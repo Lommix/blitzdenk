@@ -1,5 +1,8 @@
 # Blitzdenk - Multi API AI Tui
 
+[![License: Apache 2.0](https://img.shields.io/badge/Apache2-blue.svg)](./LICENSE)
+[![Crate](https://img.shields.io/crates/v/blitzdenk.svg)](https://crates.io/crates/blitzdenk)
+
 A minimal, concise auto-context project chat bot. A replacement for dying search.
 
 [blitz.webm](https://github.com/user-attachments/assets/217f6f64-1092-4cf6-a2b2-e0f3c5e4f17d)
