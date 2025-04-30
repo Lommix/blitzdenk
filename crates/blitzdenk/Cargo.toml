@@ -7,6 +7,7 @@ edition = "2024"
 keywords = ["ai", "tui", "chat", "agent", "tool"]
 readme = "README.md"
 license-file = "LICENSE"
+repository = "https://github.com/Lommix/blitzdenk"
 
 [dependencies]
 blitzagent = { path = "../blitzagent" }
