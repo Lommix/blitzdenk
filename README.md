@@ -2,6 +2,9 @@
 
 A minimal, concise auto-context project chat bot. A replacement for dying search.
 
+[blitz.webm](https://github.com/user-attachments/assets/217f6f64-1092-4cf6-a2b2-e0f3c5e4f17d)
+
+
 Using basic CLI tools to quickly find information relevant to your question.
 
 (ripgrep, tree, cat, etc ... )
