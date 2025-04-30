@@ -4,6 +4,9 @@ authors = ["Lorenz Mielke"]
 description = "multi api Ai-agent framework"
 version = "0.1.0"
 edition = "2024"
+keywords = ["ai", "chat", "agent", "tool"]
+readme = "README.md"
+license-file = "LICENSE"
 
 [dependencies]
 async-trait = "0.1.88"

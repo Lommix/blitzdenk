@@ -8,7 +8,7 @@ agent=$(mktemp -d)
 cp -r ./crates/blitzagent/* "$agent"/.
 cp -r LICENSE "$agent"/.
 
-cd $denk && cargo publish
+cd $agent && cargo publish
 
 ## blitzdenk chat
 
@@ -21,8 +21,6 @@ version=$(grep "^version" ./crates/blitzagent/Cargo.toml | sed 's/version = "\(.
 sed -i '/^blitzagent/c\blitzagent="'${version}'"' "$denk"/Cargo.toml
 
 cd $denk && cargo publish
-
-## cleanup
 
 rm -rf $agent
 rm -rf $denk
