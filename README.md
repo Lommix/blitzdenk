@@ -10,7 +10,11 @@ Using basic CLI tools to quickly find information relevant to your question.
 
 ## Install
 
-`make install` will build the and copy the bin to ~/.local/bin
+clone + `make install` will build the and copy the bin to ~/.local/bin
+
+or
+
+`cargo install blitzdenk`
 
 ## Dependencies
 

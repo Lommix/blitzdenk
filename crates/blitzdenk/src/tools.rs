@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use blitzdenk_core::{
+use blitzagent::{
     AgentArgs, AgentContext, AgentInstruction, AiTool, ArgType, Argument, BResult, Message,
 };
 use scraper::Html;

@@ -1,4 +1,4 @@
-use blitzdenk_core::{Agent, Message, Role};
+use blitzagent::{Agent, Message, Role};
 use crossbeam::channel::{Receiver, Sender};
 use ratatui::{
     crossterm::{

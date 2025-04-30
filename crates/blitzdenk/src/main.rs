@@ -1,4 +1,4 @@
-use blitzdenk_core::*;
+use blitzagent::*;
 use clap::*;
 use home::home_dir;
 use serde::{Deserialize, Serialize};

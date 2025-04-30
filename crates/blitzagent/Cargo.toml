@@ -1,5 +1,5 @@
 [package]
-name = "blitzdenk_core"
+name = "blitzagent"
 authors = ["Lorenz Mielke"]
 description = "multi api Ai-agent framework"
 version = "0.1.0"
