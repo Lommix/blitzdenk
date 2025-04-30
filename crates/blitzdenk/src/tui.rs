@@ -175,9 +175,7 @@ fn handle_input(tx: Sender<Event>) {
                         let rect = Rect::new(0, 0, col, row);
                         tx.send(Event::Resize(rect)).unwrap()
                     }
-                    event::Event::Paste(str) => {
-                        tx.send(Event::Paste(str)).unwrap()
-                    }
+                    event::Event::Paste(str) => tx.send(Event::Paste(str)).unwrap(),
                     _ => {}
                 };
             }
@@ -246,37 +244,7 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
 
     ctx.size = frame.area();
     // ----------------------------------------------
-
-    let scrollbar = widgets::Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(Some("↑"))
-        .end_symbol(Some("↓"));
-
-    let prompt_lines = ctx.prompt_buffer.lines().count();
-    let mut state = ScrollbarState::new(prompt_lines).position(ctx.prompt_scroll as usize);
-
-    let prompt = widgets::Paragraph::new(ctx.prompt_buffer.clone())
-        .block(
-            Block::bordered()
-                .title_top(PROMPT_HEADER)
-                .title_bottom(PROMPT_FOOTER)
-                .border_type(widgets::BorderType::Rounded)
-                .border_style(Style::default().cyan()),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((
-            prompt_lines.saturating_sub(prompt_box.height as usize - 2) as u16,
-            0,
-        ));
-
-    frame.render_widget(prompt, prompt_box);
-    frame.render_stateful_widget(
-        scrollbar,
-        prompt_box.inner(Margin {
-            vertical: 1,
-            horizontal: 0,
-        }),
-        &mut state,
-    );
+    //  chat
 
     let mut headers: Vec<String> = Vec::new();
     let mut lines = Vec::new();
@@ -373,29 +341,52 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
     frame.render_widget(chat, chat_box);
 
     // ----------------------------------------------
+    //  prompt
+    let scrollbar = widgets::Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("↑"))
+        .end_symbol(Some("↓"));
 
-    let mut y = ctx
-        .prompt_buffer
-        .lines()
-        .fold(0u16, |mut acc, v| {
-            acc += wrap(v, prompt_box.width.saturating_sub(2) as usize).len() as u16;
-            acc
-        })
-        .clamp(1, prompt_box.height.saturating_sub(2));
+    let mut prompt_lines = Vec::new();
+    let mut prompt_line_count: u16 = 0;
+    ctx.prompt_buffer.lines().for_each(|line| {
+        prompt_line_count += wrap(line, prompt_box.width.saturating_sub(2) as usize).len() as u16;
+        prompt_lines.push(Line::raw(line));
+    });
 
-    let x = ctx
-        .prompt_buffer
-        .chars()
-        .rev()
-        .take_while(|c| !c.is_ascii_control())
-        .count() as u16
-        % prompt_box.width.saturating_sub(2);
+    let mut state = ScrollbarState::new(prompt_lines.len()).position(ctx.prompt_scroll as usize);
 
-    if ctx.prompt_buffer.ends_with('\n') {
-        y = (y + 1).min(prompt_box.height.saturating_sub(2));
-    }
+    frame.set_cursor_position((
+        prompt_box.x
+            + prompt_lines
+                .last()
+                .map(|l| l.width() as u16 % prompt_box.width.saturating_sub(2))
+                .unwrap_or_default()
+            + 1,
+        prompt_box.y + prompt_line_count.clamp(1, prompt_box.height.saturating_sub(2)),
+    ));
+    let prompt = widgets::Paragraph::new(prompt_lines)
+        .block(
+            Block::bordered()
+                .title_top(PROMPT_HEADER)
+                .title_bottom(PROMPT_FOOTER)
+                .border_type(widgets::BorderType::Rounded)
+                .border_style(Style::default().cyan()),
+        )
+        .wrap(Wrap { trim: true })
+        .scroll((
+            prompt_line_count.saturating_sub(prompt_box.height.saturating_sub(2)),
+            0,
+        ));
 
-    frame.set_cursor_position((prompt_box.x + x as u16 + 1, prompt_box.y + y));
+    frame.render_widget(prompt, prompt_box);
+    frame.render_stateful_widget(
+        scrollbar,
+        prompt_box.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut state,
+    );
 }
 
 pub fn translate_colour(syntect_color: syntect::highlighting::Color) -> Option<Color> {
