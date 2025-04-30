@@ -50,6 +50,9 @@ blitzdenk chat ollama ./path/to/project
 Same as chat. But with access to edit and delete files with no backups. Will destroy your project. Might code a turd.
 (rm, mv, mkdir, sed)
 
+[yolo.webm](https://github.com/user-attachments/assets/21bcdcdc-5cb1-40fd-8bd1-0287af0472d0)
+
+
 It's like cursor, but less safe.
 
 ```shell
