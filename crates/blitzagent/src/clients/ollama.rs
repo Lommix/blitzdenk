@@ -13,9 +13,9 @@ pub struct OllamaClient {
 }
 
 impl OllamaClient {
-    pub fn new(model: impl Into<String>) -> Self {
+    pub fn new(model: impl Into<String>, url: impl Into<String>) -> Self {
         return Self {
-            url: "http://127.0.0.1:11434/api/chat".into(),
+            url: url.into(),
             chat: OChat::new(model),
         };
     }
@@ -26,7 +26,7 @@ impl ChatClient for OllamaClient {
     async fn list_models(&self) -> BResult<Vec<String>> {
         let client = reqwest::Client::new();
 
-        let url = "http://127.0.0.1:11434/api/tags";
+        let url = format!("{}/{}", self.url, "/tags");
         let req = client.get(url);
         let res = req.send().await?.json::<ModelResponse>().await?;
 
@@ -35,7 +35,9 @@ impl ChatClient for OllamaClient {
 
     async fn prompt(&mut self, tx: Sender<Message>) -> BResult<()> {
         let client = reqwest::Client::new();
-        let req = client.post(&self.url).json(&self.chat);
+
+        let url = format!("{}/{}", self.url, "/chat");
+        let req = client.post(&url).json(&self.chat);
         let res = req.send().await?.text().await?;
 
         let mut msg = Message {
@@ -121,7 +123,7 @@ impl ChatClient for OllamaClient {
     }
 
     fn fresh(&self) -> Box<dyn ChatClient> {
-        Box::new(Self::new(&self.chat.model))
+        Box::new(Self::new(&self.chat.model, &self.url))
     }
 }
 

@@ -80,41 +80,39 @@ async fn main() -> anyhow::Result<()> {
     let cmd = Cmd::parse();
     let mut config = read_or_create_config().await?;
 
-    match cmd {
-        Cmd::Yolo(args) => {
+    match &cmd {
+        Cmd::Yolo(args) | Cmd::Chat(args) => {
             print!("\x1B[2J\x1B[1;1H");
 
-            let root = args.root.unwrap_or("./".into());
+            let root = args
+                .root
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("./")
+                .to_string();
 
             let (ctx, rx) = match args.client {
-                ClientType::Openai => AgentContext::new(
-                    root,
-                    OpenApiClient::new(config.openai_model, config.openai_key),
-                ),
-                ClientType::Ollama => {
-                    AgentContext::new(root, OllamaClient::new(config.ollama_model))
+                ClientType::Openai => {
+                    if config.openai_key.is_empty() {
+                        println!("Missing openAi api key! Please run `config`");
+                        return Ok(());
+                    }
+                    AgentContext::new(
+                        root,
+                        OpenApiClient::new(config.openai_model, config.openai_key),
+                    )
                 }
+                ClientType::Ollama => AgentContext::new(
+                    root,
+                    OllamaClient::new(config.ollama_model, config.ollama_url),
+                ),
             };
 
-            let agent = ctx.new_agent::<YoloAgent>();
-            tui::init(agent, rx).await?;
-        }
-        Cmd::Chat(args) => {
-            print!("\x1B[2J\x1B[1;1H");
-
-            let root = args.root.unwrap_or("./".into());
-
-            let (ctx, rx) = match args.client {
-                ClientType::Openai => AgentContext::new(
-                    root,
-                    OpenApiClient::new(config.openai_model, config.openai_key),
-                ),
-                ClientType::Ollama => {
-                    AgentContext::new(root, OllamaClient::new(config.ollama_model))
-                }
+            let agent = match cmd {
+                Cmd::Yolo(_) => ctx.new_agent::<YoloAgent>(),
+                _ => ctx.new_agent::<DevAgent>(),
             };
 
-            let agent = ctx.new_agent::<DevAgent>();
             tui::init(agent, rx).await?;
         }
         Cmd::Config => {
@@ -159,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
                     println!("new model choosen: '{}'", config.openai_model);
                 }
                 2 => {
-                    let c = OllamaClient::new("");
+                    let c = OllamaClient::new("", &config.ollama_url);
                     let models = c.list_models().await?;
                     for (i, m) in models.iter().enumerate() {
                         println!("({}) {}", i, m);
@@ -186,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     ollama_model: String,
+    ollama_url: String,
     openai_key: String,
     openai_model: String,
 }
@@ -195,6 +194,7 @@ impl Default for Config {
         Self {
             ollama_model: "qwen3:14b".into(),
             openai_key: "".into(),
+            ollama_url: "http://127.0.0.1:11434/api".into(),
             openai_model: "gpt-4.1".into(),
         }
     }
@@ -221,8 +221,16 @@ async fn read_or_create_config() -> anyhow::Result<Config> {
         return Ok(Config::default());
     }
 
-    let str = tokio::fs::read_to_string(path).await?;
-    let cfg = toml::from_str(&str)?;
+    let str = tokio::fs::read_to_string(&path).await?;
+    let cfg = match toml::from_str(&str) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            let str = toml::to_string(&Config::default())?;
+            tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+            tokio::fs::write(path, str).await?;
+            Config::default()
+        }
+    };
 
     Ok(cfg)
 }
