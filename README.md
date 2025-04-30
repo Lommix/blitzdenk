@@ -55,7 +55,6 @@ Same as chat. But with access to edit and delete files with no backups. Will des
 
 [yolo.webm](https://github.com/user-attachments/assets/21bcdcdc-5cb1-40fd-8bd1-0287af0472d0)
 
-
 It's like cursor, but less safe.
 
 ```shell
@@ -74,7 +73,7 @@ Any model. Might fail on some.
 It's a simple no-border tui. Perfect to use in the Neovim term buffer.
 
 ```lua
-vim.keymap.set(("n", "<leader>o", ":vsplit term:// blitzdenk agent openai<CR>:startinsert<CR>", {})
+vim.keymap.set(("n", "<leader>o", ":vsplit term:// blitzdenk chat openai<CR>:startinsert<CR>", {})
 ```
 
 ## The AI pipeline approach
