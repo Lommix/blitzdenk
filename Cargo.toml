@@ -1,0 +1,36 @@
+[workspace]
+members = ["./", "./crates/blitzdenk_core"]
+resolver = "2"
+
+
+[package]
+name = "blitzdenk"
+authors = ["Lorenz Mielke"]
+description = "A minimal multi api auto-context project chat bot as tui"
+version = "0.1.0"
+edition = "2024"
+readme = "README.md"
+license-file = "LICENSE"
+
+
+[dependencies]
+crossbeam = { version = "0.8.4", features = [
+  "crossbeam-channel",
+  "crossbeam-queue",
+] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+async-trait = "0.1.88"
+reqwest = { version = "0.12.14", features = ["json"] }
+blitzdenk_core = { path = "./crates/blitzdenk_core" }
+anyhow = "1.0.97"
+clap = { version = "4.5.32", features = ["derive"] }
+home = "0.5.11"
+ratatui = { version = "0.29.0", features = ["palette", "scrolling-regions"] }
+scraper = "0.23.1"
+syntect = "5.2.0"
+textwrap = "0.16.2"
+time = "0.3.40"
+tokio = { version = "1.44.1", features = ["full"] }
+toml = "0.8.20"
+rand = "0.9.1"
