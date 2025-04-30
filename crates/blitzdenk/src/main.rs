@@ -193,7 +193,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            ollama_model: "qwen2.5-coder:14b".into(),
+            ollama_model: "qwen3:14b".into(),
             openai_key: "".into(),
             openai_model: "gpt-4.1".into(),
         }
