@@ -60,6 +60,7 @@ pub struct AppContext {
     syntax_set: SyntaxSet,
     themes: ThemeSet,
     show_tool_res: bool,
+    yolo_accept: bool,
     prompt_scroll: u16,
 }
 
@@ -97,6 +98,7 @@ pub async fn init(
         themes: ThemeSet::load_defaults(),
         show_tool_res: false,
         prompt_scroll: 0,
+        yolo_accept: false,
     };
 
     handle_worker(agent, prompt_rx);
@@ -220,7 +222,11 @@ fn run(mut ctx: AppContext, mut terminal: DefaultTerminal) -> anyhow::Result<()>
 
         if ctx.current_confirm.is_none() {
             if let Ok(conf) = ctx.confirm_requests.try_recv() {
-                ctx.current_confirm = Some(conf);
+                if ctx.yolo_accept {
+                    conf.responder.send(true).unwrap();
+                } else {
+                    ctx.current_confirm = Some(conf);
+                }
             }
         }
 
@@ -430,8 +436,7 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
                 widgets::Block::bordered()
                     .border_type(widgets::BorderType::Double)
                     .title_bottom("═[ACCEPT:ctrl+y]═════[DECLINE:ctrl+x]"),
-            )
-            .fg(Color::Blue);
+            );
 
         let confirm_area = frame.area().inner(Margin::new(5, 5));
         frame.render_widget(Clear, confirm_area);

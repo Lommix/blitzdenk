@@ -38,6 +38,7 @@ is most likly related to the content of file you have to search.
 
 # Rules
 
+-   Do not ask permission for tool use.
 -   Do not reach out of your context. Do not assume anything you do not know.
 -   Answers must me concise and short. Use Annoations/Placeholders for information outside of the current scope.
 -   Code must be concicse. Use annoations for boilerplate.

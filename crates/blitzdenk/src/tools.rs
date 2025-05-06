@@ -294,11 +294,11 @@ pub struct Sed;
 #[async_trait]
 impl AiTool for Sed {
     fn name(&self) -> &'static str {
-        "search_and_replace"
+        "suggest_search_and_replace"
     }
 
     fn description(&self) -> &'static str {
-        "suggest to the user to use `sed` to search and replace a string"
+        "suggest to use `sed` for searching and replacing a string. Safe"
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -341,6 +341,48 @@ impl AiTool for Sed {
     }
 }
 
+pub struct EditFile;
+#[async_trait]
+impl AiTool for CreateFile {
+    fn name(&self) -> &'static str {
+        "edit_file"
+    }
+
+    fn description(&self) -> &'static str {
+        "Make a file edit suggestions to user"
+    }
+
+    fn args(&self) -> Vec<Argument> {
+        vec![
+            Argument::new("file", "the file path", ArgType::Str),
+            Argument::new("operation", "the content", ArgType::Str),
+            Argument::new("start", "the content", ArgType::Str),
+            Argument::new("end", "the content", ArgType::Str),
+        ]
+    }
+
+    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+        let file = args.get("file_path")?;
+        let content = args.get("content")?;
+
+        let (conf, rx) = Confirmation::new(format!(
+            "Agent wants to create file `{}` with:\n{}",
+            file, content,
+        ));
+
+        ctx.confirm_tx.send(conf).unwrap();
+        let ok = rx.await?;
+
+        if !ok {
+            return Ok(Message::tool("user declined".into(), None));
+        }
+
+        tokio::fs::write(file, content).await?;
+
+        Ok(Message::tool("file created".into(), None))
+    }
+}
+
 // create file
 #[derive(Default)]
 pub struct CreateFile;
@@ -351,7 +393,7 @@ impl AiTool for CreateFile {
     }
 
     fn description(&self) -> &'static str {
-        "suggest to create a new file with content"
+        "suggest to create a new file with content. Safe"
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -393,7 +435,7 @@ impl AiTool for MoveFile {
     }
 
     fn description(&self) -> &'static str {
-        "suggest using `mv` to move a file"
+        "suggest using `mv` to move a file. Safe"
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -439,7 +481,7 @@ impl AiTool for DeleteFile {
     }
 
     fn description(&self) -> &'static str {
-        "using `rm` to delete a file"
+        "suggest using `rm` to delete a file. Safe"
     }
 
     fn args(&self) -> Vec<Argument> {

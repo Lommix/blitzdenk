@@ -77,10 +77,14 @@ impl ChatClient for OllamaClient {
             let o = OProp {
                 ty: (&arg.ty).into(),
                 description: arg.description.clone(),
+                options: arg.options.clone(),
             };
 
             properties.insert(arg.name.clone(), o);
-            required.push(arg.name.clone());
+
+            if arg.required {
+                required.push(arg.name.clone());
+            }
         });
 
         self.chat.tools.push(OTool {
@@ -311,6 +315,8 @@ pub struct OProp {
     #[serde(rename = "type")]
     pub ty: String,
     pub description: String,
+    #[serde(rename = "enum")]
+    pub options: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Serialize)]

@@ -34,6 +34,8 @@ pub struct Argument {
     pub name: String,
     pub description: String,
     pub ty: ArgType,
+    pub required: bool,
+    pub options: Option<Vec<String>>,
 }
 
 impl Argument {
@@ -42,6 +44,8 @@ impl Argument {
             name: name.into(),
             description: description.into(),
             ty,
+            options: None,
+            required: true,
         }
     }
 }
