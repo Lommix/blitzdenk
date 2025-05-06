@@ -39,7 +39,7 @@ impl ChatClient for OpenApiClient {
             let o = OProp {
                 ty: (&arg.ty).into(),
                 description: arg.description.clone(),
-                options: arg.options.clone(),
+                // options: arg.options.clone(),
             };
 
             properties.insert(arg.name.clone(), o);
@@ -125,6 +125,7 @@ impl ChatClient for OpenApiClient {
             }
         };
 
+        // tx.send(Message::tool(raw.clone(), None)).unwrap();
         self.chat.messages.push(res.choices[0].message.clone());
         let m: Message = res.choices[0].message.clone().into();
         tx.send(m)?;
@@ -315,10 +316,9 @@ pub struct OParameters {
 pub struct OProp {
     #[serde(rename = "type")]
     pub ty: String, // `type' object
-    pub description: String,
-    // @not comp with open ai
-    #[serde(rename = "enum")]
-    pub options: Option<Vec<String>>,
+    pub description: Option<String>,
+    // #[serde(rename = "enum")]
+    // pub options: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Serialize)]

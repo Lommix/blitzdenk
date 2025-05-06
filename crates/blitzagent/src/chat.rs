@@ -32,7 +32,7 @@ impl Into<String> for &ArgType {
 
 pub struct Argument {
     pub name: String,
-    pub description: String,
+    pub description: Option<String>,
     pub ty: ArgType,
     pub required: bool,
     pub options: Option<Vec<String>>,
@@ -42,10 +42,34 @@ impl Argument {
     pub fn new(name: impl Into<String>, description: impl Into<String>, ty: ArgType) -> Self {
         Self {
             name: name.into(),
-            description: description.into(),
+            description: Some(description.into()),
             ty,
             options: None,
             required: true,
+        }
+    }
+
+    pub fn options(
+        name: impl Into<String>,
+        options: impl IntoIterator<Item = &'static str>,
+        required: bool,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+            ty: ArgType::Str,
+            options: Some(options.into_iter().map(|s| s.to_string()).collect()),
+            required,
+        }
+    }
+
+    pub fn string(name: impl Into<String>, description: impl Into<String>, required: bool) -> Self {
+        Self {
+            name: name.into(),
+            description: Some(description.into()),
+            ty: ArgType::Str,
+            options: None,
+            required,
         }
     }
 }

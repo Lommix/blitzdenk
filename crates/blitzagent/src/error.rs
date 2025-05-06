@@ -22,6 +22,9 @@ pub enum BlitzError {
 
     #[error("{0}")]
     MissingArgument(String),
+
+    #[error("failed to parse argument")]
+    ArgumentParseErrror,
 }
 
 impl<T> From<crossbeam::channel::SendError<T>> for BlitzError {
@@ -33,5 +36,11 @@ impl<T> From<crossbeam::channel::SendError<T>> for BlitzError {
 impl From<crossbeam::channel::RecvError> for BlitzError {
     fn from(_: crossbeam::channel::RecvError) -> Self {
         BlitzError::ChannelDown
+    }
+}
+
+impl From<std::num::ParseIntError> for BlitzError{
+    fn from(_: std::num::ParseIntError) -> Self {
+        BlitzError::ArgumentParseErrror
     }
 }

@@ -343,7 +343,7 @@ impl AiTool for Sed {
 
 pub struct EditFile;
 #[async_trait]
-impl AiTool for CreateFile {
+impl AiTool for EditFile {
     fn name(&self) -> &'static str {
         "edit_file"
     }
@@ -355,19 +355,26 @@ impl AiTool for CreateFile {
     fn args(&self) -> Vec<Argument> {
         vec![
             Argument::new("file", "the file path", ArgType::Str),
-            Argument::new("operation", "the content", ArgType::Str),
-            Argument::new("start", "the content", ArgType::Str),
-            Argument::new("end", "the content", ArgType::Str),
+            Argument::string("content", "the content", true),
+            Argument::string("operation", "'insert' or 'replace'", true),
+            Argument::string("start_line", "start line number", true),
+            Argument::string("end_line", "end line number", false),
         ]
     }
 
     async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
-        let file = args.get("file_path")?;
+        let file = args.get("file")?;
         let content = args.get("content")?;
+        let op = args.get("operation")?;
+        let start = args.get("start_line")?.parse::<usize>()?;
+        let end = args.get("end_line")?.parse::<usize>()?;
 
         let (conf, rx) = Confirmation::new(format!(
-            "Agent wants to create file `{}` with:\n{}",
-            file, content,
+            r#"Agents wants to edit `{}`
+                op:{} start: {} end: {}
+                {}
+            "#,
+            file, op, start, end, content
         ));
 
         ctx.confirm_tx.send(conf).unwrap();
@@ -377,10 +384,56 @@ impl AiTool for CreateFile {
             return Ok(Message::tool("user declined".into(), None));
         }
 
-        tokio::fs::write(file, content).await?;
+        match op.as_str() {
+            "insert" => insert_after_line(file, start, content).await?,
+            "replace" => replace_lines(file, start, end, content).await?,
+            _ => {
+                return Ok(Message::tool("unkown opteration".into(), None));
+            }
+        }
 
-        Ok(Message::tool("file created".into(), None))
+        Ok(Message::tool("user accepted".into(), None))
     }
+}
+
+pub async fn replace_lines(
+    file: &str,
+    start: usize,
+    end: usize,
+    new_content: &str,
+) -> std::io::Result<()> {
+    let mut lines: Vec<_> = tokio::fs::read_to_string(file)
+        .await?
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    if start >= 1 && end <= lines.len() && start <= end {
+        lines.splice((start - 1)..end, new_content.lines().map(|l| l.to_string()));
+        let result = lines.join("\n") + "\n";
+        tokio::fs::write(file, result).await?;
+    }
+    Ok(())
+}
+
+pub async fn insert_after_line(
+    file: &str,
+    line: usize,
+    insert_content: &str,
+) -> std::io::Result<()> {
+    let mut lines: Vec<_> = tokio::fs::read_to_string(file)
+        .await?
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    if line <= lines.len() {
+        let idx = line;
+        for (i, l) in insert_content.lines().enumerate() {
+            lines.insert(idx + i, l.to_string());
+        }
+        let result = lines.join("\n") + "\n";
+        tokio::fs::write(file, result).await?;
+    }
+    Ok(())
 }
 
 // create file
