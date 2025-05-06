@@ -345,18 +345,18 @@ pub struct EditFile;
 #[async_trait]
 impl AiTool for EditFile {
     fn name(&self) -> &'static str {
-        "edit_file"
+        "suggest_edit_file"
     }
 
     fn description(&self) -> &'static str {
-        "Make a file edit suggestions to user"
+        "Make a file edit suggestions to user. Always use this tool if you want to suggest a code change"
     }
 
     fn args(&self) -> Vec<Argument> {
         vec![
             Argument::new("file", "the file path", ArgType::Str),
             Argument::string("content", "the content", true),
-            Argument::string("operation", "'insert' or 'replace'", true),
+            Argument::string("operation", "'insert' or 'replace'. Insert will append content after 'start_line'. Replace will replace between start and end", true),
             Argument::string("start_line", "start line number", true),
             Argument::string("end_line", "end line number", false),
         ]
