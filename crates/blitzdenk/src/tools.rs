@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use blitzagent::{
-    AgentArgs, AgentContext, AgentInstruction, AiTool, ArgType, Argument, BResult, Message,
+    AgentArgs, AgentContext, AgentInstruction, AiTool, ArgType, Argument, BResult, Confirmation,
+    Message,
 };
 use scraper::Html;
 use tokio::io::AsyncWriteExt;
@@ -208,7 +209,7 @@ impl AiTool for Mkdir {
     }
 
     fn description(&self) -> &'static str {
-        "creates a new dir using `mkdir -p $dir_path`"
+        "suggest the user to create a new dir using `mkdir -p $dir_path`"
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -217,6 +218,15 @@ impl AiTool for Mkdir {
 
     async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
         let path = args.get("dir_path")?;
+
+        let (conf, rx) = Confirmation::new(format!("The agent wants to create a dir `{}`", path));
+        ctx.confirm_tx.send(conf).unwrap();
+        let ok = rx.await?;
+
+        if !ok {
+            return Ok(Message::tool("user declined".into(), None));
+        }
+
         let result = tokio::process::Command::new("mkdir")
             .args(&["-p", &path])
             .current_dir(ctx.cwd)
@@ -288,7 +298,7 @@ impl AiTool for Sed {
     }
 
     fn description(&self) -> &'static str {
-        "using `sed` to search and replace a string"
+        "suggest to the user to use `sed` to search and replace a string"
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -303,6 +313,17 @@ impl AiTool for Sed {
         let file = args.get("file_path")?;
         let old = args.get("old")?;
         let new = args.get("new")?;
+
+        let (conf, rx) = Confirmation::new(format!(
+            "In `{}` the agent wants search and replace\n OLD:\n{}\n NEW:\n{}",
+            file, old, new
+        ));
+        ctx.confirm_tx.send(conf).unwrap();
+        let ok = rx.await?;
+
+        if !ok {
+            return Ok(Message::tool("user declined".into(), None));
+        }
 
         let result = tokio::process::Command::new("sed")
             .args(&[
@@ -330,7 +351,7 @@ impl AiTool for CreateFile {
     }
 
     fn description(&self) -> &'static str {
-        "create a new file with content"
+        "suggest to create a new file with content"
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -340,9 +361,21 @@ impl AiTool for CreateFile {
         ]
     }
 
-    async fn run(&self, _ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
         let file = args.get("file_path")?;
         let content = args.get("content")?;
+
+        let (conf, rx) = Confirmation::new(format!(
+            "Agent wants to create file `{}` with:\n{}",
+            file, content,
+        ));
+
+        ctx.confirm_tx.send(conf).unwrap();
+        let ok = rx.await?;
+
+        if !ok {
+            return Ok(Message::tool("user declined".into(), None));
+        }
 
         tokio::fs::write(file, content).await?;
 
@@ -360,7 +393,7 @@ impl AiTool for MoveFile {
     }
 
     fn description(&self) -> &'static str {
-        "using `mv` to move a file"
+        "suggest using `mv` to move a file"
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -373,6 +406,18 @@ impl AiTool for MoveFile {
     async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
         let src = args.get("src")?;
         let dst = args.get("dst")?;
+
+        let (conf, rx) = Confirmation::new(format!(
+            "Agent wants to move a file\n from: `{}`\nto:{}",
+            src, dst,
+        ));
+
+        ctx.confirm_tx.send(conf).unwrap();
+        let ok = rx.await?;
+
+        if !ok {
+            return Ok(Message::tool("user declined".into(), None));
+        }
 
         _ = tokio::process::Command::new("mv")
             .args(&[src, dst])

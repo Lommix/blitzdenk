@@ -1,4 +1,4 @@
-use blitzagent::{Agent, Message, Role};
+use blitzagent::{Agent, Confirmation, Message, Role};
 use crossbeam::channel::{Receiver, Sender};
 use ratatui::{
     crossterm::{
@@ -6,10 +6,10 @@ use ratatui::{
         event::{self, EnableBracketedPaste, EnableMouseCapture, KeyModifiers},
         terminal::{enable_raw_mode, EnterAlternateScreen},
     },
-    layout::{Constraint, Layout, Margin, Rect},
+    layout::{self, Constraint, Layout, Margin, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{self, Block, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{self, Block, Clear, ScrollbarOrientation, ScrollbarState, Widget, Wrap},
     DefaultTerminal, Frame,
 };
 use std::time::{Duration, Instant};
@@ -30,7 +30,7 @@ enum Order {
     Send(Message),
 }
 
-enum Event {
+enum InputEvent {
     Tick,
     Input(char),
     Backspace,
@@ -40,6 +40,8 @@ enum Event {
     ScrollDown,
     ToggleTool,
     Paste(String),
+    Accept,
+    Decline,
     Clear,
     Send,
     Exit,
@@ -47,9 +49,11 @@ enum Event {
 
 pub struct AppContext {
     rec: Receiver<Message>,
-    inputs: Receiver<Event>,
+    inputs: Receiver<InputEvent>,
     prompt_buffer: String,
     prompt_tx: Sender<Order>,
+    confirm_requests: Receiver<Confirmation>,
+    current_confirm: Option<Confirmation>,
     chat_msg: Vec<Message>,
     scroll: u16,
     size: Rect,
@@ -59,7 +63,11 @@ pub struct AppContext {
     prompt_scroll: u16,
 }
 
-pub async fn init(agent: Agent, rec: Receiver<Message>) -> anyhow::Result<()> {
+pub async fn init(
+    agent: Agent,
+    rec: Receiver<Message>,
+    confirm_requests: Receiver<Confirmation>,
+) -> anyhow::Result<()> {
     let terminal = ratatui::init();
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
@@ -81,6 +89,8 @@ pub async fn init(agent: Agent, rec: Receiver<Message>) -> anyhow::Result<()> {
         prompt_buffer: String::new(),
         chat_msg: vec![],
         prompt_tx,
+        confirm_requests,
+        current_confirm: None,
         scroll: 0,
         size: Rect::new(0, 0, 0, 0),
         syntax_set: SyntaxSet::load_defaults_newlines(),
@@ -107,7 +117,7 @@ fn handle_worker(mut agent: Agent, rec: Receiver<Order>) {
             match ev {
                 Order::Clear => agent.chat.clear(),
                 Order::Send(msg) => {
-                    agent.context.broadcast.send(msg.clone()).unwrap();
+                    agent.context.message_tx.send(msg.clone()).unwrap();
                     agent.chat.push_message(msg);
                     agent.run().await.unwrap();
                 }
@@ -116,7 +126,7 @@ fn handle_worker(mut agent: Agent, rec: Receiver<Order>) {
     });
 }
 
-fn handle_input(tx: Sender<Event>) {
+fn handle_input(tx: Sender<InputEvent>) {
     let tick_rate = Duration::from_millis(30);
     tokio::spawn(async move {
         let mut last_tick = Instant::now();
@@ -132,55 +142,65 @@ fn handle_input(tx: Sender<Event>) {
                         match key.code {
                             event::KeyCode::Char(char) => {
                                 if is_ctrl && char == 'c' {
-                                    tx.send(Event::Exit).unwrap();
+                                    tx.send(InputEvent::Exit).unwrap();
                                     break;
                                 }
 
                                 if is_ctrl && char == 'n' {
-                                    tx.send(Event::Clear).unwrap();
+                                    tx.send(InputEvent::Clear).unwrap();
                                     continue;
                                 }
 
                                 if is_ctrl && char == 't' {
-                                    tx.send(Event::ToggleTool).unwrap();
+                                    tx.send(InputEvent::ToggleTool).unwrap();
                                     continue;
                                 }
 
                                 if is_ctrl && char == 'u' {
-                                    tx.send(Event::ScrollUP).unwrap();
+                                    tx.send(InputEvent::ScrollUP).unwrap();
                                     continue;
                                 }
 
                                 if is_ctrl && char == 'd' {
-                                    tx.send(Event::ScrollDown).unwrap();
+                                    tx.send(InputEvent::ScrollDown).unwrap();
                                     continue;
                                 }
 
-                                tx.send(Event::Input(char)).unwrap();
+                                if is_ctrl && char == 'y' {
+                                    tx.send(InputEvent::Accept).unwrap();
+                                    continue;
+                                }
+
+                                if is_ctrl && char == 'x' {
+                                    tx.send(InputEvent::Decline).unwrap();
+                                    continue;
+                                }
+
+                                tx.send(InputEvent::Input(char)).unwrap();
                             }
-                            event::KeyCode::Backspace => tx.send(Event::Backspace).unwrap(),
+                            event::KeyCode::Backspace => tx.send(InputEvent::Backspace).unwrap(),
                             event::KeyCode::Enter => {
                                 if is_alt || is_ctrl || is_shift {
-                                    tx.send(Event::Send).unwrap()
+                                    tx.send(InputEvent::Send).unwrap()
                                 } else {
-                                    tx.send(Event::NewLine).unwrap()
+                                    tx.send(InputEvent::NewLine).unwrap()
                                 }
                             }
-                            event::KeyCode::Up => tx.send(Event::ScrollUP).unwrap(),
-                            event::KeyCode::Down => tx.send(Event::ScrollDown).unwrap(),
+                            event::KeyCode::Up => tx.send(InputEvent::ScrollUP).unwrap(),
+                            event::KeyCode::Down => tx.send(InputEvent::ScrollDown).unwrap(),
                             _ => {}
                         }
                     }
                     event::Event::Resize(col, row) => {
                         let rect = Rect::new(0, 0, col, row);
-                        tx.send(Event::Resize(rect)).unwrap()
+                        tx.send(InputEvent::Resize(rect)).unwrap()
                     }
-                    event::Event::Paste(str) => tx.send(Event::Paste(str)).unwrap(),
+                    event::Event::Paste(str) => tx.send(InputEvent::Paste(str)).unwrap(),
                     _ => {}
                 };
             }
             if last_tick.elapsed() >= tick_rate {
-                tx.send(Event::Tick).unwrap();
+                tx.send(InputEvent::Tick).unwrap();
                 last_tick = Instant::now();
             }
         }
@@ -198,37 +218,53 @@ fn run(mut ctx: AppContext, mut terminal: DefaultTerminal) -> anyhow::Result<()>
             terminal.resize(ctx.size).unwrap();
         }
 
+        if ctx.current_confirm.is_none() {
+            if let Ok(conf) = ctx.confirm_requests.try_recv() {
+                ctx.current_confirm = Some(conf);
+            }
+        }
+
         if let Ok(input) = ctx.inputs.try_recv() {
             match input {
-                Event::Tick => {
+                InputEvent::Tick => {
                     terminal.draw(|frame| draw(&mut ctx, frame))?;
                 }
-                Event::Input(c) => ctx.prompt_buffer.push(c),
-                Event::Backspace => _ = ctx.prompt_buffer.pop(),
-                Event::NewLine => ctx.prompt_buffer.push('\n'),
-                Event::ToggleTool => ctx.show_tool_res = !ctx.show_tool_res,
-                Event::Resize(rect) => {
+                InputEvent::Input(c) => ctx.prompt_buffer.push(c),
+                InputEvent::Backspace => _ = ctx.prompt_buffer.pop(),
+                InputEvent::NewLine => ctx.prompt_buffer.push('\n'),
+                InputEvent::ToggleTool => ctx.show_tool_res = !ctx.show_tool_res,
+                InputEvent::Resize(rect) => {
                     terminal.resize(rect).unwrap();
                 }
-                Event::Send => {
+                InputEvent::Send => {
                     let msg = Message::user(ctx.prompt_buffer.drain(..).collect());
                     ctx.prompt_tx.send(Order::Send(msg))?;
                 }
-                Event::Exit => {
+                InputEvent::Exit => {
                     break Ok(());
                 }
-                Event::ScrollUP => {
+                InputEvent::Accept => {
+                    if let Some(confirm) = ctx.current_confirm.take() {
+                        confirm.responder.send(true).unwrap();
+                    }
+                }
+                InputEvent::Decline => {
+                    if let Some(confirm) = ctx.current_confirm.take() {
+                        confirm.responder.send(false).unwrap();
+                    }
+                }
+                InputEvent::ScrollUP => {
                     ctx.scroll = ctx.scroll.saturating_add(1);
                 }
-                Event::ScrollDown => {
+                InputEvent::ScrollDown => {
                     ctx.scroll = ctx.scroll.saturating_sub(1);
                 }
-                Event::Clear => {
+                InputEvent::Clear => {
                     ctx.prompt_tx.send(Order::Clear).unwrap();
                     ctx.prompt_buffer.clear();
                     ctx.chat_msg.clear();
                 }
-                Event::Paste(str) => {
+                InputEvent::Paste(str) => {
                     ctx.prompt_buffer.push_str(&str);
                 }
             }
@@ -352,7 +388,6 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
         prompt_line_count += wrap(line, prompt_box.width.saturating_sub(2) as usize).len() as u16;
         prompt_lines.push(Line::raw(line));
     });
-
     let mut state = ScrollbarState::new(prompt_lines.len()).position(ctx.prompt_scroll as usize);
 
     frame.set_cursor_position((
@@ -387,6 +422,21 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
         }),
         &mut state,
     );
+
+    if let Some(confirm) = ctx.current_confirm.as_ref() {
+        let confirm = widgets::Paragraph::new(confirm.message.as_str())
+            .wrap(Wrap { trim: false })
+            .block(
+                widgets::Block::bordered()
+                    .border_type(widgets::BorderType::Double)
+                    .title_bottom("═[ACCEPT:ctrl+y]═════[DECLINE:ctrl+x]"),
+            )
+            .fg(Color::Blue);
+
+        let confirm_area = frame.area().inner(Margin::new(5, 5));
+        frame.render_widget(Clear, confirm_area);
+        frame.render_widget(confirm, confirm_area);
+    }
 }
 
 pub fn translate_colour(syntect_color: syntect::highlighting::Color) -> Option<Color> {

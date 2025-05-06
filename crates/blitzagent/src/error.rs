@@ -17,6 +17,9 @@ pub enum BlitzError {
     #[error(transparent)]
     IoError(#[from] std::io::Error),
 
+    #[error(transparent)]
+    TokioRecErr(#[from] tokio::sync::oneshot::error::RecvError),
+
     #[error("{0}")]
     MissingArgument(String),
 }

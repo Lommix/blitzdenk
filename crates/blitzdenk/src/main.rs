@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or("./")
                 .to_string();
 
-            let (ctx, rx) = match args.client {
+            let (ctx, rx, crx) = match args.client {
                 ClientType::Openai => {
                     if config.openai_key.is_empty() {
                         println!("Missing openAi api key! Please run `config`");
@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
                 _ => ctx.new_agent::<DevAgent>(),
             };
 
-            tui::init(agent, rx).await?;
+            tui::init(agent, rx, crx).await?;
         }
         Cmd::Config => {
             println!("Please select an option");
