@@ -374,13 +374,14 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
         });
     }
 
+    let chat = widgets::Paragraph::new(lines).wrap(Wrap { trim: false });
+
+    let line_count = chat.line_count(chat_box.width);
     let offset = (line_count as u16).saturating_sub(chat_box.height);
-
-    let chat = widgets::Paragraph::new(lines)
-        .scroll((offset.saturating_sub(ctx.scroll), 0))
-        .wrap(Wrap { trim: false });
-
-    frame.render_widget(chat, chat_box);
+    frame.render_widget(
+        chat.scroll((offset.saturating_sub(ctx.scroll), 0)),
+        chat_box,
+    );
 
     // ----------------------------------------------
     //  prompt
@@ -389,37 +390,49 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
         .end_symbol(Some("↓"));
 
     let mut prompt_lines = Vec::new();
-    let mut prompt_line_count: u16 = 0;
+    // let mut prompt_line_count: u16 = 0;
     ctx.prompt_buffer.lines().for_each(|line| {
-        prompt_line_count += wrap(line, prompt_box.width.saturating_sub(2) as usize).len() as u16;
+        // prompt_line_count += wrap(line, prompt_box.width.saturating_sub(2) as usize).len() as u16;
         prompt_lines.push(Line::raw(line));
     });
-    let mut state = ScrollbarState::new(prompt_lines.len()).position(ctx.prompt_scroll as usize);
 
-    frame.set_cursor_position((
-        prompt_box.x
-            + prompt_lines
+    let mut last_x_offset = ctx
+        .prompt_buffer
+        .lines()
+        .last()
+        .map(|l| {
+            textwrap::wrap(l, prompt_box.width.saturating_sub(2) as usize)
                 .last()
-                .map(|l| l.width() as u16 % prompt_box.width.saturating_sub(2))
+                .map(|l| l.len())
                 .unwrap_or_default()
-            + 1,
-        prompt_box.y + prompt_line_count.clamp(1, prompt_box.height.saturating_sub(2)),
-    ));
-    let prompt = widgets::Paragraph::new(prompt_lines)
-        .block(
-            Block::bordered()
-                .title_top(PROMPT_HEADER)
-                .title_bottom(PROMPT_FOOTER)
-                .border_type(widgets::BorderType::Rounded)
-                .border_style(Style::default().cyan()),
-        )
-        .wrap(Wrap { trim: true })
-        .scroll((
-            prompt_line_count.saturating_sub(prompt_box.height.saturating_sub(2)),
-            0,
-        ));
+        })
+        .unwrap_or_default() as u16;
 
-    frame.render_widget(prompt, prompt_box);
+    if ctx.prompt_buffer.ends_with(' '){
+        last_x_offset += 1;
+    }
+
+    let prompt = widgets::Paragraph::new(prompt_lines).wrap(Wrap { trim: false });
+
+    let line_count = prompt.line_count(prompt_box.width.saturating_sub(2)) as u16;
+    let mut state = ScrollbarState::new(line_count as usize).position(ctx.prompt_scroll as usize);
+
+    frame.render_widget(
+        prompt
+            .scroll((
+                line_count.saturating_sub(prompt_box.height.saturating_sub(2)),
+                0,
+            ))
+            .block(
+                Block::bordered()
+                    .title_top(PROMPT_HEADER)
+                    .title_bottom(PROMPT_FOOTER)
+                    .border_type(widgets::BorderType::Rounded)
+                    .border_style(Style::default().cyan()),
+            ),
+        prompt_box,
+    );
+
     frame.render_stateful_widget(
         scrollbar,
         prompt_box.inner(Margin {
@@ -428,6 +441,18 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
         }),
         &mut state,
     );
+
+    if ctx.prompt_buffer.ends_with('\n') {
+        frame.set_cursor_position((
+            prompt_box.x + 1,
+            prompt_box.y + line_count.clamp(1, prompt_box.height.saturating_sub(2)) + 1,
+        ));
+    } else {
+        frame.set_cursor_position((
+            prompt_box.x + last_x_offset + 1,
+            prompt_box.y + line_count.clamp(1, prompt_box.height.saturating_sub(2)),
+        ));
+    }
 
     if let Some(confirm) = ctx.current_confirm.as_ref() {
         let confirm = widgets::Paragraph::new(confirm.message.as_str())
@@ -474,4 +499,53 @@ fn into_style(r: Role) -> Style {
         Role::User => Style::default().fg(Color::Cyan),
         Role::Tool => Style::default().fg(Color::Blue),
     }
+}
+
+fn into_line_buffer(line: &str, lines: &mut Vec<Line<'_>>) {
+    // if line.trim().starts_with("```") {
+    //     let lang = line.trim().trim_start_matches("```");
+    //     if !lang.is_empty() {
+    //         code_lang = Some(lang.into());
+    //     } else {
+    //         code_lang = None;
+    //     }
+    //     lines.push(Line::styled(line, Style::default()));
+    //     return;
+    // }
+    //
+    // line_count += wrap(line, chat_box.width as usize).len() as u16;
+    //
+    // match code_lang.as_ref() {
+    //     Some(lang) => {
+    //         let mut highlight = HighlightLines::new(
+    //             find_syntax(lang, &ctx.syntax_set),
+    //             &ctx.themes.themes["base16-ocean.dark"],
+    //         );
+    //
+    //         let highlighted = highlight.highlight_line(line, &ctx.syntax_set).unwrap();
+    //         let spans = highlighted
+    //             .iter()
+    //             .enumerate()
+    //             .map(|(idx, segment)| {
+    //                 let (style, content) = segment;
+    //                 let mut text = content.to_string();
+    //                 if idx == highlighted.len() - 1 {
+    //                     text = text.trim_end().to_string();
+    //                 }
+    //                 return Span::styled(
+    //                     text,
+    //                     Style {
+    //                         fg: translate_colour(style.foreground),
+    //                         ..Style::default()
+    //                     },
+    //                 );
+    //             })
+    //             .collect::<Vec<_>>();
+    //
+    //         lines.push(Line::from(spans));
+    //     }
+    //     None => {
+    //         lines.push(Line::styled(line, into_style(msg.role)));
+    //     }
+    // }
 }

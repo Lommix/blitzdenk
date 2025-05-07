@@ -370,9 +370,11 @@ impl AiTool for EditFile {
         let end = args.get("end_line")?.parse::<usize>()?;
 
         let (conf, rx) = Confirmation::new(format!(
-            r#"Agents wants to edit `{}`
-                op:{} start: {} end: {}
-                {}
+            r#"
+            Agents wants to edit `{}`
+            op:{} [{}-{}]
+            ------------
+            {}
             "#,
             file, op, start, end, content
         ));
@@ -407,8 +409,10 @@ pub async fn replace_lines(
         .lines()
         .map(|l| l.to_string())
         .collect();
+
     if start >= 1 && end <= lines.len() && start <= end {
         lines.splice((start - 1)..end, new_content.lines().map(|l| l.to_string()));
+
         let result = lines.join("\n") + "\n";
         tokio::fs::write(file, result).await?;
     }
@@ -426,11 +430,14 @@ pub async fn insert_after_line(
         .map(|l| l.to_string())
         .collect();
     if line <= lines.len() {
-        let idx = line;
+        let idx = line + 1;
+
         for (i, l) in insert_content.lines().enumerate() {
             lines.insert(idx + i, l.to_string());
         }
+
         let result = lines.join("\n") + "\n";
+
         tokio::fs::write(file, result).await?;
     }
     Ok(())
