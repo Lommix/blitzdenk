@@ -6,10 +6,10 @@ use ratatui::{
         event::{self, EnableBracketedPaste, EnableMouseCapture, KeyModifiers},
         terminal::{enable_raw_mode, EnterAlternateScreen},
     },
-    layout::{self, Constraint, Layout, Margin, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{self, Block, Clear, ScrollbarOrientation, ScrollbarState, Widget, Wrap},
+    widgets::{self, Block, Clear, ScrollbarOrientation, ScrollbarState, Wrap},
     DefaultTerminal, Frame,
 };
 use std::time::{Duration, Instant};
@@ -18,12 +18,11 @@ use syntect::{
     highlighting::ThemeSet,
     parsing::{SyntaxReference, SyntaxSet},
 };
-use textwrap::wrap;
 
-const PROMPT_HEADER: &'static str = "<PROMPT>";
+const PROMPT_HEADER: &'static str = "[PROMPT]";
 
 const PROMPT_FOOTER: &'static str =
-    "<| SEND: alt/shift/ctrl+ent <=> SCROLL:  <==> NEW: ctrl+n <==> SHOW TOOLS: ctrl+t |>";
+    "─[SEND: alt/shift/ctrl+ent]──[SCROLL: ]──[NEW: ctrl+n]──[SHOW TOOLS: ctrl+t]─";
 
 enum Order {
     Clear,
@@ -290,15 +289,16 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
 
     let mut headers: Vec<String> = Vec::new();
     let mut lines = Vec::new();
-    let mut line_count: u16 = 0;
-
     for msg in ctx.chat_msg.iter() {
         match msg.role {
             Role::Assistant => match msg.tool_calls.first().as_ref() {
                 Some(call) => {
+                    let mut args = format!("{:?}", call.args);
                     headers.push(format!(
-                        "{} calls `{}` with `{:?}`",
-                        msg.role, call.name, call.args
+                        "{} calls `{}` with `{}`",
+                        msg.role,
+                        call.name,
+                        args.split_off(args.len().min(32))
                     ));
                 }
                 None => {
@@ -316,62 +316,16 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
 
     for (i, msg) in ctx.chat_msg.iter().enumerate() {
         lines.push(Line::from(Span::styled(&headers[i], into_style(msg.role))));
-        line_count += wrap(&headers[i], chat_box.width as usize).len() as u16;
-
-        let mut code_lang: Option<String> = None;
-
         if matches!(msg.role, Role::Tool) && !ctx.show_tool_res {
             continue;
         }
 
-        msg.content.lines().for_each(|line| {
-            if line.trim().starts_with("```") {
-                let lang = line.trim().trim_start_matches("```");
-                if !lang.is_empty() {
-                    code_lang = Some(lang.into());
-                } else {
-                    code_lang = None;
-                }
-                lines.push(Line::styled(line, Style::default()));
-                return;
-            }
-
-            line_count += wrap(line, chat_box.width as usize).len() as u16;
-
-            match code_lang.as_ref() {
-                Some(lang) => {
-                    let mut highlight = HighlightLines::new(
-                        find_syntax(lang, &ctx.syntax_set),
-                        &ctx.themes.themes["base16-ocean.dark"],
-                    );
-
-                    let highlighted = highlight.highlight_line(line, &ctx.syntax_set).unwrap();
-                    let spans = highlighted
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, segment)| {
-                            let (style, content) = segment;
-                            let mut text = content.to_string();
-                            if idx == highlighted.len() - 1 {
-                                text = text.trim_end().to_string();
-                            }
-                            return Span::styled(
-                                text,
-                                Style {
-                                    fg: translate_colour(style.foreground),
-                                    ..Style::default()
-                                },
-                            );
-                        })
-                        .collect::<Vec<_>>();
-
-                    lines.push(Line::from(spans));
-                }
-                None => {
-                    lines.push(Line::styled(line, into_style(msg.role)));
-                }
-            }
-        });
+        style_raw_lines(
+            &mut lines,
+            msg.content.lines().map(|l| (l, into_style(msg.role))),
+            &ctx.themes,
+            &ctx.syntax_set,
+        );
     }
 
     let chat = widgets::Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -390,12 +344,11 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
         .end_symbol(Some("↓"));
 
     let mut prompt_lines = Vec::new();
-    // let mut prompt_line_count: u16 = 0;
     ctx.prompt_buffer.lines().for_each(|line| {
-        // prompt_line_count += wrap(line, prompt_box.width.saturating_sub(2) as usize).len() as u16;
         prompt_lines.push(Line::raw(line));
     });
 
+    // line wrapping sucks!
     let mut last_x_offset = ctx
         .prompt_buffer
         .lines()
@@ -408,7 +361,7 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
         })
         .unwrap_or_default() as u16;
 
-    if ctx.prompt_buffer.ends_with(' '){
+    if ctx.prompt_buffer.ends_with(' ') {
         last_x_offset += 1;
     }
 
@@ -455,8 +408,16 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
     }
 
     if let Some(confirm) = ctx.current_confirm.as_ref() {
-        let confirm = widgets::Paragraph::new(confirm.message.as_str())
-            .wrap(Wrap { trim: false })
+        let mut lines = Vec::new();
+        style_raw_lines(
+            &mut lines,
+            confirm.message.lines().map(|l| (l, Style::default())),
+            &ctx.themes,
+            &ctx.syntax_set,
+        );
+
+        let confirm = widgets::Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
             .block(
                 widgets::Block::bordered()
                     .border_type(widgets::BorderType::Double)
@@ -501,51 +462,57 @@ fn into_style(r: Role) -> Style {
     }
 }
 
-fn into_line_buffer(line: &str, lines: &mut Vec<Line<'_>>) {
-    // if line.trim().starts_with("```") {
-    //     let lang = line.trim().trim_start_matches("```");
-    //     if !lang.is_empty() {
-    //         code_lang = Some(lang.into());
-    //     } else {
-    //         code_lang = None;
-    //     }
-    //     lines.push(Line::styled(line, Style::default()));
-    //     return;
-    // }
-    //
-    // line_count += wrap(line, chat_box.width as usize).len() as u16;
-    //
-    // match code_lang.as_ref() {
-    //     Some(lang) => {
-    //         let mut highlight = HighlightLines::new(
-    //             find_syntax(lang, &ctx.syntax_set),
-    //             &ctx.themes.themes["base16-ocean.dark"],
-    //         );
-    //
-    //         let highlighted = highlight.highlight_line(line, &ctx.syntax_set).unwrap();
-    //         let spans = highlighted
-    //             .iter()
-    //             .enumerate()
-    //             .map(|(idx, segment)| {
-    //                 let (style, content) = segment;
-    //                 let mut text = content.to_string();
-    //                 if idx == highlighted.len() - 1 {
-    //                     text = text.trim_end().to_string();
-    //                 }
-    //                 return Span::styled(
-    //                     text,
-    //                     Style {
-    //                         fg: translate_colour(style.foreground),
-    //                         ..Style::default()
-    //                     },
-    //                 );
-    //             })
-    //             .collect::<Vec<_>>();
-    //
-    //         lines.push(Line::from(spans));
-    //     }
-    //     None => {
-    //         lines.push(Line::styled(line, into_style(msg.role)));
-    //     }
-    // }
+fn style_raw_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    raw: impl Iterator<Item = (&'a str, Style)>,
+    themes: &ThemeSet,
+    syntax: &SyntaxSet,
+) {
+    let mut code_lang: Option<String> = None;
+    for (line, default_style) in raw {
+        if line.trim().starts_with("```") {
+            let lang = line.trim().trim_start_matches("```");
+            if !lang.is_empty() {
+                code_lang = Some(lang.into());
+            } else {
+                code_lang = None;
+            }
+            lines.push(Line::styled(line, Style::default()));
+            continue;
+        }
+
+        match code_lang.as_ref() {
+            Some(lang) => {
+                let mut highlight = HighlightLines::new(
+                    find_syntax(lang, &syntax),
+                    &themes.themes["base16-ocean.dark"],
+                );
+
+                let highlighted = highlight.highlight_line(line, &syntax).unwrap();
+                let spans = highlighted
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, segment)| {
+                        let (style, content) = segment;
+                        let mut text = content.to_string();
+                        if idx == highlighted.len() - 1 {
+                            text = text.trim_end().to_string();
+                        }
+                        return Span::styled(
+                            text,
+                            Style {
+                                fg: translate_colour(style.foreground),
+                                ..Style::default()
+                            },
+                        );
+                    })
+                    .collect::<Vec<_>>();
+
+                lines.push(Line::from(spans));
+            }
+            None => {
+                lines.push(Line::styled(line, default_style));
+            }
+        }
+    }
 }
