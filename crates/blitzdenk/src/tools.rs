@@ -430,7 +430,7 @@ pub async fn insert_after_line(
         .map(|l| l.to_string())
         .collect();
     if line <= lines.len() {
-        let idx = line + 1;
+        let idx = line;
 
         for (i, l) in insert_content.lines().enumerate() {
             lines.insert(idx + i, l.to_string());

@@ -293,12 +293,12 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
         match msg.role {
             Role::Assistant => match msg.tool_calls.first().as_ref() {
                 Some(call) => {
-                    let mut args = format!("{:?}", call.args);
+                    let args = format!("{:?}", call.args);
                     headers.push(format!(
                         "{} calls `{}` with `{}`",
                         msg.role,
                         call.name,
-                        args.split_off(args.len().min(32))
+                        &args[0..args.len().min(32)],
                     ));
                 }
                 None => {
