@@ -87,10 +87,7 @@ async fn main() -> anyhow::Result<()> {
     match &cmd {
         Cmd::Yolo(args) | Cmd::Chat(args) => {
             print!("\x1B[2J\x1B[1;1H");
-            let root = args
-                .root.as_deref()
-                .unwrap_or("./")
-                .to_string();
+            let root = args.root.as_deref().unwrap_or("./").to_string();
 
             let (ctx, rx, crx) = match args.client {
                 ClientType::Openai => {
@@ -234,7 +231,7 @@ impl Default for Config {
             ollama_url: "http://127.0.0.1:11434/api".into(),
             openai_model: "gpt-4.1".into(),
             gemini_key: "".into(),
-            gemini_model: "".into(),
+            gemini_model: "models/gemini-2.0-flash".into(),
         }
     }
 }
