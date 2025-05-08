@@ -22,6 +22,7 @@ enum ClientType {
     #[default]
     Openai,
     Ollama,
+    Gemini,
 }
 
 #[derive(Args)]
@@ -85,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
 
     match &cmd {
         Cmd::Yolo(args) | Cmd::Chat(args) => {
-            print!("\x1B[2J\x1B[1;1H");
+            // print!("\x1B[2J\x1B[1;1H");
 
             let root = args
                 .root
@@ -109,6 +110,11 @@ async fn main() -> anyhow::Result<()> {
                     root,
                     OllamaClient::new(config.ollama_model, config.ollama_url),
                 ),
+
+                ClientType::Gemini => AgentContext::new(
+                    root,
+                    GeminiClient::new(config.gemini_key, config.gemini_model),
+                ),
             };
 
             let agent = match cmd {
@@ -123,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
             println!("(0) openai key");
             println!("(1) select model openai");
             println!("(2) select model ollama");
+            println!("(3) select model gemini");
             print!("SELECT:");
 
             let mut input = String::new();
@@ -176,6 +183,24 @@ async fn main() -> anyhow::Result<()> {
                     config.ollama_model = model;
                     save_config(&config).await?;
                 }
+                3 => {
+                    let c = GeminiClient::new(&config.gemini_key, &config.gemini_model);
+                    let models = c.list_models().await?;
+                    for (i, m) in models.iter().enumerate() {
+                        println!("({}) {}", i, m);
+                    }
+                    print!("SELECT:");
+                    let mut input = String::new();
+                    std::io::stdout().flush()?;
+                    std::io::stdin().read_line(&mut input)?;
+
+                    let choice = input.trim().parse::<usize>()?;
+                    let model = models[choice].clone();
+
+                    config.gemini_model = model;
+                    save_config(&config).await?;
+                }
+
                 _ => {}
             }
         }
@@ -190,6 +215,8 @@ pub struct Config {
     ollama_url: String,
     openai_key: String,
     openai_model: String,
+    gemini_key: String,
+    gemini_model: String,
 }
 
 impl Default for Config {
@@ -199,6 +226,8 @@ impl Default for Config {
             openai_key: "".into(),
             ollama_url: "http://127.0.0.1:11434/api".into(),
             openai_model: "gpt-4.1".into(),
+            gemini_key: "".into(),
+            gemini_model: "".into(),
         }
     }
 }

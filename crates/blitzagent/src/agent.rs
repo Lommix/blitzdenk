@@ -2,6 +2,7 @@ use crate::chat::{ChatClient, Message};
 use crate::tool::AiTool;
 use crate::{BResult, BlitzError};
 use crossbeam::channel::{Receiver, Sender};
+use serde_json::from_slice;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::oneshot;
 
@@ -45,12 +46,12 @@ impl AgentContext {
     pub fn new_agent<A: AgentInstruction + Default>(&self) -> Agent {
         let mut chat = (self.new_chat)();
         let task = Box::new(A::default());
-        chat.push_message(Message::system(task.sys_prompt().into()));
 
-        chat.push_message(Message::system(format!(
-            "<context>\n{}\n</context>",
+        chat.set_sys_prompt(format!(
+            "{}\n\n<memory.md>{}</memory.md>",
+            task.sys_prompt(),
             self.memory.inner
-        )));
+        ));
 
         task.toolset().iter().for_each(|tool| {
             chat.register_tool(tool);

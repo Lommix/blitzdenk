@@ -94,6 +94,16 @@ impl ChatClient for OpenApiClient {
         )
     }
 
+    fn set_sys_prompt(&mut self, content: String) {
+        if self.chat.messages.len() == 0 {
+            self.push_message(Message::system(content));
+            return;
+        }
+
+        self.chat.messages[0].role = ORole::System;
+        self.chat.messages[0].content = Some(content);
+    }
+
     fn push_message(&mut self, msg: Message) {
         self.chat.messages.push(msg.into());
     }

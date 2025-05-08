@@ -7,6 +7,7 @@ pub trait ChatClient: Send + Sync + 'static {
     async fn list_models(&self) -> BResult<Vec<String>>;
     async fn prompt(&mut self, tx: Sender<Message>) -> BResult<()>;
     fn register_tool(&mut self, tool: &Box<dyn AiTool>);
+    fn set_sys_prompt(&mut self, content: String);
     fn last_tool_call(&self) -> Option<Vec<FunctionCall>>;
     fn last_content(&self) -> &str;
     fn push_message(&mut self, msg: Message);
