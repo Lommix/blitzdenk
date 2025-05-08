@@ -19,9 +19,9 @@ use syntect::{
     parsing::{SyntaxReference, SyntaxSet},
 };
 
-const PROMPT_HEADER: &'static str = "[PROMPT]";
+const PROMPT_HEADER: &str = "[PROMPT]";
 
-const PROMPT_FOOTER: &'static str =
+const PROMPT_FOOTER: &str =
     "─[SEND: alt/shift/ctrl+ent]──[SCROLL: ]──[NEW: ctrl+n]──[SHOW TOOLS: ctrl+t]─";
 
 enum Order {
@@ -211,7 +211,7 @@ fn handle_input(tx: Sender<InputEvent>) {
 fn run(mut ctx: AppContext, mut terminal: DefaultTerminal) -> anyhow::Result<()> {
     loop {
         if let Ok(mut msg) = ctx.rec.try_recv() {
-            if let Some(bytes) = msg.images.take().map(|mut i| i.pop()).flatten() {
+            if let Some(bytes) = msg.images.take().and_then(|mut i| i.pop()) {
                 let name = format!("{:x}.png", rand::random::<u64>());
                 std::fs::write(name, &bytes).expect("unable to save image");
             }
@@ -432,8 +432,8 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
 
 pub fn translate_colour(syntect_color: syntect::highlighting::Color) -> Option<Color> {
     match syntect_color {
-        syntect::highlighting::Color { r, g, b, a } if a > 0 => return Some(Color::Rgb(r, g, b)),
-        _ => return None,
+        syntect::highlighting::Color { r, g, b, a } if a > 0 => Some(Color::Rgb(r, g, b)),
+        _ => None,
     }
 }
 
@@ -450,7 +450,7 @@ pub fn find_syntax<'a>(name: &str, set: &'a SyntaxSet) -> &'a SyntaxReference {
         return syntax;
     }
 
-    return set.find_syntax_plain_text();
+    set.find_syntax_plain_text()
 }
 
 fn into_style(r: Role) -> Style {
@@ -484,11 +484,11 @@ fn style_raw_lines<'a>(
         match code_lang.as_ref() {
             Some(lang) => {
                 let mut highlight = HighlightLines::new(
-                    find_syntax(lang, &syntax),
+                    find_syntax(lang, syntax),
                     &themes.themes["base16-ocean.dark"],
                 );
 
-                let highlighted = highlight.highlight_line(line, &syntax).unwrap();
+                let highlighted = highlight.highlight_line(line, syntax).unwrap();
                 let spans = highlighted
                     .iter()
                     .enumerate()
@@ -498,13 +498,13 @@ fn style_raw_lines<'a>(
                         if idx == highlighted.len() - 1 {
                             text = text.trim_end().to_string();
                         }
-                        return Span::styled(
+                        Span::styled(
                             text,
                             Style {
                                 fg: translate_colour(style.foreground),
                                 ..Style::default()
                             },
-                        );
+                        )
                     })
                     .collect::<Vec<_>>();
 

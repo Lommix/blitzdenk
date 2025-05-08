@@ -2,7 +2,6 @@ use crate::chat::{ChatClient, Message};
 use crate::tool::AiTool;
 use crate::{BResult, BlitzError};
 use crossbeam::channel::{Receiver, Sender};
-use serde_json::from_slice;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::oneshot;
 

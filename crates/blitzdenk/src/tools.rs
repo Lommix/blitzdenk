@@ -76,7 +76,7 @@ impl AiTool for Cat {
         let path = args.get("file")?;
 
         let result = tokio::process::Command::new("cat")
-            .args(&["-n", &path])
+            .args(["-n", path])
             .current_dir(ctx.cwd)
             .output()
             .await?;
@@ -141,9 +141,9 @@ impl AgentInstruction for CompressInstruction {
 
     fn toolset(&self) -> Vec<Box<dyn AiTool>> {
         vec![
-            Box::new(Tree::default()),
-            Box::new(Cat::default()),
-            Box::new(WriteMemo::default()),
+            Box::new(Tree),
+            Box::new(Cat),
+            Box::new(WriteMemo),
         ]
     }
 }
@@ -261,7 +261,7 @@ impl AiTool for Mkdir {
         }
 
         let result = tokio::process::Command::new("mkdir")
-            .args(&["-p", &path])
+            .args(["-p", path])
             .current_dir(ctx.cwd)
             .output()
             .await?;
@@ -369,7 +369,7 @@ impl AiTool for Sed {
         }
 
         let result = tokio::process::Command::new("sed")
-            .args(&[
+            .args([
                 "-i",
                 &format!("s/{}/{}/g", sed_escape(old), sed_escape(new)),
                 file,
@@ -580,7 +580,7 @@ impl AiTool for MoveFile {
         }
 
         _ = tokio::process::Command::new("mv")
-            .args(&[src, dst])
+            .args([src, dst])
             .current_dir(ctx.cwd)
             .output()
             .await?;
@@ -619,7 +619,7 @@ impl AiTool for DeleteFile {
         let src = args.get("file_path")?;
 
         _ = tokio::process::Command::new("rm")
-            .args(&[src])
+            .args([src])
             .current_dir(ctx.cwd)
             .output()
             .await?;
@@ -651,7 +651,7 @@ impl AiTool for GitLog {
         tool_id: Option<String>,
     ) -> BResult<Message> {
         let res = tokio::process::Command::new("git")
-            .args(&["log", "-n 20"])
+            .args(["log", "-n 20"])
             .current_dir(ctx.cwd)
             .output()
             .await?;
@@ -686,7 +686,7 @@ impl AiTool for GitShowCommit {
         let hash = args.get("commit")?;
 
         let res = tokio::process::Command::new("git")
-            .args(&["show", &hash])
+            .args(["show", hash])
             .current_dir(ctx.cwd)
             .output()
             .await?;

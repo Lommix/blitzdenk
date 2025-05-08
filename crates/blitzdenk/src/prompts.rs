@@ -1,5 +1,5 @@
 // -----------------------------------------
-pub const COMPRESS_PROMPT: &'static str = r#"
+pub const COMPRESS_PROMPT: &str = r#"
 # Your Job
 
 You are a project compresssion agent and run in a 2 cycle loop.
@@ -29,7 +29,7 @@ Everybody loves that, especially you. So do a good job! Always use the Tools and
 "#;
 
 // -----------------------------------------
-pub const ASSISTANT_PROMPT: &'static str = r#"
+pub const ASSISTANT_PROMPT: &str = r#"
 # Your Job
 
 You are a senior level software engineer and tool user. You are in the current CWD on the project inside the shell.
@@ -52,7 +52,7 @@ Everybody loves that, especially you. So do a good job! Always use the Tools and
 "#;
 
 // -----------------------------------------
-pub const YOLO_PROMPT: &'static str = r#"
+pub const YOLO_PROMPT: &str = r#"
 # Your Job
 
 You are a senior level software engineer and tool user. You are in the current working directory of the project.

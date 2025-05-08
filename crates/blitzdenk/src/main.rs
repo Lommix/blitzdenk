@@ -8,7 +8,7 @@ mod prompts;
 mod tools;
 mod tui;
 
-pub const CONFIG_PATH: &'static str = ".config/blitzdenk/config.toml";
+pub const CONFIG_PATH: &str = ".config/blitzdenk/config.toml";
 
 #[derive(Parser)]
 enum Cmd {
@@ -88,9 +88,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Yolo(args) | Cmd::Chat(args) => {
             print!("\x1B[2J\x1B[1;1H");
             let root = args
-                .root
-                .as_ref()
-                .map(|s| s.as_str())
+                .root.as_deref()
                 .unwrap_or("./")
                 .to_string();
 
