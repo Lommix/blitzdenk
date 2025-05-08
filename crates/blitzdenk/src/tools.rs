@@ -29,7 +29,12 @@ impl AiTool for Tree {
         vec![]
     }
 
-    async fn run(&self, ctx: AgentContext, _args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        _args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let result = tokio::process::Command::new("tree")
             .arg("-f")
             .arg("-i")
@@ -40,7 +45,7 @@ impl AiTool for Tree {
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
 
-        Ok(Message::tool(content, None))
+        Ok(Message::tool(content, tool_id))
     }
 }
 
@@ -62,7 +67,12 @@ impl AiTool for Cat {
         vec![Argument::new("file", "the file path", ArgType::Str)]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let path = args.get("file")?;
 
         let result = tokio::process::Command::new("cat")
@@ -73,7 +83,7 @@ impl AiTool for Cat {
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
 
-        Ok(Message::tool(content, None))
+        Ok(Message::tool(content, tool_id))
     }
 }
 
@@ -99,7 +109,12 @@ impl AiTool for Compress {
         )]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let mut agent = ctx.new_agent::<CompressInstruction>();
 
         let file = args.get("file_path")?;
@@ -110,7 +125,10 @@ impl AiTool for Compress {
 
         agent.run().await?;
 
-        Ok(Message::tool(agent.chat.last_content().to_string(), None))
+        Ok(Message::tool(
+            agent.chat.last_content().to_string(),
+            tool_id,
+        ))
     }
 }
 
@@ -153,7 +171,12 @@ impl AiTool for WriteMemo {
         )]
     }
 
-    async fn run(&self, _ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        _ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let content = args.get("information")?;
 
         let mut h = tokio::fs::OpenOptions::new()
@@ -165,7 +188,7 @@ impl AiTool for WriteMemo {
         h.write_all(content.as_bytes()).await?;
         h.flush().await?;
 
-        Ok(Message::tool("memory written".into(), None))
+        Ok(Message::tool("memory written".into(), tool_id))
     }
 }
 
@@ -185,7 +208,12 @@ impl AiTool for CrawlWebsite {
         vec![Argument::new("url", "url of the website", ArgType::Str)]
     }
 
-    async fn run(&self, _ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        _ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let url = args.get("url")?;
 
         let html = reqwest::Client::new().get(url).send().await?.text().await?;
@@ -196,7 +224,7 @@ impl AiTool for CrawlWebsite {
             .map(|el| el.text().collect::<String>())
             .collect::<String>();
 
-        Ok(Message::tool(content, None))
+        Ok(Message::tool(content, tool_id))
     }
 }
 
@@ -216,7 +244,12 @@ impl AiTool for Mkdir {
         vec![Argument::new("dir_path", "the dir path", ArgType::Str)]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let path = args.get("dir_path")?;
 
         let (conf, rx) = Confirmation::new(format!("The agent wants to create a dir `{}`", path));
@@ -235,7 +268,7 @@ impl AiTool for Mkdir {
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
 
-        Ok(Message::tool(content, None))
+        Ok(Message::tool(content, tool_id))
     }
 }
 
@@ -255,7 +288,12 @@ impl AiTool for Grep {
         vec![Argument::new("pattern", "the rg pattern", ArgType::Str)]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let pattern = args.get("pattern")?;
 
         let result = tokio::process::Command::new("rg")
@@ -266,7 +304,7 @@ impl AiTool for Grep {
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
 
-        Ok(Message::tool(content, None))
+        Ok(Message::tool(content, tool_id))
     }
 }
 
@@ -309,7 +347,12 @@ impl AiTool for Sed {
         ]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let file = args.get("file_path")?;
         let old = args.get("old")?;
         let new = args.get("new")?;
@@ -337,7 +380,7 @@ impl AiTool for Sed {
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
 
-        Ok(Message::tool(content, None))
+        Ok(Message::tool(content, tool_id))
     }
 }
 
@@ -362,7 +405,12 @@ impl AiTool for EditFile {
         ]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let file = args.get("file")?;
         let content = args.get("content")?;
         let op = args.get("operation")?;
@@ -394,7 +442,7 @@ impl AiTool for EditFile {
             }
         }
 
-        Ok(Message::tool("user accepted".into(), None))
+        Ok(Message::tool("user accepted".into(), tool_id))
     }
 }
 
@@ -463,7 +511,12 @@ impl AiTool for CreateFile {
         ]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let file = args.get("file_path")?;
         let content = args.get("content")?;
 
@@ -481,7 +534,7 @@ impl AiTool for CreateFile {
 
         tokio::fs::write(file, content).await?;
 
-        Ok(Message::tool("file created".into(), None))
+        Ok(Message::tool("file created".into(), tool_id))
     }
 }
 
@@ -505,7 +558,12 @@ impl AiTool for MoveFile {
         ]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let src = args.get("src")?;
         let dst = args.get("dst")?;
 
@@ -527,7 +585,7 @@ impl AiTool for MoveFile {
             .output()
             .await?;
 
-        Ok(Message::tool("file moved".into(), None))
+        Ok(Message::tool("file moved".into(), tool_id))
     }
 }
 
@@ -552,7 +610,12 @@ impl AiTool for DeleteFile {
         )]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let src = args.get("file_path")?;
 
         _ = tokio::process::Command::new("rm")
@@ -561,7 +624,7 @@ impl AiTool for DeleteFile {
             .output()
             .await?;
 
-        Ok(Message::tool("file deleted".into(), None))
+        Ok(Message::tool("file deleted".into(), tool_id))
     }
 }
 
@@ -581,7 +644,12 @@ impl AiTool for GitLog {
         vec![]
     }
 
-    async fn run(&self, ctx: AgentContext, _args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        _args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let res = tokio::process::Command::new("git")
             .args(&["log", "-n 20"])
             .current_dir(ctx.cwd)
@@ -589,7 +657,7 @@ impl AiTool for GitLog {
             .await?;
 
         let content = String::from_utf8_lossy(&res.stdout).to_string();
-        Ok(Message::tool(content, None))
+        Ok(Message::tool(content, tool_id))
     }
 }
 
@@ -609,7 +677,12 @@ impl AiTool for GitShowCommit {
         vec![Argument::new("commit", "The commit hash", ArgType::Str)]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message> {
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
         let hash = args.get("commit")?;
 
         let res = tokio::process::Command::new("git")
@@ -619,6 +692,6 @@ impl AiTool for GitShowCommit {
             .await?;
 
         let content = String::from_utf8_lossy(&res.stdout).to_string();
-        Ok(Message::tool(content, None))
+        Ok(Message::tool(content, tool_id))
     }
 }

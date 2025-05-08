@@ -36,7 +36,7 @@ impl ChatClient for OllamaClient {
     async fn prompt(&mut self, tx: Sender<Message>) -> BResult<()> {
         let client = reqwest::Client::new();
 
-        let url = format!("{}/{}", self.url, "/chat");
+        let url = format!("{}/{}", self.url, "chat");
         let req = client.post(&url).json(&self.chat);
         let res = req.send().await?.text().await?;
 

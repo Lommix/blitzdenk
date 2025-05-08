@@ -134,7 +134,7 @@ impl Agent {
                         inner: Arc::new(call.args.clone()),
                     };
 
-                    match func.run(self.context.clone(), args).await {
+                    match func.run(self.context.clone(), args, call.id.clone()).await {
                         Ok(mut msg) => {
                             msg.tool_call_id = call.id;
                             self.context.message_tx.send(msg.clone())?;

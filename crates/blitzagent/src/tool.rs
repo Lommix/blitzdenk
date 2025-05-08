@@ -13,5 +13,10 @@ pub trait AiTool: Send + Sync + 'static {
         vec![]
     }
 
-    async fn run(&self, ctx: AgentContext, args: AgentArgs) -> BResult<Message>;
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message>;
 }

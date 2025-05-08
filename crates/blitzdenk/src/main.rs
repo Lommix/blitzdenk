@@ -86,8 +86,7 @@ async fn main() -> anyhow::Result<()> {
 
     match &cmd {
         Cmd::Yolo(args) | Cmd::Chat(args) => {
-            // print!("\x1B[2J\x1B[1;1H");
-
+            print!("\x1B[2J\x1B[1;1H");
             let root = args
                 .root
                 .as_ref()

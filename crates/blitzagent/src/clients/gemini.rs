@@ -231,7 +231,7 @@ impl From<&Content> for Message {
 impl From<&GFunctionCall> for FunctionCall {
     fn from(value: &GFunctionCall) -> Self {
         Self {
-            id: None,
+            id: Some(value.name.clone()),
             name: value.name.clone(),
             args: serde_json::from_value(value.arguments.clone()).unwrap(),
         }
@@ -259,7 +259,16 @@ impl From<Message> for Content {
             //@todo:lol
         }
 
-        if !value.content.is_empty() {
+        if !value.content.is_empty() {}
+
+        if value.role == Role::Tool {
+            parts.push(ContentPart::FunctionResponse(FunctionResponse {
+                name: value.tool_call_id.unwrap_or_default(),
+                response: FunctionResponsePayload {
+                    content: serde_json::to_value(value.content).unwrap(),
+                },
+            }));
+        } else {
             parts.push(ContentPart::Text(value.content));
         }
 
