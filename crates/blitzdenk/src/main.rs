@@ -129,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
             println!("(1) select model openai");
             println!("(2) select model ollama");
             println!("(3) select model gemini");
+            println!("(4) gemini key");
             print!("SELECT:");
 
             let mut input = String::new();
@@ -138,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
 
             match choice {
                 0 => {
+                    println!("Input:");
                     let mut input = String::new();
                     std::io::stdout().flush()?;
                     std::io::stdin().read_line(&mut input)?;
@@ -199,7 +201,15 @@ async fn main() -> anyhow::Result<()> {
                     config.gemini_model = model;
                     save_config(&config).await?;
                 }
-
+                4 => {
+                    println!("Input:");
+                    let mut input = String::new();
+                    std::io::stdout().flush()?;
+                    std::io::stdin().read_line(&mut input)?;
+                    config.gemini_key = input.trim().into();
+                    save_config(&config).await?;
+                    println!("key saved!");
+                }
                 _ => {}
             }
         }

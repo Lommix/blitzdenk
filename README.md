@@ -53,12 +53,15 @@ blitzdenk chat openai
 
 #ollama
 blitzdenk chat ollama ./path/to/project
+
+#gemini
+blitzdenk chat gemini
+
 ```
 
 ## Yolo mode
 
-Same as chat. But with access to edit and delete files with no backups. Will destroy your project. Might code a turd.
-(rm, mv, mkdir, sed)
+Same as chat. But does not ask for permission, when mutating the project.
 
 [yolo.webm](https://github.com/user-attachments/assets/21bcdcdc-5cb1-40fd-8bd1-0287af0472d0)
 
@@ -74,6 +77,7 @@ Any model. Might fail on some.
 
 - OpenAi (gpt4.1, best so far)
 - Ollama (qwen3, pretty good)
+- Gemini
 
 ## Neovim
 
