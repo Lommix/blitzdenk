@@ -3,7 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/Apache2-blue.svg)](./LICENSE)
 [![Crate](https://img.shields.io/crates/v/blitzdenk.svg)](https://crates.io/crates/blitzdenk)
 
-A minimal, concise auto-context project chat bot. A replacement for dying search.
+A minimal, concise auto-context project chat bot.
 
 [blitz.webm](https://github.com/user-attachments/assets/217f6f64-1092-4cf6-a2b2-e0f3c5e4f17d)
 
@@ -57,15 +57,15 @@ blitzdenk chat ollama ./path/to/project
 #gemini
 blitzdenk chat gemini
 
+#claude
+blitzdenk chat claude
 ```
 
 ## Yolo mode
 
-Same as chat. But does not ask for permission, when mutating the project.
+Same as chat, but does not ask for permission, when mutating the project. Have a backup ready!
 
 [yolo.webm](https://github.com/user-attachments/assets/21bcdcdc-5cb1-40fd-8bd1-0287af0472d0)
-
-It's like cursor, but less safe.
 
 ```shell
 blitzdenk yolo openai
@@ -78,6 +78,7 @@ Any model. Might fail on some.
 - OpenAi (gpt4.1, best so far)
 - Ollama (qwen3, pretty good)
 - Gemini
+- Claude
 
 ## Neovim
 
@@ -86,12 +87,3 @@ It's a simple no-border tui. Perfect to use in the Neovim term buffer.
 ```lua
 vim.keymap.set(("n", "<leader>o", ":vsplit term:// blitzdenk chat openai<CR>:startinsert<CR>", {})
 ```
-
-## The AI pipeline approach
-
-Agents running in a loop tend to explode small lies into big ones after n iterations. So instead of looping
-the best way to get good results is in a forward pipeline.
-
-Question -> collect context -> answer -> correction. Restart
-
-Conclusion: Restart chats often. 1 question/task per chat.

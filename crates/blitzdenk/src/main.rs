@@ -48,9 +48,9 @@ impl AgentInstruction for DevAgent {
             Box::new(tools::Grep),
             Box::new(tools::GitLog),
             Box::new(tools::GitShowCommit),
-            Box::new(tools::EditFile),
-            Box::new(tools::CreateFile),
-            Box::new(tools::Mkdir),
+            // Box::new(tools::EditFile),
+            // Box::new(tools::CreateFile),
+            // Box::new(tools::Mkdir),
         ]
     }
 }
