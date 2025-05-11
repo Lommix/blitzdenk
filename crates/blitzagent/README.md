@@ -1,8 +1,10 @@
 # Blitzagent
 
-A simple forward multi API agent framework.
+A simple top to down hierarchy multi API agent framework.
 
 It's a pipe!
+
+Currently supports: Ollama, OpenAi, Gemini, Claude
 
 ```rust
 #[tokio::main]
@@ -10,13 +12,16 @@ async fn main() -> anyhow::Result<()> {
     let (ctx, rec) = AgentContext::new(root, OllamaClient::new(config.ollama_model))
     let agent = ctx.new_agent::<DevAgent>();
 
+    tokio::spawn(async move {
+        loop {
+            let msg = rec.recv().unwrap();
+            println("{}", msg);
+        }
+    };
+
     agent.chat.push_message(Message::User("list all files".into()));
     agent.run().await?;
 
-    loop {
-        let msg = rec.recv().unwrap();
-        println("{}", msg);
-    }
 }
 
 

@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use crate::{
     chat::{ChatClient, FunctionCall, Message, Role},
     tool::AiTool,
@@ -128,7 +126,7 @@ impl ChatClient for GeminiClient {
             }],
         };
 
-        let mut configs = match self.chat.tools.as_mut() {
+        let configs = match self.chat.tools.as_mut() {
             Some(c) => c,
             None => {
                 self.chat.tools = Some(vec![]);
@@ -190,8 +188,7 @@ impl ChatClient for GeminiClient {
     }
 
     fn fresh(&self) -> Box<dyn ChatClient> {
-        let mut n = self.clone();
-        Box::new(n)
+        Box::new(GeminiClient::new(self.key.clone(), self.model.clone()))
     }
 }
 
@@ -220,7 +217,7 @@ impl From<GRole> for Role {
 impl From<&Content> for Message {
     fn from(value: &Content) -> Self {
         let mut calls = Vec::new();
-        let mut files = Vec::new();
+        let files = Vec::new();
         let mut text = String::new();
         let mut tool_call_id = None;
 
@@ -277,7 +274,7 @@ impl From<Message> for Content {
             parts.push(ContentPart::FunctionCall(call.into()));
         }
 
-        if let Some(files) = value.images {
+        if let Some(_) = value.images {
             //@todo:lol
         }
 
