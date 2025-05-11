@@ -55,16 +55,25 @@ impl ChatClient for GeminiClient {
             BASE_URL, self.model, self.key
         );
 
-        let mut req = client
+        let req = client
             .post(url)
             .json(&self.chat)
             .header("Content-Type", "application/json")
             .send()
             .await?
-            .json::<GenerateContentResponse>()
+            .text()
             .await?;
 
-        let mut op = req
+        let mut res = match serde_json::from_str::<GenerateContentResponse>(&req) {
+            Ok(res) => res,
+            Err(err) => {
+                let err_msg = format!("{}\n{}", err.to_string(), req);
+                tx.send(Message::system(err_msg.clone())).unwrap();
+                return Err(BlitzError::ApiError(err_msg));
+            }
+        };
+
+        let mut op = res
             .candidates
             .take()
             .ok_or(BlitzError::ApiError("no options".into()))?
@@ -87,34 +96,47 @@ impl ChatClient for GeminiClient {
     }
 
     fn register_tool(&mut self, tool: &Box<dyn AiTool>) {
-        let mut tools = match self.chat.tools.as_mut() {
-            Some(m) => m,
-            None => {
-                self.chat.tools = Some(vec![]);
-                self.chat.tools.iter_mut().last().unwrap()
-            }
-        };
-
         let mut properties: HashMap<String, ParameterProperty> = HashMap::new();
         let mut required: Vec<String> = Vec::new();
 
-        tools.push(ToolConfig::FunctionDeclaration(
-            ToolConfigFunctionDeclaration {
-                function_declarations: vec![FunctionDeclaration {
-                    name: tool.name().into(),
-                    description: tool.description().into(),
-                    parameters: FunctionParameters {
-                        parameter_type: "object".into(),
-                        properties,
-                        required: if required.len() > 0 {
-                            Some(required)
-                        } else {
-                            None
-                        },
+        tool.args().iter().for_each(|arg| {
+            let o = ParameterProperty {
+                property_type: (&arg.ty).into(),
+                description: arg.description.as_ref().cloned().unwrap_or_default(),
+                enum_values: None,
+            };
+
+            properties.insert(arg.name.clone(), o);
+            if arg.required {
+                required.push(arg.name.clone());
+            }
+        });
+
+        let decl = ToolConfigFunctionDeclaration {
+            function_declarations: vec![FunctionDeclaration {
+                name: tool.name().into(),
+                description: tool.description().into(),
+                parameters: FunctionParameters {
+                    parameter_type: "object".into(),
+                    properties,
+                    required: if required.len() > 0 {
+                        Some(required)
+                    } else {
+                        None
                     },
-                }],
-            },
-        ));
+                },
+            }],
+        };
+
+        let mut configs = match self.chat.tools.as_mut() {
+            Some(c) => c,
+            None => {
+                self.chat.tools = Some(vec![]);
+                self.chat.tools.as_mut().unwrap()
+            }
+        };
+
+        configs.push(ToolConfig::FunctionDeclaration(decl));
     }
 
     fn set_sys_prompt(&mut self, content: String) {

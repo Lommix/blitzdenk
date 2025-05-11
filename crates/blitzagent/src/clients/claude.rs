@@ -7,15 +7,15 @@ use crossbeam::channel::Sender;
 use serde::*;
 use std::collections::HashMap;
 
-pub const OPENAI_CHAT: &'static str = "https://api.openai.com/v1/chat/completions";
-pub const OPENAI_MODEL: &'static str = "https://api.openai.com/v1/models";
+pub const CLAUDE_CHAT: &str = "https://api.anthropic.com/v1/messages";
+pub const CLAUDE_MODEL: &str = "https://api.anthropic.com/v1/models";
 
-pub struct OpenApiClient {
+pub struct ClaudeClient {
     chat: OChat,
     key: String,
 }
 
-impl OpenApiClient {
+impl ClaudeClient {
     pub fn new(model: impl Into<String>, key: impl Into<String>) -> Self {
         return Self {
             key: key.into(),
@@ -23,14 +23,16 @@ impl OpenApiClient {
                 model: model.into(),
                 messages: vec![],
                 tools: vec![],
-                tool_choice: "auto".into(),
+                system: "".into(),
+                max_tokens: 1024,
+                temperature: 1.0,
             },
         };
     }
 }
 
 #[async_trait::async_trait]
-impl ChatClient for OpenApiClient {
+impl ChatClient for ClaudeClient {
     fn register_tool(&mut self, tool: &Box<dyn AiTool>) {
         let mut properties: HashMap<String, OProp> = HashMap::new();
         let mut required: Vec<String> = Vec::new();
@@ -39,7 +41,6 @@ impl ChatClient for OpenApiClient {
             let o = OProp {
                 ty: (&arg.ty).into(),
                 description: arg.description.clone(),
-                // options: arg.options.clone(),
             };
 
             properties.insert(arg.name.clone(), o);
@@ -50,23 +51,21 @@ impl ChatClient for OpenApiClient {
         });
 
         self.chat.tools.push(OTool {
-            ty: ToolType::Function,
-            function: OFunc {
-                name: tool.name().into(),
-                description: tool.description().into(),
-                parameters: OParameters {
-                    ty: "object".into(),
-                    required,
-                    properties,
-                },
+            name: tool.name().into(),
+            description: tool.description().into(),
+            input_schema: OParameters {
+                ty: "object".into(),
+                required,
+                properties,
             },
         });
     }
 
     async fn list_models(&self) -> BResult<Vec<String>> {
         let raw = reqwest::Client::new()
-            .get(OPENAI_MODEL)
-            .header("Authorization", format!("Bearer {}", &self.key))
+            .get(CLAUDE_MODEL)
+            .header("x-api-key", format!("{}", &self.key))
+            .header("anthropic-version", "2023-06-01")
             .send()
             .await?
             .text()
@@ -80,32 +79,20 @@ impl ChatClient for OpenApiClient {
     }
 
     fn last_tool_call(&self) -> Option<Vec<FunctionCall>> {
-        let tool_calls = self.chat.messages.last()?.tool_calls.as_ref()?;
-        if tool_calls.len() == 0 {
-            return None;
-        };
+        let content = self.chat.messages.last()?.content.last()?;
 
-        Some(
-            tool_calls
-                .iter()
-                .map(|c| FunctionCall {
-                    id: Some(c.id.clone()),
-                    name: c.function.name.clone(),
-                    args: serde_json::from_str::<HashMap<String, String>>(&c.function.arguments)
-                        .unwrap(),
-                })
-                .collect(),
-        )
+        match content.ty {
+            ContentType::ToolUse => Some(vec![FunctionCall {
+                id: Some(content.id.as_ref().unwrap().clone()),
+                name: content.name.as_ref().unwrap().clone(),
+                args: content.input.as_ref().unwrap().clone(),
+            }]),
+            _ => None,
+        }
     }
 
     fn set_sys_prompt(&mut self, content: String) {
-        if self.chat.messages.len() == 0 {
-            self.push_message(Message::system(content));
-            return;
-        }
-
-        self.chat.messages[0].role = ORole::System;
-        self.chat.messages[0].content = Some(content);
+        self.chat.system = content;
     }
 
     fn push_message(&mut self, msg: Message) {
@@ -120,8 +107,9 @@ impl ChatClient for OpenApiClient {
 
     async fn prompt(&mut self, tx: Sender<Message>) -> BResult<()> {
         let raw = reqwest::Client::new()
-            .post(OPENAI_CHAT)
-            .header("Authorization", format!("Bearer {}", &self.key))
+            .post(CLAUDE_CHAT)
+            .header("x-api-key", format!("{}", &self.key.trim_matches('"')))
+            .header("anthropic-version", "2023-06-01")
             .json(&self.chat)
             .send()
             .await?
@@ -131,6 +119,13 @@ impl ChatClient for OpenApiClient {
         let res = match serde_json::from_str::<ChatResponse>(&raw) {
             Ok(r) => r,
             Err(err) => {
+                tx.send(Message::system(format!(
+                    "[Error] {}\n{}",
+                    err.to_string(),
+                    serde_json::to_string(&self.chat).unwrap(),
+                )))
+                .unwrap();
+
                 return Err(crate::error::BlitzError::ApiError(format!(
                     "[Error] {}\n{}",
                     err.to_string(),
@@ -139,20 +134,29 @@ impl ChatClient for OpenApiClient {
             }
         };
 
-        // tx.send(Message::tool(raw.clone(), None)).unwrap();
-        self.chat.messages.push(res.choices[0].message.clone());
-        let m: Message = res.choices[0].message.clone().into();
-        tx.send(m)?;
+        let msg = OMessage {
+            role: ORole::Assistant,
+            content: res.content,
+        };
+
+        tx.send(msg.clone().into())?;
+        self.chat.messages.push(msg);
 
         return Ok(());
     }
 
     fn last_content(&self) -> &str {
-        self.chat
-            .messages
-            .last()
-            .map(|m| m.content.as_ref().map(|s| s.as_str()).unwrap_or(""))
-            .unwrap_or("")
+        let Some(last) = self.chat.messages.last() else {
+            return "";
+        };
+
+        for p in last.content.iter() {
+            if p.text.is_some() {
+                return p.text.as_deref().unwrap();
+            }
+        }
+
+        return "";
     }
 
     fn fresh(&self) -> Box<dyn ChatClient> {
@@ -170,9 +174,9 @@ impl From<Role> for ORole {
     fn from(value: Role) -> Self {
         match value {
             Role::Assistant => ORole::Assistant,
-            Role::System => ORole::System,
+            Role::System => ORole::Assistant,
             Role::User => ORole::User,
-            Role::Tool => ORole::Tool,
+            Role::Tool => ORole::User,
         }
     }
 }
@@ -181,56 +185,77 @@ impl From<ORole> for Role {
     fn from(value: ORole) -> Self {
         match value {
             ORole::Assistant => Role::Assistant,
-            ORole::System => Role::System,
             ORole::User => Role::User,
-            ORole::Tool => Role::Tool,
         }
     }
 }
 
 impl From<Message> for OMessage {
-    fn from(mut value: Message) -> Self {
-        let calls = value
-            .tool_calls
-            .drain(..)
-            .map(|c| OToolCall {
-                id: c.id.unwrap_or_default(),
-                ty: "function".into(),
-                function: OCall {
-                    name: c.name,
-                    arguments: serde_json::to_string(&c.args).unwrap(),
-                },
-            })
-            .collect::<Vec<_>>();
+    fn from(value: Message) -> Self {
+        let mut content = Content {
+            ty: ContentType::Text,
+            ..Default::default()
+        };
 
-        OMessage {
-            role: value.role.into(),
-            content: Some(value.content),
-            tool_call_id: value.tool_call_id,
-            tool_calls: if calls.len() > 0 { Some(calls) } else { None },
+        if let Some(call) = value.tool_calls.first() {
+            content.name = Some(call.name.clone());
+            content.input = Some(call.args.clone());
+            content.id = call.id.clone();
+        }
+
+        if value.role == Role::Tool {
+            content.ty = ContentType::ToolResult;
+            content.tool_use_id = value.tool_call_id.clone();
+            content.id = None;
+            content.content = Some(value.content);
+            OMessage {
+                role: value.role.into(),
+                content: vec![content],
+            }
+        } else {
+            if value.content.len() > 0 {
+                content.text = Some(value.content);
+            }
+            OMessage {
+                role: value.role.into(),
+                content: vec![content],
+            }
         }
     }
 }
 
 impl From<OMessage> for Message {
     fn from(value: OMessage) -> Self {
-        Message {
-            tool_call_id: None,
+        let mut msg = Message {
             role: value.role.into(),
-            content: value.content.unwrap_or_default(),
+            content: String::new(),
+            tool_calls: vec![],
+            tool_call_id: None,
             images: None,
-            tool_calls: value
-                .tool_calls
-                .unwrap_or_default()
-                .drain(..)
-                .map(|call| FunctionCall {
-                    id: Some(call.id),
-                    name: call.function.name,
-                    args: serde_json::from_str::<HashMap<String, String>>(&call.function.arguments)
-                        .unwrap(),
-                })
-                .collect(),
+        };
+
+        for p in value.content.iter() {
+            if let Some(str) = p.text.clone() {
+                msg.content = str;
+            }
+
+            let Some(name) = p.name.clone() else {
+                continue;
+            };
+
+            let Some(args) = p.input.clone() else {
+                continue;
+            };
+
+            msg.tool_call_id = p.id.clone();
+            msg.tool_calls.push(FunctionCall {
+                id: p.id.clone(),
+                name,
+                args,
+            });
         }
+
+        msg
     }
 }
 
@@ -242,19 +267,47 @@ pub struct OChat {
     pub model: String,
     pub messages: Vec<OMessage>,
     pub tools: Vec<OTool>,
-    pub tool_choice: String,
+    pub system: String,
+    pub temperature: f32,
+    pub max_tokens: u32,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct ChatResponse {
     pub model: String,
-    pub choices: Vec<Choice>,
+    pub role: ORole,
+    pub content: Vec<Content>,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-pub struct Choice {
-    pub index: i64,
-    pub message: OMessage,
+#[derive(Deserialize, Default, Serialize, Clone, Debug)]
+pub enum ContentType {
+    #[default]
+    #[serde(rename = "text")]
+    Text,
+    #[serde(rename = "image")]
+    Image,
+    #[serde(rename = "tool_use")]
+    ToolUse,
+    #[serde(rename = "tool_result")]
+    ToolResult,
+}
+
+#[derive(Deserialize, Default, Serialize, Clone, Debug)]
+pub struct Content {
+    #[serde(rename = "type")]
+    pub ty: ContentType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug, Serialize)]
@@ -266,21 +319,19 @@ pub struct OCall {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct OMessage {
     pub role: ORole,
-    pub content: Option<String>,
-    pub tool_calls: Option<Vec<OToolCall>>,
-    pub tool_call_id: Option<String>,
+    pub content: Vec<Content>,
+    // #[serde(skip_serializing_if = "Option::is_none")]
+    // pub tool_use: Option<OToolCall>,
+    // #[serde(skip_serializing_if = "Option::is_none")]
+    // pub tool_call_id: Option<String>,
 }
 
 #[derive(Deserialize, PartialEq, Eq, Serialize, Debug, Clone, Copy)]
 pub enum ORole {
     #[serde(rename = "assistant")]
     Assistant,
-    #[serde(rename = "system")]
-    System,
     #[serde(rename = "user")]
     User,
-    #[serde(rename = "tool")]
-    Tool,
 }
 
 #[derive(Deserialize, Clone, Serialize, Debug)]
@@ -288,11 +339,14 @@ pub struct OToolCall {
     pub id: String,
     #[serde(rename = "type")]
     pub ty: String,
-    pub function: OCall,
+    pub name: String,
+    pub input: String,
 }
 
 #[derive(Deserialize, Clone, Serialize, Debug)]
 pub enum ToolType {
+    #[serde(rename = "object")]
+    Object,
     #[serde(rename = "function")]
     Function,
     Unknown,
@@ -300,9 +354,9 @@ pub enum ToolType {
 
 #[derive(Deserialize, Clone, Serialize, Debug)]
 pub struct OTool {
-    #[serde(rename = "type")]
-    pub ty: ToolType,
-    pub function: OFunc,
+    pub name: String,
+    pub description: String,
+    pub input_schema: OParameters,
 }
 
 #[derive(Deserialize, Serialize, Debug)]

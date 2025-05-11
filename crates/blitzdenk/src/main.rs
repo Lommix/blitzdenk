@@ -23,6 +23,7 @@ enum ClientType {
     Openai,
     Ollama,
     Gemini,
+    Claude,
 }
 
 #[derive(Args)]
@@ -100,15 +101,30 @@ async fn main() -> anyhow::Result<()> {
                         OpenApiClient::new(config.openai_model, config.openai_key),
                     )
                 }
+                ClientType::Claude => {
+                    if config.claude_key.is_empty() {
+                        println!("Missing claude api key! Please run `config`");
+                        return Ok(());
+                    }
+                    AgentContext::new(
+                        root,
+                        ClaudeClient::new(config.claude_model, config.claude_key),
+                    )
+                }
                 ClientType::Ollama => AgentContext::new(
                     root,
                     OllamaClient::new(config.ollama_model, config.ollama_url),
                 ),
-
-                ClientType::Gemini => AgentContext::new(
-                    root,
-                    GeminiClient::new(config.gemini_key, config.gemini_model),
-                ),
+                ClientType::Gemini => {
+                    if config.gemini_key.is_empty() {
+                        println!("Missing gemini api key! Please run `config`");
+                        return Ok(());
+                    }
+                    AgentContext::new(
+                        root,
+                        GeminiClient::new(config.gemini_key, config.gemini_model),
+                    )
+                }
             };
 
             let agent = match cmd {
@@ -123,8 +139,12 @@ async fn main() -> anyhow::Result<()> {
             println!("(0) openai key");
             println!("(1) select model openai");
             println!("(2) select model ollama");
-            println!("(3) select model gemini");
-            println!("(4) gemini key");
+
+            println!("(3) gemini key");
+            println!("(4) select model gemini");
+
+            println!("(5) claude key");
+            println!("(6) select claude model");
             print!("SELECT:");
 
             let mut input = String::new();
@@ -180,6 +200,15 @@ async fn main() -> anyhow::Result<()> {
                     save_config(&config).await?;
                 }
                 3 => {
+                    println!("Input:");
+                    let mut input = String::new();
+                    std::io::stdout().flush()?;
+                    std::io::stdin().read_line(&mut input)?;
+                    config.gemini_key = input.trim().into();
+                    save_config(&config).await?;
+                    println!("key saved!");
+                }
+                4 => {
                     let c = GeminiClient::new(&config.gemini_key, &config.gemini_model);
                     let models = c.list_models().await?;
                     for (i, m) in models.iter().enumerate() {
@@ -196,14 +225,31 @@ async fn main() -> anyhow::Result<()> {
                     config.gemini_model = model;
                     save_config(&config).await?;
                 }
-                4 => {
+                5 => {
                     println!("Input:");
                     let mut input = String::new();
                     std::io::stdout().flush()?;
                     std::io::stdin().read_line(&mut input)?;
-                    config.gemini_key = input.trim().into();
+                    config.claude_key = input.trim().into();
                     save_config(&config).await?;
                     println!("key saved!");
+                }
+                6 => {
+                    let c = ClaudeClient::new(&config.claude_model, &config.claude_key);
+                    let models = c.list_models().await?;
+                    for (i, m) in models.iter().enumerate() {
+                        println!("({}) {}", i, m);
+                    }
+                    print!("SELECT:");
+                    let mut input = String::new();
+                    std::io::stdout().flush()?;
+                    std::io::stdin().read_line(&mut input)?;
+
+                    let choice = input.trim().parse::<usize>()?;
+                    let model = models[choice].clone();
+
+                    config.claude_model = model;
+                    save_config(&config).await?;
                 }
                 _ => {}
             }
@@ -221,6 +267,10 @@ pub struct Config {
     openai_model: String,
     gemini_key: String,
     gemini_model: String,
+    claude_key: String,
+    claude_model: String,
+    grok_key: String,
+    grok_model: String,
 }
 
 impl Default for Config {
@@ -232,6 +282,10 @@ impl Default for Config {
             openai_model: "gpt-4.1".into(),
             gemini_key: "".into(),
             gemini_model: "models/gemini-2.0-flash".into(),
+            claude_key: "".into(),
+            claude_model: "".into(),
+            grok_key: "".into(),
+            grok_model: "".into(),
         }
     }
 }
