@@ -45,7 +45,10 @@ impl AiTool for Tree {
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
 
-        Ok(Message::tool(content, tool_id))
+        Ok(Message::tool(
+            content.lines().take(500).collect::<Vec<_>>().join("\n"),
+            tool_id,
+        ))
     }
 }
 
@@ -82,8 +85,10 @@ impl AiTool for Cat {
             .await?;
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
-
-        Ok(Message::tool(content, tool_id))
+        Ok(Message::tool(
+            content.lines().take(2000).collect::<Vec<_>>().join("\n"),
+            tool_id,
+        ))
     }
 }
 
@@ -140,11 +145,7 @@ impl AgentInstruction for CompressInstruction {
     }
 
     fn toolset(&self) -> Vec<Box<dyn AiTool>> {
-        vec![
-            Box::new(Tree),
-            Box::new(Cat),
-            Box::new(WriteMemo),
-        ]
+        vec![Box::new(Tree), Box::new(Cat), Box::new(WriteMemo)]
     }
 }
 
@@ -304,7 +305,10 @@ impl AiTool for Grep {
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
 
-        Ok(Message::tool(content, tool_id))
+        Ok(Message::tool(
+            content.lines().take(1000).collect::<Vec<_>>().join("\n"),
+            tool_id,
+        ))
     }
 }
 

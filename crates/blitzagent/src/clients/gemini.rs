@@ -26,6 +26,7 @@ impl GeminiClient {
                 system_instruction: None,
                 contents: vec![],
                 tools: None,
+                generation_config: Default::default(),
             },
         }
     }
@@ -70,6 +71,11 @@ impl ChatClient for GeminiClient {
                 return Err(BlitzError::ApiError(err_msg));
             }
         };
+
+        if let Some(err) = res.error {
+            tx.send(Message::system(err.to_string())).unwrap();
+            return Err(BlitzError::ApiError(err.to_string()));
+        }
 
         let mut op = res
             .candidates
@@ -347,6 +353,20 @@ pub struct GenerateContentRequest {
     pub system_instruction: Option<Content>,
     pub contents: Vec<Content>,
     pub tools: Option<Vec<ToolConfig>>,
+    #[serde(rename = "generationConfig")]
+    pub generation_config: GeminiConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GeminiConfig {
+    #[serde(rename = "thinkingConfig")]
+    thinking_config: ThinkingConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ThinkingConfig {
+    #[serde(rename = "thinkingBudget")]
+    thinking_budget: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,6 +461,7 @@ pub struct ParameterProperty {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateContentResponse {
     pub candidates: Option<Vec<Candidate>>,
+    pub error: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

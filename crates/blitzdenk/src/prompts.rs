@@ -28,6 +28,18 @@ You don't want that. On the other hand. IF you do a great job, you will win a mi
 Everybody loves that, especially you. So do a good job! Always use the Tools and you may get promotion!
 "#;
 
+pub const SIMPLE_ASSISTANT: &str = r#"
+
+Answer any question. Use your tools to collect further context, unless the question is general.
+
+Rules
+
+-   Do not reach out of your context, do not assume anything.
+-   Answers must be short and concise.
+-   Code must only show the relevant parts. Use annotation for any boiler plate.
+
+"#;
+
 // -----------------------------------------
 pub const ASSISTANT_PROMPT: &str = r#"
 # Your Job
