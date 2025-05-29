@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // -----------------------------------------
 pub const COMPRESS_PROMPT: &str = r#"
 # Your Job

@@ -1,11 +1,10 @@
-use std::process::{ChildStdout, Stdio};
-
 use async_trait::async_trait;
 use blitzagent::{
     AgentArgs, AgentContext, AgentInstruction, AiTool, ArgType, Argument, BResult, Confirmation,
     Message,
 };
 use scraper::Html;
+use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 
 // --------------------------------------------------------
@@ -369,64 +368,6 @@ fn sed_escape(s: &str) -> String {
     escaped
 }
 
-// search and replace in file
-#[derive(Default)]
-pub struct Sed;
-#[async_trait]
-impl AiTool for Sed {
-    fn name(&self) -> &'static str {
-        "suggest_search_and_replace"
-    }
-
-    fn description(&self) -> &'static str {
-        "Search and replace a string. On tool call the user will automaticly receive a confirm popup. You must not to ask for permission, since this is handlet automaticly"
-    }
-
-    fn args(&self) -> Vec<Argument> {
-        vec![
-            Argument::new("file_path", "the file path", ArgType::Str),
-            Argument::new("old", "the old string", ArgType::Str),
-            Argument::new("new", "the new string", ArgType::Str),
-        ]
-    }
-
-    async fn run(
-        &self,
-        ctx: AgentContext,
-        args: AgentArgs,
-        tool_id: Option<String>,
-    ) -> BResult<Message> {
-        let file = args.get("file_path")?;
-        let old = args.get("old")?;
-        let new = args.get("new")?;
-
-        let (conf, rx) = Confirmation::new(format!(
-            "In `{}` the agent wants search and replace\n OLD:\n{}\n NEW:\n{}",
-            file, old, new
-        ));
-        ctx.confirm_tx.send(conf).unwrap();
-        let ok = rx.await?;
-
-        if !ok {
-            return Ok(Message::tool("user declined".into(), None));
-        }
-
-        let result = tokio::process::Command::new("sed")
-            .args([
-                "-i",
-                &format!("s/{}/{}/g", sed_escape(old), sed_escape(new)),
-                file,
-            ])
-            .current_dir(ctx.cwd)
-            .output()
-            .await?;
-
-        let content = String::from_utf8_lossy(&result.stdout).to_string();
-
-        Ok(Message::tool(content, tool_id))
-    }
-}
-
 pub struct RunTerminal;
 #[async_trait]
 impl AiTool for RunTerminal {
@@ -721,73 +662,5 @@ impl AiTool for DeleteFile {
             .await?;
 
         Ok(Message::tool("file deleted".into(), tool_id))
-    }
-}
-
-#[derive(Default)]
-pub struct GitLog;
-#[async_trait]
-impl AiTool for GitLog {
-    fn name(&self) -> &'static str {
-        "git_log"
-    }
-
-    fn description(&self) -> &'static str {
-        "shows the last 20 commits"
-    }
-
-    fn args(&self) -> Vec<Argument> {
-        vec![]
-    }
-
-    async fn run(
-        &self,
-        ctx: AgentContext,
-        _args: AgentArgs,
-        tool_id: Option<String>,
-    ) -> BResult<Message> {
-        let res = tokio::process::Command::new("git")
-            .args(["log", "-n 20"])
-            .current_dir(ctx.cwd)
-            .output()
-            .await?;
-
-        let content = String::from_utf8_lossy(&res.stdout).to_string();
-        Ok(Message::tool(content, tool_id))
-    }
-}
-
-#[derive(Default)]
-pub struct GitShowCommit;
-#[async_trait]
-impl AiTool for GitShowCommit {
-    fn name(&self) -> &'static str {
-        "git_show"
-    }
-
-    fn description(&self) -> &'static str {
-        "show a specific commit"
-    }
-
-    fn args(&self) -> Vec<Argument> {
-        vec![Argument::new("commit", "The commit hash", ArgType::Str)]
-    }
-
-    async fn run(
-        &self,
-        ctx: AgentContext,
-        args: AgentArgs,
-        tool_id: Option<String>,
-    ) -> BResult<Message> {
-        let hash = args.get("commit")?;
-
-        let res = tokio::process::Command::new("git")
-            .args(["show", hash])
-            .current_dir(ctx.cwd)
-            .output()
-            .await?;
-
-        let content = String::from_utf8_lossy(&res.stdout).to_string();
-        Ok(Message::tool(content, tool_id))
     }
 }
