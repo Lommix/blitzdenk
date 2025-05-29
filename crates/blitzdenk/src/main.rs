@@ -47,6 +47,7 @@ impl AgentInstruction for DevAgent {
             Box::new(tools::CrawlWebsite),
             Box::new(tools::Grep),
             Box::new(tools::RunTerminal),
+            Box::new(tools::EditFile),
         ]
     }
 }

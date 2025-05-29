@@ -368,6 +368,78 @@ fn sed_escape(s: &str) -> String {
     escaped
 }
 
+pub struct PatchFile;
+#[async_trait]
+impl AiTool for PatchFile {
+    fn name(&self) -> &'static str {
+        "patch_file"
+    }
+
+    fn description(&self) -> &'static str {
+        r#"
+        PROPOSE  to apply changes to files using `patch`.
+        It reads a patch string and modifies the target files
+        according to the instructions within the patch.
+
+        **Importance of Correct Patch File Format:**
+
+        The `patch` command relies heavily on the correct format of the patch file.
+        Patch files are usually created by `diff -u` (unified format) or `diff -c` (context format).
+        The unified format is generally preferred and more common.
+
+        A typical unified diff header looks like this:
+        --- original_file_path  timestamp_original
+        +++ new_file_path       timestamp_new
+
+        Following the header, lines starting with:
+        - `-` indicate lines removed from the original file.
+        - `+` indicate lines added to the new file.
+        - ` ` (a space) indicate context lines (unchanged lines).
+        - `@@ -start_line_original,num_lines_original +start_line_new,num_lines_new @@` indicate hunk headers,
+          specifying the line numbers and lengths of the changed blocks.
+        "#
+    }
+
+    fn args(&self) -> Vec<Argument> {
+        vec![Argument::string("diff", "", true)]
+    }
+
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
+        let diff = args.get("diff")?;
+
+        let (conf, rx) = Confirmation::new(format!("agent wants to run\n{}", diff));
+        ctx.confirm_tx.send(conf).unwrap();
+        let ok = rx.await?;
+
+        if !ok {
+            return Ok(Message::tool("user declined".into(), None));
+        }
+
+        let mut cat = tokio::process::Command::new("echo")
+            .args(["-e", diff])
+            .current_dir(&ctx.cwd)
+            .stdout(std::process::Stdio::piped())
+            .spawn()?;
+
+        let catout: Stdio = cat.stdout.take().unwrap().try_into().unwrap();
+
+        let result = tokio::process::Command::new("patch")
+            .args(["-p1"])
+            .stdin(catout)
+            .output()
+            .await?;
+
+        let content = String::from_utf8_lossy(&result.stdout).to_string();
+
+        Ok(Message::tool(content, tool_id))
+    }
+}
+
 pub struct RunTerminal;
 #[async_trait]
 impl AiTool for RunTerminal {
@@ -425,20 +497,32 @@ pub struct EditFile;
 #[async_trait]
 impl AiTool for EditFile {
     fn name(&self) -> &'static str {
-        "suggest_edit_file"
+        "edit_file"
     }
 
     fn description(&self) -> &'static str {
-        "Make a file edit suggestion. On tool call the user will automaticly receive a confirm popup. You must not to ask for permission, since this is already handeld."
+        r#"
+        Use this tool to propose an edit to an existing file or create a new file.
+        This will be read by a less intelligent model, which will quickly apply the edit.
+        You should make it clear what the edit is, while also minimizing the unchanged code you write.
+        When writing the edit, you should specify each edit in sequence, with the special comment // ... existing code ... to represent unchanged code in between edited lines.
+        For example:
+        // ... existing code ... FIRST_EDIT // ... existing code ... SECOND_EDIT // ... existing code ... THIRD_EDIT // ... existing code ...
+        You should still bias towards repeating as few lines of the original file as possible to convey the change.
+        But, each edit should contain sufficient context of unchanged lines around the code you're editing to resolve ambiguity.
+        DO NOT omit spans of pre-existing code (or comments) without using the
+        // ... existing code ... comment to indicate its absence.
+        // If you omit the existing code comment, the model may inadvertently delete these lines.
+        // Make sure it is clear what the edit should be, and where it should be applied.
+        // To create a new file, simply specify the content of the file in the code_edit field.
+        You should specify the following arguments before the others: [target_file]
+        "#
     }
 
     fn args(&self) -> Vec<Argument> {
         vec![
-            Argument::new("file", "the file path", ArgType::Str),
-            Argument::string("content", "the content", true),
-            Argument::string("operation", "'insert' or 'replace'. Insert will append content after 'start_line'. Replace will replace between start and end", true),
-            Argument::string("start_line", "start line number", true),
-            Argument::string("end_line", "end line number", false),
+            Argument::string("edit_string", "things to edit", true),
+            Argument::string("target_file", "the file to edit", true),
         ]
     }
 
@@ -448,38 +532,37 @@ impl AiTool for EditFile {
         args: AgentArgs,
         tool_id: Option<String>,
     ) -> BResult<Message> {
-        let file = args.get("file")?;
-        let content = args.get("content")?;
-        let op = args.get("operation")?;
-        let start = args.get("start_line")?.parse::<usize>()?;
-        let end = args.get("end_line")?.parse::<usize>()?;
+        let edit_string = args.get("edit_string")?;
+        let file = args.get("target_file")?;
 
-        let (conf, rx) = Confirmation::new(format!(
+        let mut agent = ctx.new_agent::<EditInstruction>();
+        agent.chat.push_message(Message::user(format!(
             r#"
-            Agents wants to edit `{}`
-            op:{} [{}-{}]
-            ------------
+            Here are some changes for the file "{}". The changes are not marked.
+            You have to read the current file and compare it to the changes.
+            Then create patch tool requests for each change. Do not ask for permission.
+            you run in a loop. Only use tool calls, until you are finished.
+            <changes>
             {}
-            "#,
-            file, op, start, end, content
-        ));
+            </changes>
+        "#,
+            file, edit_string,
+        )));
 
-        ctx.confirm_tx.send(conf).unwrap();
-        let ok = rx.await?;
+        agent.run().await?;
+        Ok(Message::tool("edits done".into(), tool_id))
+    }
+}
 
-        if !ok {
-            return Ok(Message::tool("user declined".into(), None));
-        }
+#[derive(Default)]
+struct EditInstruction;
+impl AgentInstruction for EditInstruction {
+    fn sys_prompt(&self) -> &'static str {
+        crate::prompts::CURSOR_POMPT
+    }
 
-        match op.as_str() {
-            "insert" => insert_after_line(file, start, content).await?,
-            "replace" => replace_lines(file, start, end, content).await?,
-            _ => {
-                return Ok(Message::tool("unkown opteration".into(), None));
-            }
-        }
-
-        Ok(Message::tool("user accepted".into(), tool_id))
+    fn toolset(&self) -> Vec<Box<dyn AiTool>> {
+        vec![Box::new(Cat), Box::new(PatchFile)]
     }
 }
 
