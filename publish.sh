@@ -3,12 +3,12 @@
 
 ## agent framework
 
-agent=$(mktemp -d)
-
-cp -r ./crates/blitzagent/* "$agent"/.
-cp -r LICENSE "$agent"/.
-
-cd $agent && cargo publish
+# agent=$(mktemp -d)
+#
+# cp -r ./crates/blitzagent/* "$agent"/.
+# cp -r LICENSE "$agent"/.
+#
+# cd $agent && cargo publish
 
 ## blitzdenk chat
 
