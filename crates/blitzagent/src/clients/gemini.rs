@@ -116,20 +116,18 @@ impl ChatClient for GeminiClient {
             }
         });
 
-        let decl = ToolConfigFunctionDeclaration {
-            function_declarations: vec![FunctionDeclaration {
-                name: tool.name().into(),
-                description: tool.description().into(),
-                parameters: FunctionParameters {
-                    parameter_type: "object".into(),
-                    properties,
-                    required: if required.len() > 0 {
-                        Some(required)
-                    } else {
-                        None
-                    },
+        let decl = FunctionDeclaration {
+            name: tool.name().into(),
+            description: tool.description().into(),
+            parameters: FunctionParameters {
+                parameter_type: "object".into(),
+                properties,
+                required: if required.len() > 0 {
+                    Some(required)
+                } else {
+                    None
                 },
-            }],
+            },
         };
 
         let configs = match self.chat.tools.as_mut() {
@@ -140,7 +138,14 @@ impl ChatClient for GeminiClient {
             }
         };
 
-        configs.push(ToolConfig::FunctionDeclaration(decl));
+        match configs.first_mut() {
+            Some(s) => s.function_declaration.push(decl),
+            None => {
+                *configs = vec![ToolConfig {
+                    function_declaration: vec![decl],
+                }]
+            }
+        }
     }
 
     fn set_sys_prompt(&mut self, content: String) {
@@ -370,26 +375,9 @@ pub struct ThinkingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ToolConfig {
-    // will work for both v1 and v2 models
-    #[serde(rename = "function_declaration")]
-    FunctionDeclaration(ToolConfigFunctionDeclaration),
-
-    /* NOTE: For v1 models will be depreciated by google in 2025 */
-    DynamicRetieval {
-        google_search_retrieval: DynamicRetrieval,
-    },
-
-    /* NOTE: Used by v2 models if they have search built in */
-    GoogleSearch {
-        google_search: serde_json::Value,
-    },
-
-    /* NOTE: Used by v2 models if they have the code execution built in */
-    CodeExecution {
-        code_execution: serde_json::Value,
-    },
+pub struct ToolConfig {
+    #[serde(rename = "functionDeclarations")]
+    function_declaration: Vec<FunctionDeclaration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
