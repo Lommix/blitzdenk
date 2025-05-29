@@ -2,7 +2,7 @@
 name = "blitzdenk"
 authors = ["Lorenz Mielke"]
 description = "A minimal multi api auto-context project chat bot as tui"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 keywords = ["ai", "tui", "chat", "agent", "tool"]
 readme = "README.md"
