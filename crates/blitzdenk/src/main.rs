@@ -36,7 +36,7 @@ struct AgentArgs {
 pub struct DevAgent;
 impl AgentInstruction for DevAgent {
     fn sys_prompt(&self) -> &'static str {
-        crate::prompts::ASSISTANT_PROMPT
+        crate::prompts::CURSOR_POMPT
     }
 
     fn toolset(&self) -> Vec<Box<dyn AiTool>> {
@@ -46,11 +46,7 @@ impl AgentInstruction for DevAgent {
             Box::new(tools::WriteMemo),
             Box::new(tools::CrawlWebsite),
             Box::new(tools::Grep),
-            Box::new(tools::GitLog),
-            Box::new(tools::GitShowCommit),
-            // Box::new(tools::EditFile),
-            // Box::new(tools::CreateFile),
-            // Box::new(tools::Mkdir),
+            Box::new(tools::RunTerminal),
         ]
     }
 }
@@ -69,13 +65,7 @@ impl AgentInstruction for YoloAgent {
             Box::new(tools::WriteMemo),
             Box::new(tools::CrawlWebsite),
             Box::new(tools::Grep),
-            Box::new(tools::Mkdir),
-            Box::new(tools::Sed),
-            Box::new(tools::CreateFile),
-            Box::new(tools::DeleteFile), //bad idea
-            Box::new(tools::MoveFile),
-            Box::new(tools::GitLog),
-            Box::new(tools::GitShowCommit),
+            Box::new(tools::RunTerminal),
         ]
     }
 }
@@ -89,6 +79,8 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Yolo(args) | Cmd::Chat(args) => {
             print!("\x1B[2J\x1B[1;1H");
             let root = args.root.as_deref().unwrap_or("./").to_string();
+
+            let nc = config.clone();
 
             let (ctx, rx, crx) = match args.client {
                 ClientType::Openai => {
@@ -132,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
                 _ => ctx.new_agent::<DevAgent>(),
             };
 
-            tui::init(agent, rx, crx).await?;
+            tui::init(agent, rx, crx, nc).await?;
         }
         Cmd::Config => {
             println!("Please select an option");

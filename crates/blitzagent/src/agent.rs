@@ -5,6 +5,8 @@ use crossbeam::channel::{Receiver, Sender};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::oneshot;
 
+pub const MEMO_CONTEXT_FILE: &str = "agent.md";
+
 #[derive(Clone, Default)]
 pub struct Blackboard {
     pub inner: Arc<String>,
@@ -24,7 +26,7 @@ impl AgentContext {
         root: impl Into<std::path::PathBuf>,
         client: C,
     ) -> (Self, Receiver<Message>, Receiver<Confirmation>) {
-        let mem = std::fs::read_to_string("memo.md").unwrap_or_default();
+        let mem = std::fs::read_to_string(MEMO_CONTEXT_FILE).unwrap_or_default();
         let (tx, rx) = crossbeam::channel::unbounded();
         let (ctx, crx) = crossbeam::channel::unbounded();
         return (
@@ -47,7 +49,7 @@ impl AgentContext {
         let task = Box::new(A::default());
 
         chat.set_sys_prompt(format!(
-            "{}\n\n<memory.md>{}</memory.md>",
+            "{}\n\n<agent_context.md>{}</agent_context.md>",
             task.sys_prompt(),
             self.memory.inner
         ));

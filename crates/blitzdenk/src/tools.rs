@@ -1,3 +1,5 @@
+use std::process::{ChildStdout, Stdio};
+
 use async_trait::async_trait;
 use blitzagent::{
     AgentArgs, AgentContext, AgentInstruction, AiTool, ArgType, Argument, BResult, Confirmation,
@@ -57,17 +59,33 @@ pub struct Cat;
 #[async_trait]
 impl AiTool for Cat {
     fn name(&self) -> &'static str {
-        "cat_file"
+        "read_file"
     }
 
     fn description(&self) -> &'static str {
         r#"
-          - Prints the content of a specified file with line numbers.
+        Read the contents of a file.
+        The output of this tool call will be the 1-indexed file contents from start_line_one_indexed to end_line_one_indexed_inclusive,
+        together with a summary of the lines outside start_line_one_indexed and end_line_one_indexed_inclusive.
+        Note that this call can view at most 250 lines at a time and 200 lines minimum.
+
+        When using this tool to gather information, it's your responsibility to ensure you have the COMPLETE context. Specifically, each time you call this command you should:
+
+        1.) Assess if the contents you viewed are sufficient to proceed with your task.
+        2.) Take note of where there are lines not shown.
+        3.) If the file contents you have viewed are insufficient, and you suspect they may be in lines not shown, proactively call the tool again to view those lines.
+        4.) When in doubt, call this tool again to gather more information. Remember that partial file views may miss critical dependencies, imports, or functionality.
+
+        In some cases, if reading a range of lines is not enough, you may choose to read the entire file. Reading entire files is often wasteful and slow, especially for large files (i.e. more than a few hundred lines). So you should use this option sparingly. Reading the entire file is not allowed in most cases. You are only allowed to read the entire file if it has been edited or manually attached to the conversation by the user.
+
         "#
     }
 
     fn args(&self) -> Vec<Argument> {
-        vec![Argument::new("file", "the file path", ArgType::Str)]
+        vec![
+            Argument::new("file", "the file path", ArgType::Str),
+            Argument::new("start_line", "the line offset", ArgType::Str),
+        ]
     }
 
     async fn run(
@@ -77,16 +95,33 @@ impl AiTool for Cat {
         tool_id: Option<String>,
     ) -> BResult<Message> {
         let path = args.get("file")?;
+        let start = args.get("start_line")?;
 
-        let result = tokio::process::Command::new("cat")
+        let mut cat = tokio::process::Command::new("cat")
             .args(["-n", path])
-            .current_dir(ctx.cwd)
+            .current_dir(&ctx.cwd)
+            .stdout(std::process::Stdio::piped())
+            .spawn()?;
+
+        let catout: Stdio = cat.stdout.take().unwrap().try_into().unwrap();
+
+        let mut tail = tokio::process::Command::new("tail")
+            .args(["-n", &format!("+{}", start)])
+            .stdin(catout)
+            .stdout(std::process::Stdio::piped())
+            .spawn()?;
+
+        let tailout: Stdio = tail.stdout.take().unwrap().try_into().unwrap();
+
+        let result = tokio::process::Command::new("head")
+            .args(["-n", "250"])
+            .stdin(tailout)
             .output()
             .await?;
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
         Ok(Message::tool(
-            content.lines().take(2000).collect::<Vec<_>>().join("\n"),
+            format!("<content>\n{}\n</content>", content),
             tool_id,
         ))
     }
@@ -202,7 +237,7 @@ impl AiTool for CrawlWebsite {
     }
 
     fn description(&self) -> &'static str {
-        "reads the content of website. Requires a vaild URL"
+        "reads the content of any url/link. Requires a vaild URL. This can and should be used to read any relevant documentation."
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -238,7 +273,7 @@ impl AiTool for Mkdir {
     }
 
     fn description(&self) -> &'static str {
-        "suggest the user to create a new dir using `mkdir -p $dir_path`"
+        "Create a new dir with `mkdir -p`. On tool call the user will automaticly receive a confirm popup. You must not to ask for permission, since this is handlet automaticly"
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -278,11 +313,16 @@ pub struct Grep;
 #[async_trait]
 impl AiTool for Grep {
     fn name(&self) -> &'static str {
-        "grep"
+        "grep_search"
     }
 
     fn description(&self) -> &'static str {
-        "search a pattern in the current project using `rg`"
+        r#"
+        Fast text-based regex search that finds exact pattern matches within files or directories,
+        utilizing the ripgrep command for efficient searching. Results will be formatted in the style of ripgrep and can be configured to include line numbers and content.
+        To avoid overwhelming output, the results are capped at 50 matches.
+        Use the include or exclude patterns to filter the search scope by file type or specific paths.
+        "#
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -299,16 +339,15 @@ impl AiTool for Grep {
 
         let result = tokio::process::Command::new("rg")
             .arg(pattern)
+            .arg("-m")
+            .arg("50")
             .current_dir(ctx.cwd)
             .output()
             .await?;
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
 
-        Ok(Message::tool(
-            content.lines().take(1000).collect::<Vec<_>>().join("\n"),
-            tool_id,
-        ))
+        Ok(Message::tool(content, tool_id))
     }
 }
 
@@ -340,7 +379,7 @@ impl AiTool for Sed {
     }
 
     fn description(&self) -> &'static str {
-        "suggest to use `sed` for searching and replacing a string. Safe"
+        "Search and replace a string. On tool call the user will automaticly receive a confirm popup. You must not to ask for permission, since this is handlet automaticly"
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -388,6 +427,59 @@ impl AiTool for Sed {
     }
 }
 
+pub struct RunTerminal;
+#[async_trait]
+impl AiTool for RunTerminal {
+    fn name(&self) -> &'static str {
+        "run_terminal"
+    }
+
+    fn description(&self) -> &'static str {
+        r#"
+        PROPOSE a command to run on behalf of the user.
+        If you have this tool, note that you DO have the ability to run commands directly on the USER's system.
+        Note that the user will have to approve the command before it is executed.
+        The user may reject it if it is not to their liking, or may modify the command before approving it.
+        If they do change it, take those changes into account. The actual command will NOT execute until the user approves it.
+        "#
+    }
+
+    fn args(&self) -> Vec<Argument> {
+        vec![
+            Argument::new("command", "the command with arguments", ArgType::Str),
+            Argument::new("arguments", "the command with arguments", ArgType::Str),
+        ]
+    }
+
+    async fn run(
+        &self,
+        ctx: AgentContext,
+        args: AgentArgs,
+        tool_id: Option<String>,
+    ) -> BResult<Message> {
+        let command = args.get("command")?;
+        let args = args.get("arguments")?;
+
+        let (conf, rx) = Confirmation::new(format!("agent wants to run\n`{} {}`", command, args));
+        ctx.confirm_tx.send(conf).unwrap();
+        let ok = rx.await?;
+
+        if !ok {
+            return Ok(Message::tool("user declined".into(), None));
+        }
+
+        let result = tokio::process::Command::new(command)
+            .arg(args)
+            .current_dir(ctx.cwd)
+            .output()
+            .await?;
+
+        let content = String::from_utf8_lossy(&result.stdout).to_string();
+
+        Ok(Message::tool(content, tool_id))
+    }
+}
+
 pub struct EditFile;
 #[async_trait]
 impl AiTool for EditFile {
@@ -396,7 +488,7 @@ impl AiTool for EditFile {
     }
 
     fn description(&self) -> &'static str {
-        "Make a file edit suggestions to user. Always use this tool if you want to suggest a code change"
+        "Make a file edit suggestion. On tool call the user will automaticly receive a confirm popup. You must not to ask for permission, since this is already handeld."
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -505,7 +597,7 @@ impl AiTool for CreateFile {
     }
 
     fn description(&self) -> &'static str {
-        "suggest to create a new file with content. Safe"
+        "Make a file creation suggestion. On tool call the user will automaticly receive a confirm popup. You must not to ask for permission, since this is already handeld."
     }
 
     fn args(&self) -> Vec<Argument> {
@@ -552,7 +644,7 @@ impl AiTool for MoveFile {
     }
 
     fn description(&self) -> &'static str {
-        "suggest using `mv` to move a file. Safe"
+        "Make a file move suggestion. On tool call the user will automaticly receive a confirm popup. You must not to ask for permission, since this is already handeld."
     }
 
     fn args(&self) -> Vec<Argument> {

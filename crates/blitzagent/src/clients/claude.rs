@@ -122,7 +122,7 @@ impl ChatClient for ClaudeClient {
                 tx.send(Message::system(format!(
                     "[Error] {}\n{}",
                     err.to_string(),
-                    serde_json::to_string(&self.chat).unwrap(),
+                    raw,
                 )))
                 .unwrap();
 

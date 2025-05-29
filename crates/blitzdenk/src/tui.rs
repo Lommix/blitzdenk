@@ -19,6 +19,8 @@ use syntect::{
     parsing::{SyntaxReference, SyntaxSet},
 };
 
+use crate::Config;
+
 const PROMPT_HEADER: &str = "[PROMPT]";
 
 const PROMPT_FOOTER: &str =
@@ -39,6 +41,7 @@ enum InputEvent {
     ScrollDown,
     ToggleTool,
     Paste(String),
+    ChangeClient(String),
     Accept,
     Decline,
     Clear,
@@ -47,6 +50,7 @@ enum InputEvent {
 }
 
 pub struct AppContext {
+    config: Config,
     rec: Receiver<Message>,
     inputs: Receiver<InputEvent>,
     prompt_buffer: String,
@@ -67,6 +71,7 @@ pub async fn init(
     agent: Agent,
     rec: Receiver<Message>,
     confirm_requests: Receiver<Confirmation>,
+    config: Config,
 ) -> anyhow::Result<()> {
     let terminal = ratatui::init();
     let stdout = std::io::stdout();
@@ -84,6 +89,7 @@ pub async fn init(
     let (prompt_tx, prompt_rx) = crossbeam::channel::unbounded();
 
     let ctx = AppContext {
+        config,
         rec,
         inputs,
         prompt_buffer: String::new(),
@@ -272,6 +278,7 @@ fn run(mut ctx: AppContext, mut terminal: DefaultTerminal) -> anyhow::Result<()>
                 InputEvent::Paste(str) => {
                     ctx.prompt_buffer.push_str(&str);
                 }
+                InputEvent::ChangeClient(new_client) => {}
             }
         }
     }
@@ -298,7 +305,7 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
                         "{} calls `{}` with `{}`",
                         msg.role,
                         call.name,
-                        &args[0..args.len().min(32)],
+                        &args[0..args.len().min(64)],
                     ));
                 }
                 None => {

@@ -13,6 +13,10 @@ pub trait ChatClient: Send + Sync + 'static {
     fn push_message(&mut self, msg: Message);
     fn clear(&mut self);
     fn fresh(&self) -> Box<dyn ChatClient>;
+
+    // @TODO:
+    // fn load(raw: &str) -> BResult<Box<dyn ChatClient>>;
+    // fn save(&self, dir: std::path::PathBuf) -> BResult<Box<dyn ChatClient>>;
 }
 
 pub enum ArgType {
