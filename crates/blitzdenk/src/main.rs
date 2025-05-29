@@ -43,7 +43,6 @@ impl AgentInstruction for DevAgent {
         vec![
             Box::new(tools::Tree),
             Box::new(tools::Cat),
-            Box::new(tools::WriteMemo),
             Box::new(tools::CrawlWebsite),
             Box::new(tools::Grep),
             Box::new(tools::RunTerminal),

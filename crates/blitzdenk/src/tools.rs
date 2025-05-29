@@ -217,7 +217,7 @@ impl AiTool for WriteMemo {
         let mut h = tokio::fs::OpenOptions::new()
             .append(true)
             .create(true)
-            .open("memo.md")
+            .open("agent.md")
             .await?;
 
         h.write_all(content.as_bytes()).await?;
@@ -264,50 +264,6 @@ impl AiTool for CrawlWebsite {
 }
 
 #[derive(Default)]
-pub struct Mkdir;
-#[async_trait]
-impl AiTool for Mkdir {
-    fn name(&self) -> &'static str {
-        "create_dir"
-    }
-
-    fn description(&self) -> &'static str {
-        "Create a new dir with `mkdir -p`. On tool call the user will automaticly receive a confirm popup. You must not to ask for permission, since this is handlet automaticly"
-    }
-
-    fn args(&self) -> Vec<Argument> {
-        vec![Argument::new("dir_path", "the dir path", ArgType::Str)]
-    }
-
-    async fn run(
-        &self,
-        ctx: AgentContext,
-        args: AgentArgs,
-        tool_id: Option<String>,
-    ) -> BResult<Message> {
-        let path = args.get("dir_path")?;
-
-        let (conf, rx) = Confirmation::new(format!("The agent wants to create a dir `{}`", path));
-        ctx.confirm_tx.send(conf).unwrap();
-        let ok = rx.await?;
-
-        if !ok {
-            return Ok(Message::tool("user declined".into(), None));
-        }
-
-        let result = tokio::process::Command::new("mkdir")
-            .args(["-p", path])
-            .current_dir(ctx.cwd)
-            .output()
-            .await?;
-
-        let content = String::from_utf8_lossy(&result.stdout).to_string();
-
-        Ok(Message::tool(content, tool_id))
-    }
-}
-
-#[derive(Default)]
 pub struct Grep;
 #[async_trait]
 impl AiTool for Grep {
@@ -348,24 +304,6 @@ impl AiTool for Grep {
 
         Ok(Message::tool(content, tool_id))
     }
-}
-
-fn sed_escape(s: &str) -> String {
-    // Characters that need escaping in sed
-    let special_chars = [
-        '/', '&', '\\', '\n', '\t', '\r', // sed-specific and general delimiters
-        '<', '>', '"', '\'', // HTML-related
-        '[', ']', '*', '?', '^', '$', '.', // regex-related
-    ];
-
-    let mut escaped = String::new();
-    for c in s.chars() {
-        if special_chars.contains(&c) {
-            escaped.push('\\');
-        }
-        escaped.push(c);
-    }
-    escaped
 }
 
 pub struct PatchFile;
@@ -435,7 +373,6 @@ impl AiTool for PatchFile {
             .await?;
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
-
         Ok(Message::tool(content, tool_id))
     }
 }
@@ -563,187 +500,5 @@ impl AgentInstruction for EditInstruction {
 
     fn toolset(&self) -> Vec<Box<dyn AiTool>> {
         vec![Box::new(Cat), Box::new(PatchFile)]
-    }
-}
-
-pub async fn replace_lines(
-    file: &str,
-    start: usize,
-    end: usize,
-    new_content: &str,
-) -> std::io::Result<()> {
-    let mut lines: Vec<_> = tokio::fs::read_to_string(file)
-        .await?
-        .lines()
-        .map(|l| l.to_string())
-        .collect();
-
-    if start >= 1 && end <= lines.len() && start <= end {
-        lines.splice((start - 1)..end, new_content.lines().map(|l| l.to_string()));
-
-        let result = lines.join("\n") + "\n";
-        tokio::fs::write(file, result).await?;
-    }
-    Ok(())
-}
-
-pub async fn insert_after_line(
-    file: &str,
-    line: usize,
-    insert_content: &str,
-) -> std::io::Result<()> {
-    let mut lines: Vec<_> = tokio::fs::read_to_string(file)
-        .await?
-        .lines()
-        .map(|l| l.to_string())
-        .collect();
-    if line <= lines.len() {
-        let idx = line;
-
-        for (i, l) in insert_content.lines().enumerate() {
-            lines.insert(idx + i, l.to_string());
-        }
-
-        let result = lines.join("\n") + "\n";
-
-        tokio::fs::write(file, result).await?;
-    }
-    Ok(())
-}
-
-// create file
-#[derive(Default)]
-pub struct CreateFile;
-#[async_trait]
-impl AiTool for CreateFile {
-    fn name(&self) -> &'static str {
-        "create_file"
-    }
-
-    fn description(&self) -> &'static str {
-        "Make a file creation suggestion. On tool call the user will automaticly receive a confirm popup. You must not to ask for permission, since this is already handeld."
-    }
-
-    fn args(&self) -> Vec<Argument> {
-        vec![
-            Argument::new("file_path", "the file path", ArgType::Str),
-            Argument::new("content", "the content", ArgType::Str),
-        ]
-    }
-
-    async fn run(
-        &self,
-        ctx: AgentContext,
-        args: AgentArgs,
-        tool_id: Option<String>,
-    ) -> BResult<Message> {
-        let file = args.get("file_path")?;
-        let content = args.get("content")?;
-
-        let (conf, rx) = Confirmation::new(format!(
-            "Agent wants to create file `{}` with:\n{}",
-            file, content,
-        ));
-
-        ctx.confirm_tx.send(conf).unwrap();
-        let ok = rx.await?;
-
-        if !ok {
-            return Ok(Message::tool("user declined".into(), None));
-        }
-
-        tokio::fs::write(file, content).await?;
-
-        Ok(Message::tool("file created".into(), tool_id))
-    }
-}
-
-// create file
-#[derive(Default)]
-pub struct MoveFile;
-#[async_trait]
-impl AiTool for MoveFile {
-    fn name(&self) -> &'static str {
-        "move_file"
-    }
-
-    fn description(&self) -> &'static str {
-        "Make a file move suggestion. On tool call the user will automaticly receive a confirm popup. You must not to ask for permission, since this is already handeld."
-    }
-
-    fn args(&self) -> Vec<Argument> {
-        vec![
-            Argument::new("src", "source path", ArgType::Str),
-            Argument::new("dst", "destination path", ArgType::Str),
-        ]
-    }
-
-    async fn run(
-        &self,
-        ctx: AgentContext,
-        args: AgentArgs,
-        tool_id: Option<String>,
-    ) -> BResult<Message> {
-        let src = args.get("src")?;
-        let dst = args.get("dst")?;
-
-        let (conf, rx) = Confirmation::new(format!(
-            "Agent wants to move a file\n from: `{}`\nto:{}",
-            src, dst,
-        ));
-
-        ctx.confirm_tx.send(conf).unwrap();
-        let ok = rx.await?;
-
-        if !ok {
-            return Ok(Message::tool("user declined".into(), None));
-        }
-
-        _ = tokio::process::Command::new("mv")
-            .args([src, dst])
-            .current_dir(ctx.cwd)
-            .output()
-            .await?;
-
-        Ok(Message::tool("file moved".into(), tool_id))
-    }
-}
-
-// create file
-#[derive(Default)]
-pub struct DeleteFile;
-#[async_trait]
-impl AiTool for DeleteFile {
-    fn name(&self) -> &'static str {
-        "delete_file"
-    }
-
-    fn description(&self) -> &'static str {
-        "suggest using `rm` to delete a file. Safe"
-    }
-
-    fn args(&self) -> Vec<Argument> {
-        vec![Argument::new(
-            "file_path",
-            "the file to delete",
-            ArgType::Str,
-        )]
-    }
-
-    async fn run(
-        &self,
-        ctx: AgentContext,
-        args: AgentArgs,
-        tool_id: Option<String>,
-    ) -> BResult<Message> {
-        let src = args.get("file_path")?;
-
-        _ = tokio::process::Command::new("rm")
-            .args([src])
-            .current_dir(ctx.cwd)
-            .output()
-            .await?;
-
-        Ok(Message::tool("file deleted".into(), tool_id))
     }
 }
