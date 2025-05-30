@@ -15,31 +15,40 @@ pub struct Tree;
 #[async_trait]
 impl AiTool for Tree {
     fn name(&self) -> &'static str {
-        "list_project_file_tree"
+        "read_project_tree"
     }
 
     fn description(&self) -> &'static str {
         r#"
-  - Prints the current project structure with all file paths.
-  - This tool is essential for understanding the directory layout and locating files within the project.
-  - Any question by the user is most likely related to at least one file, making this tool highly relevant.
+        Print the current project tree in the style of the unix `tree` command with a layer depth of 4.
+        When context about a file is needed, it is required to use this tool first, to find the file in question.
+        Never assume, that the user provides a full path. Always unsure you know about the file structure before acting
+        on files.
         "#
     }
 
     fn args(&self) -> Vec<Argument> {
-        vec![]
+        vec![Argument::string(
+            "root",
+            "the optional starting dir. Defaults to the current CWD",
+            false,
+        )]
     }
 
     async fn run(
         &self,
         ctx: AgentContext,
-        _args: AgentArgs,
+        args: AgentArgs,
         tool_id: Option<String>,
     ) -> BResult<Message> {
+        let start_dir = args.get("root").map(|s| s.as_str()).unwrap_or(".");
         let result = tokio::process::Command::new("tree")
+            .arg("-L")
+            .arg("4")
             .arg("-f")
             .arg("-i")
             .arg("--gitignore")
+            .arg(format!("{}", start_dir))
             .current_dir(ctx.cwd)
             .output()
             .await?;
