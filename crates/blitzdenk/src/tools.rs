@@ -82,8 +82,9 @@ impl AiTool for Cat {
 
     fn args(&self) -> Vec<Argument> {
         vec![
-            Argument::new("file", "the file path", ArgType::Str),
-            Argument::new("start_line", "the line offset", ArgType::Str),
+            Argument::string("file", "the file path", true),
+            Argument::string("start_line", "the optional line start", false),
+            Argument::string("end_line", "the optional line end", false),
         ]
     }
 
@@ -94,7 +95,17 @@ impl AiTool for Cat {
         tool_id: Option<String>,
     ) -> BResult<Message> {
         let path = args.get("file")?;
-        let start = args.get("start_line")?;
+
+        let start = args
+            .get("start_line")
+            .map(|s| s.parse::<i32>().unwrap_or(0))
+            .unwrap_or(0);
+        let end = args
+            .get("end_line")
+            .map(|s| s.parse::<i32>().unwrap_or(250))
+            .unwrap_or(250);
+
+        let num_lines = (end - start + 1).min(250);
 
         let mut cat = tokio::process::Command::new("cat")
             .args(["-n", path])
@@ -105,7 +116,7 @@ impl AiTool for Cat {
         let catout: Stdio = cat.stdout.take().unwrap().try_into().unwrap();
 
         let mut tail = tokio::process::Command::new("tail")
-            .args(["-n", &format!("+{}", start)])
+            .args(["-n", &format!("+{start}")])
             .stdin(catout)
             .stdout(std::process::Stdio::piped())
             .spawn()?;
@@ -113,14 +124,16 @@ impl AiTool for Cat {
         let tailout: Stdio = tail.stdout.take().unwrap().try_into().unwrap();
 
         let result = tokio::process::Command::new("head")
-            .args(["-n", "250"])
+            .args(["-n", &format!("{num_lines}")])
             .stdin(tailout)
             .output()
             .await?;
 
+        let c = format!("cat -n {path} | tail -n +{start} | head -n {num_lines}");
+
         let content = String::from_utf8_lossy(&result.stdout).to_string();
         Ok(Message::tool(
-            format!("<content>\n{}\n</content>", content),
+            format!("{}\n<content>\n{}\n</content>", c, content),
             tool_id,
         ))
     }
@@ -350,7 +363,15 @@ impl AiTool for PatchFile {
     ) -> BResult<Message> {
         let diff = args.get("diff")?;
 
-        let (conf, rx) = Confirmation::new(format!("agent wants to run\n{}", diff));
+        let (conf, rx) = Confirmation::new(format!(
+            r#"#Agent wants to run this patch:
+
+            ```diff
+            {}
+            ```
+            "#,
+            diff
+        ));
         ctx.confirm_tx.send(conf).unwrap();
         let ok = rx.await?;
 
@@ -410,7 +431,15 @@ impl AiTool for RunTerminal {
         let command = args.get("command")?;
         let args = args.get("arguments")?;
 
-        let (conf, rx) = Confirmation::new(format!("agent wants to run\n`{} {}`", command, args));
+        let (conf, rx) = Confirmation::new(format!(
+            r#"Agent wants to execute:
+
+            ```bash
+            {} {}
+            ```
+            "#,
+            command, args
+        ));
         ctx.confirm_tx.send(conf).unwrap();
         let ok = rx.await?;
 
@@ -475,11 +504,12 @@ impl AiTool for EditFile {
         let mut agent = ctx.new_agent::<EditInstruction>();
         agent.chat.push_message(Message::user(format!(
             r#"
-            Here are some changes for the file "{}". The changes are not marked.
+            Here are some code changes with lines. The changes are not marked.
             You have to read the current file and compare it to the changes.
             Then create patch tool requests for each change. Do not ask for permission.
-            you run in a loop. Only use tool calls, until you are finished.
-            <changes>
+            You run in a loop. Only use tool calls, until you are finished.
+
+            <changes target_file="{}">
             {}
             </changes>
         "#,

@@ -278,7 +278,9 @@ fn run(mut ctx: AppContext, mut terminal: DefaultTerminal) -> anyhow::Result<()>
                 InputEvent::Paste(str) => {
                     ctx.prompt_buffer.push_str(&str);
                 }
-                InputEvent::ChangeClient(new_client) => {}
+                InputEvent::ChangeClient(_new_client) => {
+                    // @todo client hot swap
+                }
             }
         }
     }
@@ -431,7 +433,10 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
                     .title_bottom("═[ACCEPT:ctrl+y]═════[DECLINE:ctrl+x]"),
             );
 
-        let confirm_area = frame.area().inner(Margin::new(5, 5));
+        let lc = confirm.line_count(chat_box.width - 5) as u16;
+        let mt = chat_box.height - lc / 2;
+
+        let confirm_area = frame.area().inner(Margin::new(5, mt));
         frame.render_widget(Clear, confirm_area);
         frame.render_widget(confirm, confirm_area);
     }
