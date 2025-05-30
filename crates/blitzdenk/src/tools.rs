@@ -54,11 +54,7 @@ impl AiTool for Tree {
             .await?;
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
-
-        Ok(Message::tool(
-            content.lines().take(500).collect::<Vec<_>>().join("\n"),
-            tool_id,
-        ))
+        Ok(Message::tool(content, tool_id))
     }
 }
 
