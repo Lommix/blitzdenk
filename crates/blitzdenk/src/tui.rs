@@ -434,7 +434,7 @@ fn draw(ctx: &mut AppContext, frame: &mut Frame) {
             );
 
         let lc = confirm.line_count(chat_box.width - 5) as u16;
-        let mt = chat_box.height - lc / 2;
+        let mt = (chat_box.height - lc / 2).min((chat_box.height / 2) + 2);
 
         let confirm_area = frame.area().inner(Margin::new(5, mt));
         frame.render_widget(Clear, confirm_area);

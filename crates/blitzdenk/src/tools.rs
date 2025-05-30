@@ -329,13 +329,12 @@ impl AiTool for PatchFile {
     fn description(&self) -> &'static str {
         r#"
         PROPOSE  to apply changes to files using `patch`.
-        It reads a patch string and modifies the target files
+        Reads a patch string and modifies the target files
         according to the instructions within the patch.
 
         **Importance of Correct Patch File Format:**
 
         The `patch` command relies heavily on the correct format of the patch file.
-        Patch files are usually created by `diff -u` (unified format) or `diff -c` (context format).
         The unified format is generally preferred and more common.
 
         A typical unified diff header looks like this:
@@ -394,7 +393,17 @@ impl AiTool for PatchFile {
             .await?;
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
-        Ok(Message::tool(content, tool_id))
+        let error = String::from_utf8_lossy(&result.stderr).to_string();
+
+        Ok(Message::tool(
+            format!(
+                r#"
+                <stdout>{content}</stdout>
+                <stderr>{error}</stderr>
+                "#
+            ),
+            tool_id,
+        ))
     }
 }
 
