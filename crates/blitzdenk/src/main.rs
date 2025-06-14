@@ -36,17 +36,17 @@ struct AgentArgs {
 pub struct DevAgent;
 impl AgentInstruction for DevAgent {
     fn sys_prompt(&self) -> &'static str {
-        crate::prompts::CURSOR_POMPT
+        crate::prompts::GOOGLER_PROMPT
     }
 
     fn toolset(&self) -> Vec<Box<dyn AiTool>> {
         vec![
             Box::new(tools::Tree),
-            Box::new(tools::Cat),
-            Box::new(tools::CrawlWebsite),
             Box::new(tools::Grep),
-            Box::new(tools::RunTerminal),
-            Box::new(tools::EditFile),
+            Box::new(tools::Cat),
+            // Box::new(tools::CrawlWebsite),
+            // Box::new(tools::Bash),
+            // Box::new(tools::EditFile),
         ]
     }
 }
@@ -65,7 +65,7 @@ impl AgentInstruction for YoloAgent {
             Box::new(tools::WriteMemo),
             Box::new(tools::CrawlWebsite),
             Box::new(tools::Grep),
-            Box::new(tools::RunTerminal),
+            Box::new(tools::Bash),
         ]
     }
 }

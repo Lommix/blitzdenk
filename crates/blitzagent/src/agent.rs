@@ -19,6 +19,7 @@ pub struct AgentContext {
     pub confirm_tx: Sender<Confirmation>,
     pub cwd: std::path::PathBuf,
     new_chat: Arc<dyn Fn() -> Box<dyn ChatClient> + Send + Sync + 'static>,
+    // callbacks tool <-> tool com link
 }
 
 impl AgentContext {
@@ -64,6 +65,28 @@ impl AgentContext {
             task,
         };
     }
+    // pub fn new_agent_ex(
+    //     &self,
+    //     sys_prompt: &str,
+    //     tools: impl Iterator<Item = &'_ Box<dyn AiTool>>,
+    // ) -> Agent {
+    //     let mut chat = (self.new_chat)();
+    //
+    //     chat.set_sys_prompt(format!(
+    //         "{}\n\n<agent_context.md>{}</agent_context.md>",
+    //         sys_prompt, self.memory.inner
+    //     ));
+    //
+    //     for tool in tools {
+    //         chat.register_tool(tool);
+    //     }
+    //
+    //     return Agent {
+    //         context: self.clone(),
+    //         chat,
+    //         task,
+    //     };
+    // }
 }
 
 pub struct Confirmation {

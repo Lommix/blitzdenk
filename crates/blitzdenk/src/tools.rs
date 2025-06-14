@@ -3,6 +3,7 @@ use blitzagent::{
     AgentArgs, AgentContext, AgentInstruction, AiTool, ArgType, Argument, BResult, Confirmation,
     Message,
 };
+use crossbeam::channel;
 use scraper::Html;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
@@ -79,9 +80,6 @@ impl AiTool for Cat {
         2.) Take note of where there are lines not shown.
         3.) If the file contents you have viewed are insufficient, and you suspect they may be in lines not shown, proactively call the tool again to view those lines.
         4.) When in doubt, call this tool again to gather more information. Remember that partial file views may miss critical dependencies, imports, or functionality.
-
-        In some cases, if reading a range of lines is not enough, you may choose to read the entire file. Reading entire files is often wasteful and slow, especially for large files (i.e. more than a few hundred lines). So you should use this option sparingly. Reading the entire file is not allowed in most cases. You are only allowed to read the entire file if it has been edited or manually attached to the conversation by the user.
-
         "#
     }
 
@@ -110,7 +108,7 @@ impl AiTool for Cat {
             .map(|s| s.parse::<i32>().unwrap_or(250))
             .unwrap_or(250);
 
-        let num_lines = (end - start + 1).min(250);
+        let num_lines = end - start + 1;
 
         let mut cat = tokio::process::Command::new("cat")
             .args(["-n", path])
@@ -138,7 +136,12 @@ impl AiTool for Cat {
 
         let content = String::from_utf8_lossy(&result.stdout).to_string();
         Ok(Message::tool(
-            format!("{}\n<content>\n{}\n</content>", c, content),
+            format!(
+                r#"<content file={path} from={start} to={end}>
+                {content}
+                </content>
+                "#,
+            ),
             tool_id,
         ))
     }
@@ -446,16 +449,16 @@ impl AiTool for PatchFile {
     }
 }
 
-pub struct RunTerminal;
+pub struct Bash;
 #[async_trait]
-impl AiTool for RunTerminal {
+impl AiTool for Bash {
     fn name(&self) -> &'static str {
-        "run_terminal"
+        "bash"
     }
 
     fn description(&self) -> &'static str {
         r#"
-        PROPOSE a command to run on behalf of the user.
+        PROPOSE a bash command to run on behalf of the user.
         If you have this tool, note that you DO have the ability to run commands directly on the USER's system.
         Note that the user will have to approve the command before it is executed.
         The user may reject it if it is not to their liking, or may modify the command before approving it.
@@ -550,7 +553,10 @@ impl AiTool for EditFile {
         let edit_string = args.get("edit_string")?;
         let file = args.get("target_file")?;
 
+        // let (tx, rx) = channel::unbounded();
+
         let mut agent = ctx.new_agent::<EditInstruction>();
+        // agent.callback = Some(tx);
         agent.chat.push_message(Message::user(format!(
             r#"
             Here are some code changes with lines. The changes are not marked.
@@ -566,6 +572,7 @@ impl AiTool for EditFile {
         )));
 
         agent.run().await?;
+
         Ok(Message::tool("edits done".into(), tool_id))
     }
 }
