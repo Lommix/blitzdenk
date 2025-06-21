@@ -1,5 +1,5 @@
 # Define the binary name
-BINARY_NAME=donnerdenk
+BINARY_NAME=blitzdenk
 
 
 # Build the project in release mode

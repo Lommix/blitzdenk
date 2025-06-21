@@ -1,4 +1,4 @@
-# Blitzdenk
+# [WIP] Blitzdenk
 
 Interactive multi purpose personal AI Tui, similar to tools like `opencode` or `claudecode`.
 
