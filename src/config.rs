@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-const CONFIG_PATH: &str = "/home/lommix/.cache/blitzdenk/denk.toml";
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     pub current_model: String,
@@ -25,20 +23,23 @@ impl Default for Config {
 
 impl Config {
     pub async fn load() -> Self {
-        if !tokio::fs::try_exists(CONFIG_PATH).await.unwrap() {
+        let path = home::home_dir().unwrap().join(".cache/blitzdenk/denk.toml");
+
+        if !tokio::fs::try_exists(&path).await.unwrap() {
             let config = Config::default();
             config.save().await;
             return config;
         }
 
-        let raw = tokio::fs::read_to_string(CONFIG_PATH)
+        let raw = tokio::fs::read_to_string(&path)
             .await
             .expect("cannot read config");
         toml::de::from_str(&raw).unwrap()
     }
 
     pub async fn save(&self) {
+        let path = home::home_dir().unwrap().join(".cache/blitzdenk/denk.toml");
         let raw = toml::ser::to_string(self).unwrap();
-        tokio::fs::write(CONFIG_PATH, raw).await.unwrap();
+        tokio::fs::write(path, raw).await.unwrap();
     }
 }

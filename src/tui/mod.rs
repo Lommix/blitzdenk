@@ -24,7 +24,6 @@ use ratatui::{
     Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
-use tui_widgets::scrollview::ScrollViewState;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -33,6 +32,7 @@ use std::{
 use throbber_widgets_tui::ThrobberState;
 use tokio::{io::Join, sync::Mutex, task::JoinHandle};
 use tui_textarea::TextArea;
+use tui_widgets::scrollview::ScrollViewState;
 
 mod theme;
 mod widgets;
@@ -83,10 +83,10 @@ impl<'a> SessionState<'a> {
     pub async fn save(&self) -> AResult<()> {
         let agent = self.runner.agent.lock().await;
         let session_name = agent.context.current_cwd.replace('/', "");
-        let path = format!(
-            "/home/lommix/.cache/blitzdenk/sessions/{}.json",
-            session_name
-        );
+
+        let path = home::home_dir()
+            .map(|p| p.join(format!(".cache/blitzdenk/sessions/{}.json", session_name)))
+            .unwrap();
 
         let state = SessionSaveState {
             chat: agent.chat.clone(),
@@ -102,10 +102,11 @@ impl<'a> SessionState<'a> {
 
     pub async fn load(cwd: &str, config: Config) -> AResult<Self> {
         let session_name = cwd.replace('/', "");
-        let path = format!(
-            "/home/lommix/.cache/blitzdenk/sessions/{}.json",
-            session_name
-        );
+
+        let path = home::home_dir()
+            .map(|p| p.join(format!(".cache/blitzdenk/sessions/{}.json", session_name)))
+            .unwrap();
+
         let state_str = tokio::fs::read_to_string(path).await?;
         let state: SessionSaveState = serde_json::from_str(&state_str)?;
 
