@@ -13,7 +13,7 @@ repository = "https://github.com/Lommix/blitzdenk"
 clap = { version = "4.5.40", features = ["derive"] }
 crossbeam = { version = "0.8.4", features = ["crossbeam-channel"] }
 diffy = "0.4.2"
-genai = { path = "../rust-genai" }
+genai = "0.3.5"
 html2md = "0.2.15"
 owo-colors = "4.2.1"
 ratatui = { version = "0.29.0", features = [
@@ -32,5 +32,5 @@ throbber-widgets-tui = "0.8.0"
 tokio = { version = "1.45.1", features = ["full"] }
 toml = "0.8.23"
 tui-markdown = "0.3.5"
-tui-scrollview = { path = "../tui-widgets/tui-scrollview" }
 tui-textarea = "0.7.0"
+tui-widgets = { git = "https://github.com/joshka/tui-widgets" }

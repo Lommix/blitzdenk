@@ -11,7 +11,6 @@ use ratatui::{
         Widget, block::Position,
     },
 };
-use tui_scrollview::{ScrollView, ScrollViewState};
 
 pub struct ModelSelectorWidget<'a> {
     list: List<'a>,

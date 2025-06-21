@@ -8,7 +8,7 @@ use ratatui::{
     text::{Line, Text},
     widgets::{self, Block, BorderType, Borders, Widget, block::Position},
 };
-use tui_scrollview::{ScrollView, ScrollViewState};
+use tui_widgets::scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 // chat --------------------------------------------------------------------------------------
 pub struct ChatWidget<'a> {
@@ -41,7 +41,7 @@ impl<'a> widgets::StatefulWidget for ChatWidget<'a> {
         }
 
         let mut scroll_view = ScrollView::new(Size::new(area.width, offset))
-            .horizontal_scrollbar_visibility(tui_scrollview::ScrollbarVisibility::Never);
+            .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
 
         for (widget, lines, offset, mut state) in msgs.drain(..) {
             scroll_view.render_stateful_widget(

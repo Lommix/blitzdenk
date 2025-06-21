@@ -24,6 +24,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
+use tui_widgets::scrollview::ScrollViewState;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -31,7 +32,6 @@ use std::{
 };
 use throbber_widgets_tui::ThrobberState;
 use tokio::{io::Join, sync::Mutex, task::JoinHandle};
-use tui_scrollview::ScrollViewState;
 use tui_textarea::TextArea;
 
 mod theme;
