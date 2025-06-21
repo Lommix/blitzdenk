@@ -1,8 +1,6 @@
 # Define the binary name
-BINARY_NAME=blitzdenk
+BINARY_NAME=donnerdenk
 
-run:
-	cargo run -- agent openai
 
 # Build the project in release mode
 release:

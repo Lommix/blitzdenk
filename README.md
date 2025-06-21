@@ -1,58 +1,43 @@
-# [WIP] Blitzdenk - Multi API Agent Tui
+# Blitzdenk
 
-[![License: Apache 2.0](https://img.shields.io/badge/Apache2-blue.svg)](./LICENSE)
-[![Crate](https://img.shields.io/crates/v/blitzdenk.svg)](https://crates.io/crates/blitzdenk)
+Interactive multi purpose personal AI Tui, similar to tools like `opencode` or `claudecode`.
 
-A minimal, concise auto-context project chat bot, not a coding agent.
+The goal is to replace web search, help with bug analysis and perform coding tasks with little to
+no friction from idea to keyboard to answer.
 
-[blitz.webm](https://github.com/user-attachments/assets/217f6f64-1092-4cf6-a2b2-e0f3c5e4f17d)
-
-This is a personal research project to replace search engines for simple questions.
-
-## Install
-
-clone + `make install` will build the and copy the bin to ~/.local/bin
+Supports all common AI-APIs that can handle tool calls.
 
 ## Dependencies
 
-The following linux cli tools are required and must be installed.
+I am lazy, thus I rely on proofen posix tools to do my bidding.
 
-- `rg` (ripgrep)
-- `tree`
+These CLI tools should be available on the target system:
 
-## Configure
+- ripgrep (rg)
+- ls
+- cat
+- tail
+- head
 
-Use the `config` command. Save API keys and models.
+## No borders
 
-```shell
-blitzdenk config
-```
+I use tmux visual mode. I hate decorative borders that block a clean yank. There will never be nice looking borders around
+messages.
 
-Default config file is saved at: `~/.cache/blitzdenk/config`.
+## Configuration
 
-## Use
+All API keys are read from the your environment.
 
-Basic chat in cwd. Optional you can pass a path to the desired working directory.
+The configuration file for colors and available models is under:
 
-```shell
-#openai
-blitzdenk chat openai
+`~/.cache/blitzdenk/denk.toml`
 
-#ollama
-blitzdenk chat ollama ./path/to/project
+All sessions are saved on exit as json, identified by the project cwd in:
 
-#gemini
-blitzdenk chat gemini
+`~/.cache/blitzdenk/sessions/`
 
-#claude
-blitzdenk chat claude
-```
+## 3 Modes
 
-## Currently Supports
-
-Any model. Might fail on some.
-
-- OpenAi
-- Ollama
-- Gemini
-- Claude
+- Debug - no edit, helps your analyse problems in your project.
+- Search - no edit, answers questions short and concise. Replacement for common websearch.
+- Code - all tools, can edit your project just like any other coding agent.
