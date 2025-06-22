@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 use crate::{
-    agent::{AResult, Agent, AgentEvent, AgentMessage, PermissionRequest, TodoItem, ToolBox}, config::Config, error::AiError, prompts, theme::Theme, tools, widgets::{self, MessageState}
+    agent::{AResult, Agent, AgentEvent, AgentMessage, PermissionRequest, TodoItem, ToolBox}, config::{Config, Theme}, error::AiError, prompts, tools, widgets::{self, MessageState}
 };
 use crossbeam::channel::{self, Receiver, Sender};
 use genai::chat::{ChatMessage, ChatRequest};
@@ -446,7 +446,7 @@ where
 
 pub fn render(session: &mut SessionState) -> impl FnOnce(&mut Frame) {
     move |frame| {
-        let theme = Theme::lommix();
+        let theme = session.config.theme.clone();
         let window = frame.area();
 
         let (chat_window, prompt_window, status_window) = Layout::new(

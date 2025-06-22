@@ -1,4 +1,4 @@
-use crate::{theme::Theme, tui::TuiMessage};
+use crate::{config::Theme, tui::TuiMessage};
 use genai::chat::{ChatMessage, ChatRequest};
 use ratatui::{
     layout::{Margin, Rect, Size},

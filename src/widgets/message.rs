@@ -1,6 +1,4 @@
 use std::thread::park_timeout;
-
-use crate::theme::{self, Theme};
 use genai::chat::{ChatMessage, ChatRequest};
 use owo_colors::{
     OwoColorize,
@@ -20,6 +18,8 @@ use ratatui::{
         calendar::CalendarEventStore,
     },
 };
+
+use crate::config::Theme;
 
 const MAX_WIDTH: usize = 100;
 
