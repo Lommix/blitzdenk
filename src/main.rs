@@ -1,10 +1,10 @@
 use ratatui::crossterm::{
     self,
     event::{EnableBracketedPaste, EnableMouseCapture},
-    terminal::{EnterAlternateScreen, enable_raw_mode},
+    terminal::{enable_raw_mode, EnterAlternateScreen},
 };
 
-use crate::agent::AResult;
+use crate::{agent::AResult, config::Config};
 
 mod agent;
 mod config;
@@ -32,6 +32,9 @@ enum Commands {
 #[tokio::main]
 async fn main() -> AResult<()> {
     let cli = Cli::parse();
+
+    let config = Config::load().await;
+
 
     match cli.command.unwrap_or(Commands::Run) {
         Commands::Run => {

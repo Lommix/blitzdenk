@@ -43,6 +43,10 @@ impl Config {
     pub async fn save(&self) {
         let path = home::home_dir().unwrap().join(".cache/blitzdenk/denk.toml");
         let raw = toml::ser::to_string(self).unwrap();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.unwrap();
+        }
+
         tokio::fs::write(path, raw).await.unwrap();
     }
 }

@@ -8,12 +8,12 @@ use crate::{
 use crossbeam::channel::{self, Receiver, Sender};
 use genai::chat::{ChatMessage, ChatRequest};
 use ratatui::{
-    Frame, Terminal,
     crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers},
     layout::{Alignment, Constraint, Direction, Flex, Layout, Margin},
     prelude::Backend,
     style::Style,
     widgets::{Block, Borders, Clear, ListState, Paragraph, StatefulWidget, Widget, Wrap},
+    Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -76,6 +76,10 @@ impl<'a> SessionState<'a> {
         let path = home::home_dir()
             .map(|p| p.join(format!(".cache/blitzdenk/sessions/{}.json", session_name)))
             .unwrap();
+
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
 
         let state = SessionSaveState {
             chat: agent.chat.clone(),
