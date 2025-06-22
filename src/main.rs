@@ -1,10 +1,9 @@
+use crate::{agent::AResult, config::Config};
 use ratatui::crossterm::{
     self,
     event::{EnableBracketedPaste, EnableMouseCapture},
     terminal::{enable_raw_mode, EnterAlternateScreen},
 };
-
-use crate::{agent::AResult, config::Config};
 
 mod agent;
 mod config;
@@ -52,7 +51,7 @@ async fn main() -> AResult<()> {
             tui::run(terminal, config).await?;
         }
         Commands::Init => {
-            println!("Init command executed");
+            println!("not yet implemented!");
         }
     }
 

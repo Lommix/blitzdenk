@@ -421,15 +421,27 @@ where
                     }
 
                     let prompt: String = session.textarea.lines().join("\n");
-                    session.textarea = TextArea::default();
 
-                    session.messages.push(TuiMessage {
-                        message: ChatMessage::user(prompt.clone()),
-                        state: MessageState::default(),
-                    });
+                    match prompt.as_str() {
+                        "/init" => {
+                            session.textarea = TextArea::new(
+                                prompts::INIT_AGENT_PROMPT
+                                    .split('\n')
+                                    .map(|s| s.to_string())
+                                    .collect(),
+                            )
+                        }
+                        any => {
+                            session.messages.push(TuiMessage {
+                                message: ChatMessage::user(any),
+                                state: MessageState::default(),
+                            });
 
-                    session.runner.add_message(ChatMessage::user(prompt)).await;
-                    session.runner.start_cycle().await?;
+                            session.runner.add_message(ChatMessage::user(any)).await;
+                            session.runner.start_cycle().await?;
+                            session.textarea = TextArea::default();
+                        }
+                    };
                 }
                 TuiEvent::Exit => {
                     session.save().await.unwrap();
@@ -496,7 +508,7 @@ pub fn render(session: &mut SessionState) -> impl FnOnce(&mut Frame) {
 
             text.render(title, frame.buffer_mut());
             Paragraph::new(
-                "v0.3\n\n[ctrl+k] select model\n[ctrl+n] new session\n[alt+enter] send prompt",
+                "v0.3\n\n[ctrl+k] select model\n[ctrl+n] new session\n[alt+enter] send prompt\n/init",
             )
             .render(info, frame.buffer_mut());
         } else {

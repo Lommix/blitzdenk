@@ -15,7 +15,9 @@ impl Default for Config {
             model_list: vec![
                 "claude-sonnet-4-20250514".into(),
                 "claude-3-7-sonnet-20250219".into(),
-                "gpt-4o-mini".into(),
+                "gpt-4.1-nano".into(),
+                "gpt-4.1-mini".into(),
+                "gpt-4.1".into(),
                 "gemini-2.5-flash-preview-05-20".into(),
                 "gemini-2.5-pro-preview-06-05".into(),
             ],

@@ -1,10 +1,10 @@
 use crate::error::AiError;
 use crossbeam::channel::Sender;
 use genai::chat::*;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 
 pub type AResult<T> = Result<T, crate::error::AiError>;
 pub type AFuture<T> = std::pin::Pin<Box<dyn Future<Output = AResult<T>> + Send + Sync>>;
@@ -122,6 +122,7 @@ pub enum AgentEvent {
     Permission(PermissionRequest),
 }
 
+#[derive(Debug)]
 pub struct AgentMessage {
     pub chat_message: ChatMessage,
     pub token_cost: Option<i32>,
