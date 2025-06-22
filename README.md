@@ -9,7 +9,7 @@ Supports all common AI-APIs that can handle tool calls.
 
 ## Dependencies
 
-I am lazy, thus I rely on proofen posix tools to do my bidding.
+I am lazy, thus I rely on posix tools to do my bidding.
 
 These CLI tools should be available on the target system:
 
@@ -37,19 +37,18 @@ The configuration file for colors and available models is under:
 
 `~/.cache/blitzdenk/denk.toml`
 
-You can add any model unique id to the model list. (Ollama included)
+You can add any model unique id to the model list. (Ollama included).
 
-[models.dev](models.dev)
+- [based on rust-genai](https://github.com/jeremychone/rust-genai)
+- [models.dev](models.dev)
 
-[checkout rust-genai](https://github.com/jeremychone/rust-genai)
-
-- Ollama and more
+## Saving sessions
 
 All sessions are saved on exit as json, identified by the project cwd in:
 
 `~/.cache/blitzdenk/sessions/`
 
-They restore, until the user creates a new one
+They restore on reopen, until the user creates a new one.
 
 ## Neovim quick access split
 
@@ -67,3 +66,7 @@ vim.keymap.set("n", "<leader>o", "vplit | terminal blitzdenk", { silent = true }
 | ctrl + y    | accept         |
 | ctrl + x    | decline        |
 | up/down     | scroll up/down |
+
+## MCP
+
+Not yet implemented
