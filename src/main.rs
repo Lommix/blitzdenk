@@ -35,7 +35,6 @@ async fn main() -> AResult<()> {
 
     let config = Config::load().await;
 
-
     match cli.command.unwrap_or(Commands::Run) {
         Commands::Run => {
             let terminal = ratatui::init();
@@ -50,7 +49,7 @@ async fn main() -> AResult<()> {
             )
             .unwrap();
 
-            tui::run(terminal).await?;
+            tui::run(terminal, config).await?;
         }
         Commands::Init => {
             println!("Init command executed");

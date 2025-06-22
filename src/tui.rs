@@ -11,11 +11,12 @@ use ratatui::{
     crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers},
     layout::{Alignment, Constraint, Direction, Flex, Layout, Margin},
     prelude::Backend,
-    style::Style,
+    style::{Style, Stylize},
+    text::Line,
     widgets::{Block, Borders, Clear, ListState, Paragraph, StatefulWidget, Widget, Wrap},
     Frame, Terminal,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::IntoDeserializer, Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -283,12 +284,10 @@ impl Drop for AgentRunner {
     }
 }
 
-pub async fn run<T>(mut terminal: Terminal<T>) -> AResult<()>
+pub async fn run<T>(mut terminal: Terminal<T>, config: Config) -> AResult<()>
 where
     T: Backend,
 {
-    let config = Config::load().await;
-
     let cwd = std::env::current_dir()
         .unwrap_or_default()
         .to_string_lossy()
@@ -473,7 +472,36 @@ pub fn render(session: &mut SessionState) -> impl FnOnce(&mut Frame) {
             theme,
         };
 
-        chat_widget.render(chat_window, frame.buffer_mut(), &mut session.scroll_state);
+        if session.messages.is_empty() {
+            let [modal] = Layout::horizontal([Constraint::Length(40)])
+                .flex(Flex::Center)
+                .areas(window);
+
+            let [modal] = Layout::vertical([Constraint::Length(16)])
+                .flex(Flex::Center)
+                .areas(modal);
+
+            let [title, info] = Layout::vertical([Constraint::Length(4), Constraint::Fill(1)])
+                .flex(Flex::Center)
+                .areas(modal);
+
+            let mut line = Line::default();
+            line.push_span("BLITZ".blue());
+            line.push_span("DENK".white());
+
+            let text = tui_widgets::big_text::BigText::builder()
+                .pixel_size(tui_widgets::big_text::PixelSize::Quadrant)
+                .lines(vec![line])
+                .build();
+
+            text.render(title, frame.buffer_mut());
+            Paragraph::new(
+                "v0.3\n\n[ctrl+k] select model\n[ctrl+n] new session\n[alt+enter] send prompt",
+            )
+            .render(info, frame.buffer_mut());
+        } else {
+            chat_widget.render(chat_window, frame.buffer_mut(), &mut session.scroll_state);
+        }
 
         let input_widget = widgets::PromptWidget::new(session, theme);
         input_widget.render(prompt_window, frame.buffer_mut());
