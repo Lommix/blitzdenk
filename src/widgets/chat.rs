@@ -1,4 +1,4 @@
-use crate::tui::{TuiMessage, theme::Theme};
+use crate::{theme::Theme, tui::TuiMessage};
 use genai::chat::{ChatMessage, ChatRequest};
 use ratatui::{
     layout::{Margin, Rect, Size},
@@ -6,7 +6,7 @@ use ratatui::{
     prelude::BlockExt,
     style::Style,
     text::{Line, Text},
-    widgets::{self, Block, BorderType, Borders, Widget, block::Position},
+    widgets::{self, block::Position, Block, BorderType, Borders, Widget},
 };
 use tui_widgets::scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 

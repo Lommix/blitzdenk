@@ -1,6 +1,6 @@
 use std::thread::park_timeout;
 
-use crate::tui::theme::{self, Theme};
+use crate::theme::{self, Theme};
 use genai::chat::{ChatMessage, ChatRequest};
 use owo_colors::{
     OwoColorize,

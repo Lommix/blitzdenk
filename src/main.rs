@@ -12,6 +12,8 @@ mod error;
 mod prompts;
 mod tools;
 mod tui;
+mod theme;
+mod widgets;
 
 use clap::{Parser, Subcommand};
 

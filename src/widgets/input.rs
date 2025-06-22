@@ -1,7 +1,4 @@
-use crate::tui::{
-    theme::{self, Theme},
-    SessionState,
-};
+use crate::{theme::Theme, tui::SessionState};
 use genai::chat::{ChatMessage, ChatRequest};
 use owo_colors::OwoColorize;
 use ratatui::{

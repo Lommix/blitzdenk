@@ -1,11 +1,7 @@
 #![allow(unused)]
 
 use crate::{
-    agent::{AResult, Agent, AgentEvent, AgentMessage, PermissionRequest, TodoItem, ToolBox},
-    config::Config,
-    error::AiError,
-    prompts, tools,
-    tui::widgets::MessageState,
+    agent::{AResult, Agent, AgentEvent, AgentMessage, PermissionRequest, TodoItem, ToolBox}, config::Config, error::AiError, prompts, theme::Theme, tools, widgets::{self, MessageState}
 };
 use crossbeam::channel::{self, Receiver, Sender};
 use genai::chat::{ChatMessage, ChatRequest};
@@ -34,12 +30,9 @@ use tokio::{io::Join, sync::Mutex, task::JoinHandle};
 use tui_textarea::TextArea;
 use tui_widgets::scrollview::ScrollViewState;
 
-mod theme;
-mod widgets;
-
 pub struct TuiMessage {
-    message: ChatMessage,
-    state: MessageState,
+    pub message: ChatMessage,
+    pub state: MessageState,
 }
 
 pub struct SessionState<'a> {
@@ -453,7 +446,7 @@ where
 
 pub fn render(session: &mut SessionState) -> impl FnOnce(&mut Frame) {
     move |frame| {
-        let theme = theme::Theme::lommix();
+        let theme = Theme::lommix();
         let window = frame.area();
 
         let (chat_window, prompt_window, status_window) = Layout::new(
