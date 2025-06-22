@@ -23,9 +23,27 @@ These CLI tools should be available on the target system:
 
 All API keys are read from the your environment.
 
+```
+OPENAI_API_KEY
+ANTHROPIC_API_KEY
+ANTHROPIC_API_KEY
+GEMINI_API_KEY
+GROQ_API_KEY
+XAI_API_KEY
+DEEPSEEK_API_KEY
+```
+
 The configuration file for colors and available models is under:
 
 `~/.cache/blitzdenk/denk.toml`
+
+You can add any model unique id to the model list. (Ollama included)
+
+[models.dev](models.dev)
+
+[checkout rust-genai](https://github.com/jeremychone/rust-genai)
+
+- Ollama and more
 
 All sessions are saved on exit as json, identified by the project cwd in:
 
