@@ -1,12 +1,7 @@
 use crate::{config::Theme, tui::TuiMessage};
-use genai::chat::{ChatMessage, ChatRequest};
 use ratatui::{
-    layout::{Margin, Rect, Size},
-    palette::stimulus::IntoStimulus,
-    prelude::BlockExt,
-    style::Style,
-    text::{Line, Text},
-    widgets::{self, block::Position, Block, BorderType, Borders, Widget},
+    layout::{Rect, Size},
+    widgets::{self, Widget},
 };
 use tui_widgets::scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 

@@ -1,6 +1,4 @@
-use crate::agent::{
-        AFuture, AgentContext, AiTool, TodoItem, ToolArgs,
-    };
+use crate::agent::{AFuture, AgentContext, AiTool, TodoItem, ToolArgs};
 use genai::chat::*;
 use serde_json::json;
 

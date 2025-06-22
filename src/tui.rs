@@ -1,21 +1,19 @@
 use crate::{
-    agent::{AResult, Agent, AgentEvent, AgentMessage, PermissionRequest, TodoItem, ToolBox}, config::{Config, Theme}, error::AiError, prompts, tools, widgets::{self, MessageState}
+    agent::{AResult, Agent, AgentEvent, AgentMessage, PermissionRequest, TodoItem},
+    config::Config,
+    error::AiError,
+    prompts, tools,
+    widgets::{self, MessageState},
 };
 use crossbeam::channel::{self, Receiver, Sender};
 use genai::chat::{ChatMessage, ChatRequest};
 use ratatui::{
-    crossterm::{
-        self,
-        event::{self, EnableBracketedPaste, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers},
-        terminal::{enable_raw_mode, EnterAlternateScreen},
-    },
+    Frame, Terminal,
+    crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers},
     layout::{Alignment, Constraint, Direction, Flex, Layout, Margin},
     prelude::Backend,
-    style::{Color, Style},
-    widgets::{
-        Block, Borders, Clear, ListState, Paragraph, ScrollbarState, StatefulWidget, Widget, Wrap,
-    },
-    Frame, Terminal,
+    style::Style,
+    widgets::{Block, Borders, Clear, ListState, Paragraph, StatefulWidget, Widget, Wrap},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 use throbber_widgets_tui::ThrobberState;
-use tokio::{io::Join, sync::Mutex, task::JoinHandle};
+use tokio::{sync::Mutex, task::JoinHandle};
 use tui_textarea::TextArea;
 use tui_widgets::scrollview::ScrollViewState;
 
@@ -109,7 +107,7 @@ impl<'a> SessionState<'a> {
             });
         }
 
-        let mut runner = AgentRunner::new(&state.model);
+        let runner = AgentRunner::new(&state.model);
 
         {
             let mut agent = runner.agent.lock().await;
@@ -117,7 +115,7 @@ impl<'a> SessionState<'a> {
             agent.context.todo_list = Arc::new(Mutex::new(state.todo.clone()));
         }
 
-        let mut session = Self {
+        let session = Self {
             messages,
             token_cost: 0,
             textarea: TextArea::default(),
@@ -444,7 +442,7 @@ where
 
 pub fn render(session: &mut SessionState) -> impl FnOnce(&mut Frame) {
     move |frame| {
-        let theme = session.config.theme.clone();
+        let theme = session.config.theme;
         let window = frame.area();
 
         let (chat_window, prompt_window, status_window) = Layout::new(

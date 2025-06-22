@@ -1,17 +1,10 @@
 use crate::{config::Theme, tui::SessionState};
-use genai::chat::{ChatMessage, ChatRequest};
 use owo_colors::OwoColorize;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
-    palette::stimulus::IntoStimulus,
-    prelude::BlockExt,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
-    symbols::scrollbar::Set,
-    text::{Line, Span, Text},
-    widgets::{
-        self, block::Position, Block, BorderType, Borders, Padding, Paragraph, StatefulWidget,
-        Widget,
-    },
+    text::Line,
+    widgets::{self, Block, BorderType, Borders, Padding, StatefulWidget, Widget},
 };
 use throbber_widgets_tui::{Throbber, ThrobberState};
 use tui_textarea::TextArea;
@@ -77,7 +70,7 @@ impl<'a> StatusLineWidget<'a> {
                 throbber_widgets_tui::WHITE_CIRCLE
             });
 
-        let mut token_string = format_token_cost(session.token_cost as f64);
+        let token_string = format_token_cost(session.token_cost as f64);
         widget.token_counter = Line::raw(token_string)
             .bg(theme.accent)
             .fg(theme.text_color)

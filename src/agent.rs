@@ -1,10 +1,10 @@
 use crate::error::AiError;
 use crossbeam::channel::Sender;
 use genai::chat::*;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 pub type AResult<T> = Result<T, crate::error::AiError>;
 pub type AFuture<T> = std::pin::Pin<Box<dyn Future<Output = AResult<T>> + Send + Sync>>;

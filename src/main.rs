@@ -1,7 +1,7 @@
 use ratatui::crossterm::{
     self,
     event::{EnableBracketedPaste, EnableMouseCapture},
-    terminal::{enable_raw_mode, EnterAlternateScreen},
+    terminal::{EnterAlternateScreen, enable_raw_mode},
 };
 
 use crate::agent::AResult;

@@ -1,5 +1,3 @@
-use std::{collections::HashMap, str::FromStr};
-
 use crate::{
     agent::{AFuture, AgentContext, AgentEvent, AiTool, PermissionRequest, ToolArgs},
     error::AiError,
@@ -7,7 +5,7 @@ use crate::{
 use diffy::DiffOptions;
 use genai::chat::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 
 pub struct Edit;
 impl AiTool for Edit {

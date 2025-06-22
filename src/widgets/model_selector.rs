@@ -1,15 +1,8 @@
 use crate::config::Theme;
-use genai::chat::{ChatMessage, ChatRequest};
 use ratatui::{
-    layout::{Alignment, Margin, Rect, Size},
-    palette::stimulus::IntoStimulus,
-    prelude::BlockExt,
+    layout::{Alignment, Rect},
     style::{Color, Style, Stylize},
-    text::{Line, Text},
-    widgets::{
-        self, block::Position, Block, BorderType, Borders, List, ListItem, ListState, Padding,
-        StatefulWidget, Widget,
-    },
+    widgets::{self, Block, BorderType, List, ListItem, ListState, Padding, StatefulWidget},
 };
 
 pub struct ModelSelectorWidget<'a> {

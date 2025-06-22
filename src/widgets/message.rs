@@ -1,22 +1,10 @@
-use std::thread::park_timeout;
-use genai::chat::{ChatMessage, ChatRequest};
-use owo_colors::{
-    OwoColorize,
-    colors::{
-        css::{DarkBlue, DarkGreen},
-        *,
-    },
-};
+use genai::chat::ChatMessage;
+use owo_colors::OwoColorize;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Margin, Rect},
-    palette::stimulus::IntoStimulus,
-    prelude::BlockExt,
+    layout::{Constraint, Direction, Layout},
     style::Style,
-    text::{Line, Text},
-    widgets::{
-        self, Block, BorderType, Borders, Clear, Widget, block::Position,
-        calendar::CalendarEventStore,
-    },
+    text::Line,
+    widgets::{self, Widget},
 };
 
 use crate::config::Theme;
@@ -124,7 +112,7 @@ impl<'a> widgets::StatefulWidget for MessageWidget<'a> {
     ) where
         Self: Sized,
     {
-        let (mut header_win, content_win) = Layout::new(
+        let (header_win, content_win) = Layout::new(
             Direction::Vertical,
             [Constraint::Length(1), Constraint::Fill(1)],
         )
