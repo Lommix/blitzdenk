@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 mod chat;
 mod input;
 mod message;

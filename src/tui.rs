@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use crate::{
     agent::{AResult, Agent, AgentEvent, AgentMessage, PermissionRequest, TodoItem, ToolBox}, config::{Config, Theme}, error::AiError, prompts, tools, widgets::{self, MessageState}
 };
