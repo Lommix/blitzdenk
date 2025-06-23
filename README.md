@@ -2,6 +2,8 @@
 
 Interactive multi purpose personal AI Tui, similar to tools like `opencode` or `claudecode`.
 
+![blitzdenk](/docs/screenshot.png)
+
 The goal is to replace web search, help with bug analysis and perform coding tasks with little to
 no friction from idea to keyboard to answer.
 
