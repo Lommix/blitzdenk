@@ -64,43 +64,18 @@ TIPS:
                     "type": "string",
                     "description": "The glob pattern to match files against"
                 },
-                "path": {
-                    "type": "string",
-                    "description": "The directory to search in. Defaults to the current working directory."
-                },
             },
             "required": ["pattern"],
         }))
     }
 
-    fn run(tool_id: String, args: ToolArgs, ctx: AgentContext) -> AFuture<ChatMessage> {
+    fn run(tool_id: String, args: ToolArgs, _ctx: AgentContext) -> AFuture<ChatMessage> {
         Box::pin(async move {
-            let path = args.get::<String>("path").unwrap_or(".".into());
             let pattern = args.get::<String>("pattern")?;
-
-            let paths = match glob::glob(&pattern) {
-                Ok(res) => res,
-                Err(err) => {
-                    return Err(AiError::ToolFailed(err.to_string()));
-                }
-            };
-
-            let output = tokio::process::Command::new("rg")
-                .arg("--files")
-                .arg("--glob")
-                .arg(pattern)
-                .arg(path)
-                .output()
-                .await?;
-
-            let mut content = String::from_utf8_lossy(&output.stdout).to_string();
-
-            if content.is_empty() {
-                content = String::from_utf8_lossy(&output.stderr).to_string();
-            }
+            let result = walk_with_gitignore_and_glob(&pattern)?;
 
             let res = json!({
-                "result": content,
+                "result": result,
             })
             .to_string();
 
@@ -110,9 +85,7 @@ TIPS:
 }
 
 mod test {
-
     use super::*;
-
     #[test]
     fn test_glob() {
         let res = walk_with_gitignore_and_glob("**/*").unwrap();
@@ -122,7 +95,6 @@ mod test {
 
 pub fn walk_with_gitignore_and_glob(pattern: &str) -> AResult<Vec<PathBuf>> {
     let glob = glob::glob(pattern)?.flatten().collect::<Vec<_>>();
-    dbg!(&glob);
 
     let walker = WalkBuilder::new(".").standard_filters(true).build();
 
@@ -130,9 +102,7 @@ pub fn walk_with_gitignore_and_glob(pattern: &str) -> AResult<Vec<PathBuf>> {
 
     for entry in walker.flatten() {
         if entry.file_type().map_or(false, |ft| ft.is_file()) {
-            let p = entry.into_path();
-
-            dbg!(&p);
+            let p = entry.path().strip_prefix("./").unwrap().to_path_buf();
 
             if glob.contains(&p) {
                 paths.push(p);
