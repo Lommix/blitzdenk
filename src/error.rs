@@ -18,10 +18,12 @@ pub enum AiError {
     AlreadyRunning,
     #[error(transparent)]
     TokioRecErr(#[from] tokio::sync::oneshot::error::RecvError),
-    #[error("The tool call failed with an error:\n\n```error\n{0}\n```")]
+    #[error("{0}")]
     ToolFailed(String),
     #[error(transparent)]
     FetchError(#[from] reqwest::Error),
+    #[error(transparent)]
+    GlobError(#[from] glob::PatternError),
 }
 
 impl<T> From<crossbeam::channel::SendError<T>> for AiError {

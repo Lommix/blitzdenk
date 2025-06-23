@@ -1,5 +1,11 @@
-use crate::agent::{AFuture, AgentContext, AiTool, ToolArgs};
+use std::path::PathBuf;
+
+use crate::{
+    agent::{AFuture, AResult, AgentContext, AiTool, ToolArgs},
+    error::AiError,
+};
 use genai::chat::*;
+use ignore::WalkBuilder;
 use serde_json::json;
 
 pub struct Glob;
@@ -72,6 +78,13 @@ TIPS:
             let path = args.get::<String>("path").unwrap_or(".".into());
             let pattern = args.get::<String>("pattern")?;
 
+            let paths = match glob::glob(&pattern) {
+                Ok(res) => res,
+                Err(err) => {
+                    return Err(AiError::ToolFailed(err.to_string()));
+                }
+            };
+
             let output = tokio::process::Command::new("rg")
                 .arg("--files")
                 .arg("--glob")
@@ -94,4 +107,38 @@ TIPS:
             Ok(ToolResponse::new(tool_id, res).into())
         })
     }
+}
+
+mod test {
+
+    use super::*;
+
+    #[test]
+    fn test_glob() {
+        let res = walk_with_gitignore_and_glob("**/*").unwrap();
+        dbg!(res);
+    }
+}
+
+pub fn walk_with_gitignore_and_glob(pattern: &str) -> AResult<Vec<PathBuf>> {
+    let glob = glob::glob(pattern)?.flatten().collect::<Vec<_>>();
+    dbg!(&glob);
+
+    let walker = WalkBuilder::new(".").standard_filters(true).build();
+
+    let mut paths = Vec::new();
+
+    for entry in walker.flatten() {
+        if entry.file_type().map_or(false, |ft| ft.is_file()) {
+            let p = entry.into_path();
+
+            dbg!(&p);
+
+            if glob.contains(&p) {
+                paths.push(p);
+            }
+        }
+    }
+
+    Ok(paths)
 }

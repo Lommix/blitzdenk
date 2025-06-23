@@ -37,43 +37,19 @@ impl AiTool for Read {
         }))
     }
 
-    fn run(tool_id: String, args: ToolArgs, ctx: AgentContext) -> AFuture<ChatMessage> {
+    fn run(tool_id: String, args: ToolArgs, _ctx: AgentContext) -> AFuture<ChatMessage> {
         Box::pin(async move {
             let path = args.get::<String>("path")?;
-            let offset = args.get::<i32>("offset")?;
+            let offset = args.get::<usize>("offset")?;
 
-            let mut cat = tokio::process::Command::new("cat")
-                .args([&path])
-                .stdout(std::process::Stdio::piped())
-                .spawn()?;
+            let file_content = tokio::fs::read_to_string(&path).await?;
 
-            let catout: Stdio = cat.stdout.take().unwrap().try_into().unwrap();
-
-            let mut tail = tokio::process::Command::new("tail")
-                .args(["-n", &format!("+{offset}")])
-                .stdin(catout)
-                .stdout(std::process::Stdio::piped())
-                .spawn()?;
-
-            let tailout: Stdio = tail.stdout.take().unwrap().try_into().unwrap();
-
-            let result = tokio::process::Command::new("head")
-                .args(["-n", "250"])
-                .stdin(tailout)
-                .output()
-                .await?;
-
-            let content = String::from_utf8_lossy(&result.stdout).to_string();
-
-            let total_lines = tokio::process::Command::new("wc")
-                .args([&path, "-l"])
-                .output()
-                .await?;
-            let line_count = String::from_utf8_lossy(&total_lines.stdout).to_string();
+            let total_lines = file_content.lines().count();
+            let content: String = file_content.lines().skip(offset).collect();
 
             let res = json!({
-                "file_info": format!("total lines: {}",line_count),
-                "offset": offset,
+                "total_lines": total_lines,
+                "curent_offset": offset,
                 "content": content,
             })
             .to_string();

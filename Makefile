@@ -10,3 +10,6 @@ release:
 install: release
 	@cp target/release/$(BINARY_NAME) ~/.local/bin/
 	@echo "Binary installed to ~/.local/bin/$(BINARY_NAME)"
+
+test:
+	cargo test -- --nocapture

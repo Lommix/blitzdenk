@@ -17,10 +17,6 @@ I am lazy, thus I rely on posix tools to do my bidding.
 These CLI tools should be available on the target system:
 
 - ripgrep (rg)
-- ls
-- cat
-- tail
-- head
 
 ## Configuration
 
