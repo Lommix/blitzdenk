@@ -7,6 +7,10 @@ no friction from idea to keyboard to answer.
 
 Supports all common AI-APIs that can handle tool calls.
 
+The goal is not a fully autonomous agent, but a pair programmer/researcher with a lot of control.
+
+If you need an autonomous agent tool, checkout [opencode](https://github.com/sst/opencode).
+
 ## Dependencies
 
 I am lazy, thus I rely on posix tools to do my bidding.
@@ -36,7 +40,7 @@ The configuration file for colors and available models is under:
 
 `~/.cache/blitzdenk/denk.toml`
 
-You can add any model unique id to the model list. (Ollama included).
+You can add any models unique id to the model list. (Ollama included).
 
 - [based on rust-genai](https://github.com/jeremychone/rust-genai)
 - [models.dev](models.dev)
