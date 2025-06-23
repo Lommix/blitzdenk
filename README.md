@@ -1,17 +1,14 @@
 # [WIP] Blitzdenk
 
-Interactive multi purpose personal AI Tui, similar to tools like `opencode` or `claudecode`.
+Interactive multi purpose personal AI Tui, similar to tools like [opencode](https://github.com/sst/opencode) or `claudecode`.
 
 ![blitzdenk](/docs/screenshot.png)
 
 The goal is to replace web search, help with bug analysis and perform coding tasks with little to
-no friction from idea to keyboard to answer.
+no friction from idea to keyboard to answer. It is not a fully autonomous agent. There is a lot of
+user control.
 
 Supports all common AI-APIs that can handle tool calls.
-
-The goal is not a fully autonomous agent, but a pair programmer/researcher with a lot of control.
-
-If you need an autonomous agent tool, checkout [opencode](https://github.com/sst/opencode).
 
 ## Dependencies
 
