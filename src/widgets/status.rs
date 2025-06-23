@@ -72,13 +72,12 @@ impl<'a> widgets::StatefulWidget for StatusLineWidget<'a> {
     where
         Self: Sized,
     {
-        let (version_win, mut spinner_win, token_win, model_win, mode_win) = Layout::new(
+        let (version_win, mut spinner_win, token_win, model_win) = Layout::new(
             Direction::Horizontal,
             [
                 Constraint::Length(20),
                 Constraint::Length(15),
                 Constraint::Length(8),
-                Constraint::Length(48),
                 Constraint::Fill(1),
             ],
         )

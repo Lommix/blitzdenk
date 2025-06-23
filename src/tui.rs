@@ -50,6 +50,7 @@ pub struct SessionSaveState {
     chat: ChatRequest,
     todo: HashMap<String, TodoItem>,
     model: String,
+    token_cost: i32,
 }
 
 impl<'a> SessionState<'a> {
@@ -85,6 +86,7 @@ impl<'a> SessionState<'a> {
             chat: agent.chat.clone(),
             todo: agent.context.todo_list.lock().await.clone(),
             model: agent.model.clone(),
+            token_cost: self.token_cost,
         };
 
         let state_str = serde_json::to_string(&state)?;
@@ -121,7 +123,7 @@ impl<'a> SessionState<'a> {
 
         let session = Self {
             messages,
-            token_cost: 0,
+            token_cost: state.token_cost,
             textarea: TextArea::default(),
             runner,
             confirm: None,
