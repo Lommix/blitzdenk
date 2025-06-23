@@ -1,4 +1,5 @@
 use crate::{agent::AResult, config::Config};
+use clap::{Parser, Subcommand};
 use ratatui::crossterm::{
     self,
     event::{EnableBracketedPaste, EnableMouseCapture},
@@ -13,8 +14,6 @@ mod tools;
 mod tui;
 mod widgets;
 
-use clap::{Parser, Subcommand};
-
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -25,13 +24,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Run,
-    Init,
 }
 
 #[tokio::main]
 async fn main() -> AResult<()> {
     let cli = Cli::parse();
-
     let config = Config::load().await;
 
     match cli.command.unwrap_or(Commands::Run) {
@@ -49,9 +46,6 @@ async fn main() -> AResult<()> {
             .unwrap();
 
             tui::run(terminal, config).await?;
-        }
-        Commands::Init => {
-            println!("not yet implemented!");
         }
     }
 

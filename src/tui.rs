@@ -9,14 +9,13 @@ use crossbeam::channel::{self, Receiver, Sender};
 use genai::chat::{ChatMessage, ChatRequest};
 use ratatui::{
     crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers},
-    layout::{Alignment, Constraint, Direction, Flex, Layout, Margin},
+    layout::{Constraint, Direction, Layout, Margin},
     prelude::Backend,
-    style::{Style, Stylize},
-    text::Line,
-    widgets::{Block, Borders, Clear, ListState, Paragraph, StatefulWidget, Widget, Wrap},
+    style::Style,
+    widgets::{ListState, StatefulWidget, Widget},
     Frame, Terminal,
 };
-use serde::{de::IntoDeserializer, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -177,7 +176,11 @@ impl AgentRunner {
 
         let handle = tokio::spawn(async move {
             loop {
-                match cmd_rx.recv().unwrap() {
+                let Ok(event) = cmd_rx.recv() else {
+                    break;
+                };
+
+                match event {
                     AgentCmd::Cancle => {
                         todo!("impl cancle")
                     }
@@ -528,7 +531,7 @@ impl InputRunner {
     pub fn new() -> Self {
         let (tx, rx) = channel::unbounded();
         let handle = tokio::spawn(async move {
-            handle_input(tx).unwrap();
+            _ = handle_input(tx);
         });
 
         Self { handle, rx }
@@ -548,7 +551,11 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
     loop {
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout).unwrap() {
-            match event::read().unwrap() {
+            let Ok(event) = event::read() else {
+                break;
+            };
+
+            match event {
                 event::Event::Key(key) => {
                     let is_alt = key.modifiers.contains(KeyModifiers::ALT);
                     let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -609,6 +616,8 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
             tx.send(TuiEvent::Tick)?;
         }
     }
+
+    Ok(())
 }
 
 pub enum TuiEvent {

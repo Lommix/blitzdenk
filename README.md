@@ -1,6 +1,6 @@
 # [WIP] Blitzdenk
 
-Interactive multi purpose personal AI Tui, similar to tools like [opencode](https://github.com/sst/opencode) or `claudecode`.
+Interactive multi purpose personal AI Tui, similar to tools like [opencode](https://github.com/sst/opencode) or claudecode.
 
 ![blitzdenk](/docs/screenshot.png)
 
