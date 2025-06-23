@@ -37,4 +37,4 @@ tokio = { version = "1.45.1", features = ["full"] }
 toml = "0.8.23"
 tui-markdown = "0.3.5"
 tui-textarea = "0.7.0"
-tui-widgets = { git = "https://github.com/joshka/tui-widgets", rev = "0ac812e"}
+tui-widgets = { git = "https://github.com/joshka/tui-widgets", rev = "0ac812e" }

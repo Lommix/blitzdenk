@@ -1,5 +1,6 @@
 use crate::agent::{AFuture, AgentContext, AiTool, ToolArgs};
 use genai::chat::*;
+use grep::searcher::{sinks::UTF8, Sink};
 use serde_json::json;
 
 pub struct Grep;
@@ -107,4 +108,27 @@ TIPS:
             Ok(ToolResponse::new(tool_id, res).into())
         })
     }
+}
+
+mod test {
+    use grep::searcher::sinks::UTF8;
+    #[test]
+    fn test_grep() {
+        let matcher = grep::regex::RegexMatcher::new("output").unwrap();
+        grep::searcher::Searcher::new()
+            .search_path(
+                matcher,
+                ".",
+                UTF8(|lnum, line| {
+                    dbg!(lnum, line);
+                    // --
+                    Ok(true)
+                }),
+            )
+            .unwrap();
+    }
+}
+
+fn search_recursive() -> Vec<String> {
+    todo!()
 }

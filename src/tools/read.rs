@@ -1,5 +1,9 @@
-use crate::agent::{AFuture, AgentContext, AiTool, ToolArgs};
+use crate::{
+    agent::{AFuture, AgentContext, AiTool, ToolArgs},
+    error::AiError,
+};
 use genai::chat::*;
+use ignore::WalkBuilder;
 use serde_json::json;
 use std::process::Stdio;
 
@@ -42,6 +46,12 @@ impl AiTool for Read {
             let path = args.get::<String>("path")?;
             let offset = args.get::<usize>("offset")?;
 
+            if !is_part_of_project(&path) {
+                return Err(AiError::ToolFailed(
+                    "path does not exists in current project".into(),
+                ));
+            }
+
             let file_content = tokio::fs::read_to_string(&path).await?;
 
             let total_lines = file_content.lines().count();
@@ -57,4 +67,20 @@ impl AiTool for Read {
             Ok(ToolResponse::new(tool_id, res).into())
         })
     }
+}
+
+fn is_part_of_project(path: &str) -> bool {
+    let walker = WalkBuilder::new(".").standard_filters(true).build();
+    for p in walker.flatten() {
+        if p.into_path()
+            .strip_prefix("./")
+            .unwrap()
+            .to_str()
+            .unwrap_or_default()
+            == path
+        {
+            return true;
+        }
+    }
+    return false;
 }
