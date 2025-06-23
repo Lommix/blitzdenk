@@ -12,8 +12,6 @@ Supports all common AI-APIs that can handle tool calls.
 
 ## Dependencies
 
-I am lazy, thus I rely on posix tools to do my bidding.
-
 These CLI tools should be available on the target system:
 
 - ripgrep (rg)
