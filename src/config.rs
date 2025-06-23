@@ -65,12 +65,13 @@ pub struct Theme {
     pub selection_bg: Color,
     pub selection_fg: Color,
     pub error_text_color: Color,
+    pub succes_text_color: Color,
 }
 
 impl Theme {
     pub fn lommix() -> Self {
         Self {
-            background: Color::Rgb(40, 44, 52),          // #282c34
+            background: Color::Rgb(40, 44, 52),          // #282c34;
             foreground: Color::Rgb(171, 178, 191),       // #abb2bf
             primary: Color::Rgb(97, 175, 239),           // #61afef
             secondary: Color::Rgb(198, 120, 221),        // #c678dd
@@ -80,6 +81,7 @@ impl Theme {
             selection_bg: Color::Rgb(65, 70, 82),        // #414552
             selection_fg: Color::Rgb(171, 178, 191),     // #abb2bf
             error_text_color: Color::Rgb(224, 108, 117), // #e06c75
+            succes_text_color: Color::Rgb(0, 180, 0),    // #00AF00
         }
     }
 }

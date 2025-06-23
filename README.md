@@ -26,7 +26,6 @@ All API keys are read from the your environment.
 ```
 OPENAI_API_KEY
 ANTHROPIC_API_KEY
-ANTHROPIC_API_KEY
 GEMINI_API_KEY
 GROQ_API_KEY
 XAI_API_KEY

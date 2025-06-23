@@ -2,7 +2,9 @@ use crate::config::Theme;
 use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Style, Stylize},
-    widgets::{self, Block, BorderType, List, ListItem, ListState, Padding, StatefulWidget},
+    widgets::{
+        self, Block, BorderType, Clear, List, ListItem, ListState, Padding, StatefulWidget, Widget,
+    },
 };
 
 pub struct ModelSelectorWidget<'a> {
@@ -49,6 +51,7 @@ impl<'a> StatefulWidget for ModelSelectorWidget<'a> {
             .flex(Flex::Center)
             .areas(modal);
 
+        Widget::render(Clear, modal, buf);
         StatefulWidget::render(self.list, modal, buf, state);
     }
 }
