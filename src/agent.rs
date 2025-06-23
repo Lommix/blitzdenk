@@ -66,7 +66,14 @@ impl Agent {
         let mut chat = self.chat.clone();
 
         loop {
-            let res = client.exec_chat(&self.model, chat.clone(), None).await?;
+            let res = match client.exec_chat(&self.model, chat.clone(), None).await {
+                Ok(res) => res,
+                Err(err) => {
+                    chat = chat.append_message(ChatMessage::system(err.to_string()));
+                    break;
+                }
+            };
+
             let token_cost = res.usage.total_tokens;
 
             if let Some(calls) = res.clone().into_tool_calls() {
