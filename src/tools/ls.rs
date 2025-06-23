@@ -1,5 +1,6 @@
 use crate::agent::{AFuture, AgentContext, AiTool, ToolArgs};
 use genai::chat::*;
+use ignore::WalkBuilder;
 use serde_json::json;
 
 pub struct Ls;
@@ -31,21 +32,21 @@ Lists files and directories in a given path. The path parameter must be an absol
 
     fn run(tool_id: String, args: ToolArgs, ctx: AgentContext) -> AFuture<ChatMessage> {
         Box::pin(async move {
-            let mut path = args
-                .get::<String>("path")
-                .unwrap_or(ctx.current_cwd.clone());
-            if !path.contains(&ctx.current_cwd) {
-                path = ctx.current_cwd.clone();
+            let mut path = args.get::<String>("path").unwrap_or("./".to_string());
+
+            if !path.starts_with('.') {
+                path = format!(".{}", path);
             }
 
-            let output = tokio::process::Command::new("ls")
-                .arg(path)
-                .output()
-                .await?;
-            let content = String::from_utf8_lossy(&output.stdout).to_string();
+            let walker = WalkBuilder::new(&path).max_depth(Some(1)).build();
+            let mut list = Vec::new();
+
+            for entry in walker.flatten() {
+                list.push(entry.path().to_string_lossy().to_string());
+            }
 
             let res = json!({
-                "result": content,
+                "result": list,
             })
             .to_string();
 
