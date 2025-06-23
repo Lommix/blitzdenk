@@ -1,12 +1,9 @@
 use crate::{config::Theme, tui::SessionState};
-use owo_colors::OwoColorize;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
-    text::Line,
-    widgets::{self, Block, BorderType, Borders, Padding, StatefulWidget, Widget},
+    layout::Rect,
+    style::Color,
+    widgets::{self, Block, BorderType, Borders, Padding},
 };
-use throbber_widgets_tui::{Throbber, ThrobberState};
 use tui_textarea::TextArea;
 
 // input -------------------------------------------------------------------------------------
@@ -15,7 +12,7 @@ pub struct PromptWidget<'a> {
 }
 
 impl<'a> PromptWidget<'a> {
-    pub fn new(session: &'a SessionState, theme: Theme) -> Self {
+    pub fn new(session: &'a SessionState, _theme: Theme) -> Self {
         Self {
             textarea: &session.textarea,
         }

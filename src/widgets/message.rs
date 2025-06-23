@@ -9,8 +9,6 @@ use ratatui::{
 
 use crate::config::Theme;
 
-const MAX_WIDTH: usize = 100;
-
 #[derive(Default, Clone)]
 pub struct MessageState {
     collapse: bool,
@@ -108,7 +106,7 @@ impl<'a> widgets::StatefulWidget for MessageWidget<'a> {
         self,
         area: ratatui::prelude::Rect,
         buf: &mut ratatui::prelude::Buffer,
-        state: &mut Self::State,
+        _state: &mut Self::State,
     ) where
         Self: Sized,
     {

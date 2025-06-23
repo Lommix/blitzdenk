@@ -1,6 +1,6 @@
 use crate::config::Theme;
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Style, Stylize},
     widgets::{self, Block, BorderType, List, ListItem, ListState, Padding, StatefulWidget},
 };
@@ -24,6 +24,7 @@ impl<'a> ModelSelectorWidget<'a> {
                     .padding(Padding::top(1))
                     .title_style(Style::new().bg(Color::White).fg(theme.selection_bg))
                     .border_type(BorderType::QuadrantOutside)
+                    .border_style(Style::new().fg(Color::White))
                     .style(Style::new().bg(theme.selection_bg)),
             )
             .highlight_style(Style::new().italic().bold().bg(theme.selection_fg))
@@ -40,6 +41,14 @@ impl<'a> StatefulWidget for ModelSelectorWidget<'a> {
     type State = ListState;
 
     fn render(self, area: Rect, buf: &mut ratatui::prelude::Buffer, state: &mut Self::State) {
-        StatefulWidget::render(self.list, area, buf, state);
+        let [modal] = Layout::horizontal([Constraint::Length(48)])
+            .flex(Flex::Center)
+            .areas(area);
+
+        let [modal] = Layout::vertical([Constraint::Length(16)])
+            .flex(Flex::Center)
+            .areas(modal);
+
+        StatefulWidget::render(self.list, modal, buf, state);
     }
 }

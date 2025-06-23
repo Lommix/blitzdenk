@@ -3,7 +3,7 @@ use crate::{
     config::Config,
     error::AiError,
     prompts, tools,
-    widgets::{self, MessageState},
+    widgets::{self, ConfirmWidget, MessageState},
 };
 use crossbeam::channel::{self, Receiver, Sender};
 use genai::chat::{ChatMessage, ChatRequest};
@@ -479,41 +479,21 @@ pub fn render(session: &mut SessionState) -> impl FnOnce(&mut Frame) {
             .buffer_mut()
             .set_style(prompt_window, Style::new().bg(theme.background));
 
-        let chat_widget = widgets::ChatWidget {
-            history: &session.messages,
-            theme,
-        };
+        // --------------
+        // title screen / chat
 
         if session.messages.is_empty() {
-            let [modal] = Layout::horizontal([Constraint::Length(40)])
-                .flex(Flex::Center)
-                .areas(window);
-
-            let [modal] = Layout::vertical([Constraint::Length(16)])
-                .flex(Flex::Center)
-                .areas(modal);
-
-            let [title, info] = Layout::vertical([Constraint::Length(4), Constraint::Fill(1)])
-                .flex(Flex::Center)
-                .areas(modal);
-
-            let mut line = Line::default();
-            line.push_span("BLITZ".blue());
-            line.push_span("DENK".white());
-
-            let text = tui_widgets::big_text::BigText::builder()
-                .pixel_size(tui_widgets::big_text::PixelSize::Quadrant)
-                .lines(vec![line])
-                .build();
-
-            text.render(title, frame.buffer_mut());
-            Paragraph::new(
-                "v0.3\n\n[ctrl+k] select model\n[ctrl+n] new session\n[alt+enter] send prompt\n/init",
-            )
-            .render(info, frame.buffer_mut());
+            widgets::TitleWidget::new().render(window, frame.buffer_mut());
         } else {
-            chat_widget.render(chat_window, frame.buffer_mut(), &mut session.scroll_state);
+            widgets::ChatWidget {
+                history: &session.messages,
+                theme,
+            }
+            .render(chat_window, frame.buffer_mut(), &mut session.scroll_state);
         }
+
+        // --------------
+        // textarea
 
         let input_widget = widgets::PromptWidget::new(session, theme);
         input_widget.render(prompt_window, frame.buffer_mut());
@@ -525,38 +505,17 @@ pub fn render(session: &mut SessionState) -> impl FnOnce(&mut Frame) {
             &mut session.running_spinner_state,
         );
 
+        // select confirm
         if let Some(confirm) = session.confirm.as_ref() {
             let modal = window.inner(Margin::new(5, 5));
-            frame.render_widget(Clear, modal);
-            let content = tui_markdown::from_str(confirm.message.as_str());
-
-            Paragraph::new(content)
-                .block(
-                    Block::new()
-                        .title_top("permission request")
-                        .title_alignment(Alignment::Center)
-                        .title_bottom("[ctrl+y:Accept][ctrl+n:Decline]")
-                        .borders(Borders::ALL)
-                        .border_type(ratatui::widgets::BorderType::QuadrantOutside),
-                )
-                .scroll((session.confirm_scroll, 0))
-                .wrap(Wrap { trim: false })
-                .render(modal, frame.buffer_mut());
+            ConfirmWidget::new(&confirm.message, &session, theme).render(modal, frame.buffer_mut());
         }
 
+        // select model
         if let Some(select) = session.model_select_state.as_mut() {
-            let [modal] = Layout::horizontal([Constraint::Length(48)])
-                .flex(Flex::Center)
-                .areas(window);
-
-            let [modal] = Layout::vertical([Constraint::Length(16)])
-                .flex(Flex::Center)
-                .areas(modal);
-
-            frame.render_widget(Clear, modal);
             let selection =
                 widgets::ModelSelectorWidget::new(session.config.model_list.clone(), theme);
-            selection.render(modal, frame.buffer_mut(), select);
+            selection.render(window, frame.buffer_mut(), select);
         }
     }
 }
