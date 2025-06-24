@@ -57,14 +57,11 @@ impl AiTool for Read {
             let total_lines = file_content.lines().count();
             let content: String = file_content.lines().skip(offset).collect();
 
-            let res = json!({
-                "total_lines": total_lines,
-                "curent_offset": offset,
-                "content": content,
-            })
-            .to_string();
-
-            Ok(ToolResponse::new(tool_id, res).into())
+            let res = format!(
+                "total lines: {}\n<content>\n{}\n</content>",
+                total_lines, content
+            );
+            Ok(ToolResponse::new(tool_id, content).into())
         })
     }
 }

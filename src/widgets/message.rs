@@ -1,9 +1,8 @@
 use genai::chat::ChatMessage;
-use owo_colors::OwoColorize;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
-    text::Line,
+    style::{Color, Style, Stylize},
+    text::{Line, Span},
     widgets::{self, Widget},
 };
 
@@ -38,18 +37,26 @@ impl<'a> MessageWidget<'a> {
             .bg(theme.selection_bg)
             .fg(theme.selection_fg);
 
-        let (title, color) = match &msg.content {
+        let header = match &msg.content {
             genai::chat::MessageContent::Text(_) => {
-                (format!("{}", msg.role), theme.succes_text_color)
+                let mut line = Line::default().bg(theme.succes_text_color);
+                line.push_span(Span::raw(format!("{}", msg.role)));
+                line
             }
-            genai::chat::MessageContent::Parts(_) => (format!("{}", msg.role), theme.secondary),
+            genai::chat::MessageContent::Parts(_) => {
+                let mut line = Line::default().bg(theme.secondary);
+                line.push_span(Span::raw(format!("{}", msg.role)));
+                line
+            }
             genai::chat::MessageContent::ToolCalls(tool_calls) => {
                 let call = tool_calls.first().unwrap();
                 let preview: String = call.fn_arguments.to_string();
-                (
-                    format!("Calling {} with {}", call.fn_name, preview),
-                    theme.primary,
-                )
+
+                let mut line = Line::default().bg(theme.primary);
+                line.push_span(Span::raw(format!("[{}]", call.fn_name)).bold());
+                line.push_span(Span::raw(" with ").italic());
+                line.push_span(Span::raw(format!(" {} ", preview)).bold());
+                line
             }
             genai::chat::MessageContent::ToolResponses(tool_responses) => {
                 let preview: String = tool_responses
@@ -57,11 +64,13 @@ impl<'a> MessageWidget<'a> {
                     .map(|s| s.content.clone())
                     .unwrap_or_default();
 
-                (format!(" ⮡ {}", preview), theme.selection_bg)
+                let mut line = Line::default().bg(theme.selection_bg);
+                line.push_span(Span::raw(format!(" ⮡ {}", preview)).italic());
+                line
             }
         };
 
-        let header = Line::raw(title).style(Style::new().bg(color).fg(theme.text_color));
+        // let header = Line::raw(title).style(Style::new().bg(color).fg(theme.text_color));
 
         let c: String = match &msg.content {
             genai::chat::MessageContent::Text(t) => t.clone(),

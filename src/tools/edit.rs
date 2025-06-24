@@ -80,7 +80,7 @@ Usage:
             }
 
             tokio::fs::write(path, new_content).await?;
-            Ok(ToolResponse::new(tool_id, json!({"result":"file was edited"}).to_string()).into())
+            Ok(ToolResponse::new(tool_id, "file was edited").into())
         })
     }
 }
@@ -200,7 +200,7 @@ If you want to create a new file, use:
             }
 
             tokio::fs::write(path, new_content).await?;
-            Ok(ToolResponse::new(tool_id, json!({"result":"file was edited"}).to_string()).into())
+            Ok(ToolResponse::new(tool_id, "files edited").into())
         })
     }
 }

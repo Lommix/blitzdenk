@@ -38,10 +38,7 @@ impl Agent {
     }
 
     pub fn add_system_msg(&mut self, prompt: impl Into<String>) {
-        self.chat = self
-            .chat
-            .clone()
-            .append_message(ChatMessage::system(prompt.into()));
+        self.chat.system = Some(prompt.into());
     }
 
     pub fn add_user_msg(&mut self, prompt: impl Into<String>) {
@@ -66,14 +63,7 @@ impl Agent {
         let mut chat = self.chat.clone();
 
         loop {
-            let res = match client.exec_chat(&self.model, chat.clone(), None).await {
-                Ok(res) => res,
-                Err(err) => {
-                    chat = chat.append_message(ChatMessage::system(err.to_string()));
-                    break;
-                }
-            };
-
+            let res = client.exec_chat(&self.model, chat.clone(), None).await?;
             let token_cost = res.usage.total_tokens;
 
             if let Some(calls) = res.clone().into_tool_calls() {

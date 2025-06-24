@@ -61,7 +61,7 @@ Usage:
             }
 
             tokio::fs::write(path, content).await?;
-            Ok(ToolResponse::new(tool_id, json!({"result":"file was edited"}).to_string()).into())
+            Ok(ToolResponse::new(tool_id, "file edited").into())
         })
     }
 }

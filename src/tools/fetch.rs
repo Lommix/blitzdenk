@@ -56,12 +56,7 @@ Usage notes:
                 .map(|el| el.text().collect::<String>())
                 .collect();
 
-            let result = json!({
-                "result": content,
-            })
-            .to_string();
-
-            Ok(ToolResponse::new(tool_id, result).into())
+            Ok(ToolResponse::new(tool_id, content).into())
         })
     }
 }

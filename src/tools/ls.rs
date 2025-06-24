@@ -45,12 +45,7 @@ Lists files and directories in a given path. The path parameter must be an absol
                 list.push(entry.path().to_string_lossy().to_string());
             }
 
-            let res = json!({
-                "result": list,
-            })
-            .to_string();
-
-            Ok(ToolResponse::new(tool_id, res).into())
+            Ok(ToolResponse::new(tool_id, list.join("\n")).into())
         })
     }
 }

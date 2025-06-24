@@ -100,12 +100,7 @@ TIPS:
 
             let content = String::from_utf8_lossy(&output.stdout).to_string();
 
-            let res = json!({
-                "result": content,
-            })
-            .to_string();
-
-            Ok(ToolResponse::new(tool_id, res).into())
+            Ok(ToolResponse::new(tool_id, content).into())
         })
     }
 }

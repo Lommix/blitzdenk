@@ -73,12 +73,7 @@ TIPS:
         Box::pin(async move {
             let pattern = args.get::<String>("pattern")?;
             let result = walk_with_gitignore_and_glob(&pattern)?;
-
-            let res = json!({
-                "result": result,
-            })
-            .to_string();
-
+            let res = serde_json::to_string(&result)?;
             Ok(ToolResponse::new(tool_id, res).into())
         })
     }

@@ -267,7 +267,7 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
                 },
             );
 
-            Ok(ToolResponse::new(tool_id, json!({"result": "item saved"}).to_string()).into())
+            Ok(ToolResponse::new(tool_id, "task saved").into())
         })
     }
 }
