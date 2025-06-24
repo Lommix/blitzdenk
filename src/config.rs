@@ -74,7 +74,7 @@ impl Theme {
             background: Color::Rgb(40, 44, 52),          // #282c34;
             foreground: Color::Rgb(171, 178, 191),       // #abb2bf
             primary: Color::Rgb(97, 175, 239),           // #61afef
-            secondary: Color::Rgb(198, 120, 221),        // #c678dd
+            secondary: Color::Rgb(98, 120, 221),         // #c678dd
             accent: Color::Rgb(224, 108, 117),           // #e06c75
             text_color: Color::Rgb(255, 255, 255),       // #FFFFFF
             border_color: Color::Rgb(65, 70, 82),        // #414552

@@ -22,7 +22,7 @@ pub struct StatusLineWidget<'a> {
 impl<'a> StatusLineWidget<'a> {
     pub fn new(session: &SessionState, theme: Theme) -> Self {
         let mut widget = Self::default();
-        widget.style = Style::new().bg(theme.foreground).fg(theme.text_color);
+        widget.style = Style::new().bg(theme.secondary).fg(theme.text_color);
 
         widget.spinner = Throbber::default()
             .label(if session.running {
@@ -40,7 +40,7 @@ impl<'a> StatusLineWidget<'a> {
 
         let token_string = format_token_cost(session.token_cost as f64);
         widget.token_counter = Line::raw(token_string)
-            .bg(theme.accent)
+            .bg(theme.secondary)
             .fg(theme.text_color)
             .alignment(Alignment::Center)
             .add_modifier(Modifier::BOLD);
@@ -56,11 +56,6 @@ impl<'a> StatusLineWidget<'a> {
             .fg(theme.text_color)
             .bg(theme.secondary)
             .add_modifier(Modifier::BOLD);
-
-        // line.push_span(Span::raw(" MODE: ").style(Style::default()));
-        // line.push_span(Span::raw(" [HELP] ").style(Style::default().bg(Color::Green).fg(Color::Black)));
-        // line.push_span(Span::raw(" [DEBUG] ").style(Style::default().bg(Color::DarkGray)));
-        // line.push_span(Span::raw(" [CODE] ").style(Style::default().bg(Color::DarkGray)));
 
         widget
     }

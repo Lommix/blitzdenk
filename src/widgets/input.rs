@@ -2,7 +2,7 @@ use crate::{config::Theme, tui::SessionState};
 use ratatui::{
     layout::Rect,
     style::Color,
-    widgets::{self, Block, BorderType, Borders, Padding},
+    widgets::{self, Block, BorderType, Borders, Padding, Paragraph},
 };
 use tui_textarea::TextArea;
 
@@ -27,7 +27,7 @@ where
         let mut a = self.textarea.clone();
         a.set_block(
             Block::new()
-                .borders(Borders::TOP)
+                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
                 .padding(Padding::horizontal(1))
                 .border_style(Color::Rgb(171, 178, 191))
                 .border_type(BorderType::QuadrantOutside),
