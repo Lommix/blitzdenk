@@ -13,7 +13,7 @@ pub struct ConfirmWidget<'a> {
 }
 
 impl<'a> ConfirmWidget<'a> {
-    pub fn new(content: &'a str, session: &'a SessionState, theme: Theme) -> Self {
+    pub fn new(content: &'a str, scroll: u16, theme: Theme) -> Self {
         let content = tui_markdown::from_str(content);
         let content = Paragraph::new(content)
             .block(
@@ -26,7 +26,7 @@ impl<'a> ConfirmWidget<'a> {
                     .border_type(ratatui::widgets::BorderType::QuadrantOutside),
             )
             .style(Style::new().bg(theme.selection_bg))
-            .scroll((session.confirm_scroll, 0))
+            .scroll((scroll, 0))
             .wrap(Wrap { trim: false });
 
         Self { content }

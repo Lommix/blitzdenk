@@ -36,18 +36,24 @@ pub struct TuiMessage {
 }
 
 pub struct SessionState<'a> {
-    pub config: Config,
+    // -----------------
     pub messages: Vec<TuiMessage>,
-    pub token_cost: i32,
     pub textarea: TextArea<'a>,
     pub runner: AgentRunner,
+    // -----------------
+    pub config: Config,
+    pub token_cost: i32,
     pub scroll_state: ScrollViewState,
     pub running: bool,
     pub running_spinner_state: ThrobberState,
-    pub model_select_state: Option<ListState>,
-    pub todo_select_state: Option<ListState>,
-    pub confirm: Option<PermissionRequest>,
-    pub confirm_scroll: u16,
+
+    // -----------------
+    // pub model_select_state: Option<ListState>,
+    // pub todo_select_state: Option<ListState>,
+    // pub confirm: Option<PermissionRequest>,
+    // pub confirm_scroll: u16,
+    // -----------------
+    pub popup_state: PopupState,
 }
 
 #[derive(Default)]
@@ -69,6 +75,7 @@ pub struct SessionSaveState {
     todo: HashMap<String, TodoItem>,
     model: String,
     token_cost: i32,
+    input: Vec<String>,
 }
 
 impl<'a> SessionState<'a> {
@@ -78,14 +85,11 @@ impl<'a> SessionState<'a> {
             token_cost: 0,
             textarea: TextArea::default(),
             runner: AgentRunner::new(&config.current_model),
-            confirm: None,
             scroll_state: ScrollViewState::default(),
             running: false,
             running_spinner_state: ThrobberState::default(),
-            todo_select_state: None,
-            model_select_state: None,
             config,
-            confirm_scroll: 0,
+            popup_state: PopupState::None,
         }
     }
 
@@ -102,6 +106,7 @@ impl<'a> SessionState<'a> {
         }
 
         let state = SessionSaveState {
+            input: self.textarea.lines().to_owned(),
             chat: agent.chat.clone(),
             todo: agent.context.todo_list.lock().await.clone(),
             model: agent.model.clone(),
@@ -143,15 +148,12 @@ impl<'a> SessionState<'a> {
         let session = Self {
             messages,
             token_cost: state.token_cost,
-            textarea: TextArea::default(),
+            textarea: TextArea::new(state.input),
             runner,
-            confirm: None,
             scroll_state: ScrollViewState::default(),
             running: false,
             running_spinner_state: ThrobberState::default(),
-            todo_select_state: None,
-            model_select_state: None,
-            confirm_scroll: 0,
+            popup_state: PopupState::None,
             config,
         };
 
@@ -340,8 +342,10 @@ where
                     session.scroll_state.scroll_to_bottom();
                 }
                 AgentEvent::Permission(permission_request) => {
-                    session.confirm = Some(permission_request);
-                    session.confirm_scroll = 0;
+                    session.popup_state = PopupState::Confirm {
+                        req: permission_request,
+                        scroll: 0,
+                    };
                 }
             }
         }
@@ -354,96 +358,104 @@ where
                     let todo = session.runner.context.todo_list.lock().await.clone();
                     _ = terminal.draw(render(&mut session, todo)).unwrap();
                 }
-                TuiEvent::SelectPrev => {
-                    _ = session
-                        .model_select_state
-                        .as_mut()
-                        .map(|l| l.select_previous())
-                }
-                TuiEvent::SelectNext => {
-                    _ = session.model_select_state.as_mut().map(|l| l.select_next())
-                }
-                TuiEvent::SelectModel => {
-                    if session.model_select_state.is_none() {
-                        session.model_select_state =
-                            Some(ListState::default().with_selected(Some(0)))
-                    } else {
-                        session.model_select_state = None;
+                TuiEvent::SelectPrev => match &mut session.popup_state {
+                    PopupState::ModelSelect(list_state) | PopupState::TodoList(list_state) => {
+                        list_state.select_previous()
                     }
-                }
+                    _ => (),
+                },
+                TuiEvent::SelectNext => match &mut session.popup_state {
+                    PopupState::ModelSelect(list_state) | PopupState::TodoList(list_state) => {
+                        list_state.select_next()
+                    }
+                    _ => (),
+                },
+                TuiEvent::ToggleSelectModal => match &session.popup_state {
+                    PopupState::ModelSelect(_) => session.popup_state = PopupState::None,
+                    PopupState::Confirm { req, scroll } => (),
+                    _ => {
+                        session.popup_state =
+                            PopupState::ModelSelect(ListState::default().with_selected(Some(0)))
+                    }
+                },
+                TuiEvent::ToggleShowTodo => match &session.popup_state {
+                    PopupState::TodoList(_) => session.popup_state = PopupState::None,
+                    PopupState::Confirm { req, scroll } => (),
+                    _ => {
+                        session.popup_state =
+                            PopupState::TodoList(ListState::default().with_selected(Some(0)))
+                    }
+                },
                 TuiEvent::Key(key) => {
-                    if let Some(state) = session.model_select_state.as_mut() {
-                        match key.code {
-                            KeyCode::Enter => {
-                                let index = session
-                                    .model_select_state
-                                    .as_ref()
-                                    .and_then(|k| k.selected())
-                                    .unwrap_or_default();
+                    match key.code {
+                        KeyCode::Char(c) => match &mut session.popup_state {
+                            PopupState::ModelSelect(list_state)
+                            | PopupState::TodoList(list_state) => {
+                                if c == 'k' {
+                                    list_state.select_previous();
+                                }
+
+                                if c == 'j' {
+                                    list_state.select_next();
+                                }
+                            }
+                            PopupState::Confirm { req, scroll } => {}
+                            PopupState::None => (),
+                            PopupState::Help => (),
+                        },
+                        KeyCode::Up => session.scroll_state.scroll_up(),
+                        KeyCode::Down => session.scroll_state.scroll_down(),
+                        KeyCode::Enter => match &session.popup_state {
+                            PopupState::ModelSelect(list_state) => {
+                                let index = list_state.selected().unwrap_or_default();
+
+                                {
+                                    session.runner.agent.lock().await.model =
+                                        session.config.model_list[index].clone();
+                                }
+
                                 session.config.current_model =
                                     session.config.model_list[index].clone();
                                 session.config.save().await;
-                                session.model_select_state = None;
+
+                                session.popup_state = PopupState::None;
                             }
-                            KeyCode::Esc => {
-                                session.model_select_state = None;
-                            }
-                            KeyCode::Char(c) => {
-                                if c == 'k' {
-                                    state.select_previous();
-                                }
-                                if c == 'j' {
-                                    state.select_next();
-                                }
-                            }
+                            PopupState::TodoList(list_state) => (),
                             _ => (),
-                        }
-
-                        continue;
-                    }
-
-                    if session.confirm.is_some() {
-                        match key.code {
-                            KeyCode::Up => {
-                                session.confirm_scroll = session.confirm_scroll.saturating_sub(1)
-                            }
-                            KeyCode::Down => session.confirm_scroll += 1,
-                            _ => (),
-                        }
-                        continue;
-                    }
-
-                    match key.code {
-                        KeyCode::Up => session.scroll_state.scroll_up(),
-                        KeyCode::Down => session.scroll_state.scroll_down(),
+                        },
                         _ => (),
                     }
 
-                    _ = session.textarea.input(key);
-                }
-                TuiEvent::ToggleTodo => {
-                    if session.todo_select_state.is_none() {
-                        session.todo_select_state =
-                            Some(ListState::default().with_selected(Some(0)));
-                    } else {
-                        session.todo_select_state = None;
+                    if matches!(session.popup_state, PopupState::None) {
+                        _ = session.textarea.input(key);
                     }
                 }
                 TuiEvent::Paste(string) => _ = session.textarea.insert_str(string),
                 TuiEvent::Input(_) => (),
                 TuiEvent::Resize(_, _) => (),
-                TuiEvent::ScrollUp => session.scroll_state.scroll_up(),
+                TuiEvent::ScrollUp => match &mut session.popup_state {
+                    // session.scroll_state.scroll_up(),
+                    PopupState::None => session.scroll_state.scroll_up(),
+                    PopupState::Confirm { req, scroll } => {
+                        *scroll = scroll.saturating_sub(0);
+                    }
+                    _ => (),
+                },
                 TuiEvent::ScrollDown => session.scroll_state.scroll_down(),
-                TuiEvent::Accept => {
-                    if let Some(req) = session.confirm.take() {
+                TuiEvent::Accept => match session.popup_state {
+                    PopupState::Confirm { req, scroll } => {
                         req.respond.send(true).unwrap();
+                        session.popup_state = PopupState::None;
                     }
-                }
-                TuiEvent::Decline => {
-                    if let Some(req) = session.confirm.take() {
+                    _ => (),
+                },
+                TuiEvent::Decline => match session.popup_state {
+                    PopupState::Confirm { req, scroll } => {
                         req.respond.send(false).unwrap();
+                        session.popup_state = PopupState::None;
                     }
-                }
+                    _ => (),
+                },
                 TuiEvent::Clear => {
                     if session.runner.is_running().await {
                         continue;
@@ -455,10 +467,6 @@ where
                 }
                 TuiEvent::Prompt => {
                     if session.runner.is_running().await {
-                        continue;
-                    }
-
-                    if let Some(_select_state) = session.model_select_state.take() {
                         continue;
                     }
 
@@ -557,22 +565,22 @@ pub fn render(
             &mut session.running_spinner_state,
         );
 
-        if let Some(todo_state) = session.todo_select_state.as_mut() {
-            let modal = window.inner(Margin::new(10, 10));
-            TodoWidget::new(todo.iter(), theme).render(modal, frame.buffer_mut(), todo_state);
-        }
-
-        // select confirm
-        if let Some(confirm) = session.confirm.as_ref() {
-            let modal = window.inner(Margin::new(5, 5));
-            ConfirmWidget::new(&confirm.message, &session, theme).render(modal, frame.buffer_mut());
-        }
-
-        // select model
-        if let Some(select) = session.model_select_state.as_mut() {
-            let selection =
-                widgets::ModelSelectorWidget::new(session.config.model_list.clone(), theme);
-            selection.render(window, frame.buffer_mut(), select);
+        match &mut session.popup_state {
+            PopupState::None => (),
+            PopupState::Help => (),
+            PopupState::ModelSelect(list_state) => {
+                let selection =
+                    widgets::ModelSelectorWidget::new(session.config.model_list.clone(), theme);
+                selection.render(window, frame.buffer_mut(), list_state);
+            }
+            PopupState::TodoList(list_state) => {
+                let modal = window.inner(Margin::new(10, 10));
+                TodoWidget::new(todo.iter(), theme).render(modal, frame.buffer_mut(), list_state);
+            }
+            PopupState::Confirm { req, scroll } => {
+                let modal = window.inner(Margin::new(5, 5));
+                ConfirmWidget::new(&req.message, *scroll, theme).render(modal, frame.buffer_mut());
+            }
         }
     }
 }
@@ -633,7 +641,7 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
                             }
 
                             if is_ctrl && c == 'k' {
-                                tx.send(TuiEvent::SelectModel).unwrap();
+                                tx.send(TuiEvent::ToggleSelectModal).unwrap();
                                 continue;
                             }
 
@@ -648,7 +656,7 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
                             }
 
                             if is_ctrl && c == 't' {
-                                tx.send(TuiEvent::ToggleTodo).unwrap();
+                                tx.send(TuiEvent::ToggleShowTodo).unwrap();
                                 continue;
                             }
 
@@ -692,8 +700,8 @@ pub enum TuiEvent {
     Clear,
     Prompt,
     Exit,
-    SelectModel,
-    ToggleTodo,
+    ToggleSelectModal,
+    ToggleShowTodo,
     Paste(String),
     Key(KeyEvent),
 }
