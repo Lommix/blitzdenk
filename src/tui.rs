@@ -1,15 +1,18 @@
 use crate::{
-    agent::{AResult, Agent, AgentEvent, AgentMessage, PermissionRequest, TodoItem},
+    agent::{
+        AResult, Agent, AgentContext, AgentEvent, AgentMessage, PermissionRequest, Status, TodoItem,
+    },
     config::Config,
     error::AiError,
     prompts, tools,
-    widgets::{self, ConfirmWidget, MessageState},
+    widgets::{self, ConfirmWidget, MessageState, TodoWidget},
 };
 use crossbeam::channel::{self, Receiver, Sender};
 use genai::chat::{ChatMessage, ChatRequest};
 use ratatui::{
+    buffer::Buffer,
     crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers},
-    layout::{Constraint, Direction, Layout, Margin},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     prelude::Backend,
     style::Style,
     widgets::{ListState, StatefulWidget, Widget},
@@ -18,6 +21,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    hash::Hash,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -32,17 +36,31 @@ pub struct TuiMessage {
 }
 
 pub struct SessionState<'a> {
+    pub config: Config,
     pub messages: Vec<TuiMessage>,
     pub token_cost: i32,
     pub textarea: TextArea<'a>,
     pub runner: AgentRunner,
-    pub confirm: Option<PermissionRequest>,
     pub scroll_state: ScrollViewState,
     pub running: bool,
     pub running_spinner_state: ThrobberState,
     pub model_select_state: Option<ListState>,
-    pub config: Config,
+    pub todo_select_state: Option<ListState>,
+    pub confirm: Option<PermissionRequest>,
     pub confirm_scroll: u16,
+}
+
+#[derive(Default)]
+pub enum PopupState {
+    #[default]
+    None,
+    Help,
+    ModelSelect(ListState),
+    TodoList(ListState),
+    Confirm {
+        req: PermissionRequest,
+        scroll: u16,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,6 +82,7 @@ impl<'a> SessionState<'a> {
             scroll_state: ScrollViewState::default(),
             running: false,
             running_spinner_state: ThrobberState::default(),
+            todo_select_state: None,
             model_select_state: None,
             config,
             confirm_scroll: 0,
@@ -118,7 +137,7 @@ impl<'a> SessionState<'a> {
         {
             let mut agent = runner.agent.lock().await;
             agent.chat = state.chat.clone();
-            agent.context.todo_list = Arc::new(Mutex::new(state.todo.clone()));
+            *agent.context.todo_list.lock().await = state.todo.clone();
         }
 
         let session = Self {
@@ -130,6 +149,7 @@ impl<'a> SessionState<'a> {
             scroll_state: ScrollViewState::default(),
             running: false,
             running_spinner_state: ThrobberState::default(),
+            todo_select_state: None,
             model_select_state: None,
             confirm_scroll: 0,
             config,
@@ -146,6 +166,7 @@ pub enum AgentCmd {
 
 pub struct AgentRunner {
     pub agent: Arc<Mutex<Agent>>,
+    pub context: AgentContext,
     pub cmd_channel: Sender<AgentCmd>,
     pub handle: JoinHandle<()>,
     pub msg_rx: Receiver<AgentEvent>,
@@ -168,6 +189,8 @@ impl AgentRunner {
         agent.add_tool(tools::TodoWrite);
         agent.add_tool(tools::Ls);
         agent.add_system_msg(Self::build_system_prompt());
+
+        let context = agent.context.clone();
 
         let agent_wrapped = Arc::new(Mutex::new(agent));
         let (cmd_tx, cmd_rx) = channel::unbounded();
@@ -225,6 +248,7 @@ impl AgentRunner {
             handle,
             msg_rx,
             state,
+            context,
         }
     }
 
@@ -293,7 +317,7 @@ where
     T: Backend,
 {
     let cwd = std::env::current_dir()
-        .unwrap_or_default()
+        .expect("failed to read current dir!")
         .to_string_lossy()
         .to_string();
 
@@ -327,7 +351,8 @@ where
                 TuiEvent::Tick => {
                     session.running = session.runner.is_running().await;
                     session.running_spinner_state.calc_next();
-                    _ = terminal.draw(render(&mut session)).unwrap();
+                    let todo = session.runner.context.todo_list.lock().await.clone();
+                    _ = terminal.draw(render(&mut session, todo)).unwrap();
                 }
                 TuiEvent::SelectPrev => {
                     _ = session
@@ -339,7 +364,12 @@ where
                     _ = session.model_select_state.as_mut().map(|l| l.select_next())
                 }
                 TuiEvent::SelectModel => {
-                    session.model_select_state = Some(ListState::default().with_selected(Some(0)))
+                    if session.model_select_state.is_none() {
+                        session.model_select_state =
+                            Some(ListState::default().with_selected(Some(0)))
+                    } else {
+                        session.model_select_state = None;
+                    }
                 }
                 TuiEvent::Key(key) => {
                     if let Some(state) = session.model_select_state.as_mut() {
@@ -390,6 +420,14 @@ where
                     }
 
                     _ = session.textarea.input(key);
+                }
+                TuiEvent::ToggleTodo => {
+                    if session.todo_select_state.is_none() {
+                        session.todo_select_state =
+                            Some(ListState::default().with_selected(Some(0)));
+                    } else {
+                        session.todo_select_state = None;
+                    }
                 }
                 TuiEvent::Paste(string) => _ = session.textarea.insert_str(string),
                 TuiEvent::Input(_) => (),
@@ -459,7 +497,10 @@ where
     Ok(())
 }
 
-pub fn render(session: &mut SessionState) -> impl FnOnce(&mut Frame) {
+pub fn render(
+    session: &mut SessionState,
+    todo: HashMap<String, TodoItem>,
+) -> impl FnOnce(&mut Frame) {
     move |frame| {
         let theme = session.config.theme;
         let window = frame.area();
@@ -467,8 +508,8 @@ pub fn render(session: &mut SessionState) -> impl FnOnce(&mut Frame) {
         let (chat_window, prompt_window, status_window) = Layout::new(
             Direction::Vertical,
             [
-                Constraint::Percentage(80),
                 Constraint::Fill(1),
+                Constraint::Length(6),
                 Constraint::Length(1),
             ],
         )
@@ -502,12 +543,24 @@ pub fn render(session: &mut SessionState) -> impl FnOnce(&mut Frame) {
         let input_widget = widgets::PromptWidget::new(session, theme);
         input_widget.render(prompt_window, frame.buffer_mut());
 
-        let status_widget = widgets::StatusLineWidget::new(session, theme);
+        let total_tasks = todo.len();
+        let completed_tasks = todo
+            .iter()
+            .filter(|(_, i)| i.status == Status::Completed)
+            .count();
+
+        let status_widget =
+            widgets::StatusLineWidget::new(session, theme, completed_tasks, total_tasks);
         status_widget.render(
             status_window,
             frame.buffer_mut(),
             &mut session.running_spinner_state,
         );
+
+        if let Some(todo_state) = session.todo_select_state.as_mut() {
+            let modal = window.inner(Margin::new(10, 10));
+            TodoWidget::new(todo.iter(), theme).render(modal, frame.buffer_mut(), todo_state);
+        }
 
         // select confirm
         if let Some(confirm) = session.confirm.as_ref() {
@@ -594,6 +647,11 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
                                 continue;
                             }
 
+                            if is_ctrl && c == 't' {
+                                tx.send(TuiEvent::ToggleTodo).unwrap();
+                                continue;
+                            }
+
                             tx.send(TuiEvent::Input(c))?;
                         }
                         _ => (),
@@ -635,6 +693,7 @@ pub enum TuiEvent {
     Prompt,
     Exit,
     SelectModel,
+    ToggleTodo,
     Paste(String),
     Key(KeyEvent),
 }

@@ -1,6 +1,7 @@
 use crate::error::AiError;
 use crossbeam::channel::Sender;
 use genai::chat::*;
+use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
@@ -217,7 +218,7 @@ impl AgentContext {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Priority {
     #[serde(rename = "high")]
     High,
@@ -227,7 +228,7 @@ pub enum Priority {
     Low,
 }
 
-#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Status {
     #[serde(rename = "completed")]
     Pending,
@@ -237,7 +238,7 @@ pub enum Status {
     Completed,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TodoItem {
     pub priority: Priority,
     pub status: Status,
