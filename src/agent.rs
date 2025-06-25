@@ -66,23 +66,21 @@ impl Agent {
             let res = client.exec_chat(&self.model, chat.clone(), None).await?;
             let token_cost = res.usage.total_tokens;
 
-            if let Some(calls) = res.clone().into_tool_calls() {
-                chat = chat.append_message(calls.clone());
+            for text in res.texts().iter() {
+                let msg = ChatMessage::assistant(text.to_string());
+                chat = chat.append_message(msg.clone());
                 self.context
                     .sender
-                    .send(AgentEvent::Message(AgentMessage::new(
-                        calls.clone().into(),
-                        token_cost,
-                    )))?;
+                    .send(AgentEvent::Message(AgentMessage::new(msg, token_cost)))?;
+            }
 
-                for call in calls {
-                    let func = self.tool_box.get(&call.fn_name).unwrap();
-                    let args: HashMap<String, Value> =
-                        serde_json::from_value(call.fn_arguments.clone()).unwrap();
+            for call in res.clone().into_tool_calls().drain(..) {
+                let func = self.tool_box.get(&call.fn_name).unwrap();
+                let args: HashMap<String, Value> =
+                    serde_json::from_value(call.fn_arguments.clone()).unwrap();
 
-                    let msg = match func(call.call_id.clone(), ToolArgs(args), self.context.clone())
-                        .await
-                    {
+                let msg =
+                    match func(call.call_id.clone(), ToolArgs(args), self.context.clone()).await {
                         Ok(msg) => msg,
                         Err(err) => ToolResponse::new(
                             call.call_id.clone(),
@@ -91,21 +89,24 @@ impl Agent {
                         .into(),
                     };
 
-                    self.context
-                        .sender
-                        .send(AgentEvent::Message(AgentMessage::new(msg.clone(), None)))?;
-                    chat = chat.append_message(msg);
-                }
-            } else {
-                if let Some(txt) = res.content_text_into_string() {
-                    let msg = ChatMessage::assistant(txt.clone());
-                    chat = chat.append_message(msg.clone());
-                    self.context
-                        .sender
-                        .send(AgentEvent::Message(AgentMessage::new(msg, token_cost)))?;
-                }
+                self.context
+                    .sender
+                    .send(AgentEvent::Message(AgentMessage::new(msg.clone(), None)))?;
+
+                chat = chat.append_message(msg);
+            }
+
+            // todo: auto finish todo list
+            if res.tool_calls().len() == 0 {
                 break;
             }
+            // if self.context.has_open_todos().await {
+            //     chat = chat.append_message(ChatMessage::user(
+            //         "you have unfinished work on your todo list.",
+            //     ));
+            // } else {
+            //     break;
+            // }
         }
 
         self.chat = chat;
@@ -190,10 +191,56 @@ pub struct AgentContext {
     pub todo_list: Arc<Mutex<HashMap<String, TodoItem>>>,
 }
 
+impl AgentContext {
+    pub async fn get_open_todos(&self) -> Vec<(String, TodoItem)> {
+        self.todo_list
+            .lock()
+            .await
+            .iter()
+            .flat_map(|entry| {
+                if entry.1.status != Status::Completed {
+                    return Some((entry.0.clone(), entry.1.clone()));
+                }
+                None
+            })
+            .collect()
+    }
+
+    pub async fn has_open_todos(&self) -> bool {
+        self.todo_list
+            .lock()
+            .await
+            .iter()
+            .filter(|entry| entry.0 != "completed")
+            .next()
+            .is_some()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub enum Priority {
+    #[serde(rename = "high")]
+    High,
+    #[serde(rename = "medium")]
+    Medium,
+    #[serde(rename = "low")]
+    Low,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub enum Status {
+    #[serde(rename = "completed")]
+    Pending,
+    #[serde(rename = "in_progress")]
+    InProgress,
+    #[serde(rename = "pending")]
+    Completed,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct TodoItem {
-    pub priority: String,
-    pub status: String,
+    pub priority: Priority,
+    pub status: Status,
     pub content: String,
 }
 

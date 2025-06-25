@@ -248,15 +248,14 @@ impl AgentRunner {
 
         if let Ok(user_context) = read_user_context() {
             system_prompt.push_str(&format!(
-                r#"
-# User Rules and Context
+                r#"# User Rules and Context
 
 Here is the user provided project context and ruleset. User context can overwrite any existing rule.
 
 <user_context>
 {}
 </user_context>
-            "#,
+"#,
                 user_context
             ));
         }

@@ -1,5 +1,4 @@
 use crate::{config::Theme, tui::SessionState};
-use owo_colors::OwoColorize;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},

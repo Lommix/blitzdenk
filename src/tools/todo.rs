@@ -1,4 +1,4 @@
-use crate::agent::{AFuture, AgentContext, AiTool, TodoItem, ToolArgs};
+use crate::agent::{AFuture, AgentContext, AiTool, Priority, Status, TodoItem, ToolArgs};
 use genai::chat::*;
 use serde_json::json;
 
@@ -254,8 +254,8 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
     fn run(tool_id: String, args: ToolArgs, ctx: AgentContext) -> AFuture<ChatMessage> {
         Box::pin(async move {
             let id = args.get::<String>("id")?;
-            let status = args.get::<String>("status")?;
-            let priority = args.get::<String>("priority")?;
+            let status = args.get::<Status>("status")?;
+            let priority = args.get::<Priority>("priority")?;
             let content = args.get::<String>("content")?;
 
             ctx.todo_list.lock().await.insert(
@@ -271,15 +271,3 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
         })
     }
 }
-
-// const TodoInfo = z.object({
-//   content: z.string().min(1).describe("Brief description of the task"),
-//   status: z
-//     .enum(["pending", "in_progress", "completed"])
-//     .describe("Current status of the task"),
-//   priority: z
-//     .enum(["high", "medium", "low"])
-//     .describe("Priority level of the task"),
-//   id: z.string().describe("Unique identifier for the todo item"),
-// })
-// type TodoInfo = z.infer<typeof TodoInfo>
