@@ -103,26 +103,3 @@ TIPS:
         })
     }
 }
-
-mod test {
-    
-    #[test]
-    fn test_grep() {
-        let matcher = grep::regex::RegexMatcher::new("output").unwrap();
-        grep::searcher::Searcher::new()
-            .search_path(
-                matcher,
-                ".",
-                UTF8(|lnum, line| {
-                    dbg!(lnum, line);
-                    // --
-                    Ok(true)
-                }),
-            )
-            .unwrap();
-    }
-}
-
-fn search_recursive() -> Vec<String> {
-    todo!()
-}

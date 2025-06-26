@@ -76,15 +76,6 @@ TIPS:
     }
 }
 
-mod test {
-    
-    #[test]
-    fn test_glob() {
-        let res = walk_with_gitignore_and_glob("**/*").unwrap();
-        dbg!(res);
-    }
-}
-
 pub fn walk_with_gitignore_and_glob(pattern: &str) -> AResult<Vec<PathBuf>> {
     let glob = glob::glob(pattern)?.flatten().collect::<Vec<_>>();
 
