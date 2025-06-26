@@ -4,11 +4,11 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum AiError {
     /// An error occurred while making a request to the AI API.
-    #[error("api fail {0}")]
+    #[error(transparent)]
     RequestError(#[from] genai::Error),
 
     /// An I/O error occurred.
-    #[error("io fail {0}")]
+    #[error(transparent)]
     IoError(#[from] std::io::Error),
 
     /// A required argument for a tool call is missing.
@@ -16,7 +16,7 @@ pub enum AiError {
     MissingArgument(String),
 
     /// An error occurred while serializing or deserializing JSON.
-    #[error("Failed to parse json `{0}`")]
+    #[error(transparent)]
     JsonError(#[from] serde_json::Error),
 
     /// A broadcast channel is down.

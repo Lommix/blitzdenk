@@ -96,7 +96,6 @@ impl Agent {
                 chat = chat.append_message(msg);
             }
 
-            // todo: auto finish todo list
             if res.tool_calls().is_empty() {
                 if self.context.has_open_todos().await {
                     chat = chat.append_message(ChatMessage::user(
