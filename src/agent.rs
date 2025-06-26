@@ -67,6 +67,7 @@ impl Agent {
             let res = client.exec_chat(&self.model, chat.clone(), None).await?;
             let token_cost = res.usage.total_tokens;
 
+            // add text message
             for text in res.texts().iter() {
                 let msg = ChatMessage::assistant(text.to_string());
                 chat = chat.append_message(msg.clone());
@@ -75,6 +76,16 @@ impl Agent {
                     .send(AgentEvent::Message(AgentMessage::new(msg, token_cost)))?;
             }
 
+            // add tool calls
+            if res.tool_calls().len() > 0 {
+                let tool_msg = ChatMessage::from(res.clone().into_tool_calls());
+                chat = chat.append_message(tool_msg.clone());
+                self.context
+                    .sender
+                    .send(AgentEvent::Message(AgentMessage::new(tool_msg, None)))?;
+            }
+
+            // resolve tool calls
             for call in res.clone().into_tool_calls().drain(..) {
                 let func = self.tool_box.get(&call.fn_name).unwrap();
                 let args: HashMap<String, Value> =
@@ -83,11 +94,7 @@ impl Agent {
                 let msg =
                     match func(call.call_id.clone(), ToolArgs(args), self.context.clone()).await {
                         Ok(msg) => msg,
-                        Err(err) => ToolResponse::new(
-                            call.call_id.clone(),
-                            json!({"error": err.to_string()}).to_string(),
-                        )
-                        .into(),
+                        Err(err) => ToolResponse::new(call.call_id.clone(), err.to_string()).into(),
                     };
 
                 self.context
@@ -97,6 +104,7 @@ impl Agent {
                 chat = chat.append_message(msg);
             }
 
+            // loop
             // todo: auto finish todo list
             if res.tool_calls().len() == 0 {
                 break;

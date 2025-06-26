@@ -13,8 +13,7 @@ repository = "https://github.com/Lommix/blitzdenk"
 clap = { version = "4.5.40", features = ["derive"] }
 crossbeam = { version = "0.8.4", features = ["crossbeam-channel"] }
 diffy = "0.4.2"
-genai = { path = "../rust-genai" }
-# genai = { git = "https://github.com/Lommix/rust-genai.git" }
+genai = { git = "https://github.com/Lommix/rust-genai.git" }
 glob = "0.3.2"
 grep = "0.3.2"
 home = "0.5.11"

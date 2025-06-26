@@ -30,6 +30,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 use tui_textarea::TextArea;
 use tui_widgets::scrollview::ScrollViewState;
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TuiMessage {
     pub message: ChatMessage,
     pub state: MessageState,
@@ -46,13 +47,6 @@ pub struct SessionState<'a> {
     pub scroll_state: ScrollViewState,
     pub running: bool,
     pub running_spinner_state: ThrobberState,
-
-    // -----------------
-    // pub model_select_state: Option<ListState>,
-    // pub todo_select_state: Option<ListState>,
-    // pub confirm: Option<PermissionRequest>,
-    // pub confirm_scroll: u16,
-    // -----------------
     pub popup_state: PopupState,
 }
 
@@ -130,7 +124,7 @@ impl<'a> SessionState<'a> {
         let state: SessionSaveState = serde_json::from_str(&state_str)?;
 
         let mut messages = Vec::new();
-        for msg in state.chat.messages.iter().skip(1) {
+        for msg in state.chat.messages.iter() {
             messages.push(TuiMessage {
                 message: msg.clone(),
                 state: MessageState::default(),
@@ -460,10 +454,10 @@ where
                     if session.runner.is_running().await {
                         continue;
                     }
-
                     session.token_cost = 0;
                     session.runner.clear().await;
                     session.messages.clear();
+                    session.textarea = TextArea::default();
                 }
                 TuiEvent::Prompt => {
                     if session.runner.is_running().await {
@@ -539,7 +533,7 @@ pub fn render(
             widgets::TitleWidget::new().render(window, frame.buffer_mut());
         } else {
             widgets::ChatWidget {
-                history: &session.messages,
+                messages: &session.messages,
                 theme,
             }
             .render(chat_window, frame.buffer_mut(), &mut session.scroll_state);

@@ -993,6 +993,7 @@ dependencies = [
 [[package]]
 name = "genai"
 version = "0.4.0-WIP"
+source = "git+https://github.com/Lommix/rust-genai.git#9ec9b21d73626cc9e656decbed08042f6ad9028d"
 dependencies = [
  "bytes",
  "derive_more 2.0.1",

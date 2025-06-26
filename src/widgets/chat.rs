@@ -7,7 +7,7 @@ use tui_widgets::scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 // chat --------------------------------------------------------------------------------------
 pub struct ChatWidget<'a> {
-    pub history: &'a Vec<TuiMessage>,
+    pub messages: &'a Vec<TuiMessage>,
     pub theme: Theme,
 }
 
@@ -28,7 +28,7 @@ impl<'a> widgets::StatefulWidget for ChatWidget<'a> {
 
         let mut msgs = Vec::new();
 
-        for msg in self.history.iter() {
+        for msg in self.messages.iter() {
             let msg_widget = super::MessageWidget::new(&msg.message, self.theme);
             let lines = msg_widget.lines(area.width);
             msgs.push((msg_widget, lines, offset, msg.state.clone()));
