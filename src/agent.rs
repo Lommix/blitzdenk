@@ -107,15 +107,14 @@ impl Agent {
             // loop
             // todo: auto finish todo list
             if res.tool_calls().len() == 0 {
-                break;
+                if self.context.has_open_todos().await {
+                    chat = chat.append_message(ChatMessage::user(
+                        "you have unfinished work on your todo list.",
+                    ));
+                } else {
+                    break;
+                }
             }
-            // if self.context.has_open_todos().await {
-            //     chat = chat.append_message(ChatMessage::user(
-            //         "you have unfinished work on your todo list.",
-            //     ));
-            // } else {
-            //     break;
-            // }
         }
 
         self.chat = chat;
@@ -220,7 +219,7 @@ impl AgentContext {
             .lock()
             .await
             .iter()
-            .filter(|entry| entry.0 != "completed")
+            .filter(|entry| matches!(entry.1.status, Status::Completed))
             .next()
             .is_some()
     }
