@@ -16,6 +16,17 @@ These CLI tools should be available on the target system:
 
 - ripgrep (rg)
 
+## Installation
+
+Standard build.
+
+```
+cargo build --release
+cp target/release/blitzdenk ~/.local/bin/
+```
+
+Or `make install` (same thing)
+
 ## Configuration
 
 All API keys are read from the your environment.
