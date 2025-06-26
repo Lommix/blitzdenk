@@ -60,7 +60,7 @@ impl AiTool for Read {
                 "total lines: {}\n<content>\n{}\n</content>",
                 total_lines, content
             );
-            Ok(ToolResponse::new(tool_id, content).into())
+            Ok(ToolResponse::new(tool_id, res).into())
         })
     }
 }

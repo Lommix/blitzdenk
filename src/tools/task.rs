@@ -1,3 +1,6 @@
+#![allow(unused)]
+
+/// [WIP]
 use crate::agent::{AgentContext, AiTool, ToolArgs};
 use genai::chat::ChatMessage;
 

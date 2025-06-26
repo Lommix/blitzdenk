@@ -76,7 +76,7 @@ TIPS:
         }))
     }
 
-    fn run(tool_id: String, args: ToolArgs, ctx: AgentContext) -> AFuture<ChatMessage> {
+    fn run(tool_id: String, args: ToolArgs, _ctx: AgentContext) -> AFuture<ChatMessage> {
         Box::pin(async move {
             let pattern = args.get::<String>("pattern")?;
             let path = args.get::<String>("path").unwrap_or("./".into());

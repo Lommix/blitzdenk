@@ -15,10 +15,6 @@ pub enum AiError {
     #[error("tool call is missing argument `{0}`")]
     MissingArgument(String),
 
-    /// An argument for a tool call could not be parsed.
-    #[error("Failed to parse argument `{0}`")]
-    ArgumentParseFailed(String),
-
     /// An error occurred while serializing or deserializing JSON.
     #[error("Failed to parse json `{0}`")]
     JsonError(#[from] serde_json::Error),

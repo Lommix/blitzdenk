@@ -44,7 +44,7 @@ Usage notes:
         }))
     }
 
-    fn run(tool_id: String, args: ToolArgs, ctx: AgentContext) -> AFuture<ChatMessage> {
+    fn run(tool_id: String, args: ToolArgs, _ctx: AgentContext) -> AFuture<ChatMessage> {
         Box::pin(async move {
             let url = args.get::<String>("url")?;
             let html = reqwest::Client::new().get(url).send().await?.text().await?;

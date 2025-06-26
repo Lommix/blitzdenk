@@ -1,15 +1,8 @@
+#![allow(unused)]
+
 pub const DEBUG_AGENT_PROMPT: &str = r#"
 With every tool call you make, you must add a comment explaining what the tool call is doing and why you are using it. This
 comment should be concise and informative.
-"#;
-
-pub const USER_CONTEXT_PROMPT: &str = r#"# User Rules and Context
-
-Here is the user provided project context and ruleset. User context can overwrite any existing rule.
-
-<user_context>
-{}
-</user_context>
 "#;
 
 pub const INIT_AGENT_PROMPT: &str = r#"Please analyze this codebase and create an AGENTS.md file containing:

@@ -30,7 +30,7 @@ Lists files and directories in a given path. The path parameter must be an absol
         }))
     }
 
-    fn run(tool_id: String, args: ToolArgs, ctx: AgentContext) -> AFuture<ChatMessage> {
+    fn run(tool_id: String, args: ToolArgs, _ctx: AgentContext) -> AFuture<ChatMessage> {
         Box::pin(async move {
             let mut path = args.get::<String>("path").unwrap_or("./".to_string());
 

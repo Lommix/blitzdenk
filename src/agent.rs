@@ -41,13 +41,6 @@ impl Agent {
         self.chat.system = Some(prompt.into());
     }
 
-    pub fn add_user_msg(&mut self, prompt: impl Into<String>) {
-        self.chat = self
-            .chat
-            .clone()
-            .append_message(ChatMessage::user(prompt.into()));
-    }
-
     pub fn add_tool<T: AiTool + 'static>(&mut self, def: T) {
         self.chat = self.chat.clone().append_tool(def.into_tool());
         self.tool_box.insert(def.name().into(), Arc::new(T::run));
@@ -198,6 +191,7 @@ pub struct AgentContext {
     pub todo_list: Arc<Mutex<HashMap<String, TodoItem>>>,
 }
 
+#[allow(unused)]
 impl AgentContext {
     pub async fn get_open_todos(&self) -> Vec<(String, TodoItem)> {
         self.todo_list
@@ -217,8 +211,8 @@ impl AgentContext {
         self.todo_list
             .lock()
             .await
-            .iter().find(|entry| matches!(entry.1.status, Status::Completed))
-            .is_some()
+            .iter()
+            .any(|entry| matches!(entry.1.status, Status::Completed))
     }
 }
 
