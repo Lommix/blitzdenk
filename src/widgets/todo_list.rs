@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::Alignment,
+    layout::{Alignment, Constraint, Flex, Layout},
     style::{Color, Style, Stylize},
     text::{Line, Span},
     widgets::{
@@ -36,7 +36,7 @@ impl<'a> TodoWidget<'a> {
                     Block::bordered()
                         .title(" [Todo List] ")
                         .title_alignment(Alignment::Center)
-                        .title_bottom(" j/k ↓↑ ")
+                        .title_bottom("[j/k: ↓↑]  [enter: toggle] [backspace: delete]")
                         .padding(Padding::top(1))
                         .title_style(Style::new().bg(Color::White).fg(theme.selection_bg))
                         .border_type(BorderType::QuadrantOutside)
@@ -61,7 +61,15 @@ impl<'a> StatefulWidget for TodoWidget<'a> {
     ) where
         Self: Sized,
     {
-        Widget::render(Clear, area, buf);
-        StatefulWidget::render(self.list, area, buf, state);
+        let [modal] = Layout::horizontal([Constraint::Length(48)])
+            .flex(Flex::Center)
+            .areas(area);
+
+        let [modal] = Layout::vertical([Constraint::Length(16)])
+            .flex(Flex::Center)
+            .areas(modal);
+
+        Widget::render(Clear, modal, buf);
+        StatefulWidget::render(self.list, modal, buf, state);
     }
 }

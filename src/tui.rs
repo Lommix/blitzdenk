@@ -175,7 +175,6 @@ impl AgentRunner {
         agent.add_tool(tools::Grep);
         agent.add_tool(tools::Read);
         agent.add_tool(tools::Edit);
-        agent.add_tool(tools::MultiEdit);
         agent.add_tool(tools::Bash);
         agent.add_tool(tools::Fetch);
         agent.add_tool(tools::Write);
@@ -404,6 +403,19 @@ where
                         },
                         KeyCode::Up => session.scroll_state.scroll_up(),
                         KeyCode::Down => session.scroll_state.scroll_down(),
+                        KeyCode::Backspace => match &session.popup_state {
+                            PopupState::TodoList(list_state) => {
+                                let index = list_state.selected().unwrap_or_default();
+                                let mut todo = session.runner.context.todo_list.lock().await;
+
+                                if let Some(key) =
+                                    todo.iter().nth(index).map(|(key, _)| key.clone())
+                                {
+                                    todo.remove_entry(&key);
+                                }
+                            }
+                            _ => (),
+                        },
                         KeyCode::Enter => match &session.popup_state {
                             PopupState::ModelSelect(list_state) => {
                                 let index = list_state.selected().unwrap_or_default();
@@ -416,7 +428,6 @@ where
                                 session.config.current_model =
                                     session.config.model_list[index].clone();
                                 session.config.save().await;
-
                                 session.popup_state = PopupState::None;
                             }
                             PopupState::TodoList(list_state) => {
@@ -601,12 +612,10 @@ pub fn render(
                 selection.render(window, frame.buffer_mut(), list_state);
             }
             PopupState::TodoList(list_state) => {
-                let modal = window.inner(Margin::new(10, 10));
-                TodoWidget::new(todo.iter(), theme).render(modal, frame.buffer_mut(), list_state);
+                TodoWidget::new(todo.iter(), theme).render(window, frame.buffer_mut(), list_state);
             }
             PopupState::Confirm { req, scroll } => {
-                let modal = window.inner(Margin::new(5, 5));
-                ConfirmWidget::new(&req.message, *scroll, theme).render(modal, frame.buffer_mut());
+                ConfirmWidget::new(&req.message, *scroll, theme).render(window, frame.buffer_mut());
             }
         }
     }

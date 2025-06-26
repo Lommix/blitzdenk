@@ -15,8 +15,7 @@ impl AiTool for Edit {
 
     fn description(&self) -> Option<&'static str> {
         Some(
-            r#"
-Performs exact string replacements in files.
+            r#"Performs exact string replacements in files.
 
 Usage:
 - You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
@@ -45,6 +44,10 @@ Usage:
                     "type": "string",
                     "description": "The text to replace it with (must be different from old_string)"
                 },
+                "replace_all":{
+                    "type": "boolean",
+                    "description": "Replace all occurrences of old_string (default false)",
+                }
             },
             "required": ["path", "old_string", "new_string"],
         }))
@@ -55,6 +58,7 @@ Usage:
             let path = args.get::<String>("path")?;
             let old = args.get::<String>("old_string")?;
             let new = args.get::<String>("new_string")?;
+            let replace_all = args.get::<bool>("replace_all").unwrap_or_default();
 
             let old_content = tokio::fs::read_to_string(&path).await?;
 
@@ -64,7 +68,11 @@ Usage:
                 ));
             }
 
-            let new_content = old_content.replace(&old, &new);
+            let new_content = match replace_all {
+                true => old_content.replace(&old, &new),
+                false => old_content.replacen(&old, &new, 1),
+            };
+
             let patch = DiffOptions::default().create_patch(&old_content, &new_content);
 
             let req_msg = format!(
@@ -159,8 +167,12 @@ If you want to create a new file, use:
                             "new_string": {
                                 "type": "string",
                                 "description": "The text to replace it with (must be different from old_string)"
+                            },
+                            "replace_all":{
+                                "type": "boolean",
+                                "description": "Replace all occurrences of old_string (default false)",
                             }
-                        }
+                        },
                     }
                 },
             },
@@ -182,7 +194,11 @@ If you want to create a new file, use:
                         "the `old_string` argument cannot be found in the original file!".into(),
                     ));
                 }
-                new_content = new_content.replace(&arg.old_string, &arg.new_string);
+
+                new_content = match arg.replace_all {
+                    true => new_content.replace(&arg.old_string, &arg.new_string),
+                    false => new_content.replacen(&arg.old_string, &arg.new_string, 1),
+                };
             }
 
             let patch = DiffOptions::default().create_patch(&file_content, &new_content);
@@ -209,4 +225,5 @@ If you want to create a new file, use:
 struct EditArg {
     old_string: String,
     new_string: String,
+    replace_all: bool,
 }
