@@ -12,15 +12,23 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             current_model: "gemini-2.5-pro-preview-06-05".into(),
-            model_list: vec![
-                "claude-sonnet-4-20250514".into(),
-                "claude-3-7-sonnet-20250219".into(),
-                "gpt-4.1-nano".into(),
-                "gpt-4.1-mini".into(),
-                "gpt-4.1".into(),
-                "gemini-2.5-flash-preview-05-20".into(),
-                "gemini-2.5-pro-preview-06-05".into(),
-            ],
+            model_list: [
+                "claude-opus-4-20250514",
+                "claude-sonnet-4-20250514",
+                "claude-3-7-sonnet-latest",
+                "claude-3-5-haiku-latest",
+                "gpt-4.1",
+                "gpt-4.1-mini",
+                "gpt-4.1-nano",
+                "gemini-2.5-pro",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite-preview-06-17",
+                "gemini-2.0-flash-lite",
+                "grok-3-beta",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
             theme: Theme::lommix(),
         }
     }

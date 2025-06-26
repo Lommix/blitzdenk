@@ -1,5 +1,3 @@
-# Agent Operating Guidelines
-
 ## Build, Lint, Test Commands
 
 - Use `cargo build` for building the project.
