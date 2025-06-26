@@ -120,9 +120,9 @@ impl<'a> widgets::StatefulWidget for MessageWidget<'a> {
         match self {
             MessageWidget::GenericToolCall(mut lines) => {
                 let mut rect = Rect::new(area.x, area.y, area.width, 1);
-                lines.drain(..).enumerate().for_each(|(i, line)| {
+                lines.drain(..).for_each(|line| {
                     line.render(rect, buf);
-                    rect.y += i as u16;
+                    rect.y += 1;
                 });
             }
             MessageWidget::GenericChatMessage { header, paragraph } => {
