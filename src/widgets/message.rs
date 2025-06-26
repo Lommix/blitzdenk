@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Theme;
 
+/// Stores open/collapse state for MessageWidget.
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct MessageState {
     collapse: bool,
@@ -26,7 +27,7 @@ impl MessageState {
     }
 }
 
-// message ----------------------------------------------------------------------------------
+/// Widget to display chat or tool messages in the UI.
 pub enum MessageWidget<'a> {
     GenericToolCall(Vec<Line<'a>>),
     GenericToolResponse {

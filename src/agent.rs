@@ -1,9 +1,8 @@
 use crate::error::AiError;
 use crossbeam::channel::Sender;
 use genai::chat::*;
-use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{oneshot, Mutex};
 

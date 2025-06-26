@@ -7,6 +7,7 @@ use ratatui::{
     },
 };
 
+/// Selectable list for available model choices.
 pub struct ModelSelectorWidget<'a> {
     list: List<'a>,
 }

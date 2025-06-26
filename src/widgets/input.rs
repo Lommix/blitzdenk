@@ -7,6 +7,7 @@ use ratatui::{
 use tui_textarea::TextArea;
 
 // input -------------------------------------------------------------------------------------
+/// Renders the user prompt input textarea.
 pub struct PromptWidget<'a> {
     textarea: &'a TextArea<'a>,
 }

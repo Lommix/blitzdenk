@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use crate::{agent::AResult, config::Config};
 use clap::{Parser, Subcommand};
 use ratatui::crossterm::{

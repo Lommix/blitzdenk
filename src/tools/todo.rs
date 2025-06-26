@@ -258,7 +258,9 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
             let priority = args.get::<Priority>("priority")?;
             let content = args.get::<String>("content")?;
 
-            ctx.todo_list.lock().await.insert(
+            let mut todo_list = ctx.todo_list.lock().await;
+
+            todo_list.insert(
                 id,
                 TodoItem {
                     priority,
@@ -267,7 +269,7 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
                 },
             );
 
-            Ok(ToolResponse::new(tool_id, "task saved").into())
+            Ok(ToolResponse::new(tool_id, "todo list updated").into())
         })
     }
 }

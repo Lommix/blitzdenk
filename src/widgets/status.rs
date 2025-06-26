@@ -10,6 +10,7 @@ use tui_textarea::TextArea;
 
 // status ------------------------------------------------------------------------------------
 #[derive(Default)]
+/// Application status bar with spinner, model, and tokens.
 pub struct StatusLineWidget<'a> {
     style: Style,
     spinner: Throbber<'a>,

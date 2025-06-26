@@ -6,6 +6,7 @@ use ratatui::{
 use tui_widgets::scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 
 // chat --------------------------------------------------------------------------------------
+/// Displays a scrollable list of chat messages.
 pub struct ChatWidget<'a> {
     pub messages: &'a Vec<TuiMessage>,
     pub theme: Theme,

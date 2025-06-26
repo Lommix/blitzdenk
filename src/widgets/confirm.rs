@@ -8,6 +8,7 @@ use ratatui::{
 use crate::{config::Theme, tui::SessionState};
 
 // input -------------------------------------------------------------------------------------
+/// Confirmation modal with styled markdown content.
 pub struct ConfirmWidget<'a> {
     content: Paragraph<'a>,
 }

@@ -7,6 +7,7 @@ use ratatui::{
 use tui_widgets::big_text::BigText;
 
 // input -------------------------------------------------------------------------------------
+/// Displays the application title and info panel.
 pub struct TitleWidget<'a> {
     title: BigText<'a>,
     info: Paragraph<'a>,

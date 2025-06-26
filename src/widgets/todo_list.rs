@@ -10,6 +10,7 @@ use ratatui::{
 
 use crate::{agent::{Status, TodoItem}, config::Theme};
 
+/// Todo list widget showing tasks and their statuses.
 pub struct TodoWidget<'a> {
     list: List<'a>,
 }
