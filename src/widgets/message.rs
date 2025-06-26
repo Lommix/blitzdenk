@@ -80,8 +80,7 @@ impl<'a> MessageWidget<'a> {
                         let mut line = Line::default().bg(theme.primary).fg(theme.text_color);
                         line.push_span(Span::raw(format!("[{}]", call.fn_name)).bold());
                         line.push_span(Span::raw(" with ").italic());
-                        let preview: String = call.fn_arguments.to_string();
-                        line.push_span(Span::raw(format!(" {} ", preview)).bold());
+                        line.push_span(Span::raw(format!(" {:?} ", call.fn_arguments)).bold());
                         line
                     })
                     .collect();
@@ -144,14 +143,13 @@ impl<'a> widgets::StatefulWidget for MessageWidget<'a> {
                 let mut offset = 0;
                 for (preview, content) in preview.drain(..).zip(content.drain(..)) {
                     let rect = Rect::new(area.x, area.y + offset, area.width, 1);
-                    preview.render(area, buf);
-
+                    preview.render(rect, buf);
                     offset += 1;
 
                     if let Some(content) = content {
                         let lines = content.line_count(area.width) as u16;
                         let rect = Rect::new(area.x, area.y + offset, area.width, lines);
-                        content.render(area, buf);
+                        content.render(rect, buf);
                         offset += lines;
                     }
                 }
