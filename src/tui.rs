@@ -35,14 +35,12 @@ pub struct TuiMessage {
 }
 
 pub struct SessionState<'a> {
-    // -----------------
     pub messages: Vec<TuiMessage>,
     pub textarea: TextArea<'a>,
     pub runner: AgentRunner,
-    // -----------------
-    pub config: Config,
     pub token_cost: i32,
     pub scroll_state: ScrollViewState,
+    pub config: Config,
     pub running: bool,
     pub running_spinner_state: ThrobberState,
     pub popup_state: PopupState,
@@ -137,7 +135,7 @@ impl<'a> SessionState<'a> {
             *agent.context.todo_list.lock().await = state.todo.clone();
         }
 
-        let session = Self {
+        let mut session = Self {
             messages,
             token_cost: state.token_cost,
             textarea: TextArea::new(state.input),
@@ -148,6 +146,8 @@ impl<'a> SessionState<'a> {
             popup_state: PopupState::None,
             config,
         };
+
+        session.scroll_state.scroll_to_bottom();
 
         Ok(session)
     }
@@ -253,6 +253,10 @@ impl AgentRunner {
 
         self.cmd_channel.send(AgentCmd::Run)?;
         Ok(())
+    }
+
+    pub fn shutdown(&self) {
+        self.handle.abort();
     }
 
     pub async fn clear(&self) {
@@ -434,14 +438,18 @@ where
                     _ => (),
                 },
                 TuiEvent::ScrollDown => session.scroll_state.scroll_down(),
-                TuiEvent::Accept => if let PopupState::Confirm { req, scroll } = session.popup_state {
-                    req.respond.send(true).unwrap();
-                    session.popup_state = PopupState::None;
-                },
-                TuiEvent::Decline => if let PopupState::Confirm { req, scroll } = session.popup_state {
-                    req.respond.send(false).unwrap();
-                    session.popup_state = PopupState::None;
-                },
+                TuiEvent::Accept => {
+                    if let PopupState::Confirm { req, scroll } = session.popup_state {
+                        req.respond.send(true).unwrap();
+                        session.popup_state = PopupState::None;
+                    }
+                }
+                TuiEvent::Decline => {
+                    if let PopupState::Confirm { req, scroll } = session.popup_state {
+                        req.respond.send(false).unwrap();
+                        session.popup_state = PopupState::None;
+                    }
+                }
                 TuiEvent::Clear => {
                     if session.runner.is_running().await {
                         continue;
@@ -480,6 +488,7 @@ where
                     };
                 }
                 TuiEvent::Exit => {
+                    session.runner.shutdown();
                     session.save().await.unwrap();
                     break;
                 }
