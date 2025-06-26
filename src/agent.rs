@@ -101,7 +101,7 @@ impl Agent {
             if res.tool_calls().is_empty() {
                 if self.context.has_open_todos().await {
                     chat = chat.append_message(ChatMessage::user(
-                        "you have unfinished work on your todo list.",
+                        "you have unfinished work on your todo list. please update the list according to your task progression.",
                     ));
                 } else {
                     break;
@@ -212,7 +212,9 @@ impl AgentContext {
             .lock()
             .await
             .iter()
-            .any(|entry| matches!(entry.1.status, Status::Completed))
+            .filter(|entry| matches!(entry.1.status, Status::Completed))
+            .next()
+            .is_some()
     }
 }
 

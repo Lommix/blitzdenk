@@ -6,7 +6,7 @@ mod status;
 mod title;
 mod confirm;
 mod todo_list;
-
+mod help;
 pub use chat::ChatWidget;
 pub use input::PromptWidget;
 pub use message::{MessageState, MessageWidget};
@@ -15,3 +15,4 @@ pub use status::StatusLineWidget;
 pub use title::TitleWidget;
 pub use confirm::ConfirmWidget;
 pub use todo_list::TodoWidget;
+pub use help::HelpWidget;

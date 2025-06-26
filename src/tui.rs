@@ -366,6 +366,11 @@ where
                     }
                     _ => (),
                 },
+                TuiEvent::ToggleHelp => match &session.popup_state {
+                    PopupState::Help => session.popup_state = PopupState::None,
+                    PopupState::Confirm { req, scroll } => (),
+                    _ => session.popup_state = PopupState::Help,
+                },
                 TuiEvent::ToggleSelectModal => match &session.popup_state {
                     PopupState::ModelSelect(_) => session.popup_state = PopupState::None,
                     PopupState::Confirm { req, scroll } => (),
@@ -374,7 +379,7 @@ where
                             PopupState::ModelSelect(ListState::default().with_selected(Some(0)))
                     }
                 },
-                TuiEvent::ToggleShowTodo => match &session.popup_state {
+                TuiEvent::ToggleTodo => match &session.popup_state {
                     PopupState::TodoList(_) => session.popup_state = PopupState::None,
                     PopupState::Confirm { req, scroll } => (),
                     _ => {
@@ -395,9 +400,7 @@ where
                                     list_state.select_next();
                                 }
                             }
-                            PopupState::Confirm { req, scroll } => {}
-                            PopupState::None => (),
-                            PopupState::Help => (),
+                            _ => (),
                         },
                         KeyCode::Up => session.scroll_state.scroll_up(),
                         KeyCode::Down => session.scroll_state.scroll_down(),
@@ -416,7 +419,24 @@ where
 
                                 session.popup_state = PopupState::None;
                             }
-                            PopupState::TodoList(list_state) => (),
+                            PopupState::TodoList(list_state) => {
+                                let index = list_state.selected().unwrap_or_default();
+                                if let Some((_, item)) = session
+                                    .runner
+                                    .context
+                                    .todo_list
+                                    .lock()
+                                    .await
+                                    .iter_mut()
+                                    .nth(index)
+                                {
+                                    match item.status {
+                                        Status::Pending => item.status = Status::Completed,
+                                        Status::InProgress => item.status = Status::Completed,
+                                        Status::Completed => item.status = Status::Pending,
+                                    }
+                                }
+                            }
                             _ => (),
                         },
                         _ => (),
@@ -430,14 +450,19 @@ where
                 TuiEvent::Input(_) => (),
                 TuiEvent::Resize(_, _) => (),
                 TuiEvent::ScrollUp => match &mut session.popup_state {
-                    // session.scroll_state.scroll_up(),
                     PopupState::None => session.scroll_state.scroll_up(),
                     PopupState::Confirm { req, scroll } => {
                         *scroll = scroll.saturating_sub(0);
                     }
                     _ => (),
                 },
-                TuiEvent::ScrollDown => session.scroll_state.scroll_down(),
+                TuiEvent::ScrollDown => match &mut session.popup_state {
+                    PopupState::None => session.scroll_state.scroll_down(),
+                    PopupState::Confirm { req, scroll } => {
+                        *scroll += 1;
+                    }
+                    _ => (),
+                },
                 TuiEvent::Accept => {
                     if let PopupState::Confirm { req, scroll } = session.popup_state {
                         req.respond.send(true).unwrap();
@@ -468,12 +493,16 @@ where
 
                     match prompt.as_str() {
                         "/init" => {
-                            session.textarea = TextArea::new(
-                                prompts::INIT_AGENT_PROMPT
-                                    .split('\n')
-                                    .map(|s| s.to_string())
-                                    .collect(),
-                            )
+                            session.messages.push(TuiMessage {
+                                message: ChatMessage::user(prompts::INIT_AGENT_PROMPT),
+                                state: MessageState::default(),
+                            });
+                            session
+                                .runner
+                                .add_message(ChatMessage::user(prompts::INIT_AGENT_PROMPT))
+                                .await;
+                            session.runner.start_cycle().await?;
+                            session.textarea = TextArea::default();
                         }
                         any => {
                             session.messages.push(TuiMessage {
@@ -562,7 +591,10 @@ pub fn render(
 
         match &mut session.popup_state {
             PopupState::None => (),
-            PopupState::Help => (),
+            PopupState::Help => {
+                let modal = window.inner(Margin::new(10, 10));
+                widgets::HelpWidget::new(theme).render(modal, frame.buffer_mut());
+            }
             PopupState::ModelSelect(list_state) => {
                 let selection =
                     widgets::ModelSelectorWidget::new(session.config.model_list.clone(), theme);
@@ -651,11 +683,14 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
                             }
 
                             if is_ctrl && c == 't' {
-                                tx.send(TuiEvent::ToggleShowTodo).unwrap();
+                                tx.send(TuiEvent::ToggleTodo).unwrap();
                                 continue;
                             }
 
-                            tx.send(TuiEvent::Input(c))?;
+                            if is_ctrl && c == 'h' {
+                                tx.send(TuiEvent::ToggleHelp).unwrap();
+                                continue;
+                            }
                         }
                         _ => (),
                     }
@@ -696,7 +731,8 @@ pub enum TuiEvent {
     Prompt,
     Exit,
     ToggleSelectModal,
-    ToggleShowTodo,
+    ToggleTodo,
+    ToggleHelp,
     Paste(String),
     Key(KeyEvent),
 }

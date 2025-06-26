@@ -21,7 +21,7 @@ impl<'a> ModelSelectorWidget<'a> {
         let list = List::default()
             .block(
                 Block::bordered()
-                    .title(" Select Model ")
+                    .title(" [Select Model] ")
                     .title_alignment(Alignment::Center)
                     .title_bottom(" j/k ↓↑ ")
                     .padding(Padding::top(1))
