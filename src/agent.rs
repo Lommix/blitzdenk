@@ -76,7 +76,7 @@ impl Agent {
             }
 
             // add tool calls
-            if res.tool_calls().len() > 0 {
+            if !res.tool_calls().is_empty() {
                 let tool_msg = ChatMessage::from(res.clone().into_tool_calls());
                 chat = chat.append_message(tool_msg.clone());
                 self.context
@@ -105,7 +105,7 @@ impl Agent {
 
             // loop
             // todo: auto finish todo list
-            if res.tool_calls().len() == 0 {
+            if res.tool_calls().is_empty() {
                 if self.context.has_open_todos().await {
                     chat = chat.append_message(ChatMessage::user(
                         "you have unfinished work on your todo list.",
@@ -217,9 +217,7 @@ impl AgentContext {
         self.todo_list
             .lock()
             .await
-            .iter()
-            .filter(|entry| matches!(entry.1.status, Status::Completed))
-            .next()
+            .iter().find(|entry| matches!(entry.1.status, Status::Completed))
             .is_some()
     }
 }

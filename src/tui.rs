@@ -10,9 +10,8 @@ use crate::{
 use crossbeam::channel::{self, Receiver, Sender};
 use genai::chat::{ChatMessage, ChatRequest};
 use ratatui::{
-    buffer::Buffer,
     crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers},
-    layout::{Constraint, Direction, Layout, Margin, Rect},
+    layout::{Constraint, Direction, Layout, Margin},
     prelude::Backend,
     style::Style,
     widgets::{ListState, StatefulWidget, Widget},
@@ -21,7 +20,6 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    hash::Hash,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -436,19 +434,13 @@ where
                     _ => (),
                 },
                 TuiEvent::ScrollDown => session.scroll_state.scroll_down(),
-                TuiEvent::Accept => match session.popup_state {
-                    PopupState::Confirm { req, scroll } => {
-                        req.respond.send(true).unwrap();
-                        session.popup_state = PopupState::None;
-                    }
-                    _ => (),
+                TuiEvent::Accept => if let PopupState::Confirm { req, scroll } = session.popup_state {
+                    req.respond.send(true).unwrap();
+                    session.popup_state = PopupState::None;
                 },
-                TuiEvent::Decline => match session.popup_state {
-                    PopupState::Confirm { req, scroll } => {
-                        req.respond.send(false).unwrap();
-                        session.popup_state = PopupState::None;
-                    }
-                    _ => (),
+                TuiEvent::Decline => if let PopupState::Confirm { req, scroll } = session.popup_state {
+                    req.respond.send(false).unwrap();
+                    session.popup_state = PopupState::None;
                 },
                 TuiEvent::Clear => {
                     if session.runner.is_running().await {

@@ -1,7 +1,6 @@
 use crate::agent::{AFuture, AgentContext, AiTool, ToolArgs};
 use genai::chat::*;
 use ignore::WalkBuilder;
-use ratatui::widgets::Widget;
 use serde_json::json;
 
 pub struct Ls;

@@ -1,8 +1,8 @@
 use genai::chat::ChatMessage;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style, Stylize},
-    text::{Line, Span, Text},
+    style::Stylize,
+    text::{Line, Span},
     widgets::{self, Paragraph, Widget},
 };
 use serde::{Deserialize, Serialize};

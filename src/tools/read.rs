@@ -5,7 +5,6 @@ use crate::{
 use genai::chat::*;
 use ignore::WalkBuilder;
 use serde_json::json;
-use std::process::Stdio;
 
 pub struct Read;
 impl AiTool for Read {
@@ -79,5 +78,5 @@ fn is_part_of_project(path: &str) -> bool {
             return true;
         }
     }
-    return false;
+    false
 }

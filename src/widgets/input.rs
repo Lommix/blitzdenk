@@ -2,7 +2,7 @@ use crate::{config::Theme, tui::SessionState};
 use ratatui::{
     layout::Rect,
     style::Color,
-    widgets::{self, Block, BorderType, Borders, Padding, Paragraph},
+    widgets::{self, Block, BorderType, Borders, Padding},
 };
 use tui_textarea::TextArea;
 

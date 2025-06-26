@@ -1,12 +1,11 @@
-use crate::{agent::TodoItem, config::Theme, tui::SessionState};
+use crate::{config::Theme, tui::SessionState};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Modifier, Style, Stylize},
     text::Line,
-    widgets::{self, Block, BorderType, Borders, Padding, StatefulWidget, Widget},
+    widgets::{self, StatefulWidget, Widget},
 };
 use throbber_widgets_tui::{Throbber, ThrobberState};
-use tui_textarea::TextArea;
 
 // status ------------------------------------------------------------------------------------
 #[derive(Default)]

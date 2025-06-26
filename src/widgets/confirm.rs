@@ -1,11 +1,10 @@
 use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Style, Stylize},
-    text::{Line, Text},
     widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
 };
 
-use crate::{config::Theme, tui::SessionState};
+use crate::config::Theme;
 
 // input -------------------------------------------------------------------------------------
 /// Confirmation modal with styled markdown content.

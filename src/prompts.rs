@@ -3,7 +3,7 @@ With every tool call you make, you must add a comment explaining what the tool c
 comment should be concise and informative.
 "#;
 
-pub const USER_CONTEXT_PROMPT: &'static str = r#"# User Rules and Context
+pub const USER_CONTEXT_PROMPT: &str = r#"# User Rules and Context
 
 Here is the user provided project context and ruleset. User context can overwrite any existing rule.
 

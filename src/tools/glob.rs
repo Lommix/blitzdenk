@@ -1,9 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{
-    agent::{AFuture, AResult, AgentContext, AiTool, ToolArgs},
-    error::AiError,
-};
+use crate::agent::{AFuture, AResult, AgentContext, AiTool, ToolArgs};
 use genai::chat::*;
 use ignore::WalkBuilder;
 use serde_json::json;
@@ -80,7 +77,7 @@ TIPS:
 }
 
 mod test {
-    use super::*;
+    
     #[test]
     fn test_glob() {
         let res = walk_with_gitignore_and_glob("**/*").unwrap();
@@ -96,7 +93,7 @@ pub fn walk_with_gitignore_and_glob(pattern: &str) -> AResult<Vec<PathBuf>> {
     let mut paths = Vec::new();
 
     for entry in walker.flatten() {
-        if entry.file_type().map_or(false, |ft| ft.is_file()) {
+        if entry.file_type().is_some_and(|ft| ft.is_file()) {
             let p = entry.path().strip_prefix("./").unwrap().to_path_buf();
 
             if glob.contains(&p) {
