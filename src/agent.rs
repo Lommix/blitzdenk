@@ -236,10 +236,7 @@ impl AgentContext {
         self.todo_list
             .lock()
             .await
-            .iter()
-            .filter(|entry| matches!(entry.1.status, Status::Completed))
-            .next()
-            .is_some()
+            .iter().any(|entry| matches!(entry.1.status, Status::Completed))
     }
 }
 

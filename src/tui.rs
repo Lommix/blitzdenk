@@ -415,18 +415,15 @@ where
                         },
                         KeyCode::Up => session.scroll_state.scroll_up(),
                         KeyCode::Down => session.scroll_state.scroll_down(),
-                        KeyCode::Backspace => match &session.popup_state {
-                            PopupState::TodoList(list_state) => {
-                                let index = list_state.selected().unwrap_or_default();
-                                let mut todo = session.runner.context.todo_list.lock().await;
+                        KeyCode::Backspace => if let PopupState::TodoList(list_state) = &session.popup_state {
+                            let index = list_state.selected().unwrap_or_default();
+                            let mut todo = session.runner.context.todo_list.lock().await;
 
-                                if let Some(key) =
-                                    todo.iter().nth(index).map(|(key, _)| key.clone())
-                                {
-                                    todo.remove_entry(&key);
-                                }
+                            if let Some(key) =
+                                todo.iter().nth(index).map(|(key, _)| key.clone())
+                            {
+                                todo.remove_entry(&key);
                             }
-                            _ => (),
                         },
                         KeyCode::Enter => match &session.popup_state {
                             PopupState::ModelSelect(list_state) => {

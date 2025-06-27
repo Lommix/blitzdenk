@@ -10,7 +10,7 @@ mod todo;
 mod write;
 
 pub use bash::Bash;
-pub use edit::{Edit, MultiEdit};
+pub use edit::Edit;
 pub use fetch::Fetch;
 pub use glob::Glob;
 pub use grep::Grep;
