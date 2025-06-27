@@ -156,7 +156,7 @@ If you want to create a new file, use:
                 },
                 "edits": {
                     "type": "array",
-                    "description": "The absolute path to the file to modify",
+                    "description": "An array of edit operations to perform",
                     "items": {
                         "type": "object",
                         "properties": {
