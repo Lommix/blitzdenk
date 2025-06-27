@@ -236,7 +236,7 @@ impl AgentContext {
         self.todo_list
             .lock()
             .await
-            .iter().any(|entry| matches!(entry.1.status, Status::Completed))
+            .iter().any(|entry| !matches!(entry.1.status, Status::Completed))
     }
 }
 
@@ -252,11 +252,11 @@ pub enum Priority {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Status {
-    #[serde(rename = "completed")]
+    #[serde(rename = "pending")]
     Pending,
     #[serde(rename = "in_progress")]
     InProgress,
-    #[serde(rename = "pending")]
+    #[serde(rename = "completed")]
     Completed,
 }
 
