@@ -235,7 +235,7 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
                 },
                 "content": {
                     "type": "string",
-                    "description": "Unique identifier for the todo item",
+                    "description": "The content of the todo item",
                 },
                 "status": {
                     "type": "string",
