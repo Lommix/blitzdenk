@@ -74,7 +74,8 @@ vim.keymap.set("n", "<leader>o", "vplit | terminal blitzdenk", { silent = true }
 | ctrl + x    | decline        |
 | ctrl + t    | task list      |
 | ctrl + h    | help           |
-| ctrl + s    | cancle         |
+| ctrl + s    | cancel         |
+| ctrl + c    | exit           |
 | up/down     | scroll up/down |
 
 ## MCP

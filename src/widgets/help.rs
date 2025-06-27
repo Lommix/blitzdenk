@@ -13,7 +13,7 @@ pub struct HelpWidget<'a> {
 
 impl<'a> HelpWidget<'a> {
     pub fn new(theme: Theme) -> Self {
-        let text = "[ctrl+h] help\n[ctrl+k] select model\n[ctrl+n] new session\n[alt+enter] send prompt\n[ctrl+y] accept confirm\n[ctrl+x] decline confirm\n[ctrl+t] toggle todo list\n[ctrl+c] exit\n[ctrl+s] cancle\n/init";
+        let text = "[ctrl+h] help\n[ctrl+k] select model\n[ctrl+n] new session\n[alt+enter] send prompt\n[ctrl+y] accept confirm\n[ctrl+x] decline confirm\n[ctrl+t] toggle todo list\n[ctrl+c] exit\n[ctrl+s] cancel\n\n/init";
         let help_text = Paragraph::new(text).block(
             Block::bordered()
                 .title(" [Help] ")

@@ -25,7 +25,7 @@ impl<'a> TitleWidget<'a> {
             .build();
 
         let info = Paragraph::new(
-            "[ctrl+h] help\n[ctrl+k] select model\n[ctrl+n] new session\n[alt+enter] send prompt\n[ctrl+y] accept confirm\n[ctrl+x] decline confirm\n[ctrl+t] toggle todo list\n[ctrl+c] exit\n[ctrl+s] cancle\n/init",
+            "[ctrl+h] help\n[ctrl+k] select model\n[ctrl+n] new session\n[alt+enter] send prompt\n[ctrl+y] accept confirm\n[ctrl+x] decline confirm\n[ctrl+t] toggle todo list\n[ctrl+c] exit\n[ctrl+s] cancel\n\n/init",
         );
 
         Self { title, info }
