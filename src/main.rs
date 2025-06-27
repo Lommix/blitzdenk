@@ -14,6 +14,9 @@ mod tools;
 mod tui;
 mod widgets;
 
+pub const SESSION_SAVE_DIR: &str = ".cache/blitzdenk/sessions/";
+pub const CONIFG_SAVE_DIR: &str = ".cache/blitzdenk/";
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -24,13 +27,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Run,
+    #[clap(about = "deletes all saved sessions")]
+    Cleanup,
 }
 
 #[tokio::main]
 async fn main() -> AResult<()> {
     let cli = Cli::parse();
     let config = Config::load().await;
-
     match cli.command.unwrap_or(Commands::Run) {
         Commands::Run => {
             let terminal = ratatui::init();
@@ -44,10 +48,25 @@ async fn main() -> AResult<()> {
                 EnterAlternateScreen
             )
             .unwrap();
-
             tui::run(terminal, config).await?;
         }
-    }
+        Commands::Cleanup => {
+            let homepath = home::home_dir().expect("unable to find your home dir");
+            let mut dir = tokio::fs::read_dir(homepath.join(SESSION_SAVE_DIR))
+                .await
+                .unwrap();
 
+            let mut count = 0;
+
+            while let Ok(Some(file)) = dir.next_entry().await {
+                if file.path().extension().and_then(|s| s.to_str()) == Some("json") {
+                    tokio::fs::remove_file(file.path()).await?;
+                    count += 1;
+                }
+            }
+
+            println!("deleted {} old sessions", count);
+        }
+    }
     Ok(())
 }
