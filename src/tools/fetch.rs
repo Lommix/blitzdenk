@@ -15,9 +15,8 @@ impl AiTool for Fetch {
         Some(
             r#"
 - Fetches content from a specified URL
-- Takes a URL and a prompt as input
+- Takes a URL as input
 - Fetches the URL content, converts HTML to markdown
-- Returns the model's response about the content
 - Use this tool when you need to retrieve and analyze web content
 
 Usage notes:
