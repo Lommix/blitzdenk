@@ -349,8 +349,8 @@ where
                 }
                 AgentEvent::Timeout => {
                     session.popup_state = PopupState::Notification {
-                        msg: "timout".into(),
-                        elapsed: Duration::from_secs(2),
+                        msg: "Timout reached.".into(),
+                        elapsed: Duration::from_secs(6),
                     };
                 }
             }
@@ -632,7 +632,8 @@ pub fn render(
             PopupState::Notification { msg, elapsed } => {
                 if let Some(new_elapsed) = elapsed.checked_sub(Duration::from_millis(30)) {
                     *elapsed = new_elapsed;
-                    NotifyWidget::new(theme, msg).render(window, frame.buffer_mut());
+                    let modal = window.inner(Margin::new(3, 3));
+                    NotifyWidget::new(theme, msg).render(modal, frame.buffer_mut());
                 } else {
                     session.popup_state = PopupState::None;
                 }

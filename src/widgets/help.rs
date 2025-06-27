@@ -1,11 +1,24 @@
 use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout, Rect},
-    style::{Color, Style, Stylize},
-    text::{Line, Span},
+    style::{Color, Style},
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget},
 };
 
 use crate::config::Theme;
+
+pub const HELP_TEXT: &str = r#"
+[alt+enter] send prompt
+[ctrl+k] select model
+[ctrl+n] new session
+[ctrl+y] accept confirm
+[ctrl+x] decline confirm
+[ctrl+h] help
+[ctrl+t] toggle todo list
+[ctrl+c] exit
+[ctrl+s] cancel request
+
+/init - generates a AGENTS.md
+"#;
 
 pub struct HelpWidget<'a> {
     help_text: Paragraph<'a>,
@@ -13,10 +26,9 @@ pub struct HelpWidget<'a> {
 
 impl<'a> HelpWidget<'a> {
     pub fn new(theme: Theme) -> Self {
-        let text = "[ctrl+h] help\n[ctrl+k] select model\n[ctrl+n] new session\n[alt+enter] send prompt\n[ctrl+y] accept confirm\n[ctrl+x] decline confirm\n[ctrl+t] toggle todo list\n[ctrl+c] exit\n[ctrl+s] cancel\n\n/init";
-        let help_text = Paragraph::new(text).block(
+        let help_text = Paragraph::new(HELP_TEXT).block(
             Block::bordered()
-                .title(" [Help] ")
+                .title(" Help Overview ")
                 .title_alignment(Alignment::Center)
                 .padding(Padding::top(1))
                 .title_style(Style::new().bg(Color::White).fg(theme.selection_bg))

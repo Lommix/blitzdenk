@@ -24,9 +24,10 @@ impl<'a> TitleWidget<'a> {
             .lines(vec![line])
             .build();
 
-        let info = Paragraph::new(
-            "[ctrl+h] help\n[ctrl+k] select model\n[ctrl+n] new session\n[alt+enter] send prompt\n[ctrl+y] accept confirm\n[ctrl+x] decline confirm\n[ctrl+t] toggle todo list\n[ctrl+c] exit\n[ctrl+s] cancel\n\n/init",
-        );
+        let info = Paragraph::new(format!(
+            "github.com/Lommix/blitzdenk v0.3\n{}",
+            super::help::HELP_TEXT
+        ));
 
         Self { title, info }
     }
