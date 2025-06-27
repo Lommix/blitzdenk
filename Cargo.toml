@@ -7,7 +7,7 @@ keywords = ["ai", "tui", "chat", "agent", "tool"]
 description = "A multi api agent tui"
 readme = "README.md"
 license-file = "LICENSE"
-repository = "hhttps://github.com/Lommix/blitzdenk"
+repository = "https://github.com/Lommix/blitzdenk"
 
 [dependencies]
 clap = { version = "4.5.40", features = ["derive"] }
