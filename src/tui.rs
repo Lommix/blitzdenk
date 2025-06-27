@@ -290,7 +290,7 @@ Here is the user provided project context and ruleset. User context can overwrit
         system_prompt
     }
 
-    pub fn cancle(&self) {
+    pub fn cancel(&self) {
         self.abort.notify_one();
     }
 
@@ -364,7 +364,7 @@ where
                     let todo = session.runner.context.todo_list.lock().await.clone();
                     _ = terminal.draw(render(&mut session, todo)).unwrap();
                 }
-                TuiEvent::Cancle => session.runner.abort.notify_waiters(),
+                TuiEvent::Cancel => session.runner.abort.notify_waiters(),
                 TuiEvent::SelectPrev => match &mut session.popup_state {
                     PopupState::ModelSelect(list_state) | PopupState::TodoList(list_state) => {
                         list_state.select_previous()
@@ -720,7 +720,7 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
                             }
 
                             if is_ctrl && c == 's' {
-                                tx.send(TuiEvent::Cancle).unwrap();
+                                tx.send(TuiEvent::Cancel).unwrap();
                                 continue;
                             }
                         }
@@ -757,7 +757,7 @@ pub enum TuiEvent {
     ScrollDown,
     SelectNext,
     SelectPrev,
-    Cancle,
+    Cancel,
     Accept,
     Decline,
     Clear,
