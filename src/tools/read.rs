@@ -54,7 +54,7 @@ impl AiTool for Read {
             let file_content = tokio::fs::read_to_string(&path).await?;
 
             let total_lines = file_content.lines().count();
-            let content: String = file_content.lines().skip(offset).collect();
+            let content: String = file_content.lines().skip(offset).take(250).collect();
 
             let res = format!(
                 "total lines: {}\n<content>\n{}\n</content>",
