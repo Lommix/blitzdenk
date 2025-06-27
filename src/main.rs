@@ -1,4 +1,4 @@
-use crate::{agent::AResult, config::Config};
+use crate::{config::Config, error::AResult};
 use clap::{Parser, Subcommand};
 use ratatui::crossterm::{
     self,

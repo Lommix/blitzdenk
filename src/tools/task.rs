@@ -30,7 +30,7 @@ impl AiTool for Task {
         tool_id: String,
         args: ToolArgs,
         ctx: AgentContext,
-    ) -> crate::agent::AFuture<ChatMessage> {
+    ) -> crate::error::AFuture<ChatMessage> {
         Box::pin(async move { todo!() })
     }
 }

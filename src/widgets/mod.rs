@@ -7,6 +7,10 @@ mod title;
 mod confirm;
 mod todo_list;
 mod help;
+mod notify;
+
+
+pub use notify::NotifyWidget;
 pub use chat::ChatWidget;
 pub use input::PromptWidget;
 pub use message::{MessageState, MessageWidget};

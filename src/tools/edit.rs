@@ -1,6 +1,6 @@
 use crate::{
-    agent::{AFuture, AgentContext, AgentEvent, AiTool, PermissionRequest, ToolArgs},
-    error::AiError,
+    agent::{AgentContext, AgentEvent, AiTool, PermissionRequest, ToolArgs},
+    error::{AFuture, AiError},
 };
 use diffy::DiffOptions;
 use genai::chat::*;

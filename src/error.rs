@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+pub type AResult<T> = Result<T, crate::error::AiError>;
+pub type AFuture<T> = std::pin::Pin<Box<dyn Future<Output = AResult<T>> + Send + Sync>>;
+
 /// The top-level error type for the application.
 #[derive(Error, Debug)]
 pub enum AiError {

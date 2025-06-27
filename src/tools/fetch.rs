@@ -1,4 +1,5 @@
-use crate::agent::{AFuture, AgentContext, AiTool, ToolArgs};
+use crate::agent::{AgentContext, AiTool, ToolArgs};
+use crate::error::AFuture;
 use genai::chat::*;
 use scraper::Html;
 use serde_json::json;

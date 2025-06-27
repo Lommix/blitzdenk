@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use crate::agent::{AFuture, AResult, AgentContext, AiTool, ToolArgs};
+use crate::agent::{AgentContext, AiTool, ToolArgs};
+use crate::error::{AFuture, AResult};
 use genai::chat::*;
 use ignore::WalkBuilder;
 use serde_json::json;

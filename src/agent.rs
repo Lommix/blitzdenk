@@ -1,14 +1,17 @@
-use crate::error::AiError;
+use crate::error::{AFuture, AResult, AiError};
 use crossbeam::channel::Sender;
 use genai::chat::*;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{oneshot, Mutex};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::sync::{
+    oneshot::{self},
+    Mutex,
+};
 
-pub type AResult<T> = Result<T, crate::error::AiError>;
-pub type AFuture<T> = std::pin::Pin<Box<dyn Future<Output = AResult<T>> + Send + Sync>>;
 pub type ToolFn = Arc<dyn Fn(String, ToolArgs, AgentContext) -> AFuture<ChatMessage> + Send + Sync>;
+
+pub const TIMEOUT_DURATION: Duration = Duration::from_secs(120);
 
 #[derive(Clone)]
 pub struct Agent {
@@ -17,6 +20,12 @@ pub struct Agent {
     pub tool_box: ToolBox,
     pub running: bool,
     pub context: AgentContext,
+}
+
+enum AgentReq {
+    Timeout,
+    Abort,
+    Result(ChatResponse),
 }
 
 impl Agent {
@@ -46,7 +55,7 @@ impl Agent {
         self.tool_box.insert(def.name().into(), Arc::new(T::run));
     }
 
-    pub async fn run(&mut self) -> AResult<()> {
+    pub async fn run(&mut self, abort: Arc<tokio::sync::Notify>) -> AResult<()> {
         if self.running {
             return Err(AiError::AlreadyRunning);
         }
@@ -55,8 +64,25 @@ impl Agent {
         let client = genai::Client::default();
         let mut chat = self.chat.clone();
 
+        let options = ChatOptions {
+            reasoning_effort: None,
+            ..Default::default()
+        };
+
         loop {
-            let res = client.exec_chat(&self.model, chat.clone(), None).await?;
+            let res = match tokio::select! {
+                res = client.exec_chat(&self.model, chat.clone(), Some(&options)) => { AgentReq::Result(res?) }
+                _ = tokio::time::sleep(TIMEOUT_DURATION) => { AgentReq::Timeout }
+                _ = abort.notified() => { AgentReq::Abort }
+            } {
+                AgentReq::Timeout => {
+                    self.context.sender.send(AgentEvent::Timeout).unwrap();
+                    break;
+                }
+                AgentReq::Abort => break,
+                AgentReq::Result(chat_response) => chat_response,
+            };
+
             let token_cost = res.usage.total_tokens;
 
             // add text message
@@ -116,6 +142,7 @@ impl Agent {
 pub enum AgentEvent {
     Message(AgentMessage),
     Permission(PermissionRequest),
+    Timeout,
 }
 
 #[derive(Debug)]

@@ -1,6 +1,6 @@
 use crate::{
-    agent::{AFuture, AgentContext, AiTool, ToolArgs},
-    error::AiError,
+    agent::{AgentContext, AiTool, ToolArgs},
+    error::{AFuture, AiError},
 };
 use genai::chat::*;
 use ignore::WalkBuilder;

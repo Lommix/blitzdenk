@@ -1,11 +1,9 @@
 use crate::{
-    agent::{
-        AResult, Agent, AgentContext, AgentEvent, AgentMessage, PermissionRequest, Status, TodoItem,
-    },
+    agent::{Agent, AgentContext, AgentEvent, AgentMessage, PermissionRequest, Status, TodoItem},
     config::Config,
-    error::AiError,
+    error::{AResult, AiError},
     prompts, tools,
-    widgets::{self, ConfirmWidget, MessageState, TodoWidget},
+    widgets::{self, ConfirmWidget, MessageState, NotifyWidget, TodoWidget},
 };
 use crossbeam::channel::{self, Receiver, Sender};
 use genai::chat::{ChatMessage, ChatRequest};
@@ -24,7 +22,10 @@ use std::{
     time::{Duration, Instant},
 };
 use throbber_widgets_tui::ThrobberState;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, Notify},
+    task::JoinHandle,
+};
 use tui_textarea::TextArea;
 use tui_widgets::scrollview::ScrollViewState;
 
@@ -51,6 +52,10 @@ pub enum PopupState {
     #[default]
     None,
     Help,
+    Notification {
+        msg: String,
+        elapsed: Duration,
+    },
     ModelSelect(ListState),
     TodoList(ListState),
     Confirm {
@@ -154,7 +159,6 @@ impl<'a> SessionState<'a> {
 }
 
 pub enum AgentCmd {
-    Cancle,
     Run,
 }
 
@@ -165,6 +169,7 @@ pub struct AgentRunner {
     pub handle: JoinHandle<()>,
     pub msg_rx: Receiver<AgentEvent>,
     pub state: Arc<Mutex<bool>>,
+    pub abort: Arc<Notify>,
 }
 
 impl AgentRunner {
@@ -191,6 +196,9 @@ impl AgentRunner {
         let _agent = agent_wrapped.clone();
         let state = Arc::new(Mutex::new(false));
         let _state = state.clone();
+        let abort = Arc::new(Notify::new());
+
+        let _abort = abort.clone();
 
         let handle = tokio::spawn(async move {
             loop {
@@ -199,9 +207,6 @@ impl AgentRunner {
                 };
 
                 match event {
-                    AgentCmd::Cancle => {
-                        todo!("impl cancle")
-                    }
                     AgentCmd::Run => {
                         {
                             if *_state.lock().await {
@@ -215,7 +220,7 @@ impl AgentRunner {
                             *_state.lock().await = true;
                         }
 
-                        match agent.run().await {
+                        match agent.run(_abort.clone()).await {
                             Ok(_) => (),
                             Err(err) => agent
                                 .context
@@ -242,6 +247,7 @@ impl AgentRunner {
             msg_rx,
             state,
             context,
+            abort,
         }
     }
 
@@ -284,9 +290,8 @@ Here is the user provided project context and ruleset. User context can overwrit
         system_prompt
     }
 
-    pub fn cancle(&self) -> AResult<()> {
-        self.cmd_channel.send(AgentCmd::Cancle)?;
-        Ok(())
+    pub fn cancle(&self) {
+        self.abort.notify_one();
     }
 
     pub async fn is_running(&self) -> bool {
@@ -342,6 +347,12 @@ where
                         scroll: 0,
                     };
                 }
+                AgentEvent::Timeout => {
+                    session.popup_state = PopupState::Notification {
+                        msg: "timout".into(),
+                        elapsed: Duration::from_secs(2),
+                    };
+                }
             }
         }
 
@@ -353,6 +364,7 @@ where
                     let todo = session.runner.context.todo_list.lock().await.clone();
                     _ = terminal.draw(render(&mut session, todo)).unwrap();
                 }
+                TuiEvent::Cancle => session.runner.abort.notify_waiters(),
                 TuiEvent::SelectPrev => match &mut session.popup_state {
                     PopupState::ModelSelect(list_state) | PopupState::TodoList(list_state) => {
                         list_state.select_previous()
@@ -617,6 +629,14 @@ pub fn render(
             PopupState::Confirm { req, scroll } => {
                 ConfirmWidget::new(&req.message, *scroll, theme).render(window, frame.buffer_mut());
             }
+            PopupState::Notification { msg, elapsed } => {
+                if let Some(new_elapsed) = elapsed.checked_sub(Duration::from_millis(30)) {
+                    *elapsed = new_elapsed;
+                    NotifyWidget::new(theme, msg).render(window, frame.buffer_mut());
+                } else {
+                    session.popup_state = PopupState::None;
+                }
+            }
         }
     }
 }
@@ -700,6 +720,11 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
                                 tx.send(TuiEvent::ToggleHelp).unwrap();
                                 continue;
                             }
+
+                            if is_ctrl && c == 's' {
+                                tx.send(TuiEvent::Cancle).unwrap();
+                                continue;
+                            }
                         }
                         _ => (),
                     }
@@ -734,6 +759,7 @@ pub enum TuiEvent {
     ScrollDown,
     SelectNext,
     SelectPrev,
+    Cancle,
     Accept,
     Decline,
     Clear,
