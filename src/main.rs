@@ -13,6 +13,7 @@ mod prompts;
 mod tools;
 mod tui;
 mod widgets;
+mod cost;
 
 pub const SESSION_SAVE_DIR: &str = ".cache/blitzdenk/sessions/";
 pub const CONIFG_SAVE_DIR: &str = ".cache/blitzdenk/";
