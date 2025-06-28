@@ -119,6 +119,9 @@ fn format_token_cost(token_cost: f64) -> String {
     }
 }
 
-fn format_currency(value: f64) -> String {
-    format!("${:.2}", value)
+fn format_currency(value: Option<f64>) -> String {
+    match value {
+        Some(c) => format!("${:.2}", c),
+        None => String::new(),
+    }
 }

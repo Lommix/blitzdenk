@@ -41,7 +41,7 @@ pub struct SessionState<'a> {
     pub textarea: TextArea<'a>,
     pub runner: AgentRunner,
     pub token_cost: i32,
-    pub money_cost: f64,
+    pub money_cost: Option<f64>,
     pub scroll_state: ScrollViewState,
     pub config: Config,
     pub running: bool,
@@ -72,7 +72,7 @@ pub struct SessionSaveState {
     todo: HashMap<String, TodoItem>,
     model: String,
     token_cost: i32,
-    money_cost: f64,
+    money_cost: Option<f64>,
     input: Vec<String>,
 }
 
@@ -81,7 +81,7 @@ impl<'a> SessionState<'a> {
         Self {
             messages: Vec::new(),
             token_cost: 0,
-            money_cost: 0.0,
+            money_cost: None,
             textarea: TextArea::default(),
             runner: AgentRunner::new(&config.current_model),
             scroll_state: ScrollViewState::default(),
@@ -346,9 +346,13 @@ where
 
                     session.token_cost = agent_message.token_cost.unwrap_or(session.token_cost);
 
-                    if let Some(spec) = cost_list.0.get(&session.config.current_model) {
-                        session.money_cost =
-                            spec.output_cost_per_token * (session.token_cost as f64);
+                    if let Some(cost) =
+                        cost_list.calc_cost(&session.config.current_model, session.token_cost)
+                    {
+                        session.money_cost = match session.money_cost {
+                            Some(c) => Some(c + cost),
+                            None => Some(cost),
+                        }
                     }
 
                     session.scroll_state.scroll_to_bottom();
@@ -572,7 +576,7 @@ where
                         continue;
                     }
                     session.token_cost = 0;
-                    session.money_cost = 0.0;
+                    session.money_cost = None;
                     session.runner.clear().await;
                     session.messages.clear();
                     session.textarea = TextArea::default();
