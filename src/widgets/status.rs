@@ -43,7 +43,11 @@ impl<'a> StatusLineWidget<'a> {
                 throbber_widgets_tui::WHITE_CIRCLE
             });
 
-        let token_string = format_token_cost(session.token_cost as f64);
+        let token_string = format!(
+            "{} {}",
+            format_token_cost(session.token_cost as f64),
+            format_currency(session.money_cost),
+        );
         widget.token_counter = Line::raw(token_string)
             .bg(theme.secondary)
             .fg(theme.text_color)
@@ -56,14 +60,14 @@ impl<'a> StatusLineWidget<'a> {
             .bg(theme.secondary)
             .add_modifier(Modifier::BOLD);
 
-
-
-
-        widget.todo_info = Line::raw(format!("{}/{} Tasks completed", completed_tasks, total_tasks))
-            .alignment(Alignment::Center)
-            .fg(theme.text_color)
-            .bg(theme.secondary)
-            .add_modifier(Modifier::BOLD);
+        widget.todo_info = Line::raw(format!(
+            "{}/{} Tasks completed",
+            completed_tasks, total_tasks
+        ))
+        .alignment(Alignment::Center)
+        .fg(theme.text_color)
+        .bg(theme.secondary)
+        .add_modifier(Modifier::BOLD);
 
         widget.version = Line::raw("Blitzdenk v0.3")
             .alignment(Alignment::Center)
@@ -86,8 +90,8 @@ impl<'a> widgets::StatefulWidget for StatusLineWidget<'a> {
             [
                 Constraint::Length(20),
                 Constraint::Length(12),
-                Constraint::Length(32),
-                Constraint::Length(14),
+                Constraint::Length(28),
+                Constraint::Length(20),
                 Constraint::Fill(1),
             ],
         )
@@ -113,4 +117,8 @@ fn format_token_cost(token_cost: f64) -> String {
     } else {
         format!(" {} Tokens", token_cost)
     }
+}
+
+fn format_currency(value: f64) -> String {
+    format!("${:.2}", value)
 }

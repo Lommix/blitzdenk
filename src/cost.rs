@@ -55,6 +55,10 @@ impl CostList {
     }
 
     pub fn calc_cost(&self, model: &str, tokencount: i32) -> f32 {
-        0.0
+        if let Some(spec) = self.0.get(model) {
+            (tokencount as f64 * spec.input_cost_per_token) as f32
+        } else {
+            0.0
+        }
     }
 }

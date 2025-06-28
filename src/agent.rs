@@ -236,7 +236,8 @@ impl AgentContext {
         self.todo_list
             .lock()
             .await
-            .iter().any(|entry| !matches!(entry.1.status, Status::Completed))
+            .iter()
+            .any(|entry| !matches!(entry.1.status, Status::Completed))
     }
 }
 

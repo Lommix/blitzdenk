@@ -1,6 +1,7 @@
 use crate::{
     agent::{Agent, AgentContext, AgentEvent, AgentMessage, PermissionRequest, Status, TodoItem},
     config::Config,
+    cost::CostList,
     error::{AResult, AiError},
     prompts, tools,
     widgets::{self, ConfirmWidget, MessageState, NotifyWidget, TodoWidget},
@@ -40,6 +41,7 @@ pub struct SessionState<'a> {
     pub textarea: TextArea<'a>,
     pub runner: AgentRunner,
     pub token_cost: i32,
+    pub money_cost: f64,
     pub scroll_state: ScrollViewState,
     pub config: Config,
     pub running: bool,
@@ -70,6 +72,7 @@ pub struct SessionSaveState {
     todo: HashMap<String, TodoItem>,
     model: String,
     token_cost: i32,
+    money_cost: f64,
     input: Vec<String>,
 }
 
@@ -78,6 +81,7 @@ impl<'a> SessionState<'a> {
         Self {
             messages: Vec::new(),
             token_cost: 0,
+            money_cost: 0.0,
             textarea: TextArea::default(),
             runner: AgentRunner::new(&config.current_model),
             scroll_state: ScrollViewState::default(),
@@ -106,6 +110,7 @@ impl<'a> SessionState<'a> {
             todo: agent.context.todo_list.lock().await.clone(),
             model: agent.model.clone(),
             token_cost: self.token_cost,
+            money_cost: self.money_cost,
         };
 
         let state_str = serde_json::to_string(&state)?;
@@ -143,6 +148,7 @@ impl<'a> SessionState<'a> {
         let mut session = Self {
             messages,
             token_cost: state.token_cost,
+            money_cost: state.money_cost,
             textarea: TextArea::new(state.input),
             runner,
             scroll_state: ScrollViewState::default(),
@@ -314,7 +320,7 @@ impl Drop for AgentRunner {
     }
 }
 
-pub async fn run<T>(mut terminal: Terminal<T>, config: Config) -> AResult<()>
+pub async fn run<T>(mut terminal: Terminal<T>, config: Config, cost_list: CostList) -> AResult<()>
 where
     T: Backend,
 {
@@ -339,6 +345,12 @@ where
                     });
 
                     session.token_cost = agent_message.token_cost.unwrap_or(session.token_cost);
+
+                    if let Some(spec) = cost_list.0.get(&session.config.current_model) {
+                        session.money_cost =
+                            spec.output_cost_per_token * (session.token_cost as f64);
+                    }
+
                     session.scroll_state.scroll_to_bottom();
                 }
                 AgentEvent::Permission(permission_request) => {
@@ -502,6 +514,7 @@ where
                         continue;
                     }
                     session.token_cost = 0;
+                    session.money_cost = 0.0;
                     session.runner.clear().await;
                     session.messages.clear();
                     session.textarea = TextArea::default();

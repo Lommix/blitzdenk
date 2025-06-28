@@ -1,4 +1,4 @@
-use crate::{config::Config, error::AResult};
+use crate::{config::Config, cost::CostList, error::AResult};
 use clap::{Parser, Subcommand};
 use ratatui::crossterm::{
     self,
@@ -8,12 +8,12 @@ use ratatui::crossterm::{
 
 mod agent;
 mod config;
+mod cost;
 mod error;
 mod prompts;
 mod tools;
 mod tui;
 mod widgets;
-mod cost;
 
 pub const SESSION_SAVE_DIR: &str = ".cache/blitzdenk/sessions/";
 pub const CONIFG_SAVE_DIR: &str = ".cache/blitzdenk/";
@@ -49,7 +49,9 @@ async fn main() -> AResult<()> {
                 EnterAlternateScreen
             )
             .unwrap();
-            tui::run(terminal, config).await?;
+
+            let cost_list = CostList::fetch().await?;
+            tui::run(terminal, config, cost_list).await?;
         }
         Commands::Cleanup => {
             let homepath = home::home_dir().expect("unable to find your home dir");
