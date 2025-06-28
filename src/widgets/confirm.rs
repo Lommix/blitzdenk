@@ -18,10 +18,10 @@ impl<'a> ConfirmWidget<'a> {
         let content = Paragraph::new(content)
             .block(
                 Block::new()
-                    .title_top("[PERMISSION]")
+                    .title_top("[Allow?]")
                     .title_style(Style::new().bg(Color::White).fg(theme.selection_bg))
                     .title_alignment(Alignment::Center)
-                    .title_bottom("[ctrl+y:Accept][ctrl+x:Decline]")
+                    .title_bottom("[a:Accept] [d:Decline]")
                     .borders(Borders::ALL)
                     .border_type(ratatui::widgets::BorderType::QuadrantOutside),
             )

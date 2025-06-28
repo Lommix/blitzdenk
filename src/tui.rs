@@ -46,11 +46,11 @@ pub struct SessionState<'a> {
     pub config: Config,
     pub running: bool,
     pub running_spinner_state: ThrobberState,
-    pub popup_state: PopupState,
+    pub popup_state: TuiState,
 }
 
 #[derive(Default)]
-pub enum PopupState {
+pub enum TuiState {
     #[default]
     None,
     Help,
@@ -88,7 +88,7 @@ impl<'a> SessionState<'a> {
             running: false,
             running_spinner_state: ThrobberState::default(),
             config,
-            popup_state: PopupState::None,
+            popup_state: TuiState::None,
         }
     }
 
@@ -117,6 +117,249 @@ impl<'a> SessionState<'a> {
         tokio::fs::write(path, state_str).await?;
 
         Ok(())
+    }
+
+    async fn handle_input(&mut self, ev: KeyEvent) -> AResult<()> {
+        let is_alt = ev.modifiers.contains(KeyModifiers::ALT);
+        let is_ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
+        let is_shift = ev.modifiers.contains(KeyModifiers::SHIFT);
+
+        match &mut self.popup_state {
+            TuiState::None => {
+                match ev.code {
+                    KeyCode::Char(c) => {
+                        if is_ctrl && c == 'n' {
+                            if self.runner.is_running().await {
+                                return Ok(());
+                            }
+                            self.token_cost = 0;
+                            self.money_cost = None;
+                            self.runner.clear().await;
+                            self.messages.clear();
+                            self.textarea = TextArea::default();
+
+                            return Ok(());
+                        }
+
+                        if is_ctrl && c == 'k' {
+                            self.popup_state =
+                                TuiState::ModelSelect(ListState::default().with_selected(Some(0)));
+                            return Ok(());
+                        }
+
+                        if is_ctrl && c == 't' {
+                            self.popup_state =
+                                TuiState::TodoList(ListState::default().with_selected(Some(0)));
+                            return Ok(());
+                        }
+
+                        if is_ctrl && c == 'h' {
+                            self.popup_state = TuiState::Help;
+                            return Ok(());
+                        }
+
+                        if is_ctrl && c == 's' {
+                            self.runner.cancel();
+                            return Ok(());
+                        }
+
+                        self.textarea.input(ev);
+                    }
+                    KeyCode::Enter => {
+                        if !is_shift && !is_shift && !is_alt {
+                            if self.runner.is_running().await {
+                                return Ok(());
+                            }
+
+                            let prompt: String = self.textarea.lines().join("\n");
+
+                            if prompt.starts_with('/') {
+                                if let Some(prefab_prompt) =
+                                    self.config.user_prompts.get(&prompt[1..])
+                                {
+                                    self.messages.push(TuiMessage {
+                                        message: ChatMessage::user(prefab_prompt),
+                                        state: MessageState::default(),
+                                    });
+                                    self.runner
+                                        .add_message(ChatMessage::user(prefab_prompt))
+                                        .await;
+                                    self.runner.start_cycle().await?;
+                                    self.textarea = TextArea::default();
+                                }
+                            } else {
+                                self.messages.push(TuiMessage {
+                                    message: ChatMessage::user(&prompt),
+                                    state: MessageState::default(),
+                                });
+
+                                self.runner.add_message(ChatMessage::user(&prompt)).await;
+                                self.runner.start_cycle().await?;
+                                self.textarea = TextArea::default();
+                            }
+                        } else {
+                            self.textarea.input(ev);
+                        }
+                    }
+                    _ => {
+                        self.textarea.input(ev);
+                    }
+                }
+
+                return Ok(());
+            }
+            TuiState::Confirm { req, scroll } => match ev.code {
+                KeyCode::Up | KeyCode::PageUp => {
+                    *scroll = scroll.saturating_sub(1);
+                    Ok(())
+                }
+                KeyCode::Down | KeyCode::PageDown => {
+                    *scroll += 1;
+                    Ok(())
+                }
+                KeyCode::Char(c) => {
+                    if c == 'a' {
+                        if let Some(s) = req.respond.take() {
+                            s.send(true).unwrap();
+                        }
+
+                        return Ok(());
+                    }
+
+                    if c == 'd' {
+                        if let Some(s) = req.respond.take() {
+                            s.send(false).unwrap();
+                        }
+                        return Ok(());
+                    }
+
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
+            TuiState::Help => {
+                match ev.code {
+                    KeyCode::Esc => self.popup_state = TuiState::None,
+                    KeyCode::Char(c) => {
+                        if is_ctrl && c == 'h' {
+                            self.popup_state = TuiState::None
+                        }
+                    }
+                    _ => (),
+                }
+
+                Ok(())
+            }
+            TuiState::Notification { msg, elapsed } => {
+                //@todo: move ticker here?
+                Ok(())
+            }
+            TuiState::ModelSelect(list_state) => match ev.code {
+                KeyCode::Up | KeyCode::PageUp => {
+                    list_state.select_previous();
+                    Ok(())
+                }
+                KeyCode::Down | KeyCode::PageDown => {
+                    list_state.select_next();
+                    Ok(())
+                }
+
+                KeyCode::Enter => {
+                    let index = list_state.selected().unwrap_or_default();
+
+                    {
+                        self.runner.cancel();
+                        self.runner.agent.lock().await.model =
+                            self.config.model_list[index].clone();
+                    }
+
+                    self.config.current_model = self.config.model_list[index].clone();
+                    self.config.save().await;
+                    self.popup_state = TuiState::None;
+                    Ok(())
+                }
+
+                KeyCode::Esc => {
+                    self.popup_state = TuiState::None;
+                    Ok(())
+                }
+                KeyCode::Char(c) => {
+                    if c == 'j' {
+                        list_state.select_next();
+                    }
+
+                    if c == 'k' {
+                        list_state.select_next();
+                    }
+
+                    if is_ctrl && c == 'k' {
+                        self.popup_state = TuiState::None
+                    }
+                    Ok(())
+                }
+
+                _ => Ok(()),
+            },
+            TuiState::TodoList(list_state) => match ev.code {
+                KeyCode::Up | KeyCode::PageUp => {
+                    list_state.select_previous();
+                    Ok(())
+                }
+                KeyCode::Down | KeyCode::PageDown => {
+                    list_state.select_next();
+                    Ok(())
+                }
+
+                KeyCode::Enter => {
+                    let index = list_state.selected().unwrap_or_default();
+                    if let Some((_, item)) = self
+                        .runner
+                        .context
+                        .todo_list
+                        .lock()
+                        .await
+                        .iter_mut()
+                        .nth(index)
+                    {
+                        match item.status {
+                            Status::Pending => item.status = Status::Completed,
+                            Status::InProgress => item.status = Status::Completed,
+                            Status::Completed => item.status = Status::Pending,
+                        }
+                    }
+                    Ok(())
+                }
+                KeyCode::Esc => {
+                    self.popup_state = TuiState::None;
+                    Ok(())
+                }
+                KeyCode::Char(c) => {
+                    if c == 'j' {
+                        list_state.select_next();
+                    }
+
+                    if c == 'k' {
+                        list_state.select_next();
+                    }
+
+                    if is_ctrl && c == 't' {
+                        self.popup_state = TuiState::None
+                    }
+
+                    Ok(())
+                }
+                KeyCode::Backspace => {
+                    let index = list_state.selected().unwrap_or_default();
+                    let mut todo = self.runner.context.todo_list.lock().await;
+
+                    if let Some(key) = todo.iter().nth(index).map(|(key, _)| key.clone()) {
+                        todo.remove_entry(&key);
+                    }
+                    Ok(())
+                }
+                _ => Ok(()),
+            },
+        }
     }
 
     pub async fn load(cwd: &str, config: Config) -> AResult<Self> {
@@ -154,7 +397,7 @@ impl<'a> SessionState<'a> {
             scroll_state: ScrollViewState::default(),
             running: false,
             running_spinner_state: ThrobberState::default(),
-            popup_state: PopupState::None,
+            popup_state: TuiState::None,
             config,
         };
 
@@ -364,13 +607,13 @@ where
                     session.scroll_state.scroll_to_bottom();
                 }
                 AgentEvent::Permission(permission_request) => {
-                    session.popup_state = PopupState::Confirm {
+                    session.popup_state = TuiState::Confirm {
                         req: permission_request,
                         scroll: 0,
                     };
                 }
                 AgentEvent::Timeout => {
-                    session.popup_state = PopupState::Notification {
+                    session.popup_state = TuiState::Notification {
                         msg: "Timout reached.".into(),
                         elapsed: Duration::from_secs(6),
                     };
@@ -386,212 +629,35 @@ where
                     let todo = session.runner.context.todo_list.lock().await.clone();
                     _ = terminal.draw(render(&mut session, todo)).unwrap();
                 }
-                TuiEvent::Cancel => session.runner.abort.notify_waiters(),
-                TuiEvent::SelectPrev => match &mut session.popup_state {
-                    PopupState::ModelSelect(list_state) | PopupState::TodoList(list_state) => {
-                        list_state.select_previous()
-                    }
-                    _ => (),
-                },
-                TuiEvent::SelectNext => match &mut session.popup_state {
-                    PopupState::ModelSelect(list_state) | PopupState::TodoList(list_state) => {
-                        list_state.select_next()
-                    }
-                    _ => (),
-                },
-                TuiEvent::ToggleHelp => match &session.popup_state {
-                    PopupState::Help => session.popup_state = PopupState::None,
-                    PopupState::Confirm { req, scroll } => (),
-                    _ => session.popup_state = PopupState::Help,
-                },
-                TuiEvent::ToggleSelectModal => match &session.popup_state {
-                    PopupState::ModelSelect(_) => session.popup_state = PopupState::None,
-                    PopupState::Confirm { req, scroll } => (),
-                    _ => {
-                        session.popup_state =
-                            PopupState::ModelSelect(ListState::default().with_selected(Some(0)))
-                    }
-                },
-                TuiEvent::ToggleTodo => match &session.popup_state {
-                    PopupState::TodoList(_) => session.popup_state = PopupState::None,
-                    PopupState::Confirm { req, scroll } => (),
-                    _ => {
-                        session.popup_state =
-                            PopupState::TodoList(ListState::default().with_selected(Some(0)))
-                    }
-                },
                 TuiEvent::Key(key) => {
-                    match key.code {
-                        KeyCode::Char(c) => match &mut session.popup_state {
-                            PopupState::ModelSelect(list_state)
-                            | PopupState::TodoList(list_state) => {
-                                if c == 'k' {
-                                    list_state.select_previous();
-                                }
+                    session.handle_input(key).await?;
 
-                                if c == 'j' {
-                                    list_state.select_next();
-                                }
-                            }
-                            _ => (),
-                        },
-                        KeyCode::Down => match &mut session.popup_state {
-                            PopupState::Confirm { req, scroll } => *scroll += 1,
-                            PopupState::TodoList(state) => state.select_next(),
-                            PopupState::ModelSelect(state) => state.select_next(),
-                            _ => session.scroll_state.scroll_down(),
-                        },
-                        KeyCode::Up => match &mut session.popup_state {
-                            PopupState::Confirm { req, scroll } => {
-                                *scroll = scroll.saturating_sub(1)
-                            }
-                            PopupState::TodoList(state) => state.select_previous(),
-                            PopupState::ModelSelect(state) => state.select_previous(),
-                            _ => session.scroll_state.scroll_up(),
-                        },
-                        KeyCode::Backspace => {
-                            if let PopupState::TodoList(list_state) = &session.popup_state {
-                                let index = list_state.selected().unwrap_or_default();
-                                let mut todo = session.runner.context.todo_list.lock().await;
-
-                                if let Some(key) =
-                                    todo.iter().nth(index).map(|(key, _)| key.clone())
-                                {
-                                    todo.remove_entry(&key);
-                                }
-                            }
+                    // exit
+                    if let KeyCode::Char(c) = key.code {
+                        let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                        if is_ctrl && c == 'c' {
+                            session.runner.cancel();
+                            session.save().await?;
+                            break;
                         }
-                        KeyCode::Enter => match &session.popup_state {
-                            PopupState::None => {
-                                let is_alt = key.modifiers.contains(KeyModifiers::ALT);
-                                let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                                let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
-
-                                // @todo: cleanup
-
-                                if is_shift || is_ctrl || is_alt {
-                                    _ = session.textarea.input(key);
-                                } else {
-                                    if session.runner.is_running().await {
-                                        continue;
-                                    }
-
-                                    let prompt: String = session.textarea.lines().join("\n");
-
-                                    if prompt.starts_with('/') {
-                                        if let Some(prefab_prompt) =
-                                            config.user_prompts.get(&prompt[1..])
-                                        {
-                                            session.messages.push(TuiMessage {
-                                                message: ChatMessage::user(prefab_prompt),
-                                                state: MessageState::default(),
-                                            });
-                                            session
-                                                .runner
-                                                .add_message(ChatMessage::user(prefab_prompt))
-                                                .await;
-                                            session.runner.start_cycle().await?;
-                                            session.textarea = TextArea::default();
-                                        }
-                                    } else {
-                                        session.messages.push(TuiMessage {
-                                            message: ChatMessage::user(&prompt),
-                                            state: MessageState::default(),
-                                        });
-
-                                        session
-                                            .runner
-                                            .add_message(ChatMessage::user(&prompt))
-                                            .await;
-                                        session.runner.start_cycle().await?;
-                                        session.textarea = TextArea::default();
-                                    }
-                                }
-                            }
-                            PopupState::ModelSelect(list_state) => {
-                                let index = list_state.selected().unwrap_or_default();
-
-                                {
-                                    session.runner.agent.lock().await.model =
-                                        session.config.model_list[index].clone();
-                                }
-
-                                session.config.current_model =
-                                    session.config.model_list[index].clone();
-                                session.config.save().await;
-                                session.popup_state = PopupState::None;
-                            }
-                            PopupState::TodoList(list_state) => {
-                                let index = list_state.selected().unwrap_or_default();
-                                if let Some((_, item)) = session
-                                    .runner
-                                    .context
-                                    .todo_list
-                                    .lock()
-                                    .await
-                                    .iter_mut()
-                                    .nth(index)
-                                {
-                                    match item.status {
-                                        Status::Pending => item.status = Status::Completed,
-                                        Status::InProgress => item.status = Status::Completed,
-                                        Status::Completed => item.status = Status::Pending,
-                                    }
-                                }
-                            }
-                            _ => (),
-                        },
-                        _ => (),
-                    }
-
-                    if matches!(session.popup_state, PopupState::None) {
-                        _ = session.textarea.input(key);
                     }
                 }
                 TuiEvent::Paste(string) => _ = session.textarea.insert_str(string),
-                TuiEvent::Input(_) => (),
                 TuiEvent::Resize(_, _) => (),
                 TuiEvent::ScrollUp => match &mut session.popup_state {
-                    PopupState::None => session.scroll_state.scroll_up(),
-                    PopupState::Confirm { req, scroll } => {
+                    TuiState::None => session.scroll_state.scroll_up(),
+                    TuiState::Confirm { req, scroll } => {
                         *scroll = scroll.saturating_sub(0);
                     }
                     _ => (),
                 },
                 TuiEvent::ScrollDown => match &mut session.popup_state {
-                    PopupState::None => session.scroll_state.scroll_down(),
-                    PopupState::Confirm { req, scroll } => {
+                    TuiState::None => session.scroll_state.scroll_down(),
+                    TuiState::Confirm { req, scroll } => {
                         *scroll += 1;
                     }
                     _ => (),
                 },
-                TuiEvent::Accept => {
-                    if let PopupState::Confirm { req, scroll } = session.popup_state {
-                        req.respond.send(true).unwrap();
-                        session.popup_state = PopupState::None;
-                    }
-                }
-                TuiEvent::Decline => {
-                    if let PopupState::Confirm { req, scroll } = session.popup_state {
-                        req.respond.send(false).unwrap();
-                        session.popup_state = PopupState::None;
-                    }
-                }
-                TuiEvent::Clear => {
-                    if session.runner.is_running().await {
-                        continue;
-                    }
-                    session.token_cost = 0;
-                    session.money_cost = None;
-                    session.runner.clear().await;
-                    session.messages.clear();
-                    session.textarea = TextArea::default();
-                }
-                TuiEvent::Exit => {
-                    session.runner.cancel();
-                    session.save().await.unwrap();
-                    break;
-                }
             }
         }
     }
@@ -661,29 +727,29 @@ pub fn render(
         );
 
         match &mut session.popup_state {
-            PopupState::None => (),
-            PopupState::Help => {
+            TuiState::None => (),
+            TuiState::Help => {
                 let modal = window.inner(Margin::new(10, 10));
                 widgets::HelpWidget::new(theme).render(modal, frame.buffer_mut());
             }
-            PopupState::ModelSelect(list_state) => {
+            TuiState::ModelSelect(list_state) => {
                 let selection =
                     widgets::ModelSelectorWidget::new(session.config.model_list.clone(), theme);
                 selection.render(window, frame.buffer_mut(), list_state);
             }
-            PopupState::TodoList(list_state) => {
+            TuiState::TodoList(list_state) => {
                 TodoWidget::new(todo.iter(), theme).render(window, frame.buffer_mut(), list_state);
             }
-            PopupState::Confirm { req, scroll } => {
+            TuiState::Confirm { req, scroll } => {
                 ConfirmWidget::new(&req.message, *scroll, theme).render(window, frame.buffer_mut());
             }
-            PopupState::Notification { msg, elapsed } => {
+            TuiState::Notification { msg, elapsed } => {
                 if let Some(new_elapsed) = elapsed.checked_sub(Duration::from_millis(30)) {
                     *elapsed = new_elapsed;
                     let modal = window.inner(Margin::new(3, 3));
                     NotifyWidget::new(theme, msg).render(modal, frame.buffer_mut());
                 } else {
-                    session.popup_state = PopupState::None;
+                    session.popup_state = TuiState::None;
                 }
             }
         }
@@ -723,62 +789,7 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
             };
 
             match event {
-                event::Event::Key(key) => {
-                    let is_alt = key.modifiers.contains(KeyModifiers::ALT);
-                    let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                    // let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                    match key.code {
-                        // KeyCode::Enter => {
-                        //     if is_alt || is_ctrl {
-                        //         tx.send(TuiEvent::Prompt)?;
-                        //         continue;
-                        //     }
-                        // }
-                        KeyCode::Char(c) => {
-                            if is_ctrl && c == 'c' {
-                                tx.send(TuiEvent::Exit).unwrap();
-                                continue;
-                            }
-
-                            if is_ctrl && c == 'n' {
-                                tx.send(TuiEvent::Clear).unwrap();
-                                continue;
-                            }
-
-                            if is_ctrl && c == 'k' {
-                                tx.send(TuiEvent::ToggleSelectModal).unwrap();
-                                continue;
-                            }
-
-                            if is_ctrl && c == 'y' {
-                                tx.send(TuiEvent::Accept).unwrap();
-                                continue;
-                            }
-
-                            if is_ctrl && c == 'x' {
-                                tx.send(TuiEvent::Decline).unwrap();
-                                continue;
-                            }
-
-                            if is_ctrl && c == 't' {
-                                tx.send(TuiEvent::ToggleTodo).unwrap();
-                                continue;
-                            }
-
-                            if is_ctrl && c == 'h' {
-                                tx.send(TuiEvent::ToggleHelp).unwrap();
-                                continue;
-                            }
-
-                            if is_ctrl && c == 's' {
-                                tx.send(TuiEvent::Cancel).unwrap();
-                                continue;
-                            }
-                        }
-                        _ => (),
-                    }
-                    tx.send(TuiEvent::Key(key))?;
-                }
+                event::Event::Key(key) => tx.send(TuiEvent::Key(key))?,
                 event::Event::Paste(content) => tx.send(TuiEvent::Paste(content))?,
                 event::Event::Resize(w, h) => tx.send(TuiEvent::Resize(w, h))?,
                 event::Event::Mouse(mouse_event) => match mouse_event.kind {
@@ -802,21 +813,9 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
 
 pub enum TuiEvent {
     Tick,
-    Input(char),
     Resize(u16, u16),
     ScrollUp,
     ScrollDown,
-    SelectNext,
-    SelectPrev,
-    Cancel,
-    Accept,
-    Decline,
-    Clear,
-    // Prompt,
-    Exit,
-    ToggleSelectModal,
-    ToggleTodo,
-    ToggleHelp,
     Paste(String),
     Key(KeyEvent),
 }

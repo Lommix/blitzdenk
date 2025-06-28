@@ -270,7 +270,7 @@ pub struct TodoItem {
 
 pub struct PermissionRequest {
     pub message: String,
-    pub respond: oneshot::Sender<bool>,
+    pub respond: Option<oneshot::Sender<bool>>,
 }
 
 impl PermissionRequest {
@@ -279,7 +279,7 @@ impl PermissionRequest {
         (
             Self {
                 message: msg.into(),
-                respond: tx,
+                respond: Some(tx),
             },
             rx,
         )
