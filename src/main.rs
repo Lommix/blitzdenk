@@ -16,7 +16,7 @@ mod tui;
 mod widgets;
 
 pub const SESSION_SAVE_DIR: &str = ".cache/blitzdenk/sessions/";
-pub const CONIFG_SAVE_DIR: &str = ".cache/blitzdenk/";
+pub const CONFIG_SAVE_DIR: &str = ".cache/blitzdenk/";
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
