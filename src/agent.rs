@@ -83,24 +83,32 @@ impl Agent {
                 AgentReq::Result(chat_response) => chat_response,
             };
 
-            let token_cost = res.usage.total_tokens;
+            let mut cost = 0;
+
+            if let Some(c) = res.usage.completion_tokens {
+                cost += c;
+            }
+
+            if let Some(c) = res.usage.prompt_tokens {
+                cost += c;
+            }
+
+            if cost > 0 {
+                self.context.sender.send(AgentEvent::TokenCost(cost))?;
+            }
 
             // add text message
             for text in res.texts().iter() {
                 let msg = ChatMessage::assistant(text.to_string());
                 chat = chat.append_message(msg.clone());
-                self.context
-                    .sender
-                    .send(AgentEvent::Message(AgentMessage::new(msg, token_cost)))?;
+                self.context.sender.send(AgentEvent::Message(msg))?;
             }
 
             // add tool calls
             if !res.tool_calls().is_empty() {
                 let tool_msg = ChatMessage::from(res.clone().into_tool_calls());
                 chat = chat.append_message(tool_msg.clone());
-                self.context
-                    .sender
-                    .send(AgentEvent::Message(AgentMessage::new(tool_msg, None)))?;
+                self.context.sender.send(AgentEvent::Message(tool_msg))?;
             }
 
             // resolve tool calls
@@ -115,9 +123,7 @@ impl Agent {
                         Err(err) => ToolResponse::new(call.call_id.clone(), err.to_string()).into(),
                     };
 
-                self.context
-                    .sender
-                    .send(AgentEvent::Message(AgentMessage::new(msg.clone(), None)))?;
+                self.context.sender.send(AgentEvent::Message(msg.clone()))?;
 
                 chat = chat.append_message(msg);
             }
@@ -140,24 +146,10 @@ impl Agent {
 }
 
 pub enum AgentEvent {
-    Message(AgentMessage),
+    Message(ChatMessage),
     Permission(PermissionRequest),
+    TokenCost(i32),
     Timeout,
-}
-
-#[derive(Debug)]
-pub struct AgentMessage {
-    pub chat_message: ChatMessage,
-    pub token_cost: Option<i32>,
-}
-
-impl AgentMessage {
-    pub fn new(chat_message: ChatMessage, token_cost: Option<i32>) -> Self {
-        Self {
-            chat_message,
-            token_cost,
-        }
-    }
 }
 
 #[derive(Clone, Default)]

@@ -1,5 +1,5 @@
 use crate::{
-    agent::{Agent, AgentContext, AgentEvent, AgentMessage, PermissionRequest, Status, TodoItem},
+    agent::{Agent, AgentContext, AgentEvent, PermissionRequest, Status, TodoItem},
     config::Config,
     cost::CostList,
     error::{AResult, AiError},
@@ -277,8 +277,11 @@ impl<'a> SessionState<'a> {
                 KeyCode::Enter => {
                     let index = list_state.selected().unwrap_or_default();
 
-                    {
+                    if self.running {
                         self.runner.cancel();
+                    }
+
+                    {
                         self.runner.agent.lock().await.model =
                             self.config.model_list[index].clone();
                     }
@@ -484,10 +487,7 @@ impl AgentRunner {
                             Err(err) => agent
                                 .context
                                 .sender
-                                .send(AgentEvent::Message(AgentMessage::new(
-                                    ChatMessage::system(err.to_string()),
-                                    None,
-                                )))
+                                .send(AgentEvent::Message(ChatMessage::system(err.to_string())))
                                 .unwrap(),
                         }
 
@@ -595,24 +595,11 @@ where
     loop {
         if let Ok(response) = session.runner.msg_rx.try_recv() {
             match response {
-                AgentEvent::Message(agent_message) => {
+                AgentEvent::Message(msg) => {
                     session.messages.push(TuiMessage {
-                        message: agent_message.chat_message,
+                        message: msg,
                         state: MessageState::default(),
                     });
-
-                    session.token_cost = agent_message.token_cost.unwrap_or(session.token_cost);
-
-                    if let Some(ref cost_list) = cost_list {
-                        if let Some(cost) =
-                            cost_list.calc_cost(&session.config.current_model, session.token_cost)
-                        {
-                            session.money_cost = match session.money_cost {
-                                Some(c) => Some(c + cost),
-                                None => Some(cost),
-                            }
-                        }
-                    }
 
                     session.scroll_state.scroll_to_bottom();
                 }
@@ -627,6 +614,19 @@ where
                         msg: "Timout reached.".into(),
                         elapsed: Duration::from_secs(6),
                     };
+                }
+                AgentEvent::TokenCost(cost) => {
+                    session.token_cost += cost;
+                    if let Some(ref cost_list) = cost_list {
+                        if let Some(cost) =
+                            cost_list.calc_cost(&session.config.current_model, session.token_cost)
+                        {
+                            session.money_cost = match session.money_cost {
+                                Some(c) => Some(c + cost),
+                                None => Some(cost),
+                            }
+                        }
+                    }
                 }
             }
         }
