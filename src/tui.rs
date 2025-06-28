@@ -295,7 +295,7 @@ impl<'a> SessionState<'a> {
                     }
 
                     if c == 'k' {
-                        list_state.select_next();
+                        list_state.select_previous();
                     }
 
                     if is_ctrl && c == 'k' {
@@ -345,7 +345,7 @@ impl<'a> SessionState<'a> {
                     }
 
                     if c == 'k' {
-                        list_state.select_next();
+                        list_state.select_previous();
                     }
 
                     if is_ctrl && c == 't' {
