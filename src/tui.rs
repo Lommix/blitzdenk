@@ -165,6 +165,12 @@ impl<'a> SessionState<'a> {
 
                         self.textarea.input(ev);
                     }
+                    KeyCode::Up => {
+                        self.scroll_state.scroll_up();
+                    }
+                    KeyCode::Down => {
+                        self.scroll_state.scroll_down();
+                    }
                     KeyCode::Enter => {
                         if !is_shift && !is_shift && !is_alt {
                             if self.runner.is_running().await {
