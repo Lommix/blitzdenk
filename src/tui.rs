@@ -440,6 +440,62 @@ where
                             }
                         }
                         KeyCode::Enter => match &session.popup_state {
+                            PopupState::None => {
+                                let is_alt = key.modifiers.contains(KeyModifiers::ALT);
+                                let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                                let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+                                // @todo: cleanup
+
+                                if is_shift || is_ctrl || is_alt {
+                                    _ = session.textarea.input(key);
+                                } else {
+                                    if session.runner.is_running().await {
+                                        continue;
+                                    }
+
+                                    let prompt: String = session.textarea.lines().join("\n");
+
+                                    match prompt.as_str() {
+                                        "/init" => {
+                                            session.messages.push(TuiMessage {
+                                                message: ChatMessage::user(
+                                                    prompts::INIT_AGENT_PROMPT,
+                                                ),
+                                                state: MessageState::default(),
+                                            });
+                                            session
+                                                .runner
+                                                .add_message(ChatMessage::user(
+                                                    prompts::INIT_AGENT_PROMPT,
+                                                ))
+                                                .await;
+                                            session.runner.start_cycle().await?;
+                                            session.textarea = TextArea::default();
+                                        }
+                                        "/audit" => {
+                                            let audit_prompt = prompts::AUDIT_PROMPT
+                                                .lines()
+                                                .map(String::from)
+                                                .collect();
+                                            session.textarea = TextArea::new(audit_prompt)
+                                        }
+                                        any => {
+                                            session.messages.push(TuiMessage {
+                                                message: ChatMessage::user(any),
+                                                state: MessageState::default(),
+                                            });
+
+                                            session
+                                                .runner
+                                                .add_message(ChatMessage::user(any))
+                                                .await;
+                                            session.runner.start_cycle().await?;
+                                            session.textarea = TextArea::default();
+                                        }
+                                    };
+                                }
+                            }
                             PopupState::ModelSelect(list_state) => {
                                 let index = list_state.selected().unwrap_or_default();
 
@@ -475,10 +531,7 @@ where
                         },
                         _ => (),
                     }
-
-                    if matches!(session.popup_state, PopupState::None) {
-                        _ = session.textarea.input(key);
-                    }
+                    _ = session.textarea.input(key);
                 }
                 TuiEvent::Paste(string) => _ = session.textarea.insert_str(string),
                 TuiEvent::Input(_) => (),
@@ -518,43 +571,6 @@ where
                     session.runner.clear().await;
                     session.messages.clear();
                     session.textarea = TextArea::default();
-                }
-                TuiEvent::Prompt => {
-                    if session.runner.is_running().await {
-                        continue;
-                    }
-
-                    let prompt: String = session.textarea.lines().join("\n");
-
-                    match prompt.as_str() {
-                        "/init" => {
-                            session.messages.push(TuiMessage {
-                                message: ChatMessage::user(prompts::INIT_AGENT_PROMPT),
-                                state: MessageState::default(),
-                            });
-                            session
-                                .runner
-                                .add_message(ChatMessage::user(prompts::INIT_AGENT_PROMPT))
-                                .await;
-                            session.runner.start_cycle().await?;
-                            session.textarea = TextArea::default();
-                        }
-                        "/audit" => {
-                            let audit_prompt =
-                                prompts::AUDIT_PROMPT.lines().map(String::from).collect();
-                            session.textarea = TextArea::new(audit_prompt)
-                        }
-                        any => {
-                            session.messages.push(TuiMessage {
-                                message: ChatMessage::user(any),
-                                state: MessageState::default(),
-                            });
-
-                            session.runner.add_message(ChatMessage::user(any)).await;
-                            session.runner.start_cycle().await?;
-                            session.textarea = TextArea::default();
-                        }
-                    };
                 }
                 TuiEvent::Exit => {
                     session.runner.cancel();
@@ -697,12 +713,12 @@ fn handle_input(tx: Sender<TuiEvent>) -> AResult<()> {
                     let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     // let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
                     match key.code {
-                        KeyCode::Enter => {
-                            if is_alt || is_ctrl {
-                                tx.send(TuiEvent::Prompt)?;
-                                continue;
-                            }
-                        }
+                        // KeyCode::Enter => {
+                        //     if is_alt || is_ctrl {
+                        //         tx.send(TuiEvent::Prompt)?;
+                        //         continue;
+                        //     }
+                        // }
                         KeyCode::Char(c) => {
                             if is_ctrl && c == 'c' {
                                 tx.send(TuiEvent::Exit).unwrap();
@@ -781,7 +797,7 @@ pub enum TuiEvent {
     Accept,
     Decline,
     Clear,
-    Prompt,
+    // Prompt,
     Exit,
     ToggleSelectModal,
     ToggleTodo,

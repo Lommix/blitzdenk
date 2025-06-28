@@ -7,7 +7,7 @@ use ratatui::{
 use crate::config::Theme;
 
 pub const HELP_TEXT: &str = r#"
-[alt+enter] send prompt
+[enter] send prompt
 [ctrl+k] select model
 [ctrl+n] new session
 [ctrl+y] accept confirm
