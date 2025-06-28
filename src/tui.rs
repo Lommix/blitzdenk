@@ -42,11 +42,13 @@ pub struct SessionState<'a> {
     pub runner: AgentRunner,
     pub token_cost: i32,
     pub money_cost: Option<f64>,
-    pub scroll_state: ScrollViewState,
+
+    // -------- @todo: move
     pub config: Config,
+    pub scroll_state: ScrollViewState,
     pub running: bool,
     pub running_spinner_state: ThrobberState,
-    pub popup_state: TuiState,
+    pub tui_state: TuiState,
 }
 
 #[derive(Default)]
@@ -88,7 +90,7 @@ impl<'a> SessionState<'a> {
             running: false,
             running_spinner_state: ThrobberState::default(),
             config,
-            popup_state: TuiState::None,
+            tui_state: TuiState::None,
         }
     }
 
@@ -124,7 +126,7 @@ impl<'a> SessionState<'a> {
         let is_ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
         let is_shift = ev.modifiers.contains(KeyModifiers::SHIFT);
 
-        match &mut self.popup_state {
+        match &mut self.tui_state {
             TuiState::None => {
                 match ev.code {
                     KeyCode::Char(c) => {
@@ -142,19 +144,19 @@ impl<'a> SessionState<'a> {
                         }
 
                         if is_ctrl && c == 'k' {
-                            self.popup_state =
+                            self.tui_state =
                                 TuiState::ModelSelect(ListState::default().with_selected(Some(0)));
                             return Ok(());
                         }
 
                         if is_ctrl && c == 't' {
-                            self.popup_state =
+                            self.tui_state =
                                 TuiState::TodoList(ListState::default().with_selected(Some(0)));
                             return Ok(());
                         }
 
                         if is_ctrl && c == 'h' {
-                            self.popup_state = TuiState::Help;
+                            self.tui_state = TuiState::Help;
                             return Ok(());
                         }
 
@@ -227,6 +229,7 @@ impl<'a> SessionState<'a> {
                     if c == 'a' {
                         if let Some(s) = req.respond.take() {
                             s.send(true).unwrap();
+                            self.tui_state = TuiState::None;
                         }
 
                         return Ok(());
@@ -235,6 +238,7 @@ impl<'a> SessionState<'a> {
                     if c == 'd' {
                         if let Some(s) = req.respond.take() {
                             s.send(false).unwrap();
+                            self.tui_state = TuiState::None;
                         }
                         return Ok(());
                     }
@@ -245,10 +249,10 @@ impl<'a> SessionState<'a> {
             },
             TuiState::Help => {
                 match ev.code {
-                    KeyCode::Esc => self.popup_state = TuiState::None,
+                    KeyCode::Esc => self.tui_state = TuiState::None,
                     KeyCode::Char(c) => {
                         if is_ctrl && c == 'h' {
-                            self.popup_state = TuiState::None
+                            self.tui_state = TuiState::None
                         }
                     }
                     _ => (),
@@ -281,12 +285,12 @@ impl<'a> SessionState<'a> {
 
                     self.config.current_model = self.config.model_list[index].clone();
                     self.config.save().await;
-                    self.popup_state = TuiState::None;
+                    self.tui_state = TuiState::None;
                     Ok(())
                 }
 
                 KeyCode::Esc => {
-                    self.popup_state = TuiState::None;
+                    self.tui_state = TuiState::None;
                     Ok(())
                 }
                 KeyCode::Char(c) => {
@@ -299,7 +303,7 @@ impl<'a> SessionState<'a> {
                     }
 
                     if is_ctrl && c == 'k' {
-                        self.popup_state = TuiState::None
+                        self.tui_state = TuiState::None
                     }
                     Ok(())
                 }
@@ -336,7 +340,7 @@ impl<'a> SessionState<'a> {
                     Ok(())
                 }
                 KeyCode::Esc => {
-                    self.popup_state = TuiState::None;
+                    self.tui_state = TuiState::None;
                     Ok(())
                 }
                 KeyCode::Char(c) => {
@@ -349,7 +353,7 @@ impl<'a> SessionState<'a> {
                     }
 
                     if is_ctrl && c == 't' {
-                        self.popup_state = TuiState::None
+                        self.tui_state = TuiState::None
                     }
 
                     Ok(())
@@ -403,7 +407,7 @@ impl<'a> SessionState<'a> {
             scroll_state: ScrollViewState::default(),
             running: false,
             running_spinner_state: ThrobberState::default(),
-            popup_state: TuiState::None,
+            tui_state: TuiState::None,
             config,
         };
 
@@ -613,13 +617,13 @@ where
                     session.scroll_state.scroll_to_bottom();
                 }
                 AgentEvent::Permission(permission_request) => {
-                    session.popup_state = TuiState::Confirm {
+                    session.tui_state = TuiState::Confirm {
                         req: permission_request,
                         scroll: 0,
                     };
                 }
                 AgentEvent::Timeout => {
-                    session.popup_state = TuiState::Notification {
+                    session.tui_state = TuiState::Notification {
                         msg: "Timout reached.".into(),
                         elapsed: Duration::from_secs(6),
                     };
@@ -650,14 +654,14 @@ where
                 }
                 TuiEvent::Paste(string) => _ = session.textarea.insert_str(string),
                 TuiEvent::Resize(_, _) => (),
-                TuiEvent::ScrollUp => match &mut session.popup_state {
+                TuiEvent::ScrollUp => match &mut session.tui_state {
                     TuiState::None => session.scroll_state.scroll_up(),
                     TuiState::Confirm { req, scroll } => {
                         *scroll = scroll.saturating_sub(0);
                     }
                     _ => (),
                 },
-                TuiEvent::ScrollDown => match &mut session.popup_state {
+                TuiEvent::ScrollDown => match &mut session.tui_state {
                     TuiState::None => session.scroll_state.scroll_down(),
                     TuiState::Confirm { req, scroll } => {
                         *scroll += 1;
@@ -732,7 +736,7 @@ pub fn render(
             &mut session.running_spinner_state,
         );
 
-        match &mut session.popup_state {
+        match &mut session.tui_state {
             TuiState::None => (),
             TuiState::Help => {
                 let modal = window.inner(Margin::new(10, 10));
@@ -755,7 +759,7 @@ pub fn render(
                     let modal = window.inner(Margin::new(3, 3));
                     NotifyWidget::new(theme, msg).render(modal, frame.buffer_mut());
                 } else {
-                    session.popup_state = TuiState::None;
+                    session.tui_state = TuiState::None;
                 }
             }
         }

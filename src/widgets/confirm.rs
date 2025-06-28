@@ -21,7 +21,7 @@ impl<'a> ConfirmWidget<'a> {
                     .title_top("[Allow?]")
                     .title_style(Style::new().bg(Color::White).fg(theme.selection_bg))
                     .title_alignment(Alignment::Center)
-                    .title_bottom("[a:Accept] [d:Decline]")
+                    .title_bottom("[ a:Accept] [ d:Decline]")
                     .borders(Borders::ALL)
                     .border_type(ratatui::widgets::BorderType::QuadrantOutside),
             )

@@ -23,9 +23,8 @@ impl<'a> TitleWidget<'a> {
             .pixel_size(tui_widgets::big_text::PixelSize::Quadrant)
             .lines(vec![line])
             .build();
-
         let info = Paragraph::new(format!(
-            "github.com/Lommix/blitzdenk v0.3\n{}",
+            "  github.com/Lommix/blitzdenk v0.3\n{}",
             super::help::HELP_TEXT
         ));
 
