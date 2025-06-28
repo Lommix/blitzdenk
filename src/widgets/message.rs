@@ -80,7 +80,11 @@ impl<'a> MessageWidget<'a> {
                         let mut line = Line::default().bg(theme.primary).fg(theme.text_color);
                         line.push_span(Span::raw(format!("[{}]", call.fn_name)).bold());
                         line.push_span(Span::raw(" with ").italic());
-                        line.push_span(Span::raw(format!(" {:?} ", call.fn_arguments)).bold());
+
+                        let mut s = format!(" {:?} ", call.fn_arguments);
+                        s.truncate(300);
+
+                        line.push_span(Span::raw(format!(" {:?} ", s)).bold());
                         line
                     })
                     .collect();
@@ -93,7 +97,11 @@ impl<'a> MessageWidget<'a> {
 
                 for res in tool_responses {
                     let mut line = Line::default().bg(theme.selection_bg);
-                    line.push_span(Span::raw(format!(" ⮡ {}", res.content)).italic());
+
+                    let mut d = res.content.clone();
+                    d.truncate(300);
+
+                    line.push_span(Span::raw(format!(" ⮡ {}", d)).italic());
                     preview.push(line);
                     //@todo: certain tools should show their full content, like the edit
                     content.push(None);
