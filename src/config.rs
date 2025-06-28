@@ -1,11 +1,16 @@
+use std::{collections::HashMap, hash::Hash};
+
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
+
+use crate::prompts;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     pub current_model: String,
     pub model_list: Vec<String>,
     pub theme: Theme,
+    pub user_prompts: HashMap<String, String>,
 }
 
 impl Default for Config {
@@ -30,6 +35,13 @@ impl Default for Config {
             .map(|s| s.to_string())
             .collect::<Vec<_>>(),
             theme: Theme::lommix(),
+            user_prompts: [
+                ("init".to_string(), prompts::INIT_AGENT_PROMPT.to_string()),
+                ("audit".to_string(), prompts::AUDIT_PROMPT.to_string()),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
         }
     }
 }

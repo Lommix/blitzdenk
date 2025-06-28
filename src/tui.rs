@@ -331,7 +331,7 @@ where
 
     let mut session = SessionState::load(&cwd, config.clone())
         .await
-        .unwrap_or(SessionState::new(config));
+        .unwrap_or(SessionState::new(config.clone()));
 
     let input = InputRunner::new();
 
@@ -468,44 +468,34 @@ where
 
                                     let prompt: String = session.textarea.lines().join("\n");
 
-                                    match prompt.as_str() {
-                                        "/init" => {
+                                    if prompt.starts_with('/') {
+                                        if let Some(prefab_prompt) =
+                                            config.user_prompts.get(&prompt[1..])
+                                        {
                                             session.messages.push(TuiMessage {
-                                                message: ChatMessage::user(
-                                                    prompts::INIT_AGENT_PROMPT,
-                                                ),
+                                                message: ChatMessage::user(prefab_prompt),
                                                 state: MessageState::default(),
                                             });
                                             session
                                                 .runner
-                                                .add_message(ChatMessage::user(
-                                                    prompts::INIT_AGENT_PROMPT,
-                                                ))
+                                                .add_message(ChatMessage::user(prefab_prompt))
                                                 .await;
                                             session.runner.start_cycle().await?;
                                             session.textarea = TextArea::default();
                                         }
-                                        "/audit" => {
-                                            let audit_prompt = prompts::AUDIT_PROMPT
-                                                .lines()
-                                                .map(String::from)
-                                                .collect();
-                                            session.textarea = TextArea::new(audit_prompt)
-                                        }
-                                        any => {
-                                            session.messages.push(TuiMessage {
-                                                message: ChatMessage::user(any),
-                                                state: MessageState::default(),
-                                            });
+                                    } else {
+                                        session.messages.push(TuiMessage {
+                                            message: ChatMessage::user(&prompt),
+                                            state: MessageState::default(),
+                                        });
 
-                                            session
-                                                .runner
-                                                .add_message(ChatMessage::user(any))
-                                                .await;
-                                            session.runner.start_cycle().await?;
-                                            session.textarea = TextArea::default();
-                                        }
-                                    };
+                                        session
+                                            .runner
+                                            .add_message(ChatMessage::user(&prompt))
+                                            .await;
+                                        session.runner.start_cycle().await?;
+                                        session.textarea = TextArea::default();
+                                    }
                                 }
                             }
                             PopupState::ModelSelect(list_state) => {
