@@ -10,8 +10,6 @@ pub const HELP_TEXT: &str = r#"
 [enter] send prompt
 [ctrl+k] select model
 [ctrl+n] new session
-[ctrl+y] accept
-[ctrl+x] decline
 [ctrl+h] help
 [ctrl+t] todo list
 [ctrl+c] exit

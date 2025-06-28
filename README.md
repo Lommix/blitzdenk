@@ -42,12 +42,19 @@ DEEPSEEK_API_KEY
 
 The configuration file for colors and available models is under:
 
-`~/.cache/blitzdenk/denk.toml`
+`~/.config/blitzdenk/denk.toml`
 
 You can add any models unique id to the model list. (Ollama included).
 
 - [based on rust-genai](https://github.com/jeremychone/rust-genai)
 - [models.dev](models.dev)
+
+## User quick prompts
+
+You can save custom quick prompts in the configuration. Identified by
+an alias, they can be called with a slash prefix.
+
+There is an example for `/init` and `/audit`.
 
 ## Saving sessions
 
@@ -70,11 +77,9 @@ vim.keymap.set("n", "<leader>o", "vplit | terminal blitzdenk", { silent = true }
 | enter    | send prompt    |
 | ctrl + k | select model   |
 | ctrl + n | new session    |
-| ctrl + y | accept         |
-| ctrl + x | decline        |
 | ctrl + t | task list      |
 | ctrl + h | help           |
-| ctrl + s | cancel         |
+| ctrl + s | cancel agent   |
 | ctrl + c | exit           |
 | up/down  | scroll up/down |
 
