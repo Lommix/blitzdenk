@@ -50,7 +50,7 @@ async fn main() -> AResult<()> {
             )
             .unwrap();
 
-            let cost_list = CostList::fetch().await?;
+            let cost_list = CostList::fetch().await.ok();
             tui::run(terminal, config, cost_list).await?;
         }
         Commands::Cleanup => {

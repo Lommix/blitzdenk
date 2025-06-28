@@ -320,7 +320,11 @@ impl Drop for AgentRunner {
     }
 }
 
-pub async fn run<T>(mut terminal: Terminal<T>, config: Config, cost_list: CostList) -> AResult<()>
+pub async fn run<T>(
+    mut terminal: Terminal<T>,
+    config: Config,
+    cost_list: Option<CostList>,
+) -> AResult<()>
 where
     T: Backend,
 {
@@ -346,12 +350,14 @@ where
 
                     session.token_cost = agent_message.token_cost.unwrap_or(session.token_cost);
 
-                    if let Some(cost) =
-                        cost_list.calc_cost(&session.config.current_model, session.token_cost)
-                    {
-                        session.money_cost = match session.money_cost {
-                            Some(c) => Some(c + cost),
-                            None => Some(cost),
+                    if let Some(ref cost_list) = cost_list {
+                        if let Some(cost) =
+                            cost_list.calc_cost(&session.config.current_model, session.token_cost)
+                        {
+                            session.money_cost = match session.money_cost {
+                                Some(c) => Some(c + cost),
+                                None => Some(cost),
+                            }
                         }
                     }
 
