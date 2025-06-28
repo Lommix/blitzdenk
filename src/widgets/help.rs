@@ -10,12 +10,12 @@ pub const HELP_TEXT: &str = r#"
 [enter] send prompt
 [ctrl+k] select model
 [ctrl+n] new session
-[ctrl+y] accept confirm
-[ctrl+x] decline confirm
+[ctrl+y] accept
+[ctrl+x] decline
 [ctrl+h] help
-[ctrl+t] toggle todo list
+[ctrl+t] todo list
 [ctrl+c] exit
-[ctrl+s] cancel request
+[ctrl+s] cancel agent
 
 /init - generates a AGENTS.md
 /audit - finding bugs and problems.

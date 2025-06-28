@@ -425,8 +425,20 @@ where
                             }
                             _ => (),
                         },
-                        KeyCode::Up => session.scroll_state.scroll_up(),
-                        KeyCode::Down => session.scroll_state.scroll_down(),
+                        KeyCode::Down => match &mut session.popup_state {
+                            PopupState::Confirm { req, scroll } => *scroll += 1,
+                            PopupState::TodoList(state) => state.select_next(),
+                            PopupState::ModelSelect(state) => state.select_next(),
+                            _ => session.scroll_state.scroll_down(),
+                        },
+                        KeyCode::Up => match &mut session.popup_state {
+                            PopupState::Confirm { req, scroll } => {
+                                *scroll = scroll.saturating_sub(1)
+                            }
+                            PopupState::TodoList(state) => state.select_previous(),
+                            PopupState::ModelSelect(state) => state.select_previous(),
+                            _ => session.scroll_state.scroll_up(),
+                        },
                         KeyCode::Backspace => {
                             if let PopupState::TodoList(list_state) = &session.popup_state {
                                 let index = list_state.selected().unwrap_or_default();
@@ -531,7 +543,10 @@ where
                         },
                         _ => (),
                     }
-                    _ = session.textarea.input(key);
+
+                    if matches!(session.popup_state, PopupState::None) {
+                        _ = session.textarea.input(key);
+                    }
                 }
                 TuiEvent::Paste(string) => _ = session.textarea.insert_str(string),
                 TuiEvent::Input(_) => (),

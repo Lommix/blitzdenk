@@ -65,18 +65,18 @@ vim.keymap.set("n", "<leader>o", "vplit | terminal blitzdenk", { silent = true }
 
 ## Keymap
 
-| keybind     | action         |
-| ----------- | -------------- |
-| alt + enter | send prompt    |
-| ctrl + k    | select model   |
-| ctrl + n    | new session    |
-| ctrl + y    | accept         |
-| ctrl + x    | decline        |
-| ctrl + t    | task list      |
-| ctrl + h    | help           |
-| ctrl + s    | cancel         |
-| ctrl + c    | exit           |
-| up/down     | scroll up/down |
+| keybind  | action         |
+| -------- | -------------- |
+| enter    | send prompt    |
+| ctrl + k | select model   |
+| ctrl + n | new session    |
+| ctrl + y | accept         |
+| ctrl + x | decline        |
+| ctrl + t | task list      |
+| ctrl + h | help           |
+| ctrl + s | cancel         |
+| ctrl + c | exit           |
+| up/down  | scroll up/down |
 
 ## MCP
 
