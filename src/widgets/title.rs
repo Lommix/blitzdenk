@@ -42,7 +42,7 @@ impl<'a> Widget for TitleWidget<'a> {
             .flex(Flex::Center)
             .areas(area);
 
-        let [modal] = Layout::vertical([Constraint::Length(16)])
+        let [modal] = Layout::vertical([Constraint::Length(24)])
             .flex(Flex::Center)
             .areas(modal);
 

@@ -61,11 +61,11 @@ impl<'a> StatefulWidget for TodoWidget<'a> {
     ) where
         Self: Sized,
     {
-        let [modal] = Layout::horizontal([Constraint::Length(48)])
+        let [modal] = Layout::horizontal([Constraint::Length(64)])
             .flex(Flex::Center)
             .areas(area);
 
-        let [modal] = Layout::vertical([Constraint::Length(16)])
+        let [modal] = Layout::vertical([Constraint::Length(32)])
             .flex(Flex::Center)
             .areas(modal);
 

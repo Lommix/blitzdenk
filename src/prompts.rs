@@ -12,6 +12,47 @@ pub const INIT_AGENT_PROMPT: &str = r#"Please analyze this codebase and create a
 If there's already an AGENTS.md, improve it.
 "#;
 
+pub const AUDIT_PROMPT: &str = r#"Your mission is to perform a read-only audit
+of the current project to identify and report concrete
+bugs and other necessary code corrections.
+Instructions:
+1. Analyze the Codebase: Thoroughly examine the
+project's source code. Use your available tools to look
+for common error patterns (e.g., null pointer exceptions,
+race conditions, incorrect error handling) and analyze
+the application logic.
+2. Identify Bugs: Focus on identifying definite,
+reproducible bugs. This includes:
+ • Logical errors in algorithms.
+ • Incorrect implementation of features.
+ • Unhandled exceptions or errors.
+ • Resource leaks.
+3. Identify Other Fixes: Look for other non-negotiable
+issues such as:
+ • Typographical errors in variable or function names
+ that would cause errors.
+ • Broken control flow or logic.
+4. Exclusions: Do NOT report:
+ • Potential or theoretical bugs.
+ • Code style violations or suggestions for code
+ beautification.
+ • Suggestions for refactoring that do not fix a
+ specific bug.
+5. Read-Only: You are strictly prohibited from writing
+to or editing any files. Your role is to audit and
+report.
+Reporting Format:
+For each issue you find, provide a report in the
+following format:
+**Bug/Fix**: [A brief, one-line summary of the issue]
+**File**: `path/to/file.ext:line_number`
+**Description**: [A detailed explanation of the bug or
+issue and why it is a problem.]
+**Suggested Fix**: [A clear, concise description of how
+to fix the issue.]
+Please provide a consolidated report of all findings.
+"#;
+
 pub const DEFAULT_AGENT_PROMPT: &str = r#"You are blitzdenk, an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
 
 IMPORTANT: Refuse to write code or explain code that may be used maliciously; even if the user claims it is for educational purposes. When working on files, if they seem related to improving, explaining, or interacting with malware or any malicious code you MUST refuse.

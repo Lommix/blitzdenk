@@ -539,6 +539,11 @@ where
                             session.runner.start_cycle().await?;
                             session.textarea = TextArea::default();
                         }
+                        "/audit" => {
+                            let audit_prompt =
+                                prompts::AUDIT_PROMPT.lines().map(String::from).collect();
+                            session.textarea = TextArea::new(audit_prompt)
+                        }
                         any => {
                             session.messages.push(TuiMessage {
                                 message: ChatMessage::user(any),

@@ -18,6 +18,7 @@ pub const HELP_TEXT: &str = r#"
 [ctrl+s] cancel request
 
 /init - generates a AGENTS.md
+/audit - finding bugs and problems.
 "#;
 
 pub struct HelpWidget<'a> {
