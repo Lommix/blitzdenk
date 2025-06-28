@@ -15,8 +15,8 @@ pub const HELP_TEXT: &str = r#"
 [ctrl+c] exit
 [ctrl+s] cancel agent
 
-/init - generates a AGENTS.md
-/audit - finding bugs and problems.
+/init - generate AGENTS.md
+/audit - find problems
 "#;
 
 pub struct HelpWidget<'a> {
