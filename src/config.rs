@@ -48,7 +48,7 @@ impl Default for Config {
 
 impl Config {
     pub async fn load() -> Self {
-        let path = home::home_dir().unwrap().join(".cache/blitzdenk/denk.toml");
+        let path = home::home_dir().unwrap().join(".config/blitzdenk/denk.toml");
 
         if !tokio::fs::try_exists(&path).await.unwrap() {
             let config = Config::default();
@@ -63,7 +63,7 @@ impl Config {
     }
 
     pub async fn save(&self) {
-        let path = home::home_dir().unwrap().join(".cache/blitzdenk/denk.toml");
+        let path = home::home_dir().unwrap().join(".config/blitzdenk/denk.toml");
         let raw = toml::ser::to_string(self).unwrap();
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.unwrap();
