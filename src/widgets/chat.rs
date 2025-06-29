@@ -29,7 +29,8 @@ impl<'a> widgets::StatefulWidget for ChatWidget<'a> {
 
         let mut msgs = Vec::new();
 
-        for msg in self.messages.iter() {
+        // skip system msg
+        for msg in self.messages.iter().skip(1) {
             let msg_widget = super::MessageWidget::new(&msg.message, self.theme);
             let lines = msg_widget.lines(area.width);
             msgs.push((msg_widget, lines, offset, msg.state.clone()));

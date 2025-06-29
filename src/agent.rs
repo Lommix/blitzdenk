@@ -47,12 +47,43 @@ impl Agent {
     }
 
     pub fn add_system_msg(&mut self, prompt: impl Into<String>) {
-        self.chat.system = Some(prompt.into());
+        self.chat = self.chat.clone().append_message(ChatMessage {
+            role: ChatRole::System,
+            content: MessageContent::Text(prompt.into()),
+            options: Some(MessageOptions {
+                cache_control: Some(CacheControl::Ephemeral),
+            }),
+        });
     }
 
     pub fn add_tool<T: AiTool + 'static>(&mut self, def: T) {
         self.chat = self.chat.clone().append_tool(def.into_tool());
         self.tool_box.insert(def.name().into(), Arc::new(T::run));
+    }
+
+    // sets caching for first 2 and last 2 messages
+    fn set_caching(&mut self) {
+        self.chat.messages.iter_mut().for_each(|msg| {
+            msg.options = None;
+        });
+
+        for i in 0..2 {
+            if let Some(sys) = self.chat.messages.get_mut(i) {
+                sys.options = Some(MessageOptions {
+                    cache_control: Some(CacheControl::Ephemeral),
+                });
+            }
+        }
+
+        let mut it = self.chat.messages.iter_mut().rev();
+
+        for _ in 0..2 {
+            if let Some(sys) = it.next() {
+                sys.options = Some(MessageOptions {
+                    cache_control: Some(CacheControl::Ephemeral),
+                });
+            }
+        }
     }
 
     pub async fn run(&mut self, abort: Arc<tokio::sync::Notify>) -> AResult<()> {
@@ -70,6 +101,9 @@ impl Agent {
         };
 
         loop {
+            // set caching
+            self.set_caching();
+
             let res = match tokio::select! {
                 res = client.exec_chat(&self.model, chat.clone(), Some(&options)) => { AgentReq::Result(res?) }
                 _ = tokio::time::sleep(TIMEOUT_DURATION) => { AgentReq::Timeout }
@@ -117,11 +151,14 @@ impl Agent {
                 let args: HashMap<String, Value> =
                     serde_json::from_value(call.fn_arguments.clone()).unwrap();
 
-                let msg =
-                    match func(call.call_id.clone(), ToolArgs(args), self.context.clone()).await {
-                        Ok(msg) => msg,
-                        Err(err) => ToolResponse::new(call.call_id.clone(), err.to_string()).into(),
-                    };
+                let msg = match func(call.call_id.clone(), ToolArgs(args), self.context.clone())
+                    .await
+                {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        ChatMessage::from(ToolResponse::new(call.call_id.clone(), err.to_string()))
+                    }
+                };
 
                 self.context.sender.send(AgentEvent::Message(msg.clone()))?;
 

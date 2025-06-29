@@ -94,33 +94,6 @@ impl<'a> SessionState<'a> {
         }
     }
 
-    pub async fn save(&self) -> AResult<()> {
-        let agent = self.runner.agent.lock().await;
-        let session_name = agent.context.current_cwd.replace('/', "");
-
-        let path = home::home_dir()
-            .map(|p| p.join(format!(".cache/blitzdenk/sessions/{}.json", session_name)))
-            .unwrap();
-
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        let state = SessionSaveState {
-            input: self.textarea.lines().to_owned(),
-            chat: agent.chat.clone(),
-            todo: agent.context.todo_list.lock().await.clone(),
-            model: agent.model.clone(),
-            token_cost: self.token_cost,
-            money_cost: self.money_cost,
-        };
-
-        let state_str = serde_json::to_string(&state)?;
-        tokio::fs::write(path, state_str).await?;
-
-        Ok(())
-    }
-
     async fn handle_input(&mut self, ev: KeyEvent) -> AResult<()> {
         let is_alt = ev.modifiers.contains(KeyModifiers::ALT);
         let is_ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
@@ -137,7 +110,15 @@ impl<'a> SessionState<'a> {
                             self.token_cost = 0;
                             self.money_cost = None;
                             self.runner.clear().await;
+
                             self.messages.clear();
+
+                            // dummy
+                            self.messages.push(TuiMessage {
+                                message: ChatMessage::system(AgentRunner::build_system_prompt()),
+                                state: Default::default(),
+                            });
+
                             self.textarea = TextArea::default();
 
                             return Ok(());
@@ -373,6 +354,33 @@ impl<'a> SessionState<'a> {
                 _ => Ok(()),
             },
         }
+    }
+
+    pub async fn save(&self) -> AResult<()> {
+        let agent = self.runner.agent.lock().await;
+        let session_name = agent.context.current_cwd.replace('/', "");
+
+        let path = home::home_dir()
+            .map(|p| p.join(format!(".cache/blitzdenk/sessions/{}.json", session_name)))
+            .unwrap();
+
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let state = SessionSaveState {
+            input: self.textarea.lines().to_owned(),
+            chat: agent.chat.clone(),
+            todo: agent.context.todo_list.lock().await.clone(),
+            model: agent.model.clone(),
+            token_cost: self.token_cost,
+            money_cost: self.money_cost,
+        };
+
+        let state_str = serde_json::to_string(&state)?;
+        tokio::fs::write(path, state_str).await?;
+
+        Ok(())
     }
 
     pub async fn load(cwd: &str, config: Config) -> AResult<Self> {
