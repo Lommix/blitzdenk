@@ -623,6 +623,12 @@ where
                         elapsed: Duration::from_secs(6),
                     };
                 }
+                AgentEvent::RateLimit => {
+                    session.tui_state = TuiState::Notification {
+                        msg: "Rate limit reached. Waiting 10s".into(),
+                        elapsed: Duration::from_secs(6),
+                    };
+                }
                 AgentEvent::TokenCost(cost) => {
                     session.token_cost += cost;
                     if let Some(ref cost_list) = cost_list {

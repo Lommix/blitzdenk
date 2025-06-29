@@ -18,6 +18,10 @@ pub enum AiError {
     #[error("tool call is missing argument `{0}`")]
     MissingArgument(String),
 
+    /// An error occurred while parsing a glob pattern.
+    #[error("request for model {model} failed with: {msg}")]
+    ModelError { model: String, msg: String },
+
     /// An error occurred while serializing or deserializing JSON.
     #[error(transparent)]
     JsonError(#[from] serde_json::Error),

@@ -1,12 +1,15 @@
 use crate::error::{AFuture, AResult, AiError};
 use crossbeam::channel::Sender;
-use genai::chat::*;
+use genai::{chat::*, Error};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::{
-    oneshot::{self},
-    Mutex,
+use tokio::{
+    sync::{
+        oneshot::{self},
+        Mutex,
+    },
+    time::sleep,
 };
 
 pub type ToolFn = Arc<dyn Fn(String, ToolArgs, AgentContext) -> AFuture<ChatMessage> + Send + Sync>;
@@ -25,7 +28,7 @@ pub struct Agent {
 enum AgentReq {
     Timeout,
     Abort,
-    Result(ChatResponse),
+    Result(Result<ChatResponse, genai::Error>),
 }
 
 impl Agent {
@@ -61,7 +64,9 @@ impl Agent {
         self.tool_box.insert(def.name().into(), Arc::new(T::run));
     }
 
+    // !only affects claude!
     // sets caching for first 2 and last 2 messages
+    // first 2 are most likly the system prompt and the initial user task
     fn set_caching(&mut self) {
         self.chat.messages.iter_mut().for_each(|msg| {
             msg.options = None;
@@ -105,7 +110,9 @@ impl Agent {
             self.set_caching();
 
             let res = match tokio::select! {
-                res = client.exec_chat(&self.model, chat.clone(), Some(&options)) => { AgentReq::Result(res?) }
+                res = client.exec_chat(&self.model, chat.clone(), Some(&options)) => {
+                    AgentReq::Result(res)
+                }
                 _ = tokio::time::sleep(TIMEOUT_DURATION) => { AgentReq::Timeout }
                 _ = abort.notified() => { AgentReq::Abort }
             } {
@@ -115,6 +122,33 @@ impl Agent {
                 }
                 AgentReq::Abort => break,
                 AgentReq::Result(chat_response) => chat_response,
+            };
+
+            let res = match res {
+                Ok(r) => r,
+                Err(err) => {
+                    self.running = false;
+                    match err {
+                        genai::Error::WebModelCall {
+                            model_iden,
+                            webc_error,
+                        } => {
+                            let err_str = webc_error.to_string();
+                            if err_str.contains("rate_limit") || err_str.contains("rate limit") {
+                                self.context.sender.send(AgentEvent::RateLimit)?;
+                                sleep(Duration::from_secs(10)).await;
+                                continue;
+                            } else {
+                                return Err(genai::Error::WebModelCall {
+                                    model_iden,
+                                    webc_error,
+                                }
+                                .into());
+                            }
+                        }
+                        any => return Err(any.into()),
+                    }
+                }
             };
 
             let mut cost = 0;
@@ -187,6 +221,7 @@ pub enum AgentEvent {
     Permission(PermissionRequest),
     TokenCost(i32),
     Timeout,
+    RateLimit,
 }
 
 #[derive(Clone, Default)]
