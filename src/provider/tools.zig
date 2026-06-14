@@ -37,7 +37,7 @@ pub const ToolContext = struct {
     interface: r.agent.AgentContext,
 
     // TODO: cleanup user context
-    cfg: *const r.config.BlitzCloudCfg,
+    cfg: *const r.config.BlitzdenkCfg,
     // app_ptr: *anyopaque,
 
     /// Set by the agent driver when this tool's future is being canceled.

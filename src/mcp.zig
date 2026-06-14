@@ -200,7 +200,7 @@ const Client = struct {
         var w = &req.writer;
 
         try w.print(
-            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"{s}\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"blitzcloud\",\"version\":\"0.1\"}}}}}}\n",
+            "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"{s}\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"blitz\",\"version\":\"0.1\"}}}}}}\n",
             .{ id, PROTOCOL_VERSION },
         );
 

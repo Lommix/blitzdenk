@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
     const lua_c_mod = build_lua_c(b, target, optimize);
 
     const exe = b.addExecutable(.{
-        .name = "blitzcloud",
+        .name = "blitz",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,

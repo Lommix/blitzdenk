@@ -882,7 +882,7 @@ fn getVmFromRegistry(L: *c.lua_State) ?*LuaVm {
     return @ptrCast(@alignCast(ptr));
 }
 
-fn getCfgFromRegistry(L: *c.lua_State) ?*prv.config.BlitzCloudCfg {
+fn getCfgFromRegistry(L: *c.lua_State) ?*prv.config.BlitzdenkCfg {
     const a = getAppFromRegistry(L) orelse return null;
     return @constCast(a.swarm.cfg);
 }

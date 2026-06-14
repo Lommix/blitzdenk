@@ -264,7 +264,7 @@ pub const ContextFactory = struct {
     pub fn configureAgent(
         self: *const Self,
         agent: *prv.agent.Agent,
-        config: *const cfg.BlitzCloudCfg,
+        config: *const cfg.BlitzdenkCfg,
     ) !void {
         agent.reset();
         const alloc = agent.arena.allocator();
@@ -372,7 +372,7 @@ pub const ContextFactory = struct {
     pub fn build_prompt(
         self: *const Self,
         alloc: std.mem.Allocator,
-        config: *const cfg.BlitzCloudCfg,
+        config: *const cfg.BlitzdenkCfg,
         agent_type: AgentType,
     ) ![]const u8 {
         var allocating = std.Io.Writer.Allocating.init(alloc);

@@ -1,5 +1,5 @@
 // ----------------------------------------------------------------
-// Blitzcloud 0.1
+// Blitzdenk 0.1
 // Copyright (c) 2026 Lorenz Mielke. All Rights Reserved.
 // ----------------------------------------------------------------
 
@@ -10,7 +10,7 @@ const tools = @import("tools/root.zig");
 const app = @import("app.zig");
 const inbuilt = prv.inbuilt;
 const prompts = @import("prompts.zig");
-const BlitzCloudCfg = prv.config.BlitzCloudCfg;
+const BlitzdenkCfg = prv.config.BlitzdenkCfg;
 const lua = @import("lua.zig");
 const reg = @import("registry.zig");
 const keys = @import("keys.zig");
@@ -213,7 +213,7 @@ pub fn run(
     flags: CliFlags,
     prompt: ?[]const u8,
 ) !void {
-    var cfg: BlitzCloudCfg = .{};
+    var cfg: BlitzdenkCfg = .{};
 
     // Ensure config blitz.lua exists, get paths
     const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;

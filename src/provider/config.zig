@@ -88,7 +88,7 @@ pub const PathEntry = struct {
 };
 
 // TODO: This should not live in the provider module
-pub const BlitzCloudCfg = struct {
+pub const BlitzdenkCfg = struct {
     providers: [MAX_PROVIDERS]Provider = @splat(.{}),
     provider_count: u32 = 0,
 
@@ -106,7 +106,7 @@ pub const BlitzCloudCfg = struct {
     /// commitProvider to activate it. Returns null if the slot cap is reached or
     /// url/key_envar exceed their buffers.
     pub fn reserveProvider(
-        self: *BlitzCloudCfg,
+        self: *BlitzdenkCfg,
         url: []const u8,
         key_envar: []const u8,
     ) ?*Provider {
@@ -122,14 +122,14 @@ pub const BlitzCloudCfg = struct {
         return slot;
     }
 
-    pub fn commitProvider(self: *BlitzCloudCfg) ProviderHandle {
+    pub fn commitProvider(self: *BlitzdenkCfg) ProviderHandle {
         const handle: ProviderHandle = @enumFromInt(self.provider_count);
         self.providers[self.provider_count].active = true;
         self.provider_count += 1;
         return handle;
     }
 
-    pub fn setModel(self: *BlitzCloudCfg, effort: EffortLevel, name: []const u8, handle: ProviderHandle) bool {
+    pub fn setModel(self: *BlitzdenkCfg, effort: EffortLevel, name: []const u8, handle: ProviderHandle) bool {
         const idx = @intFromEnum(handle);
         if (idx >= self.provider_count or !self.providers[idx].active) return false;
         if (name.len > 256) return false;
@@ -142,7 +142,7 @@ pub const BlitzCloudCfg = struct {
         return true;
     }
 
-    pub fn buildConfig(self: *const BlitzCloudCfg, effort: EffortLevel, env: *const std.process.Environ.Map) ?adapter.Config {
+    pub fn buildConfig(self: *const BlitzdenkCfg, effort: EffortLevel, env: *const std.process.Environ.Map) ?adapter.Config {
         const entry = self.getModelEntry(effort);
         if (!entry.bound) return null;
 
@@ -164,7 +164,7 @@ pub const BlitzCloudCfg = struct {
         };
     }
 
-    pub fn getModelEntry(self: *const BlitzCloudCfg, effort: EffortLevel) *const ModelEntry {
+    pub fn getModelEntry(self: *const BlitzdenkCfg, effort: EffortLevel) *const ModelEntry {
         return switch (effort) {
             .max => &self.model_max,
             .mid => &self.model_mid,
@@ -172,7 +172,7 @@ pub const BlitzCloudCfg = struct {
         };
     }
 
-    fn getModelEntryMut(self: *BlitzCloudCfg, effort: EffortLevel) *ModelEntry {
+    fn getModelEntryMut(self: *BlitzdenkCfg, effort: EffortLevel) *ModelEntry {
         return switch (effort) {
             .max => &self.model_max,
             .mid => &self.model_mid,
@@ -180,7 +180,7 @@ pub const BlitzCloudCfg = struct {
         };
     }
 
-    pub fn addDoc(self: *BlitzCloudCfg, name: []const u8, desc: []const u8, location: []const u8) bool {
+    pub fn addDoc(self: *BlitzdenkCfg, name: []const u8, desc: []const u8, location: []const u8) bool {
         if (self.doc_count >= MAX_DOCS) return false;
         if (name.len > 128 or desc.len > 256 or location.len > 512) return false;
         var slot = &self.doc_entries[self.doc_count];
@@ -194,7 +194,7 @@ pub const BlitzCloudCfg = struct {
         return true;
     }
 
-    pub fn addSkill(self: *BlitzCloudCfg, name: []const u8, desc: []const u8, location: []const u8) bool {
+    pub fn addSkill(self: *BlitzdenkCfg, name: []const u8, desc: []const u8, location: []const u8) bool {
         if (self.skill_count >= MAX_SKILLS) return false;
         if (name.len > 128 or desc.len > 256 or location.len > 512) return false;
         var slot = &self.skill_entries[self.skill_count];
@@ -208,15 +208,15 @@ pub const BlitzCloudCfg = struct {
         return true;
     }
 
-    pub fn getDocs(self: *const BlitzCloudCfg) []const PathEntry {
+    pub fn getDocs(self: *const BlitzdenkCfg) []const PathEntry {
         return self.doc_entries[0..self.doc_count];
     }
 
-    pub fn getSkills(self: *const BlitzCloudCfg) []const PathEntry {
+    pub fn getSkills(self: *const BlitzdenkCfg) []const PathEntry {
         return self.skill_entries[0..self.skill_count];
     }
 
-    pub fn resetProviders(self: *BlitzCloudCfg) void {
+    pub fn resetProviders(self: *BlitzdenkCfg) void {
         self.providers = @splat(.{});
         self.provider_count = 0;
         self.model_min = .{};

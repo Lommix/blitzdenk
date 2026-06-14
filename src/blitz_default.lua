@@ -1,4 +1,4 @@
--- Blitzcloud Default CFG HOTRELOAD active
+-- Blitzdenk Default CFG HOTRELOAD active
 
 -- Context edge used for CTX:% in the statusbar and auto-compaction.
 -- blitz.set_compact_edge(124 * 1024)
