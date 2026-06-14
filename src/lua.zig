@@ -1226,8 +1226,8 @@ fn luaAddCommand(L: ?*c.lua_State) callconv(.c) c_int {
     }
 
     const name = readAnyArg([]const u8, state, "add_command", 1) orelse return 0;
-    if (name.len == 0 or name[0] != ':') {
-        _ = c.luaL_error(state, "add_command: command must start with ':'");
+    if (name.len == 0 or (name[0] != ':' and name[0] != '/')) {
+        _ = c.luaL_error(state, "add_command: command must start with ':' or '/'");
         return 0;
     }
     if (std.mem.indexOfScalar(u8, name, ' ') != null) {

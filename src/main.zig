@@ -2,12 +2,11 @@
 // Blitzdenk 0.1
 // Copyright (c) 2026 Lorenz Mielke. All Rights Reserved.
 // ----------------------------------------------------------------
-
 const std = @import("std");
 const tui = @import("tui/root.zig");
 const prv = @import("provider");
 const tools = @import("tools/root.zig");
-const app = @import("app.zig");
+const App = @import("app.zig").App;
 const inbuilt = prv.inbuilt;
 const prompts = @import("prompts.zig");
 const BlitzdenkCfg = prv.config.BlitzdenkCfg;
@@ -16,6 +15,7 @@ const reg = @import("registry.zig");
 const keys = @import("keys.zig");
 const util = @import("util.zig");
 const session = @import("session.zig");
+const ChatEntry = @import("app.zig").ChatEntry;
 
 // ----------------------------------------------------------------
 pub const LUA_DEFAULT_FILE = @embedFile("blitz_default.lua");
@@ -235,38 +235,38 @@ pub fn run(
     errdefer term.deinit();
     defer term.deinit();
 
-    var state = try app.App.init(arena, gpa, &swarm, &context_factory, cwd);
-    defer state.deinit();
+    var app = try App.init(arena, gpa, &swarm, &context_factory, cwd);
+    defer app.deinit();
 
     // Lua VM holds an opaque pointer to App + a getter for the mutable cfg
     // (swarm.cfg is *const, so a sibling accessor unwraps the const).
-    state.lua_vm.setApp(&state);
-    state.lua_vm.clearLastError();
+    app.lua_vm.setApp(&app);
+    app.lua_vm.clearLastError();
     var lua_load_failed = false;
     if (config_lua) |info| {
         const inject = try std.fmt.allocPrint(arena, "package.path = \"{s}?.lua;\" .. package.path", .{info.dir_path});
-        state.lua_vm.exec(inject) catch |err| {
+        app.lua_vm.exec(inject) catch |err| {
             lua_load_failed = true;
-            std.log.scoped(.lua).err("failed to configure lua package.path: {s} ({any})", .{ state.lua_vm.getLastError(), err });
+            std.log.scoped(.lua).err("failed to configure lua package.path: {s} ({any})", .{ app.lua_vm.getLastError(), err });
         };
-        state.lua_vm.load(info.abs_path) catch |err| {
+        app.lua_vm.load(info.abs_path) catch |err| {
             lua_load_failed = true;
-            std.log.scoped(.lua).err("failed to load {s}: {s} ({any})", .{ info.abs_path, state.lua_vm.getLastError(), err });
+            std.log.scoped(.lua).err("failed to load {s}: {s} ({any})", .{ info.abs_path, app.lua_vm.getLastError(), err });
         };
     }
     if (cwdBlitzLuaExists(io)) {
-        state.lua_vm.load("blitz.lua") catch |err| {
+        app.lua_vm.load("blitz.lua") catch |err| {
             lua_load_failed = true;
-            std.log.scoped(.lua).err("failed to load blitz.lua: {s} ({any})", .{ state.lua_vm.getLastError(), err });
+            std.log.scoped(.lua).err("failed to load blitz.lua: {s} ({any})", .{ app.lua_vm.getLastError(), err });
         };
     }
-    if (!lua_load_failed) state.lua_vm.clearLastError();
-    state.lua_vm.readConfigFields();
-    var lua_tools = try state.lua_vm.getRegisteredTools(arena);
-    var lua_binds = try state.lua_vm.getRegisteredKeybinds(arena);
-    const mcp_servers = try state.lua_vm.getEnabledMcpServers(arena);
-    state.mcp_manager.loadServers(mcp_servers);
-    var mcp_tools = state.mcp_manager.registeredTools();
+    if (!lua_load_failed) app.lua_vm.clearLastError();
+    app.lua_vm.readConfigFields();
+    var lua_tools = try app.lua_vm.getRegisteredTools(arena);
+    var lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
+    const mcp_servers = try app.lua_vm.getEnabledMcpServers(arena);
+    app.mcp_manager.loadServers(mcp_servers);
+    var mcp_tools = app.mcp_manager.registeredTools();
 
     for (lua_tools) |tool| {
         try context_factory.add(arena, tool, .all);
@@ -276,7 +276,7 @@ pub fn run(
     }
 
     for (lua_binds) |bind| {
-        try state.keymap.custom.append(state.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn } });
+        try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn } });
     }
 
     var cwd_lua_mtime: i128 = blk: {
@@ -286,63 +286,63 @@ pub fn run(
     var config_lua_mtime: i128 = if (config_lua) |info| scanDirMaxMtime(io, info.dir_path) else 0;
     var reload_tick: u32 = 0;
 
-    state.reset();
-    state.flags.skip_permissions = !flags.strict_mode;
+    app.reset();
+    app.flags.skip_permissions = !flags.strict_mode;
 
     const agent_ctx: prv.agent.AgentContext = .{
-        .ptr = &state,
-        .gen_system_reminders = &app.App.genSystemRemindersOpaque,
-        .pop_queued_message = &app.App.popQueuedMessageOpaque,
+        .ptr = &app,
+        .gen_system_reminders = &App.genSystemRemindersOpaque,
+        .pop_queued_message = &App.popQueuedMessageOpaque,
         .configure_agent = (struct {
             fn configure(ptr: *anyopaque, agent: *prv.agent.Agent) !void {
-                const a: *app.App = @ptrCast(@alignCast(ptr));
+                const a: *App = @ptrCast(@alignCast(ptr));
                 try a.configureAgent(agent);
             }
         }).configure,
         .push_system_message = (struct {
             fn pushMsg(ptr: *anyopaque, agent: prv.Swarm.AgentId, msg: []const u8) void {
-                const a: *app.App = @ptrCast(@alignCast(ptr));
+                const a: *App = @ptrCast(@alignCast(ptr));
                 a.pushSystemMessage("(Agent {d}v{d}) {s}", .{ agent.index, agent.generation, msg });
             }
         }).pushMsg,
     };
 
-    if (config_lua) |info| state.loadHistory(state.appAlloc(), info.dir_path);
+    if (config_lua) |info| app.loadHistory(app.appAlloc(), info.dir_path);
 
     if (prompt) |p| {
-        try state.input_buffer.appendSlice(state.sessionAlloc(), p);
-        state.input_cursor = @intCast(state.input_buffer.items.len);
+        try app.input_buffer.appendSlice(app.sessionAlloc(), p);
+        app.input_cursor = @intCast(app.input_buffer.items.len);
     }
 
     main_loop: while (true) {
         // tick notifications
-        const had_visible_notifications = state.notifications.hasVisible();
-        state.notifications.tick(1.0 / 60.0);
-        if (had_visible_notifications or state.notifications.hasVisible()) state.dirty = true;
+        const had_visible_notifications = app.notifications.hasVisible();
+        app.notifications.tick(1.0 / 60.0);
+        if (had_visible_notifications or app.notifications.hasVisible()) app.dirty = true;
 
-        if (state.dirty or state.main_agent_id == null) {
-            try term.drawWith(&state, app.App.render);
-            state.frame_count +%= 1;
-            state.dirty = false;
+        if (app.dirty or app.main_agent_id == null) {
+            try term.drawWith(&app, App.render);
+            app.frame_count +%= 1;
+            app.dirty = false;
         }
 
-        if (state.running) {
-            if (!state.swarm.tickAll(agent_ctx)) state.running = false;
-            state.dirty = true;
+        if (app.running) {
+            if (!app.swarm.tickAll(agent_ctx)) app.running = false;
+            app.dirty = true;
         }
 
         // Drain new agent messages from broadcast into chat_entries
-        state.drainBroadcast();
+        app.drainBroadcast();
         // Mirror in-progress streaming message so TUI shows tokens as they arrive.
-        state.syncStreamingPreview();
-        state.syncCompactionIndicator();
+        app.syncStreamingPreview();
+        app.syncCompactionIndicator();
 
-        const pending_perm = state.firstPendingPermission();
+        const pending_perm = app.firstPendingPermission();
 
         // Drive input_mode from perm presence — single source of truth.
-        switch (state.input_mode) {
-            .text => if (pending_perm != null) state.enterPermSelect(),
-            .perm_select, .perm_message => if (pending_perm == null) state.returnToText(),
+        switch (app.input_mode) {
+            .text => if (pending_perm != null) app.enterPermSelect(),
+            .perm_select, .perm_message => if (pending_perm == null) app.returnToText(),
             .passphrase => {},
         }
 
@@ -359,16 +359,16 @@ pub fn run(
             if (new_cwd_mtime != cwd_lua_mtime or new_config_mtime != config_lua_mtime) blk: {
                 // Tool worker may currently hold
                 // vm_mu. Skip this tick if busy — mtime stays unchanged so we retry.
-                if (!state.lua_vm.vm_mu.tryLock()) break :blk;
-                defer state.lua_vm.vm_mu.unlock(io);
+                if (!app.lua_vm.vm_mu.tryLock()) break :blk;
+                defer app.lua_vm.vm_mu.unlock(io);
 
                 cwd_lua_mtime = new_cwd_mtime;
                 config_lua_mtime = new_config_mtime;
 
-                state.lua_vm.clearLastError();
+                app.lua_vm.clearLastError();
                 var lua_reload_failed = false;
 
-                state.lua_vm.reset() catch |err| {
+                app.lua_vm.reset() catch |err| {
                     lua_reload_failed = true;
                     std.log.scoped(.lua).err("hot-reload: failed to reset lua vm ({any})", .{err});
                 };
@@ -376,48 +376,48 @@ pub fn run(
                 context_factory.resetPrompts();
                 if (config_lua) |info| {
                     const inject = std.fmt.allocPrint(arena, "package.path = \"{s}?.lua;\" .. package.path", .{info.dir_path}) catch null;
-                    if (inject) |code| state.lua_vm.exec(code) catch |err| {
+                    if (inject) |code| app.lua_vm.exec(code) catch |err| {
                         lua_reload_failed = true;
-                        std.log.scoped(.lua).err("hot-reload: failed to configure lua package.path: {s} ({any})", .{ state.lua_vm.getLastError(), err });
+                        std.log.scoped(.lua).err("hot-reload: failed to configure lua package.path: {s} ({any})", .{ app.lua_vm.getLastError(), err });
                     };
-                    state.lua_vm.load(info.abs_path) catch |err| {
+                    app.lua_vm.load(info.abs_path) catch |err| {
                         lua_reload_failed = true;
-                        std.log.scoped(.lua).err("hot-reload: failed to load {s}: {s} ({any})", .{ info.abs_path, state.lua_vm.getLastError(), err });
+                        std.log.scoped(.lua).err("hot-reload: failed to load {s}: {s} ({any})", .{ info.abs_path, app.lua_vm.getLastError(), err });
                     };
                 }
                 if (cwdBlitzLuaExists(io)) {
-                    state.lua_vm.load("blitz.lua") catch |err| {
+                    app.lua_vm.load("blitz.lua") catch |err| {
                         lua_reload_failed = true;
-                        std.log.scoped(.lua).err("hot-reload: failed to load blitz.lua: {s} ({any})", .{ state.lua_vm.getLastError(), err });
+                        std.log.scoped(.lua).err("hot-reload: failed to load blitz.lua: {s} ({any})", .{ app.lua_vm.getLastError(), err });
                     };
                 }
-                if (!lua_reload_failed) state.lua_vm.clearLastError();
-                state.lua_vm.readConfigFields();
-                state.dirty = true;
+                if (!lua_reload_failed) app.lua_vm.clearLastError();
+                app.lua_vm.readConfigFields();
+                app.dirty = true;
 
                 for (lua_tools) |tool| context_factory.remove(tool.def.name);
                 for (mcp_tools) |tool| context_factory.remove(tool.tool.def.name);
-                lua_tools = state.lua_vm.getRegisteredTools(arena) catch |err| {
+                lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
                     std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
                     break :blk;
                 };
                 for (lua_tools) |tool| try context_factory.add(arena, tool, .all);
 
-                const reloaded_mcp_servers = state.lua_vm.getEnabledMcpServers(arena) catch |err| {
+                const reloaded_mcp_servers = app.lua_vm.getEnabledMcpServers(arena) catch |err| {
                     std.log.scoped(.mcp).err("failed to load MCP server defs {any}", .{err});
                     break :blk;
                 };
-                state.mcp_manager.loadServers(reloaded_mcp_servers);
-                mcp_tools = state.mcp_manager.registeredTools();
+                app.mcp_manager.loadServers(reloaded_mcp_servers);
+                mcp_tools = app.mcp_manager.registeredTools();
                 for (mcp_tools) |tool| try context_factory.add(arena, tool.tool, tool.flags);
 
-                lua_binds = try state.lua_vm.getRegisteredKeybinds(arena);
-                state.keymap.custom.clearRetainingCapacity();
+                lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
+                app.keymap.custom.clearRetainingCapacity();
                 for (lua_binds) |bind| {
-                    try state.keymap.custom.append(state.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn } });
+                    try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn } });
                 }
 
-                if (state.main_agent_id) |id| {
+                if (app.main_agent_id) |id| {
                     if (swarm.getAgent(id)) |agent| {
                         var set = reg.ToolSet{};
                         context_factory.build_toolset(.main, &set) catch {};
@@ -430,63 +430,63 @@ pub fn run(
         term.pollAndEnqueue(16);
         while (true) {
             const next_event = term.nextEvent();
-            if (next_event != .none) state.dirty = true;
+            if (next_event != .none) app.dirty = true;
             switch (next_event) {
-                .wheel_down => try state.cmd_queue.append(io, .{ .scroll_down = 1 }),
-                .wheel_up => try state.cmd_queue.append(io, .{ .scroll_up = 1 }),
+                .wheel_down => try app.cmd_queue.append(io, .{ .scroll_down = 1 }),
+                .wheel_up => try app.cmd_queue.append(io, .{ .scroll_up = 1 }),
                 .key => |k| {
-                    if (state.keymap.parse(k)) |action| {
+                    if (app.keymap.parse(k)) |action| {
                         switch (action) {
                             .exit => {
-                                if (pending_perm == null and state.running) {
-                                    try state.cmd_queue.append(io, .cancel);
+                                if (pending_perm == null and app.running) {
+                                    try app.cmd_queue.append(io, .cancel);
                                 } else {
                                     break :main_loop;
                                 }
                                 continue;
                             },
                             .cancel => {
-                                if (state.running) {
-                                    try state.cmd_queue.append(io, .cancel);
+                                if (app.running) {
+                                    try app.cmd_queue.append(io, .cancel);
                                 } else {
-                                    state.screenshot_buf = null;
+                                    app.screenshot_buf = null;
                                 }
                             },
                             .scroll_down => {
-                                try state.cmd_queue.append(io, .{ .scroll_down = 1 });
+                                try app.cmd_queue.append(io, .{ .scroll_down = 1 });
                                 continue;
                             },
                             .scroll_up => {
-                                try state.cmd_queue.append(io, .{ .scroll_up = 1 });
+                                try app.cmd_queue.append(io, .{ .scroll_up = 1 });
                                 continue;
                             },
                             .clear_session => {
-                                try state.cmd_queue.append(io, .reset_session);
+                                try app.cmd_queue.append(io, .reset_session);
                                 continue;
                             },
                             .retry => {
-                                try state.cmd_queue.append(io, .retry);
+                                try app.cmd_queue.append(io, .retry);
                                 continue;
                             },
                             .lua => |lua_fn| {
-                                if (state.lua_vm.vm_mu.tryLock()) {
-                                    defer state.lua_vm.vm_mu.unlock(io);
-                                    state.lua_vm.invokeBind(lua_fn);
+                                if (app.lua_vm.vm_mu.tryLock()) {
+                                    defer app.lua_vm.vm_mu.unlock(io);
+                                    app.lua_vm.invokeBind(lua_fn);
                                 }
                                 continue;
                             },
                             .open_cmd => {
                                 continue;
                             },
-                            .cursor_left => state.input_cursor -|= 1,
+                            .cursor_left => app.input_cursor -|= 1,
                             .cursor_right => {
-                                state.input_cursor = @min(state.input_cursor + 1, state.input_buffer.items.len);
+                                app.input_cursor = @min(app.input_cursor + 1, app.input_buffer.items.len);
                             },
                             .cursor_up => {},
                             .cursor_down => {},
                             .toggle_skip => {
-                                state.flags.skip_permissions = !state.flags.skip_permissions;
-                                state.dirty = true;
+                                app.flags.skip_permissions = !app.flags.skip_permissions;
+                                app.dirty = true;
                                 continue;
                             },
                             .noop => {},
@@ -494,13 +494,13 @@ pub fn run(
                     }
                     switch (k.code) {
                         .char => |c| {
-                            switch (state.input_mode) {
+                            switch (app.input_mode) {
                                 .text => {
-                                    state.appendBytes(k.textSlice());
+                                    app.appendBytes(k.textSlice());
                                 },
                                 .perm_select => |*ps| {
                                     const pen = pending_perm orelse break;
-                                    const entry = state.swarm.permission_requests.getPtr(pen.call_id) orelse break;
+                                    const entry = app.swarm.permission_requests.getPtr(pen.call_id) orelse break;
 
                                     const max_sel: u8 = switch (entry.payload) {
                                         .ask => |a| @intCast(@min(a.options.len, tools.ask.MAX_OPTIONS)),
@@ -526,19 +526,19 @@ pub fn run(
                                 },
                             }
                         },
-                        .arrow_up => switch (state.input_mode) {
-                            .text => if (!state.running) state.historyUp(),
+                        .arrow_up => switch (app.input_mode) {
+                            .text => if (!app.running) app.historyUp(),
                             .perm_select => |*ps| {
                                 if (ps.selected > 0) ps.selected -= 1;
                             },
                             .perm_message => {},
                             .passphrase => {},
                         },
-                        .arrow_down => switch (state.input_mode) {
-                            .text => if (!state.running) state.historyDown(),
+                        .arrow_down => switch (app.input_mode) {
+                            .text => if (!app.running) app.historyDown(),
                             .perm_select => |*ps| {
                                 const pen = pending_perm orelse break;
-                                const entry = state.swarm.permission_requests.getPtr(pen.call_id) orelse break;
+                                const entry = app.swarm.permission_requests.getPtr(pen.call_id) orelse break;
                                 const max_sel: u8 = switch (entry.payload) {
                                     .ask => |a| @intCast(@min(a.options.len, tools.ask.MAX_OPTIONS)),
                                     .plan => 3,
@@ -549,8 +549,8 @@ pub fn run(
                             .perm_message => {},
                             .passphrase => {},
                         },
-                        .backspace => switch (state.input_mode) {
-                            .text => state.deleteChar(),
+                        .backspace => switch (app.input_mode) {
+                            .text => app.deleteChar(),
                             .perm_select => {},
                             .perm_message => |*pm| {
                                 while (pm.len > 0) {
@@ -565,42 +565,42 @@ pub fn run(
                                 }
                             },
                         },
-                        .enter => switch (state.input_mode) {
+                        .enter => switch (app.input_mode) {
                             .perm_message => |*pm| {
                                 const pen = pending_perm orelse break;
-                                const entry = state.swarm.permission_requests.getPtr(pen.call_id) orelse break;
+                                const entry = app.swarm.permission_requests.getPtr(pen.call_id) orelse break;
 
                                 const is_ask = entry.payload == .ask;
 
                                 if (pm.len == 0) {
-                                    state.enterPermSelect();
+                                    app.enterPermSelect();
                                     break;
                                 }
                                 const msg = pm.buf[0..pm.len];
                                 if (is_ask) {
-                                    state.resolvePermission(pen.call_id, .{ .message = msg });
+                                    app.resolvePermission(pen.call_id, .{ .message = msg });
                                 } else {
-                                    state.denyAndPopPermission(pen.call_id, msg);
+                                    app.denyAndPopPermission(pen.call_id, msg);
                                 }
-                                state.auto_scroll = true;
-                                state.scroll_offset = 0;
+                                app.auto_scroll = true;
+                                app.scroll_offset = 0;
                             },
                             .perm_select => |*ps| {
                                 const pen = pending_perm orelse break;
-                                const entry = state.swarm.permission_requests.getPtr(pen.call_id) orelse break;
+                                const entry = app.swarm.permission_requests.getPtr(pen.call_id) orelse break;
 
                                 if (entry.payload == .ask) {
                                     const args = entry.payload.ask;
                                     const opts_len: u8 = @intCast(@min(args.options.len, tools.ask.MAX_OPTIONS));
 
                                     if (ps.selected >= opts_len) {
-                                        state.enterPermMessage();
+                                        app.enterPermMessage();
                                         break;
                                     }
 
-                                    state.resolvePermission(pen.call_id, .{ .choice = ps.selected });
-                                    state.auto_scroll = true;
-                                    state.scroll_offset = 0;
+                                    app.resolvePermission(pen.call_id, .{ .choice = ps.selected });
+                                    app.auto_scroll = true;
+                                    app.scroll_offset = 0;
                                     break;
                                 }
 
@@ -609,73 +609,74 @@ pub fn run(
                                 if (entry.payload == .plan) {
                                     switch (ps.selected) {
                                         0 => {
+
                                             // Approve & clear — reset, spawn fresh exec agent.
                                             // No need to resolve; reset() drops the perm map.
                                             // plan_text and plan_entry must survive state.reset() below — stash in app arena.
-                                            const plan_text = state.appAlloc().dupe(u8, entry.payload.plan.plan_text) catch break;
-                                            const plan_entry_src: app.ChatEntry.PlanEntry = blk: {
-                                                for (0..state.chat_entries.items.len) |i| {
-                                                    const idx = state.chat_entries.items.len - i - 1;
-                                                    switch (state.chat_entries.items[idx]) {
+                                            const plan_text = app.appAlloc().dupe(u8, entry.payload.plan.plan_text) catch break;
+                                            const plan_entry_src: ChatEntry.PlanEntry = blk: {
+                                                for (0..app.chat_entries.items.len) |i| {
+                                                    const idx = app.chat_entries.items.len - i - 1;
+                                                    switch (app.chat_entries.items[idx]) {
                                                         .plan => |pe| break :blk pe,
                                                         else => continue,
                                                     }
                                                 }
                                                 return error.NoPlanPreview;
                                             };
-                                            const plan_entry = try util.deepClone(app.ChatEntry.PlanEntry, plan_entry_src, state.appAlloc());
+                                            const plan_entry = try util.deepClone(ChatEntry.PlanEntry, plan_entry_src, app.appAlloc());
 
-                                            state.reset();
-                                            state.mode = @enumFromInt(0);
+                                            app.reset();
+                                            app.mode = @enumFromInt(0);
 
                                             var set = reg.ToolSet{};
                                             context_factory.build_toolset(.main, &set) catch {};
 
-                                            const id = try state.swarm.newAgent(
+                                            const id = try app.swarm.newAgent(
                                                 .max,
                                                 null,
                                                 @intFromEnum(reg.AgentType.main),
-                                                @intFromEnum(state.mode),
+                                                @intFromEnum(app.mode),
                                             );
 
-                                            const agent = state.swarm.getAgent(id).?;
-                                            try state.configureAgent(agent);
+                                            const agent = app.swarm.getAgent(id).?;
+                                            try app.configureAgent(agent);
 
                                             agent.max_iterations = std.math.maxInt(u32);
                                             agent.max_allowed_tool_calls = std.math.maxInt(u32);
                                             agent.permission_level = .write;
 
-                                            state.pushChatMessage(.user, plan_text);
-                                            const plan_entry_session = try util.deepClone(app.ChatEntry.PlanEntry, plan_entry, state.sessionAlloc());
-                                            try state.chat_entries.append(state.sessionAlloc(), .{ .plan = plan_entry_session });
-                                            state.main_agent_id = id;
-                                            state.running = true;
-                                            state.auto_scroll = true;
-                                            state.scroll_offset = 0;
+                                            app.pushChatMessage(.user, plan_text);
+                                            const plan_entry_session = try util.deepClone(ChatEntry.PlanEntry, plan_entry, app.sessionAlloc());
+                                            try app.chat_entries.append(app.sessionAlloc(), .{ .plan = plan_entry_session });
+                                            app.main_agent_id = id;
+                                            app.running = true;
+                                            app.auto_scroll = true;
+                                            app.scroll_offset = 0;
 
-                                            state.swarm.runAgent(id, &.{.{ .text = plan_text }}) catch break;
+                                            app.swarm.runAgent(id, &.{.{ .text = plan_text }}) catch break;
                                         },
                                         1 => {
                                             // Approve & keep — same agent, switch mode, lift caps.
-                                            state.mode = @enumFromInt(0);
+                                            app.mode = @enumFromInt(0);
 
-                                            if (state.main_agent_id) |id| {
-                                                const agent = state.swarm.getAgent(id) orelse break;
+                                            if (app.main_agent_id) |id| {
+                                                const agent = app.swarm.getAgent(id) orelse break;
                                                 agent.max_iterations = std.math.maxInt(u32);
                                                 agent.max_allowed_tool_calls = std.math.maxInt(u32);
                                             }
 
-                                            state.resolvePermission(pen.call_id, .approved);
-                                            state.running = true;
-                                            state.auto_scroll = true;
-                                            state.scroll_offset = 0;
+                                            app.resolvePermission(pen.call_id, .approved);
+                                            app.running = true;
+                                            app.auto_scroll = true;
+                                            app.scroll_offset = 0;
                                         },
                                         2 => {
-                                            state.denyAndPopPermission(pen.call_id, null);
-                                            state.auto_scroll = true;
-                                            state.scroll_offset = 0;
+                                            app.denyAndPopPermission(pen.call_id, null);
+                                            app.auto_scroll = true;
+                                            app.scroll_offset = 0;
                                         },
-                                        3 => state.enterPermMessage(),
+                                        3 => app.enterPermMessage(),
                                         else => {},
                                     }
                                     break;
@@ -683,60 +684,61 @@ pub fn run(
 
                                 // Generic 3-option (yes / no / enter message)
                                 switch (ps.selected) {
-                                    0 => state.resolvePermission(pen.call_id, .approved),
-                                    1 => state.denyAndPopPermission(pen.call_id, null),
+                                    0 => app.resolvePermission(pen.call_id, .approved),
+                                    1 => app.denyAndPopPermission(pen.call_id, null),
                                     2 => {
-                                        state.enterPermMessage();
+                                        app.enterPermMessage();
                                         break;
                                     },
                                     else => {},
                                 }
-                                state.auto_scroll = true;
-                                state.scroll_offset = 0;
+                                app.auto_scroll = true;
+                                app.scroll_offset = 0;
                             },
                             .text => {
-                                if (state.input_buffer.items.len == 0) break;
+                                if (app.input_buffer.items.len == 0) break;
 
-                                if (state.running) {
-                                    const input = state.inputSlice();
-                                    state.pushHistory(state.appAlloc(), input);
-                                    if (config_lua) |info| state.saveHistory(info.dir_path);
-                                    if (state.main_agent_id) |agent_id| {
-                                        const ag = state.swarm.getAgent(agent_id).?;
+                                if (app.running) {
+                                    const input = app.inputSlice();
+                                    app.pushHistory(app.appAlloc(), input);
+                                    if (config_lua) |info| app.saveHistory(info.dir_path);
+                                    if (app.main_agent_id) |agent_id| {
+                                        const ag = app.swarm.getAgent(agent_id).?;
                                         const alloc = ag.arena.allocator();
-                                        const len: usize = if (state.screenshot_buf != null) 2 else 1;
+                                        const len: usize = if (app.screenshot_buf != null) 2 else 1;
 
                                         const parts = try alloc.alloc(prv.adapter.ContentPart, len);
                                         parts[0] = .{ .text = try alloc.dupe(u8, input) };
 
-                                        if (state.screenshot_buf) |buf| {
+                                        if (app.screenshot_buf) |buf| {
                                             parts[1] = .{ .image = .{
                                                 .media_type = "image/png",
                                                 .data = buf,
                                             } };
                                         }
 
-                                        try state.cmd_queue.append(io, .{ .queue_agent_message = .{
+                                        try app.cmd_queue.append(io, .{ .queue_agent_message = .{
                                             .agent_id = agent_id,
                                             .parts = parts,
                                         } });
                                     }
 
-                                    try state.cmd_queue.append(io, .{ .scroll_down = 999999 });
-                                    state.screenshot_buf = null;
-                                    state.input_buffer.clearRetainingCapacity();
+                                    try app.cmd_queue.append(io, .{ .scroll_down = 999999 });
+                                    app.screenshot_buf = null;
+                                    app.input_buffer.clearRetainingCapacity();
                                     continue;
                                 }
 
-                                state.pushHistory(state.appAlloc(), state.inputSlice());
-                                if (config_lua) |info| state.saveHistory(info.dir_path);
-                                const input = swarm.arena.allocator().dupe(u8, state.inputSlice()) catch break;
+                                app.pushHistory(app.appAlloc(), app.inputSlice());
+                                if (config_lua) |info| app.saveHistory(info.dir_path);
+                                const input = swarm.arena.allocator().dupe(u8, app.inputSlice()) catch break;
 
-                                if (input[0] == ':') {
-                                    if (state.lua_vm.vm_mu.tryLock()) {
-                                        defer state.lua_vm.vm_mu.unlock(io);
-                                        if (state.lua_vm.invokeCommand(input)) {
-                                            state.input_buffer.clearRetainingCapacity();
+                                // -- user commands
+                                if (input[0] == ':' or input[0] == '/') {
+                                    if (app.lua_vm.vm_mu.tryLock()) {
+                                        defer app.lua_vm.vm_mu.unlock(io);
+                                        if (app.lua_vm.invokeCommand(input)) {
+                                            app.input_buffer.clearRetainingCapacity();
                                             break;
                                         }
                                     } else {
@@ -748,24 +750,24 @@ pub fn run(
                                     if (cmd) |c| {
                                         switch (c) {
                                             .clear => {
-                                                state.reset();
+                                                app.reset();
                                                 break;
                                             },
                                             .help => {
-                                                state.pushSystemMessage("Not yet implemented. You are on your own!", .{});
+                                                app.pushSystemMessage("Not yet implemented. You are on your own!", .{});
                                             },
                                             .ssh => |args| {
-                                                handleSshCommand(&state, &cmd_pool, gpa, args);
-                                                state.input_buffer.clearRetainingCapacity();
+                                                handleSshCommand(&app, &cmd_pool, gpa, args);
+                                                app.input_buffer.clearRetainingCapacity();
                                             },
                                             .cd => |path| {
-                                                state.cwd = try state.appAlloc().dupe(u8, path);
-                                                state.input_buffer.clearRetainingCapacity();
+                                                app.cwd = try app.appAlloc().dupe(u8, path);
+                                                app.input_buffer.clearRetainingCapacity();
                                             },
                                             .ssh_off => {
                                                 cmd_pool.clearSsh();
-                                                state.pushSystemMessage("ssh mode disabled", .{});
-                                                state.input_buffer.clearRetainingCapacity();
+                                                app.pushSystemMessage("ssh mode disabled", .{});
+                                                app.input_buffer.clearRetainingCapacity();
                                             },
                                         }
                                     }
@@ -775,7 +777,7 @@ pub fn run(
                                 // state.pushChatMessage(.user, input);
 
                                 const alloc = swarm.arena.allocator();
-                                const parts: []const prv.adapter.ContentPart = if (state.screenshot_buf) |img_data|
+                                const parts: []const prv.adapter.ContentPart = if (app.screenshot_buf) |img_data|
                                     alloc.dupe(prv.adapter.ContentPart, &.{
                                         .{ .text = input },
                                         .{ .image = .{ .media_type = "image/png", .data = img_data } },
@@ -785,16 +787,16 @@ pub fn run(
                                         .{ .text = input },
                                     }) catch break;
 
-                                state.screenshot_buf = null;
+                                app.screenshot_buf = null;
 
-                                const chat_entry = try app.ChatEntry.userMessageSimple(state.sessionAlloc(), input);
+                                const chat_entry = try ChatEntry.userMessageSimple(app.sessionAlloc(), input);
 
-                                if (state.main_agent_id) |id| {
-                                    try state.cmd_queue.append(io, .{ .push_chat_entry = chat_entry });
-                                    state.swarm.runAgent(id, parts) catch {};
+                                if (app.main_agent_id) |id| {
+                                    try app.cmd_queue.append(io, .{ .push_chat_entry = chat_entry });
+                                    app.swarm.runAgent(id, parts) catch {};
                                 } else {
-                                    const id = state.swarm.reserveFreeSlot().?;
-                                    try state.cmd_queue.append(io, .{
+                                    const id = app.swarm.reserveFreeSlot().?;
+                                    try app.cmd_queue.append(io, .{
                                         .spawn_agent = .{
                                             .agent_id = id,
                                             .effort = .max,
@@ -807,32 +809,32 @@ pub fn run(
                                     });
                                 }
 
-                                state.running = true;
-                                state.input_buffer.clearRetainingCapacity();
+                                app.running = true;
+                                app.input_buffer.clearRetainingCapacity();
                             },
                             .passphrase => {
-                                handleSshUnlock(&state, &cmd_pool, gpa);
+                                handleSshUnlock(&app, &cmd_pool, gpa);
                             },
                         },
-                        .esc => switch (state.input_mode) {
+                        .esc => switch (app.input_mode) {
                             .text => {
-                                const input = state.inputSlice();
+                                const input = app.inputSlice();
                                 if (input.len > 0 and input[0] == ':') {
-                                    state.input_buffer.clearRetainingCapacity();
-                                    state.input_cursor = 0;
+                                    app.input_buffer.clearRetainingCapacity();
+                                    app.input_cursor = 0;
                                 }
                             },
                             .passphrase => {
-                                state.pushSystemMessage("ssh: passphrase entry canceled", .{});
-                                state.returnToText();
+                                app.pushSystemMessage("ssh: passphrase entry canceled", .{});
+                                app.returnToText();
                             },
                             else => {},
                         },
                         else => {},
                     }
                 },
-                .paste => |text| switch (state.input_mode) {
-                    .text => state.appendBytes(text),
+                .paste => |text| switch (app.input_mode) {
+                    .text => app.appendBytes(text),
                     .perm_message => |*pm| {
                         if (pm.len + text.len <= pm.buf.len) {
                             @memcpy(pm.buf[pm.len..][0..text.len], text);
@@ -852,7 +854,7 @@ pub fn run(
             }
         }
 
-        try state.cmd_queue.apply(io, &state);
+        try app.cmd_queue.apply(io, &app);
     }
 }
 
@@ -860,7 +862,7 @@ pub fn run(
 /// and announce. On failure → open the passphrase modal so the user can
 /// unlock a key into ssh-agent and retry.
 fn handleSshCommand(
-    state: *app.App,
+    state: *App,
     cmd_pool: *prv.exec.CmdPool,
     gpa: std.mem.Allocator,
     args: AppCommand.SshArgs,
@@ -896,7 +898,7 @@ fn sshProbe(cmd_pool: *prv.exec.CmdPool, gpa: std.mem.Allocator, user: []const u
 /// 2. Run `setsid -w ssh-add` with env carrying the passphrase + SSH_ASKPASS.
 /// 3. On success, re-probe → setSsh → status. On failure → status with stderr.
 /// 4. Always zero passphrase + delete tempfile.
-fn handleSshUnlock(state: *app.App, cmd_pool: *prv.exec.CmdPool, gpa: std.mem.Allocator) void {
+fn handleSshUnlock(state: *App, cmd_pool: *prv.exec.CmdPool, gpa: std.mem.Allocator) void {
     const pp = &state.input_mode.passphrase;
     const passphrase = pp.buf[0..pp.len];
     const user = pp.user;
@@ -1021,7 +1023,7 @@ pub const AppCommand = union(enum) {
     pub const SshArgs = struct { user: []const u8, host: []const u8, cwd: []const u8 };
 
     pub fn parse(raw: []const u8) ?AppCommand {
-        const input = if (raw.len > 0 and raw[0] == ':') raw[1..] else raw;
+        const input = if (raw.len > 0 and (raw[0] == ':' or raw[1] == '/')) raw[1..] else raw;
         var it = std.mem.splitScalar(u8, input, ' ');
         const verb = it.first();
         const rest = it.rest();

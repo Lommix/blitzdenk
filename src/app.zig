@@ -9,12 +9,13 @@ const lua = @import("lua.zig");
 const util = @import("util.zig");
 const mcp = @import("mcp.zig");
 const session = @import("session.zig");
+const events = @import("events.zig");
 
 pub const FULL_MODE_REMINDER_AFTER_USER_MSG_COUNT = 4;
 pub const PROMPT_HISTORY_FILENAME = "prompt_history.json";
 pub const MAX_HISTORY = 32;
 pub const CONTEXT_LIMIT = 124 * 1024;
-const COMMAND_COMPLETION_ROWS = 8;
+const COMMAND_COMPLETION_ROWS = 4;
 
 const builtin_command_completions: []const []const u8 = &.{
     ":clear",
@@ -276,6 +277,7 @@ pub const App = struct {
     lua_status_bar_cache_len: usize = 0,
     mcp_manager: mcp.Manager,
     notifications: Notifications = .{},
+    event_bus: events.EventBus = .{},
 
     // TODO: cleanup io
     pub fn init(
@@ -675,13 +677,7 @@ pub const App = struct {
         switch (app.input_mode) {
             .perm_select => renderPermissionWidget(app, _input_area, buf),
             .perm_message => renderPermMessage(app, _input_area, buf),
-            .text => {
-                if (commandPaletteActive(app)) {
-                    renderCommandPalette(app, frame_alloc, area, buf) catch {};
-                } else {
-                    renderInput(app, frame_alloc, _input_area, buf) catch {};
-                }
-            },
+            .text => renderInput(app, frame_alloc, _input_area, buf) catch {},
             .passphrase => {
                 // Render the normal input bar dimmed underneath, then a centered modal on top.
                 renderInput(app, frame_alloc, _input_area, buf) catch {};
@@ -1512,6 +1508,7 @@ fn commandCompletions(app: *App, input: []const u8, cursor: u32) [COMMAND_COMPLE
     return rows;
 }
 
+// TODO: move to input popup instead
 fn renderCommandPalette(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf: *tui.Buffer) !void {
     _ = arena;
 

@@ -56,7 +56,7 @@ No Issue, no merge. Open source, but not open contribution. Too much slop, to li
 
 ## Lua
 
-Configuration default file is under `~/.config/blitzdenk/blitz.lua`. You can put a `blitz.lua` in your local CWD for project based configuration
+Configuration default file is under `~/.config/blitzdenk/blitz.lua`. You can put a `blitz.lua` in your local CWD for project based configuration.
 Here is some inspiration:
 
 ```lua
