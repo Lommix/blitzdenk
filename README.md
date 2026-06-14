@@ -21,6 +21,15 @@ There are no official docs yet. Checkout the provided [lua meta file](./src/blit
 
 You can also look at [my configuration](https://github.com/Lommix/dotfiles/blob/master/config/blitzdenk/blitz.lua), which covers at least one example per use case.
 
+## Install
+
+You need the Zig 0.16 compiler.
+
+```
+zig build --release=small
+cp zig-out/bin/blitz ~/.local/bin/blitz
+```
+
 ## SSH mode
 
 Enables ssh layer all agent commands are piped through
