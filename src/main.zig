@@ -704,9 +704,9 @@ pub fn run(
                             },
                             .text => {
                                 if (app.input_buffer.items.len == 0) break;
+                                const input = swarm.arena.allocator().dupe(u8, app.inputSlice()) catch break;
 
                                 if (app.running) {
-                                    const input = app.inputSlice();
                                     app.pushHistory(app.appAlloc(), input);
                                     if (config_lua) |info| app.saveHistory(info.dir_path);
                                     if (app.main_agent_id) |agent_id| {
@@ -715,7 +715,7 @@ pub fn run(
                                         const len: usize = if (app.screenshot_buf != null) 2 else 1;
 
                                         const parts = try alloc.alloc(prv.adapter.ContentPart, len);
-                                        parts[0] = .{ .text = try alloc.dupe(u8, input) };
+                                        parts[0] = .{ .text = input };
 
                                         if (app.screenshot_buf) |buf| {
                                             parts[1] = .{ .image = .{
@@ -724,9 +724,11 @@ pub fn run(
                                             } };
                                         }
 
+                                        const chat_msg = try ChatEntry.userMessageSimple(alloc, input);
                                         try app.cmd_queue.append(io, .{ .queue_agent_message = .{
                                             .agent_id = agent_id,
                                             .parts = parts,
+                                            .chat_entry = chat_msg,
                                         } });
                                     }
 
@@ -738,7 +740,6 @@ pub fn run(
 
                                 app.pushHistory(app.appAlloc(), app.inputSlice());
                                 if (config_lua) |info| app.saveHistory(info.dir_path);
-                                const input = swarm.arena.allocator().dupe(u8, app.inputSlice()) catch break;
 
                                 // -- user commands
                                 if (input[0] == ':' or input[0] == '/') {
@@ -799,8 +800,8 @@ pub fn run(
                                 const chat_entry = try ChatEntry.userMessageSimple(app.sessionAlloc(), input);
 
                                 if (app.main_agent_id) |id| {
-                                    try app.cmd_queue.append(io, .{ .push_chat_entry = chat_entry });
-                                    app.swarm.runAgentWithMsg(id, parts) catch {};
+                                    try app.chat_entries.append(alloc, chat_entry);
+                                    try app.swarm.runAgentWithMsg(id, parts);
                                 } else {
                                     const id = app.swarm.reserveFreeSlot().?;
                                     try app.cmd_queue.append(io, .{
