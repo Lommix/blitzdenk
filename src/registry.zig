@@ -88,7 +88,7 @@ pub const ContextFactory = struct {
     const ToolEntry = struct { tool: prv.tool.Tool, flags: ToolFlags };
     pub const MAX_OVERRIDE_TOOLS = 64;
     pub const AgentOverride = struct {
-        names: [MAX_OVERRIDE_TOOLS][128]u8 = undefined,
+        names: [MAX_OVERRIDE_TOOLS][255]u8 = undefined,
         name_lens: [MAX_OVERRIDE_TOOLS]u8 = @splat(0),
         len: u8 = 0,
         active: bool = false,
@@ -356,6 +356,15 @@ pub const ContextFactory = struct {
             ov.len += 1;
         }
         ov.active = true;
+    }
+
+    pub fn addAgentTool(self: *Self, agent_type: AgentType, name: []const u8) !void {
+        _ = self; // autofix
+        _ = agent_type; // autofix
+        _ = name; // autofix
+        // var ov = self.agent_overrides.getPtr(agent_type);
+        // _ = ov; // autofix
+        // _ = name; // autofix
     }
 
     pub fn clearAgentTools(self: *Self, agent_type: AgentType) void {

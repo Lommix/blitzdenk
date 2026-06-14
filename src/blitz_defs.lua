@@ -177,6 +177,10 @@ function blitz.context_percent() end
 ---@param tokens integer
 function blitz.set_compact_edge(tokens) end
 
+--- get the main agent, if a session is running
+---@return BlitzAgentId | nil
+function blitz.get_main_agent() end
+
 ---Register a tool
 ---@param def BlitzToolDef
 function blitz.register_tool(def) end
@@ -238,7 +242,7 @@ function blitz.add_command(command, func) end
 ---Bind an event listner
 ---Example: blitz.add_listner(blitz.EVENT_MODE_CHANGED, function(new_mode_id) end)
 ---@param Event integer EventType. Check blit.EVENT_.. for more information
----@param func fun() Args are in the Event description
+---@param func fun(unknown) Args are in the Event description
 function blitz.add_listener(Event, func) end
 
 ---@class BlitzAgentId

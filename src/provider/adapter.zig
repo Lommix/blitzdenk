@@ -18,6 +18,7 @@ pub const ToolResult = struct {
     name: []const u8,
     content: []const u8,
     is_error: bool = false,
+    exit_loop: bool = false,
 };
 
 pub const ToolDef = struct {

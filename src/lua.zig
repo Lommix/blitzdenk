@@ -93,8 +93,10 @@ fn pushAny(L: *c.lua_State, value: anytype) void {
             }
         },
         .@"struct" => |str| {
+            c.lua_createtable(L, 0, @intCast(str.fields.len));
             inline for (str.fields) |field| {
                 pushAny(L, @field(value, field.name));
+                c.lua_setfield(L, -2, fieldName(field.name));
             }
         },
         .void => {},
@@ -694,6 +696,8 @@ fn registerBlitzLib(L: *c.lua_State) void {
 
     inline for (.{
         .{ "register_tool", &luaRegisterTool },
+        .{ "add_tool", &luaAddTool },
+        .{ "get_main_agent", &luaGetMainAgent },
         .{ "ok", &luaBlitzOk },
         .{ "err", &luaBlitzErr },
         .{ "add_provider", &luaAddProvider },
@@ -1496,7 +1500,7 @@ fn luaSetMode(L: ?*c.lua_State) callconv(.c) c_int {
     const mode = readEnumArg(state, @import("registry.zig").Mode, "set_mode", 1) orelse return 0;
     a.mode = mode;
 
-    a.event_bus.run(a, .{ .mode_changed = @intFromEnum(mode) }) catch |err| {
+    a.event_bus.emit(a, .{ .mode_changed = @intFromEnum(mode) }) catch |err| {
         log.err("Failed to fire event: {any}", .{err});
     };
 
@@ -1633,6 +1637,42 @@ fn luaMcpEnable(L: ?*c.lua_State) callconv(.c) c_int {
     if (getAppFromRegistry(state)) |a| {
         appQueueEnqueue(state, "mcp.reload", a, .reload_mcp);
     }
+    return 0;
+}
+
+fn luaGetMainAgent(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "Add Tool: failed to access app");
+        return 0;
+    };
+
+    if (a.main_agent_id) |id| {
+        pushAny(state, id);
+    } else {
+        c.lua_pushnil(state);
+    }
+
+    return 1;
+}
+
+fn luaAddTool(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const agent_id = readAgentIdArg(state, "add_tool", 1);
+    _ = agent_id; // autofix
+    const tool_name = readAnyArg([]const u8, state, "add_tool", 2) orelse return 0;
+    _ = tool_name; // autofix
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "Add Tool: failed to access app");
+        return 0;
+    };
+
+    // a.context_factory.setAgentTools(agent_type: AgentType, names: []const []const u8)
+
+    _ = a; // autofix
+
     return 0;
 }
 

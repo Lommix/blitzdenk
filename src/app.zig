@@ -2532,12 +2532,17 @@ pub const Command = union(enum) {
             },
             .queue_agent_message => |arg| {
                 const parts = try r.util.deepClone(@TypeOf(arg.parts), arg.parts, alloc);
-                const entry = if (arg.chat_entry) |en| try r.util.deepClone(ChatEntry, en, alloc) else null;
-                try app.queued.push(alloc, arg.agent_id, entry, parts);
+                const chat_entry = if (arg.chat_entry) |en| try r.util.deepClone(ChatEntry, en, alloc) else null;
+                try app.queued.push(alloc, arg.agent_id, chat_entry, parts);
+                app.running = true;
+                app.auto_scroll = true;
+                app.scroll_offset = 0;
+                app.swarm.retryAgent(arg.agent_id);
             },
             .compact => {
                 if (app.main_agent_id) |id| {
                     const ag = app.swarm.getAgent(id).?;
+                    try app.event_bus.emit(app, .{ .agent_complete = id });
                     ag.requestCompaction();
                     app.running = true;
                     app.auto_scroll = true;

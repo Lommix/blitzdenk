@@ -327,8 +327,14 @@ pub fn run(
             app.dirty = false;
         }
 
+        // TODO: cleanup state
         if (app.running) {
-            if (!app.swarm.tickAll(agent_ctx)) app.running = false;
+            if (!app.swarm.tickAll(agent_ctx)) {
+                if (app.main_agent_id) |agent_id| {
+                    try app.event_bus.emit(&app, .{ .agent_complete = agent_id });
+                }
+                app.running = false;
+            }
             app.dirty = true;
         }
 

@@ -340,7 +340,7 @@ pub fn runAgent(self: *Self, id: AgentId, parts: []const apt.ContentPart) !void 
 
 pub fn retryAgent(self: *Self, id: AgentId) void {
     const slot = self.getSlot(id) orelse return;
-    if (slot.state.load(.acquire) != .failed) return;
+    if (slot.state.load(.acquire) == .active) return;
     slot.time_elapsed = 0;
     slot.agent.retry();
     slot.state.store(.active, .release);

@@ -9,13 +9,13 @@ const Role = r.prv.adapter.Role;
 /// should dispatch from a central `onEvent` call.
 pub const AppEvent = union(enum) {
     session_reset,
-    mode_changed: u8,
+    mode_changed: u8, // done
     agent_created: struct { id: AgentId, type_idx: u8, depth: u16 },
-    agent_started: struct { id: AgentId },
-    agent_complete: struct { id: AgentId },
-    agent_failed: struct { id: AgentId, err: ?anyerror },
+    agent_started: AgentId,
+    agent_complete: AgentId, // done
+    agent_failed: struct { id: AgentId, err: []const u8 },
     agent_cancelled: struct { id: AgentId },
-    compaction_started: struct { id: AgentId },
+    compaction_started: struct { id: AgentId }, // done
     compaction_complete: struct { id: AgentId },
     tool_call_started: struct { agent_id: AgentId, call_id: []const u8, name: []const u8 },
     tool_call_complete: struct { agent_id: AgentId, call_id: []const u8, name: []const u8, is_error: bool },
@@ -34,7 +34,7 @@ pub const Listner = struct {
 
 pub const EventBus = struct {
     listner: std.AutoHashMapUnmanaged(AppEventTag, std.ArrayList(Listner)) = .{},
-    pub fn run(self: *const EventBus, app: *r.app.App, event: AppEvent) !void {
+    pub fn emit(self: *const EventBus, app: *r.app.App, event: AppEvent) !void {
         const listners = self.listner.get(event) orelse return;
         for (listners.items) |en| {
             // TODO: can explode, need new redesign of async lua
@@ -44,6 +44,20 @@ pub const EventBus = struct {
             switch (event) {
                 .session_reset => app.lua_vm.invokeLuaFunction(en.func_ref, {}),
                 .mode_changed => |mode_id| app.lua_vm.invokeLuaFunction(en.func_ref, mode_id),
+                .agent_created => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                .agent_started => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                .agent_complete => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                .agent_failed => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                .agent_cancelled => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                .compaction_started => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                .compaction_complete => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                .tool_call_started => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                .tool_call_complete => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                .agent_broadcast => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                // .permission_requested => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                // .permission_resolved => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
+                .user_message_sent => |msg| app.lua_vm.invokeLuaFunction(en.func_ref, msg),
+                .mcp_tools_reloaded => app.lua_vm.invokeLuaFunction(en.func_ref, {}),
                 else => {},
             }
         }
