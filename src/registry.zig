@@ -359,12 +359,22 @@ pub const ContextFactory = struct {
     }
 
     pub fn addAgentTool(self: *Self, agent_type: AgentType, name: []const u8) !void {
-        _ = self; // autofix
-        _ = agent_type; // autofix
-        _ = name; // autofix
-        // var ov = self.agent_overrides.getPtr(agent_type);
-        // _ = ov; // autofix
-        // _ = name; // autofix
+        var ov = self.agent_overrides.getPtr(agent_type);
+        if (ov.len >= MAX_OVERRIDE_TOOLS) return error.TooManyTools;
+        if (name.len > 128) return error.NameTooLong;
+
+        for (0..ov.len) |i| {
+            const len = ov.name_lens[i];
+            if (len == 0) continue;
+
+            const existing = ov.names[i][0..len];
+            if (std.mem.eql(u8, existing, name)) return;
+        }
+
+        @memcpy(ov.names[ov.len][0..name.len], name);
+        ov.name_lens[ov.len] = @intCast(name.len);
+        ov.len += 1;
+        ov.active = true;
     }
 
     pub fn clearAgentTools(self: *Self, agent_type: AgentType) void {

@@ -2437,7 +2437,6 @@ pub const CommandQueue = struct {
 // exposed to lua
 pub const Command = union(enum) {
     const Self = @This();
-
     // -------------------------------------------
     reset_session,
     cancel,
@@ -2456,7 +2455,12 @@ pub const Command = union(enum) {
     load_session: []const u8,
     save_session: []const u8,
     attach_screenshot: ScreenshotArgs,
+    add_tool: AddToolArgs,
     // -------------------------------------------
+    pub const AddToolArgs = struct {
+        agent_type: r.reg.AgentType,
+        tool_name: []const u8,
+    };
 
     pub const PlanArgs = struct {
         plan_prompt: []const u8,
@@ -2629,6 +2633,16 @@ pub const Command = union(enum) {
                 _ = std.base64.standard.Encoder.encode(encoded, arg.data);
                 app.screenshot_buf = encoded;
                 app.dirty = true;
+            },
+            .add_tool => |arg| {
+                app.context_factory.addAgentTool(arg.agent_type, arg.tool_name) catch return;
+                if (app.main_agent_id) |id| {
+                    if (app.swarm.getAgent(id)) |agent| {
+                        var set = r.reg.ToolSet{};
+                        app.context_factory.build_toolset(@enumFromInt(agent.type_idx), &set) catch return;
+                        try agent.setTools(set.slice());
+                    }
+                }
             },
         }
     }

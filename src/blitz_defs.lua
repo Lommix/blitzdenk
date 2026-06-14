@@ -192,6 +192,11 @@ function blitz.register_tool(def) end
 ---@param tool_names string[] List of tool names this agent should have
 function blitz.set_agent_tools(agent_type, tool_names) end
 
+---Add a single tool from the tool pool to an agent type's tool set.
+---@param agent_type integer One of blitz.AGENT_MAIN | blitz.AGENT_SUB | blitz.AGENT_PLAN
+---@param tool_name string Tool name to add from the pool
+function blitz.add_tool(agent_type, tool_name) end
+
 ---Push a new popup notification with a lifetime of 8s to the top right corner
 ---@param message string
 function blitz.push_notification(message) end

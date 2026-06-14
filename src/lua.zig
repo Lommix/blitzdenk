@@ -1676,19 +1676,28 @@ fn luaGetMainAgent(L: ?*c.lua_State) callconv(.c) c_int {
 fn luaAddTool(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
 
-    const agent_id = readAgentIdArg(state, "add_tool", 1);
-    _ = agent_id; // autofix
+    if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
+        _ = c.luaL_error(state, "add_tool: arg 1 must be a number (blitz.AGENT_*)");
+        return 0;
+    }
+    const ty_int = c.lua_tointegerx(state, 1, null);
+    if (ty_int < 0 or ty_int > std.math.maxInt(u6)) {
+        _ = c.luaL_error(state, "add_tool: agent type out of range");
+        return 0;
+    }
+    const agent_type: r.reg.AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
+
     const tool_name = readAnyArg([]const u8, state, "add_tool", 2) orelse return 0;
-    _ = tool_name; // autofix
 
     const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "Add Tool: failed to access app");
+        _ = c.luaL_error(state, "add_tool: app not initialized");
         return 0;
     };
 
-    // a.context_factory.setAgentTools(agent_type: AgentType, names: []const []const u8)
-
-    _ = a; // autofix
+    appQueueEnqueue(state, "add_tool", a, .{ .add_tool = .{
+        .agent_type = agent_type,
+        .tool_name = tool_name,
+    } });
 
     return 0;
 }
