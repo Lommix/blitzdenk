@@ -5,6 +5,8 @@ const Allocator = std.mem.Allocator;
 const tui = @import("tui/root.zig");
 const keys = @import("keys.zig");
 const tl = @import("tools/root.zig");
+const log = std.log.scoped(.lua);
+const r = @import("root.zig");
 
 // ── blitz.* return status codes ─────────────────────────────────────
 
@@ -77,7 +79,8 @@ fn fieldName(comptime field: []const u8) [*:0]const u8 {
 
 fn pushAny(L: *c.lua_State, value: anytype) void {
     const T = @TypeOf(value);
-    switch (@typeInfo(T)) {
+    const Info = @typeInfo(T);
+    switch (Info) {
         .bool => c.lua_pushboolean(L, @intFromBool(value)),
         .comptime_int, .int => c.lua_pushinteger(L, @intCast(value)),
         .comptime_float, .float => c.lua_pushnumber(L, @floatCast(value)),
@@ -89,6 +92,12 @@ fn pushAny(L: *c.lua_State, value: anytype) void {
                 @compileError("pushAny: unsupported pointer type " ++ @typeName(T));
             }
         },
+        .@"struct" => |str| {
+            inline for (str.fields) |field| {
+                pushAny(L, @field(value, field.name));
+            }
+        },
+        .void => {},
         else => @compileError("pushAny: unsupported type " ++ @typeName(T)),
     }
 }
@@ -573,6 +582,13 @@ pub const LuaVm = struct {
         return false;
     }
 
+    pub fn invokeLuaFunction(self: *LuaVm, func_ref: c_int, args: anytype) void {
+        _ = c.lua_rawgeti(self.L, c.LUA_REGISTRYINDEX, func_ref);
+        pushAny(self.L, args);
+        const status = c.lua_pcallk(self.L, 1, 0, 0, 0, null);
+        if (status != 0) self.popError();
+    }
+
     pub fn appendCommandCompletions(
         self: *LuaVm,
         prefix: []const u8,
@@ -689,6 +705,7 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "bind", &luaBind },
         .{ "html_to_markdown", &htmlToMarkdown },
         .{ "add_command", &luaAddCommand },
+        .{ "add_listener", &luaAddListener },
         .{ "set_agent_tools", &luaSetAgentTools },
         .{ "set_prompt", &luaSetPrompt },
         .{ "set_mode_prompt", &luaSetModePrompt },
@@ -720,6 +737,22 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "AWAIT_FAILED", AWAIT_FAILED },
         .{ "AWAIT_CANCELED", AWAIT_CANCELED },
         .{ "AWAIT_INVALID", AWAIT_INVALID },
+        .{ "EVENT_SESSION_RESET", 0 },
+        .{ "EVENT_MODE_CHANGED", 1 },
+        .{ "EVENT_AGENT_CREATED", 2 },
+        .{ "EVENT_AGENT_STARTED", 3 },
+        .{ "EVENT_AGENT_COMPLETE", 4 },
+        .{ "EVENT_AGENT_FAILED", 5 },
+        .{ "EVENT_AGENT_CANCELLED", 6 },
+        .{ "EVENT_COMPACTION_STARTED", 7 },
+        .{ "EVENT_COMPACTION_COMPLETE", 8 },
+        .{ "EVENT_TOOL_CALL_STARTED", 9 },
+        .{ "EVENT_TOOL_CALL_COMPLETE", 10 },
+        .{ "EVENT_AGENT_BROADCAST", 11 },
+        .{ "EVENT_PERMISSION_REQUESTED", 12 },
+        .{ "EVENT_PERMISSION_RESOLVED", 13 },
+        .{ "EVENT_USER_MESSAGE_SENT", 14 },
+        .{ "EVENT_MCP_TOOLS_RELOADED", 15 },
     }) |kv| {
         setFieldAny(L, -2, kv[0], kv[1]);
     }
@@ -1206,6 +1239,32 @@ fn htmlToMarkdown(L: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
+fn luaAddListener(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_compact_edge: app not initialized");
+        return 0;
+    };
+
+    if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
+        _ = c.luaL_error(state, "add_listner: arg 2 (func) must be a function");
+        return 0;
+    }
+
+    const event = readEnumArg(state, r.events.AppEventTag, "add_listener", 1) orelse return 0;
+
+    c.lua_pushvalue(state, 2);
+    const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+
+    a.event_bus.addLuaListener(a.arena_app.allocator(), event, func_ref) catch {
+        _ = c.luaL_error(state, "failed to add listener");
+        return 0;
+    };
+
+    return 0;
+}
+
 /// blitz.add_command(":command", lua func)
 fn luaAddCommand(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
@@ -1436,6 +1495,11 @@ fn luaSetMode(L: ?*c.lua_State) callconv(.c) c_int {
     };
     const mode = readEnumArg(state, @import("registry.zig").Mode, "set_mode", 1) orelse return 0;
     a.mode = mode;
+
+    a.event_bus.run(a, .{ .mode_changed = @intFromEnum(mode) }) catch |err| {
+        log.err("Failed to fire event: {any}", .{err});
+    };
+
     if (a.main_agent_id) |id| {
         if (a.swarm.getAgent(id)) |agent| agent.flags.force_full_reminder = true;
     }

@@ -235,6 +235,12 @@ function blitz.bind(key, func) end
 ---@param func fun(args: string) Callback invoked with remaining args or empty string
 function blitz.add_command(command, func) end
 
+---Bind an event listner
+---Example: blitz.add_listner(blitz.EVENT_MODE_CHANGED, function(new_mode_id) end)
+---@param Event integer EventType. Check blit.EVENT_.. for more information
+---@param func fun() Args are in the Event description
+function blitz.add_listener(Event, func) end
+
 ---@class BlitzAgentId
 ---@field index integer Slot index (u16)
 ---@field generation integer Slot generation (u16)
@@ -387,3 +393,52 @@ blitz.RET_FAILED = 1
 blitz.RET_OK = 2
 ---@type integer
 blitz.RET_ERR = 3
+
+---No event data
+---@type integer
+blitz.EVENT_SESSION_RESET = 0
+---Event data: integer mode_id
+---@type integer
+blitz.EVENT_MODE_CHANGED = 1
+---Event data: table { id: AgentId, type_idx: integer, depth: integer }
+---@type integer
+blitz.EVENT_AGENT_CREATED = 2
+---Event data: table { id: AgentId }
+---@type integer
+blitz.EVENT_AGENT_STARTED = 3
+---Event data: table { id: AgentId }
+---@type integer
+blitz.EVENT_AGENT_COMPLETE = 4
+---Event data: table { id: AgentId, err: string|nil }
+---@type integer
+blitz.EVENT_AGENT_FAILED = 5
+---Event data: table { id: AgentId }
+---@type integer
+blitz.EVENT_AGENT_CANCELLED = 6
+---Event data: table { id: AgentId }
+---@type integer
+blitz.EVENT_COMPACTION_STARTED = 7
+---Event data: table { id: AgentId }
+---@type integer
+blitz.EVENT_COMPACTION_COMPLETE = 8
+---Event data: table { agent_id: AgentId, call_id: string, name: string }
+---@type integer
+blitz.EVENT_TOOL_CALL_STARTED = 9
+---Event data: table { agent_id: AgentId, call_id: string, name: string, is_error: boolean }
+---@type integer
+blitz.EVENT_TOOL_CALL_COMPLETE = 10
+---Event data: table { id: AgentId, role: string }
+---@type integer
+blitz.EVENT_AGENT_BROADCAST = 11
+---Event data: table { call_id: string|nil, level: integer }
+---@type integer
+blitz.EVENT_PERMISSION_REQUESTED = 12
+---Event data: table { call_id: string|nil, state: integer }
+---@type integer
+blitz.EVENT_PERMISSION_RESOLVED = 13
+---Event data: string message
+---@type integer
+blitz.EVENT_USER_MESSAGE_SENT = 14
+---No event data
+---@type integer
+blitz.EVENT_MCP_TOOLS_RELOADED = 15

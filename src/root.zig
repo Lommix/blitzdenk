@@ -10,3 +10,4 @@ pub const lua = @import("lua.zig");
 pub const mcp = @import("mcp.zig");
 pub const tools = @import("tools/root.zig");
 pub const tui = @import("tui/root.zig");
+pub const c = @import("c");
