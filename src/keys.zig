@@ -25,8 +25,10 @@ pub const KeyMap = struct {
     pub const defaults: []const KeyBind = &.{
         KeyBind{ .key = .{ .code = .arrow_left }, .action = .cursor_left },
         KeyBind{ .key = .{ .code = .arrow_right }, .action = .cursor_right },
-        KeyBind{ .key = .{ .code = .arrow_up }, .action = .scroll_up },
-        KeyBind{ .key = .{ .code = .arrow_down }, .action = .scroll_down },
+        KeyBind{ .key = .{ .code = .arrow_up }, .action = .cursor_up },
+        KeyBind{ .key = .{ .code = .arrow_down }, .action = .cursor_down },
+        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'u' } }, .action = .scroll_up },
+        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'd' } }, .action = .scroll_down },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'c' } }, .action = .exit },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'r' } }, .action = .retry },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'n' } }, .action = .clear_session },
