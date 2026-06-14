@@ -53,3 +53,78 @@ end, { silent = true })
 ## Contribution
 
 No Issue, no merge. Open source, but not open contribution. Too much slop, to little time to validate. Small bug fixes are welcome.
+
+## Lua
+
+Some simple configuration examples to inspire you:
+
+```lua
+
+local llama = blitz.add_provider({
+	type = "openai",
+	url = "http://127.0.0.1:8118",
+	key_envar = "",
+	max_tokens = 32000,
+	reasoning = { effort = "high" },
+	temperature = 1,
+})
+
+local local_model = "gemma-4-12b-it"
+blitz.set_model("max", local_model, llama)
+blitz.set_model("mid", local_model, llama)
+blitz.set_model("min", local_model, llama)
+blitz.set_compact_edge(128000)
+
+
+-- custom tool example
+blitz.register_tool({
+	name = "lua_repl",
+	description = "Execute arbitrary Lua code and return the result. Use this tool for any math calculations",
+	args = {
+		code = { type = "string", description = "Lua code to execute", required = true },
+	},
+	func = function(ctx, call)
+		ctx:set_status("(Lua) `" .. call.arguments.code .. "`")
+
+		local fn, err = load(call.arguments.code)
+		if not fn then
+			return blitz.err(err)
+		end
+
+		local ok, result = pcall(fn)
+		if not ok then
+			return blitz.err(tostring(result))
+		end
+
+		return blitz.ok(tostring(result or "nil"))
+	end,
+})
+
+-- MCP configuration and activation
+
+local is_active = false
+
+local playmcp = blitz.mcp.add({
+	name = "playwright",
+	command = "npx",
+	args = {
+		"-y",
+		"@playwright/mcp@latest",
+		"--browser=chromium",
+		"--executable-path=/usr/bin/chromium",
+	},
+	tools_prefix = "pw_",
+})
+
+
+blitz.add_command(":browser", function()
+	if is_active == true then
+		return
+	end
+
+	blitz.push_notification("Playwright MCP enabled!")
+	blitz.mcp.enable(playmcp, blitz.AGENT_MAIN)
+	is_active = true
+end)
+
+```
