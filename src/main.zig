@@ -661,7 +661,7 @@ pub fn run(
                                             app.auto_scroll = true;
                                             app.scroll_offset = 0;
 
-                                            app.swarm.runAgent(id, &.{.{ .text = plan_text }}) catch break;
+                                            app.swarm.runAgentWithMsg(id, &.{.{ .text = plan_text }}) catch break;
                                         },
                                         1 => {
                                             // Approve & keep — same agent, switch mode, lift caps.
@@ -800,7 +800,7 @@ pub fn run(
 
                                 if (app.main_agent_id) |id| {
                                     try app.cmd_queue.append(io, .{ .push_chat_entry = chat_entry });
-                                    app.swarm.runAgent(id, parts) catch {};
+                                    app.swarm.runAgentWithMsg(id, parts) catch {};
                                 } else {
                                     const id = app.swarm.reserveFreeSlot().?;
                                     try app.cmd_queue.append(io, .{

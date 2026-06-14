@@ -331,10 +331,17 @@ pub fn newAgentInSlot(
     }
 }
 
-pub fn runAgent(self: *Self, id: AgentId, parts: []const apt.ContentPart) !void {
+pub fn runAgent(self: *Self, id: AgentId) !void {
     const slot = self.getSlot(id) orelse return error.InvalidAgentId;
     slot.time_elapsed = 0;
-    slot.agent.run(parts);
+    slot.agent.run();
+    slot.state.store(.active, .release);
+}
+
+pub fn runAgentWithMsg(self: *Self, id: AgentId, parts: []const apt.ContentPart) !void {
+    const slot = self.getSlot(id) orelse return error.InvalidAgentId;
+    slot.time_elapsed = 0;
+    slot.agent.runWithMsg(parts);
     slot.state.store(.active, .release);
 }
 

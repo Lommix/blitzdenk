@@ -337,8 +337,12 @@ pub const Agent = struct {
         self.arena.deinit();
     }
 
-    pub fn run(self: *Agent, parts: []const apt.ContentPart) void {
+    pub fn runWithMsg(self: *Agent, parts: []const apt.ContentPart) void {
         self.chat.addMessage(self.arena.allocator(), .user, parts) catch {};
+        self.run();
+    }
+
+    pub fn run(self: *Agent) void {
         self.state = .sending_request;
         self.iteration = 0;
         self.retry_count = 0;
