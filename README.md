@@ -49,3 +49,7 @@ vim.keymap.set("n", "<leader>o", function()
 	vim.cmd('vsplit | terminal blitz prompt "' .. fname .. ":" .. lineno .. ' " --log')
 end, { silent = true })
 ```
+
+## Contribution
+
+No Issue, no merge. Open source, but not open contribution. Too much slop, to little time to validate. Small bug fixes are welcome.
