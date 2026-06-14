@@ -13,8 +13,6 @@ const CONTEXT_FILES = .{ "CLAUDE.md", "AGENTS.md", "HERMES.md", "CONTEXT.md" };
 pub const default_tool_set = .{
     .{ tools.write.WriteTool, ToolFlags.empty.agents(&.{.main}) },
     .{ tools.edit.EditTool, ToolFlags.empty.agents(&.{.main}) },
-    // .{ tools.plan.PlanAgentTool, ToolFlags.empty.agents(&.{.main}) },
-    // .{ tools.plan.PlanTool, ToolFlags.empty.agents(&.{.main}) },
     .{ tools.bash.BashTool, ToolFlags.all },
     .{ tools.bash.CancelBackgroundCommand, ToolFlags.all },
     .{ tools.read.ReadTool, ToolFlags.all },

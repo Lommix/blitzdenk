@@ -6,7 +6,6 @@ pub const read = @import("read.zig");
 pub const tasks = @import("task.zig");
 pub const ask = @import("ask.zig");
 pub const ssh = @import("ssh.zig");
-pub const plan = @import("plan.zig");
 pub const agent = @import("agent.zig");
 pub const edit = @import("edit.zig");
 pub const write = @import("write.zig");

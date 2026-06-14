@@ -757,8 +757,6 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "TOOL_UPDATE_TASK_STATE", tl.tasks.UpdateTaskStateTool.def.name },
         .{ "TOOL_CREATE_TASK", tl.tasks.CreateTaskTool.def.name },
         .{ "TOOL_ASK", tl.ask.AskTool.def.name },
-        .{ "TOOL_EXIT_PLAN_MODE", tl.plan.PlanTool.def.name },
-        .{ "TOOL_PLAN_AGENT", tl.plan.PlanAgentTool.def.name },
         .{ "TOOL_ENTER_SSH", tl.ssh.EnterSshMode.def.name },
         .{ "TOOL_EXIT_SSH", tl.ssh.ExitSshMode.def.name },
     }) |pair| {
