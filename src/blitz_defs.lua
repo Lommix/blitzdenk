@@ -391,12 +391,23 @@ function blitz.err(message) end
 ---Signal permanent failure. Tool will NOT be re-called.
 ---@type BlitzStatus
 blitz.FAILED = nil
+
+---Exit the agent loop. Tool will NOT be re-called.
+---@type BlitzStatus
+blitz.EXIT_LOOP = nil
 ---@type integer
 blitz.RET_FAILED = 1
 ---@type integer
 blitz.RET_OK = 2
 ---@type integer
 blitz.RET_ERR = 3
+---@type integer
+blitz.RET_EXIT_LOOP = 4
+
+---Exit the agent loop with a message
+---@param content? string Content string (default "")
+---@return BlitzStatus
+function blitz.exit_loop(content) end
 
 ---No event data
 ---@type integer

@@ -13,6 +13,7 @@ const r = @import("root.zig");
 pub const RET_FAILED: c_int = 1;
 pub const RET_OK: c_int = 2;
 pub const RET_ERR: c_int = 3;
+pub const RET_EXIT_LOOP: c_int = 4;
 
 // ── Request status codes (exposed to Lua) ─────────────────────────
 
@@ -305,6 +306,7 @@ pub const LuaVm = struct {
     last_error: [512]u8 = undefined,
     last_error_len: usize = 0,
     failed_ref: c_int = c.LUA_NOREF,
+    exit_loop_ref: c_int = c.LUA_NOREF,
     /// Serializes lua_pcall across worker threads. Lua VMs are not
     /// thread-safe; native tools run in parallel, Lua tools serialize here.
     vm_mu: std.Io.Mutex = .init,
@@ -376,15 +378,22 @@ pub const LuaVm = struct {
     /// for re-set after a reload.
     fn installStatusTables(self: *LuaVm) void {
         c.luaL_unref(self.L, c.LUA_REGISTRYINDEX, self.failed_ref);
+        c.luaL_unref(self.L, c.LUA_REGISTRYINDEX, self.exit_loop_ref);
 
         c.lua_createtable(self.L, 0, 1);
         setFieldAny(self.L, -2, "status", RET_FAILED);
         self.failed_ref = c.luaL_ref(self.L, c.LUA_REGISTRYINDEX);
 
+        c.lua_createtable(self.L, 0, 1);
+        setFieldAny(self.L, -2, "status", RET_EXIT_LOOP);
+        self.exit_loop_ref = c.luaL_ref(self.L, c.LUA_REGISTRYINDEX);
+
         _ = c.lua_getglobal(self.L, "blitz");
         if (c.lua_type(self.L, -1) == c.LUA_TTABLE) {
             _ = c.lua_rawgeti(self.L, c.LUA_REGISTRYINDEX, self.failed_ref);
             setFieldPushed(self.L, -2, "FAILED");
+            _ = c.lua_rawgeti(self.L, c.LUA_REGISTRYINDEX, self.exit_loop_ref);
+            setFieldPushed(self.L, -2, "EXIT_LOOP");
         }
         c.lua_pop(self.L, 1);
     }
@@ -452,6 +461,7 @@ pub const LuaVm = struct {
         self.stdout_buf.clearRetainingCapacity();
         // Refs were tied to the closed lua_State; drop them before re-init.
         self.failed_ref = c.LUA_NOREF;
+        self.exit_loop_ref = c.LUA_NOREF;
         if (self.app) |a| {
             @constCast(a.swarm.cfg).resetProviders();
             a.default_context_limit = app.CONTEXT_LIMIT;
@@ -700,6 +710,7 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "get_main_agent", &luaGetMainAgent },
         .{ "ok", &luaBlitzOk },
         .{ "err", &luaBlitzErr },
+        .{ "exit_loop", &luaBlitzExitLoop },
         .{ "add_provider", &luaAddProvider },
         .{ "set_model", &luaSetModel },
         .{ "add_doc", &luaAddDoc },
@@ -863,6 +874,12 @@ fn luaBlitzOk(L: ?*c.lua_State) callconv(.c) c_int {
 fn luaBlitzErr(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
     pushStatusTable(state, RET_ERR, "error");
+    return 1;
+}
+
+fn luaBlitzExitLoop(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    pushStatusTable(state, RET_EXIT_LOOP, "");
     return 1;
 }
 
@@ -1841,6 +1858,20 @@ fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) T
 
     switch (status) {
         RET_FAILED => return failedResult(call, "lua tool failed"),
+        RET_EXIT_LOOP => {
+            _ = c.lua_getfield(L, -1, "msg");
+            var len: usize = 0;
+            const content_ptr = c.lua_tolstring(L, -1, &len);
+            const content_view = if (content_ptr != null) content_ptr[0..len] else "";
+            const owned = alloc.dupe(u8, content_view) catch "oom";
+            c.lua_pop(L, 1);
+            return .{
+                .call_id = call.id,
+                .name = call.name,
+                .content = owned,
+                .exit_loop = true,
+            };
+        },
         RET_OK, RET_ERR => {
             _ = c.lua_getfield(L, -1, "msg");
             var len: usize = 0;

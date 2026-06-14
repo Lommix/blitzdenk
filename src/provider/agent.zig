@@ -484,8 +484,13 @@ pub const Agent = struct {
             .executing_tools => {
                 const all_settled = self.tickToolCalls(ctx) catch |err| return self.fail(err);
                 if (all_settled) {
-                    self.commitSettledResults(ctx) catch |err| return self.fail(err);
+                    const should_exit = self.commitSettledResults(ctx) catch |err| return self.fail(err);
                     self.flags.turn_has_reminder = false;
+
+                    if (should_exit) {
+                        self.state = .complete;
+                        return .complete;
+                    }
 
                     self.iteration += 1;
                     if (self.iteration >= self.max_iterations) {
@@ -840,16 +845,18 @@ pub const Agent = struct {
         return all_settled;
     }
 
-    fn commitSettledResults(self: *Agent, ctx: AgentContext) !void {
-        const last_msg = self.chat.lastMessage() orelse return;
+    fn commitSettledResults(self: *Agent, ctx: AgentContext) !bool {
+        const last_msg = self.chat.lastMessage() orelse return false;
         var results: [MAX_TOOL_CALLS]apt.ToolResult = undefined;
         var count: u32 = 0;
+        var exit_loop = false;
 
         for (last_msg.parts) |part| {
             switch (part) {
                 .tool_call => |call| {
                     if (self.tool_call_done.get(call.id)) |result| {
                         if (count < MAX_TOOL_CALLS) {
+                            if (result.exit_loop) exit_loop = true;
                             results[count] = result;
                             count += 1;
                         }
@@ -859,7 +866,7 @@ pub const Agent = struct {
             }
         }
 
-        if (count == 0) return;
+        if (count == 0) return false;
 
         self.broadcastToolResults(results[0..count]);
         try self.chat.addToolResults(self.arena.allocator(), results[0..count], self.loopGuardWarningForResults(results[0..count]));
@@ -875,6 +882,8 @@ pub const Agent = struct {
                 .{ .text = "<system_warning>!TOOL CALL LIMIT REACHED! Report your current findings back to the user</system_warning>" },
             });
         }
+
+        return exit_loop;
     }
 
     fn loopGuardWarningForResults(self: *Agent, results: []const apt.ToolResult) ?[]const u8 {
