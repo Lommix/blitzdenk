@@ -3,19 +3,20 @@
 // Copyright (c) 2026 Lorenz Mielke. All Rights Reserved.
 // ----------------------------------------------------------------
 const std = @import("std");
-const tui = @import("tui/root.zig");
-const prv = @import("provider");
-const tools = @import("tools/root.zig");
-const App = @import("app.zig").App;
-const inbuilt = prv.inbuilt;
-const prompts = @import("prompts.zig");
-const BlitzdenkCfg = prv.config.BlitzdenkCfg;
-const lua = @import("lua.zig");
-const reg = @import("registry.zig");
-const keys = @import("keys.zig");
-const util = @import("util.zig");
-const session = @import("session.zig");
-const ChatEntry = @import("app.zig").ChatEntry;
+const r = @import("root.zig");
+const App = r.app.App;
+const BlitzdenkCfg = r.prv.config.BlitzdenkCfg;
+const ChatEntry = r.app.ChatEntry;
+const prompts = r.prompts;
+const lua = r.lua;
+const reg = r.reg;
+const keys = r.keys;
+const util = r.util;
+const session = r.session;
+const tui = r.tui;
+const inbuilt = r.prv.inbuilt;
+const prv = r.prv;
+const tools = r.tools;
 
 // ----------------------------------------------------------------
 pub const LUA_DEFAULT_FILE = @embedFile("blitz_default.lua");

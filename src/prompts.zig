@@ -1,7 +1,4 @@
 const std = @import("std");
-const prv = @import("provider");
-const tool = @import("tools/root.zig");
-const cfg = prv.config;
 
 pub const default_main_agent_prompt =
     \\# You are a coding agent

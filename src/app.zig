@@ -1,15 +1,7 @@
 const std = @import("std");
-const tui = @import("tui/root.zig");
+const r = @import("root.zig");
 const prv = @import("provider");
-const text_utils = tui.text_utils;
-const tools = @import("tools/root.zig");
-const reg = @import("registry.zig");
-const keys = @import("keys.zig");
-const lua = @import("lua.zig");
-const util = @import("util.zig");
-const mcp = @import("mcp.zig");
-const session = @import("session.zig");
-const events = @import("events.zig");
+const text_utils = r.tui.text_utils;
 
 pub const FULL_MODE_REMINDER_AFTER_USER_MSG_COUNT = 4;
 pub const PROMPT_HISTORY_FILENAME = "prompt_history.json";
@@ -68,26 +60,26 @@ pub const AppFlags = packed struct {
     show_thinking: bool = true,
     debug_log: bool = true,
     /// When true, the agent sees the SSH state reminder and gets the
-    /// `enter_ssh`/`exit_ssh` tools. When false, SSH mode is locked from the
+    /// `enter_ssh`/`exit_ssh` r.tools. When false, SSH mode is locked from the
     /// agent's perspective: it cannot toggle and is not informed of the state.
-    /// Toggle from TUI / lua.
+    /// Toggle from TUI / r.lua.
     ssh_agent_control: bool = true,
     skip_permissions: bool = true,
 };
 
 pub const Theme = struct {
-    bg: tui.Color,
-    overlay_dark: tui.Color,
-    overlay: tui.Color,
-    muted: tui.Color,
-    text: tui.Color,
-    ok: tui.Color,
-    info: tui.Color,
-    warn: tui.Color,
-    err: tui.Color,
-    diff_surface: tui.Color,
-    diff_add: tui.Color,
-    diff_remove: tui.Color,
+    bg: r.tui.Color,
+    overlay_dark: r.tui.Color,
+    overlay: r.tui.Color,
+    muted: r.tui.Color,
+    text: r.tui.Color,
+    ok: r.tui.Color,
+    info: r.tui.Color,
+    warn: r.tui.Color,
+    err: r.tui.Color,
+    diff_surface: r.tui.Color,
+    diff_add: r.tui.Color,
+    diff_remove: r.tui.Color,
 
     pub const default: Theme = .{
         .bg = .{ .rgb = .{ .r = 18, .g = 18, .b = 24 } },
@@ -248,8 +240,8 @@ pub const App = struct {
     scroll_offset: usize = 0,
     auto_scroll: bool = true,
     input_mode: InputMode = .text,
-    mode: reg.Mode = @enumFromInt(0),
-    context_factory: *reg.ContextFactory,
+    mode: r.reg.Mode = @enumFromInt(0),
+    context_factory: *r.reg.ContextFactory,
     theme: Theme = .default,
     cwd: []const u8,
     remote_cwd: []const u8 = "/",
@@ -269,25 +261,25 @@ pub const App = struct {
     passphrase_args_buf: [512]u8 = undefined,
     queued: MessageQueue = .{},
     ui_state: UiState = .chat,
-    keymap: keys.KeyMap = .{},
+    keymap: r.keys.KeyMap = .{},
     cmd_queue: CommandQueue,
-    lua_vm: lua.LuaVm,
+    lua_vm: r.lua.LuaVm,
     lua_status_bar_enabled: bool = false,
     lua_status_bar_cache: [512]u8 = undefined,
     lua_status_bar_cache_len: usize = 0,
-    mcp_manager: mcp.Manager,
+    mcp_manager: r.mcp.Manager,
     notifications: Notifications = .{},
-    event_bus: events.EventBus = .{},
+    event_bus: r.events.EventBus = .{},
 
     // TODO: cleanup io
     pub fn init(
         allocator: std.mem.Allocator,
         lua_allocator: std.mem.Allocator,
         swarm: *prv.Swarm,
-        agent_factory: *reg.ContextFactory,
+        agent_factory: *r.reg.ContextFactory,
         cwd: []const u8,
     ) !App {
-        var lua_vm = try lua.LuaVm.init(lua_allocator);
+        var lua_vm = try r.lua.LuaVm.init(lua_allocator);
         errdefer lua_vm.deinit();
 
         return App{
@@ -298,7 +290,7 @@ pub const App = struct {
             .cwd = cwd,
             .cmd_queue = try CommandQueue.init(allocator),
             .lua_vm = lua_vm,
-            .mcp_manager = mcp.Manager.init(allocator, agent_factory.io),
+            .mcp_manager = r.mcp.Manager.init(allocator, agent_factory.io),
         };
     }
 
@@ -409,7 +401,7 @@ pub const App = struct {
             const state = slot.state.load(.acquire);
             if (state == .free or state == .reserved) continue;
 
-            var set = reg.ToolSet{};
+            var set = r.reg.ToolSet{};
             self.context_factory.build_toolset(@enumFromInt(slot.agent.type_idx), &set) catch continue;
             try slot.agent.setTools(set.slice());
         }
@@ -498,7 +490,7 @@ pub const App = struct {
 
         // mode reminder
         {
-            const mode: reg.Mode = @enumFromInt(agent.mode_idx);
+            const mode: r.reg.Mode = @enumFromInt(agent.mode_idx);
             const reminder = if (agent.flags.force_full_reminder)
                 self.context_factory.mode_prompts.get(mode)
             else
@@ -605,7 +597,7 @@ pub const App = struct {
         return self.genSystemReminders(agent) catch {};
     }
 
-    pub fn render(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
+    pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
         //inlining layout the ugliest way possible, deal with it
 
         buf.fill(area, .{ .style = .{ .bg = app.theme.overlay } });
@@ -624,7 +616,7 @@ pub const App = struct {
                     const entry = app.swarm.permission_requests.getPtr(p.call_id) orelse break :blk 5;
 
                     if (entry.payload == .ask) {
-                        const opts: u16 = @intCast(@min(entry.payload.ask.options.len, tools.ask.MAX_OPTIONS));
+                        const opts: u16 = @intCast(@min(entry.payload.ask.options.len, r.tools.ask.MAX_OPTIONS));
                         break :blk @min(@as(u16, 4) + opts, area.height / 2);
                     }
                     break :blk 6; // .call, .diff, .plan all have header + options
@@ -636,17 +628,17 @@ pub const App = struct {
 
         // Combined chat + main-agent-status region; status floats right after chat.
         const _combined_area, const _input_area, const _status_area =
-            tui.Col(area, .{
-                tui.Constr.fill, // chat + status
-                tui.Constr{ .fixed = input_height }, // input
-                tui.Constr{ .fixed = 1 }, // statusbar (pinned bottom)
+            r.tui.Col(area, .{
+                r.tui.Constr.fill, // chat + status
+                r.tui.Constr{ .fixed = input_height }, // input
+                r.tui.Constr{ .fixed = 1 }, // statusbar (pinned bottom)
             });
 
         const lua_error_height = luaErrorHeight(app, frame_alloc, _combined_area.width, _combined_area.height);
         const _lua_error_area, const _chat_status_area =
-            tui.Col(_combined_area, .{
-                tui.Constr{ .fixed = lua_error_height },
-                tui.Constr.fill,
+            r.tui.Col(_combined_area, .{
+                r.tui.Constr{ .fixed = lua_error_height },
+                r.tui.Constr.fill,
             });
         renderLuaError(app, frame_alloc, _lua_error_area, buf);
 
@@ -655,7 +647,7 @@ pub const App = struct {
             renderWelcome(app, _chat_status_area, buf);
         } else {
             const chat_cap: u16 = _chat_status_area.height -| main_status_height;
-            const _chat_area: tui.Rect = .{
+            const _chat_area: r.tui.Rect = .{
                 .x = _chat_status_area.x,
                 .y = _chat_status_area.y,
                 .width = _chat_status_area.width,
@@ -739,7 +731,7 @@ pub const App = struct {
                 };
             },
             .diff => |diff| {
-                var lines: std.ArrayList(tui.DiffLine) = .empty;
+                var lines: std.ArrayList(r.tui.DiffLine) = .empty;
                 emitDiffLines(&lines, diff, self.sessionAlloc());
                 self.chat_entries.append(self.sessionAlloc(), .{ .diff = .{
                     .diff_lines = lines.items,
@@ -786,7 +778,7 @@ pub const App = struct {
     ) ?usize {
         switch (payload) {
             .diff => |d| {
-                var lines: std.ArrayList(tui.DiffLine) = .empty;
+                var lines: std.ArrayList(r.tui.DiffLine) = .empty;
                 emitDiffLines(&lines, d, alloc);
                 if (lines.items.len == 0) return null;
                 self.chat_entries.append(alloc, .{ .diff = .{
@@ -803,13 +795,13 @@ pub const App = struct {
     }
 
     fn appendPlanEntry(self: *App, payload: prv.Swarm.PlanApprovalPayload, alloc: std.mem.Allocator) ?usize {
-        var vlines: std.ArrayList(tui.Line) = .empty;
+        var vlines: std.ArrayList(r.tui.Line) = .empty;
 
-        var hl = tui.MarkdownStreamingHighlighter.init(alloc);
+        var hl = r.tui.MarkdownStreamingHighlighter.init(alloc);
         hl.feed(payload.plan_text) catch return null;
         hl.finish();
 
-        var src: tui.Line = .{};
+        var src: r.tui.Line = .{};
         drain: while (true) {
             switch (hl.consume()) {
                 .done, .need_bytes => break :drain,
@@ -1131,7 +1123,7 @@ pub const App = struct {
     }
 };
 
-fn pushDiffLine(out: *std.ArrayList(tui.DiffLine), alloc: std.mem.Allocator, line: tui.DiffLine) void {
+fn pushDiffLine(out: *std.ArrayList(r.tui.DiffLine), alloc: std.mem.Allocator, line: r.tui.DiffLine) void {
     const owned_content = alloc.dupe(u8, line.content) catch return;
     out.append(alloc, .{
         .kind = line.kind,
@@ -1140,7 +1132,7 @@ fn pushDiffLine(out: *std.ArrayList(tui.DiffLine), alloc: std.mem.Allocator, lin
     }) catch return;
 }
 
-fn emitDiffLines(out: *std.ArrayList(tui.DiffLine), snap: prv.Swarm.ToolDiff, alloc: std.mem.Allocator) void {
+fn emitDiffLines(out: *std.ArrayList(r.tui.DiffLine), snap: prv.Swarm.ToolDiff, alloc: std.mem.Allocator) void {
     if (snap.before) |before| {
         const old_lines = splitLinesAlloc(before, alloc) orelse return;
         const new_lines = splitLinesAlloc(snap.after, alloc) orelse return;
@@ -1158,7 +1150,7 @@ fn emitDiffLines(out: *std.ArrayList(tui.DiffLine), snap: prv.Swarm.ToolDiff, al
 /// Myers' O(ND) shortest edit script with context collapsing. `base_line` is
 /// the 1-based line number in the original where `old_lines` begins.
 fn emitMyersDiff(
-    out: *std.ArrayList(tui.DiffLine),
+    out: *std.ArrayList(r.tui.DiffLine),
     old_lines: []const []const u8,
     new_lines: []const []const u8,
     base_line: u32,
@@ -1224,7 +1216,7 @@ fn emitMyersDiff(
     }
 }
 
-fn emitAllOps(out: *std.ArrayList(tui.DiffLine), ops: []const DiffOp, base_line: u32, alloc: std.mem.Allocator) void {
+fn emitAllOps(out: *std.ArrayList(r.tui.DiffLine), ops: []const DiffOp, base_line: u32, alloc: std.mem.Allocator) void {
     var old_ln: u32 = 0;
     for (ops) |op| {
         switch (op) {
@@ -1250,7 +1242,7 @@ pub const ChatEntry = union(enum) {
     tool_call: ToolCallEntry,
 
     pub const PlanEntry = struct {
-        lines: []const tui.Line,
+        lines: []const r.tui.Line,
     };
 
     pub const ToolCallEntry = struct {
@@ -1269,7 +1261,7 @@ pub const ChatEntry = union(enum) {
     };
 
     pub const DiffEntry = struct {
-        diff_lines: []const tui.DiffLine,
+        diff_lines: []const r.tui.DiffLine,
     };
 
     pub fn userMessageSimple(alloc: std.mem.Allocator, msg: []const u8) !ChatEntry {
@@ -1509,7 +1501,7 @@ fn commandCompletions(app: *App, input: []const u8, cursor: u32) [COMMAND_COMPLE
 }
 
 // TODO: move to input popup instead
-fn renderCommandPalette(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf: *tui.Buffer) !void {
+fn renderCommandPalette(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
     _ = arena;
 
     const input = app.inputSlice();
@@ -1522,7 +1514,7 @@ fn renderCommandPalette(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf
     if (palette_w == 0 or palette_h == 0) return;
 
     const palette_area = area.center(palette_w, palette_h);
-    const palette = tui.widgets.CommandPallet{
+    const palette = r.tui.widgets.CommandPallet{
         .input_value = input,
         .preview = rows[0..],
         .border = .single,
@@ -1532,13 +1524,13 @@ fn renderCommandPalette(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf
     palette.render(palette_area, buf);
 }
 
-fn renderInput(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf: *tui.Buffer) !void {
+fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
     const border_color = if (app.running)
         app.theme.muted
     else
         app.context_factory.mode_colors.get(app.mode);
 
-    var para = tui.Paragraph{
+    var para = r.tui.Paragraph{
         .border = .none,
         .style = .{ .fg = border_color },
         .padding = .{ .bottom = 1, .left = 2, .right = 2, .top = 1 },
@@ -1547,7 +1539,7 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf: *tui.Bu
 
     const text = app.inputSlice();
     const cursor: usize = app.input_cursor;
-    const cursor_style: tui.Style = .{ .fg = .black, .bg = border_color };
+    const cursor_style: r.tui.Style = .{ .fg = .black, .bg = border_color };
 
     var cursor_visual_row: usize = 0;
     var accumulated_rows: usize = 0;
@@ -1556,7 +1548,7 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf: *tui.Bu
     while (it.next()) |raw_line| {
         const line_start = consumed;
         const line_end = line_start + raw_line.len;
-        var line = tui.Line{};
+        var line = r.tui.Line{};
 
         if (cursor >= line_start and cursor <= line_end) {
             const off = cursor - line_start;
@@ -1575,9 +1567,9 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf: *tui.Bu
         }
 
         // Wrap to temp buffer to detect cursor position
-        var wrapped: std.ArrayList(tui.Line) = .empty;
+        var wrapped: std.ArrayList(r.tui.Line) = .empty;
         defer wrapped.deinit(arena);
-        try tui.wrapLine(arena, &line, inner.width, &wrapped);
+        try r.tui.wrapLine(arena, &line, inner.width, &wrapped);
 
         // Find which wrapped row has cursor
         if (cursor >= line_start and cursor <= line_end) {
@@ -1608,7 +1600,7 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf: *tui.Bu
 
     const mode_name = app.context_factory.mode_names.get(app.mode);
     const title = try std.fmt.allocPrint(arena, "┤{s}├", .{mode_name});
-    const block = tui.Block{
+    const block = r.tui.Block{
         .title = title,
         .title_style = .{ .fg = border_color },
         .style = .{ .fg = border_color, .bg = app.theme.overlay_dark },
@@ -1620,13 +1612,13 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf: *tui.Bu
     buf.set(area.x + 1, area.y + 1, .{ .char = '❯' });
     if (app.screenshot_buf != null) {
         buf.set(area.x + 1, area.y, .{});
-        buf.setString(area.x, area.y, tui.icon.eye, .{ .fg = .green });
+        buf.setString(area.x, area.y, r.tui.icon.eye, .{ .fg = .green });
     }
 }
 
-fn renderPermMessage(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
+fn renderPermMessage(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const pm = &app.input_mode.perm_message;
-    const input_widget: tui.Input = .{
+    const input_widget: r.tui.Input = .{
         .text = pm.buf[0..pm.len],
         .border_style = .{ .fg = Theme.default.warn },
         .has_screenshot = app.screenshot_buf != null,
@@ -1637,11 +1629,11 @@ fn renderPermMessage(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
 /// ╭──────── PASSWORD ───────────╮
 /// │         ********            │
 /// ╰─────────────────────────────╯
-fn renderPassphraseModal(app: *App, full_area: tui.Rect, buf: *tui.Buffer) void {
+fn renderPassphraseModal(app: *App, full_area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const pp = &app.input_mode.passphrase;
     const modal = full_area.center(32, 3);
 
-    const block: tui.Block = .{
+    const block: r.tui.Block = .{
         .title = " Password or Passphrase ",
         .title_style = .{ .fg = Theme.default.warn, .modifier = .{ .bold = true } },
         .style = .{ .fg = Theme.default.warn },
@@ -1663,7 +1655,7 @@ fn renderPassphraseModal(app: *App, full_area: tui.Rect, buf: *tui.Buffer) void 
     buf.set(x, y, .{ .char = '_', .style = .{ .fg = Theme.default.warn } });
 }
 
-fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: tui.Rect, buf: *tui.Buffer) void {
+fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const notif_w: u16 = @min(full_area.width / 3, 40);
     if (notif_w < 4) return;
 
@@ -1676,19 +1668,19 @@ fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: tui.Rect,
 
         switch (entry.*) {
             .used => |en| {
-                var para = tui.Paragraph{
+                var para = r.tui.Paragraph{
                     .border = .single,
                     .style = .{ .fg = app.theme.text, .bg = app.theme.overlay_dark },
                     .padding = .{ .left = 1, .right = 1, .top = 0, .bottom = 0 },
                 };
-                var l = tui.Line{};
+                var l = r.tui.Line{};
                 l.pushText(arena, en.msg, .{}) catch {};
                 para.lines.append(arena, l) catch {};
 
                 const total_h = para.totalHeight(arena, notif_w);
                 if (total_h == 0) continue;
 
-                const area = tui.Rect{
+                const area = r.tui.Rect{
                     .x = full_area.x +| full_area.width -| notif_w,
                     .y = y,
                     .width = notif_w,
@@ -1704,7 +1696,7 @@ fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: tui.Rect,
     }
 }
 
-fn renderStatusBar(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
+fn renderStatusBar(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     for (area.x..area.x +| area.width) |x| {
         buf.set(@intCast(x), area.y, .{ .char = ' ', .style = .{ .fg = .white, .bg = app.theme.overlay_dark } });
     }
@@ -1761,7 +1753,7 @@ fn statusTextWidth(text: []const u8) u16 {
     return cols;
 }
 
-fn renderCenteredStatusText(app: *App, area: tui.Rect, buf: *tui.Buffer, status: []const u8) void {
+fn renderCenteredStatusText(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer, status: []const u8) void {
     const width = @min(statusTextWidth(status), area.width);
     const offset = @divTrunc(area.width -| width, 2);
     buf.setStringMax(area.x + offset, area.y, status, .{
@@ -1769,8 +1761,8 @@ fn renderCenteredStatusText(app: *App, area: tui.Rect, buf: *tui.Buffer, status:
     }, area.width -| offset);
 }
 
-fn luaErrorParagraph(arena: std.mem.Allocator, msg: []const u8) tui.Paragraph {
-    var p: tui.Paragraph = .{
+fn luaErrorParagraph(arena: std.mem.Allocator, msg: []const u8) r.tui.Paragraph {
+    var p: r.tui.Paragraph = .{
         .style = .{ .fg = .black, .bg = .red },
     };
     appendPlainText(&p, arena, msg, .{ .fg = .black, .bg = .red });
@@ -1785,7 +1777,7 @@ fn luaErrorHeight(app: *App, arena: std.mem.Allocator, width: u16, max_height: u
     return @min(p.totalHeight(arena, width), max_height);
 }
 
-fn renderLuaError(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf: *tui.Buffer) void {
+fn renderLuaError(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     if (area.width == 0 or area.height == 0) return;
     const msg = app.lua_vm.getLastError();
     if (msg.len == 0) return;
@@ -1794,7 +1786,7 @@ fn renderLuaError(app: *App, arena: std.mem.Allocator, area: tui.Rect, buf: *tui
     p.renderSimple(arena, area, buf);
 }
 
-/// Build one tui.Paragraph per ChatEntry. Allocations live in `arena`; do not
+/// Build one r.tui.Paragraph per ChatEntry. Allocations live in `arena`; do not
 /// deinit the result. All paragraphs use `reverse = true` so the chat-area
 /// caller can stack them bottom-up.
 fn buildEntryParagraph(
@@ -1804,7 +1796,7 @@ fn buildEntryParagraph(
     entry: ChatEntry,
     show_thinking: bool,
     inner_w: u16,
-) tui.Paragraph {
+) r.tui.Paragraph {
     return switch (entry) {
         .message => |m| buildMessageParagraph(arena, m, show_thinking),
         .plan => |p| buildPlanParagraph(arena, p),
@@ -1812,12 +1804,12 @@ fn buildEntryParagraph(
         .tool_call => |c| if (agent) |ag|
             buildToolCallParagraph(arena, ag, app, c, inner_w)
         else
-            tui.Paragraph.empty,
+            r.tui.Paragraph.empty,
     };
 }
 
-fn buildCompactionIndicatorParagraph(arena: std.mem.Allocator, app: *App) tui.Paragraph {
-    var p: tui.Paragraph = .{
+fn buildCompactionIndicatorParagraph(arena: std.mem.Allocator, app: *App) r.tui.Paragraph {
+    var p: r.tui.Paragraph = .{
         .border = .none,
         .sides = .left_only,
         .padding = .{ .left = 1, .right = 1 },
@@ -1825,7 +1817,7 @@ fn buildCompactionIndicatorParagraph(arena: std.mem.Allocator, app: *App) tui.Pa
         .reverse = true,
     };
 
-    var line = tui.Line{};
+    var line = r.tui.Line{};
     line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = .white } }) catch {};
     line.pushText(arena, " compacting context", .{ .fg = Theme.default.muted, .modifier = .{ .bold = true } }) catch {};
     p.lines.append(arena, line) catch {};
@@ -1837,8 +1829,8 @@ fn buildMessageParagraph(
     arena: std.mem.Allocator,
     m: ChatEntry.MessageEntry,
     show_thinking: bool,
-) tui.Paragraph {
-    var p: tui.Paragraph = .{
+) r.tui.Paragraph {
+    var p: r.tui.Paragraph = .{
         .border = .none,
         .sides = .left_only,
         .padding = .{ .left = 1, .right = 1 },
@@ -1848,13 +1840,13 @@ fn buildMessageParagraph(
 
     // Role prefix as the first content line.
     const role_text: []const u8 = if (m.role == .user) "❯ you:" else "❯ blitz:";
-    const role_style: tui.Style = if (m.role == .user)
+    const role_style: r.tui.Style = if (m.role == .user)
         .{ .fg = Theme.default.info, .modifier = .{ .bold = true } }
     else
         .{ .fg = Theme.default.ok, .modifier = .{ .bold = true } };
     appendPlainLine(&p, arena, role_text, role_style);
 
-    const muted: tui.Style = .{ .fg = Theme.default.muted };
+    const muted: r.tui.Style = .{ .fg = Theme.default.muted };
 
     for (m.parts) |part| switch (part) {
         .text => |txt| {
@@ -1895,8 +1887,8 @@ fn buildToolCallParagraph(
     app: *App,
     call: ChatEntry.ToolCallEntry,
     inner_w: u16,
-) tui.Paragraph {
-    var p: tui.Paragraph = .{
+) r.tui.Paragraph {
+    var p: r.tui.Paragraph = .{
         .style = .{ .bg = .black },
         .dynamic_border = false,
         .border = .none,
@@ -1905,14 +1897,14 @@ fn buildToolCallParagraph(
     };
 
     const status = agent.tool_display_status.getPtr(call.call_id);
-    var line = tui.Line{};
+    var line = r.tui.Line{};
 
     const result_opt: ?prv.adapter.ToolResult = findToolResult(agent, call.call_id) orelse agent.tool_call_done.get(call.call_id);
     if (result_opt) |result| {
         if (result.is_error) {
-            line.pushSpan(arena, .{ .content = tui.icon.fail, .style = .{ .fg = .red, .modifier = .{ .bold = true } } }) catch {};
+            line.pushSpan(arena, .{ .content = r.tui.icon.fail, .style = .{ .fg = .red, .modifier = .{ .bold = true } } }) catch {};
         } else {
-            line.pushSpan(arena, .{ .content = tui.icon.ok, .style = .{ .fg = .green, .modifier = .{ .bold = true } } }) catch {};
+            line.pushSpan(arena, .{ .content = r.tui.icon.ok, .style = .{ .fg = .green, .modifier = .{ .bold = true } } }) catch {};
         }
     } else {
         line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = .white } }) catch {};
@@ -1932,7 +1924,7 @@ fn buildToolCallParagraph(
             var it = child_ag.tool_display_status.iterator();
             var i: usize = 0;
             while (it.next()) |en| : (i += 1) {
-                var l = tui.Line{};
+                var l = r.tui.Line{};
 
                 const display_log: []const u8 = if (log_max > 0 and en.value_ptr.status_text.items.len > log_max) cl: {
                     const truncated = en.value_ptr.status_text.items[0 .. log_max - 4];
@@ -1941,9 +1933,9 @@ fn buildToolCallParagraph(
                 } else en.value_ptr.status_text.items;
 
                 if (child_ag.tool_display_status.entries.len == i + 1)
-                    l.pushSpan(arena, .{ .content = tui.icon.box_bl ++ tui.icon.box_h }) catch {}
+                    l.pushSpan(arena, .{ .content = r.tui.icon.box_bl ++ r.tui.icon.box_h }) catch {}
                 else
-                    l.pushSpan(arena, .{ .content = tui.icon.box_t_right ++ tui.icon.box_h }) catch {};
+                    l.pushSpan(arena, .{ .content = r.tui.icon.box_t_right ++ r.tui.icon.box_h }) catch {};
 
                 l.pushText(arena, display_log, .{ .fg = .white }) catch {};
                 p.lines.append(arena, l) catch {};
@@ -1951,11 +1943,11 @@ fn buildToolCallParagraph(
         }
 
         for (s.log.items, 0..) |log, i| {
-            var l = tui.Line{};
+            var l = r.tui.Line{};
             if (s.log.items.len == i + 1)
-                l.pushSpan(arena, .{ .content = tui.icon.box_bl ++ tui.icon.box_h }) catch {}
+                l.pushSpan(arena, .{ .content = r.tui.icon.box_bl ++ r.tui.icon.box_h }) catch {}
             else
-                l.pushSpan(arena, .{ .content = tui.icon.box_t_right ++ tui.icon.box_h }) catch {};
+                l.pushSpan(arena, .{ .content = r.tui.icon.box_t_right ++ r.tui.icon.box_h }) catch {};
 
             const display_log: []const u8 = if (log_max > 0 and log.len > log_max) blk: {
                 const truncated = log[0 .. log_max - 4];
@@ -1971,8 +1963,8 @@ fn buildToolCallParagraph(
     return p;
 }
 
-fn buildPlanParagraph(arena: std.mem.Allocator, plan: ChatEntry.PlanEntry) tui.Paragraph {
-    var p: tui.Paragraph = .{
+fn buildPlanParagraph(arena: std.mem.Allocator, plan: ChatEntry.PlanEntry) r.tui.Paragraph {
+    var p: r.tui.Paragraph = .{
         .border = .double,
         .padding = .all(1),
         .style = .{ .bg = Theme.default.diff_surface },
@@ -1985,9 +1977,9 @@ fn buildPlanParagraph(arena: std.mem.Allocator, plan: ChatEntry.PlanEntry) tui.P
     return p;
 }
 
-fn buildDiffParagraph(arena: std.mem.Allocator, d: ChatEntry.DiffEntry) tui.Paragraph {
+fn buildDiffParagraph(arena: std.mem.Allocator, d: ChatEntry.DiffEntry) r.tui.Paragraph {
     const theme = Theme.default;
-    var p: tui.Paragraph = .{
+    var p: r.tui.Paragraph = .{
         .border = .single,
         .sides = .left_only,
         .dynamic_border = false,
@@ -1996,7 +1988,7 @@ fn buildDiffParagraph(arena: std.mem.Allocator, d: ChatEntry.DiffEntry) tui.Para
     };
 
     for (d.diff_lines) |dl| {
-        const dl_info: struct { prefix: []const u8, fg: tui.Color, bg: tui.Color } = switch (dl.kind) {
+        const dl_info: struct { prefix: []const u8, fg: r.tui.Color, bg: r.tui.Color } = switch (dl.kind) {
             .deletion => .{ .prefix = "- ", .fg = theme.diff_remove, .bg = theme.diff_surface },
             .addition => .{ .prefix = "+ ", .fg = theme.diff_add, .bg = theme.diff_surface },
             .context => .{ .prefix = "  ", .fg = .reset, .bg = theme.diff_surface },
@@ -2007,7 +1999,7 @@ fn buildDiffParagraph(arena: std.mem.Allocator, d: ChatEntry.DiffEntry) tui.Para
         else
             "     ";
 
-        var src: tui.Line = .{ .style = .{ .bg = dl_info.bg } };
+        var src: r.tui.Line = .{ .style = .{ .bg = dl_info.bg } };
         src.pushText(arena, num_str, .{ .fg = theme.muted, .bg = dl_info.bg }) catch {};
         src.pushText(arena, dl_info.prefix, .{ .fg = dl_info.fg, .bg = dl_info.bg }) catch {};
         src.pushText(arena, dl.content, .{ .fg = dl_info.fg, .bg = dl_info.bg }) catch {};
@@ -2017,15 +2009,15 @@ fn buildDiffParagraph(arena: std.mem.Allocator, d: ChatEntry.DiffEntry) tui.Para
 }
 
 /// Append one logical Line to the paragraph, single span, given style.
-fn appendPlainLine(p: *tui.Paragraph, arena: std.mem.Allocator, text: []const u8, style: tui.Style) void {
-    var ln: tui.Line = .{ .style = style };
+fn appendPlainLine(p: *r.tui.Paragraph, arena: std.mem.Allocator, text: []const u8, style: r.tui.Style) void {
+    var ln: r.tui.Line = .{ .style = style };
     ln.pushText(arena, text, style) catch {};
     p.lines.append(arena, ln) catch {};
 }
 
 /// Split `txt` on `\n` and append each segment as a logical Line. Paragraph
 /// wraps internally, so do not pre-wrap here.
-fn appendPlainText(p: *tui.Paragraph, arena: std.mem.Allocator, raw: []const u8, style: tui.Style) void {
+fn appendPlainText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8, style: r.tui.Style) void {
     const txt = if (raw.len > 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
     if (txt.len == 0) return;
     var pos: usize = 0;
@@ -2033,7 +2025,7 @@ fn appendPlainText(p: *tui.Paragraph, arena: std.mem.Allocator, raw: []const u8,
         const nl = std.mem.indexOfScalarPos(u8, txt, pos, '\n');
         const end = nl orelse txt.len;
         const seg = txt[pos..end];
-        var ln: tui.Line = .{ .style = style };
+        var ln: r.tui.Line = .{ .style = style };
         if (seg.len > 0) ln.pushText(arena, seg, style) catch {};
         p.lines.append(arena, ln) catch return;
         if (nl == null) break;
@@ -2043,7 +2035,7 @@ fn appendPlainText(p: *tui.Paragraph, arena: std.mem.Allocator, raw: []const u8,
 
 /// Prepend `thinking: ` to the first line of `raw`, append rest as plain.
 /// All content uses `style` (typically muted).
-fn appendThinkingText(p: *tui.Paragraph, arena: std.mem.Allocator, raw: []const u8, style: tui.Style) void {
+fn appendThinkingText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8, style: r.tui.Style) void {
     const txt = if (raw.len > 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
     if (txt.len == 0) {
         appendPlainLine(p, arena, "thinking:", style);
@@ -2055,7 +2047,7 @@ fn appendThinkingText(p: *tui.Paragraph, arena: std.mem.Allocator, raw: []const 
         const nl = std.mem.indexOfScalarPos(u8, txt, pos, '\n');
         const end = nl orelse txt.len;
         const seg = txt[pos..end];
-        var ln: tui.Line = .{ .style = style };
+        var ln: r.tui.Line = .{ .style = style };
         if (first) {
             ln.pushText(arena, "thinking: ", style) catch {};
         }
@@ -2070,16 +2062,16 @@ fn appendThinkingText(p: *tui.Paragraph, arena: std.mem.Allocator, raw: []const 
 /// Run `raw` through the markdown highlighter, build logical Lines from spans
 /// (split on literal `"\n"` spans), append to `p.lines`. No pre-wrapping —
 /// Paragraph wraps at inner_w during render.
-fn appendMarkdownText(p: *tui.Paragraph, arena: std.mem.Allocator, raw: []const u8) void {
+fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8) void {
     if (raw.len == 0) return;
-    var hl = tui.MarkdownStreamingHighlighter.init(arena);
+    var hl = r.tui.MarkdownStreamingHighlighter.init(arena);
     hl.feed(raw) catch {
         appendPlainText(p, arena, raw, .{});
         return;
     };
     hl.finish();
 
-    var current: tui.Line = .{};
+    var current: r.tui.Line = .{};
     drain: while (true) switch (hl.consume()) {
         .done, .need_bytes => break :drain,
         .span => |s| {
@@ -2096,7 +2088,7 @@ fn appendMarkdownText(p: *tui.Paragraph, arena: std.mem.Allocator, raw: []const 
     }
 }
 
-fn renderChatArea(app: *App, area: tui.Rect, buf: *tui.Buffer) usize {
+fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) usize {
     if (area.width == 0 or area.height == 0) return 0;
 
     var scratch = std.heap.ArenaAllocator.init(app.sessionAlloc());
@@ -2132,7 +2124,7 @@ fn renderChatArea(app: *App, area: tui.Rect, buf: *tui.Buffer) usize {
     var scroll_offset: u16 = @intCast(@min(scroll_offset_usize, std.math.maxInt(u16)));
     const target: u32 = @as(u32, inner_h) + @as(u32, scroll_offset);
 
-    const Item = struct { p: tui.Paragraph, h: u16 };
+    const Item = struct { p: r.tui.Paragraph, h: u16 };
     var stack: std.ArrayList(Item) = .empty;
     var total: u32 = 0;
 
@@ -2183,7 +2175,7 @@ fn renderChatArea(app: *App, area: tui.Rect, buf: *tui.Buffer) usize {
         const sub_y: u16 = if (sub_top < 0) 0 else @intCast(sub_top);
         const sub_h_signed: i32 = anchor_y - sub_y;
         const sub_h: u16 = if (sub_h_signed <= 0) 0 else if (sub_h_signed > std.math.maxInt(u16)) std.math.maxInt(u16) else @intCast(sub_h_signed);
-        const sub: tui.Rect = .{ .x = area.x, .y = sub_y, .width = inner_w, .height = sub_h };
+        const sub: r.tui.Rect = .{ .x = area.x, .y = sub_y, .width = inner_w, .height = sub_h };
         // Logical area: keeps the original (possibly oversized / negative-top)
         // footprint by preserving width/height. We pass the same sub_y but
         // the paragraph's reverse layout anchors to sub.y + sub.height which
@@ -2197,7 +2189,7 @@ fn renderChatArea(app: *App, area: tui.Rect, buf: *tui.Buffer) usize {
     return @min(@as(usize, inner_h), consumed);
 }
 
-fn renderMainProgress(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
+fn renderMainProgress(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     if (area.width == 0 or area.height == 0) return;
     if (!app.running) return;
 
@@ -2208,7 +2200,7 @@ fn renderMainProgress(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
     const alloc = app.sessionAlloc();
     const spinner_str = text_utils.spinnerDots(app.frame_count);
 
-    var para = tui.Paragraph{
+    var para = r.tui.Paragraph{
         .padding = .all(1),
     };
 
@@ -2232,14 +2224,14 @@ fn renderMainProgress(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
         queued_suffix,
     }) catch "…";
 
-    var l = tui.Line{};
+    var l = r.tui.Line{};
 
     l.pushText(alloc, line, .{ .fg = .cyan }) catch {};
     para.lines.append(alloc, l) catch {};
     para.render(alloc, area, area, buf);
 }
 
-fn renderWelcome(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
+fn renderWelcome(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     var c = area.center(70, 10);
     var line_iter = std.mem.splitAny(u8, HEADER_ART, "\n");
     while (line_iter.next()) |line| : (c.y += 1) {
@@ -2256,7 +2248,7 @@ fn renderWelcome(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
             const dx = if (col >= wave_pos) col - wave_pos else wave_pos - col;
             const t: u16 = @intCast(@min(dx, 10));
             const blend: u8 = if (t >= 10) 0 else @intCast((10 - t) * 25);
-            const fg = tui.Color{ .rgb = .{
+            const fg = r.tui.Color{ .rgb = .{
                 .r = blend,
                 .g = 200 +| blend / 5,
                 .b = 200 +| blend / 5,
@@ -2296,8 +2288,8 @@ fn str_replace(buf: []u8, from: []const u8, to: []const u8, input: []const u8) [
     return buf[0..len];
 }
 
-fn renderPermissionWidget(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
-    const block: tui.Block = .{
+fn renderPermissionWidget(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+    const block: r.tui.Block = .{
         .style = .{ .fg = Theme.default.warn },
         .borders = .{ .bottom = true, .left = true, .right = true },
     };
@@ -2352,7 +2344,7 @@ fn renderPermissionWidget(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
         const y = inner.y + 1 + @as(u16, @intCast(i));
         if (y >= inner.y +| inner.height) break;
         const selected = cur_sel == @as(u8, @intCast(i));
-        const style: tui.Style = if (selected) .{ .modifier = .{ .reverse = true } } else .{};
+        const style: r.tui.Style = if (selected) .{ .modifier = .{ .reverse = true } } else .{};
         const label = if (is_plan)
             (if (selected) plan_labels_sel[i] else plan_labels[i])
         else
@@ -2361,9 +2353,9 @@ fn renderPermissionWidget(app: *App, area: tui.Rect, buf: *tui.Buffer) void {
     }
 }
 
-fn renderAskWidget(app: *App, req: *prv.Swarm.PermissionReq, inner: tui.Rect, buf: *tui.Buffer) void {
+fn renderAskWidget(app: *App, req: *prv.Swarm.PermissionReq, inner: r.tui.Rect, buf: *r.tui.Buffer) void {
     const args = req.payload.ask;
-    const opts_len = @min(args.options.len, tools.ask.MAX_OPTIONS);
+    const opts_len = @min(args.options.len, r.tools.ask.MAX_OPTIONS);
     const total_rows: usize = opts_len + 1; // + "enter message"
 
     // Clamp selection.
@@ -2388,7 +2380,7 @@ fn renderAskWidget(app: *App, req: *prv.Swarm.PermissionReq, inner: tui.Rect, bu
         if (y >= inner.y +| inner.height) break;
 
         const selected = cur_sel == @as(u8, @intCast(row));
-        const style: tui.Style = if (selected) .{ .modifier = .{ .reverse = true } } else .{};
+        const style: r.tui.Style = if (selected) .{ .modifier = .{ .reverse = true } } else .{};
         const prefix: []const u8 = if (selected) "> " else "  ";
         const label: []const u8 = if (row < opts_len) args.options[row] else "enter message";
 
@@ -2428,7 +2420,7 @@ pub const CommandQueue = struct {
         try self._m.lock(io);
         defer self._m.unlock(io);
         const alloc = self.arena.allocator();
-        const owned = try util.deepClone(Command, cmd, alloc);
+        const owned = try r.util.deepClone(Command, cmd, alloc);
         try self._data.append(alloc, owned);
     }
 
@@ -2474,7 +2466,7 @@ pub const Command = union(enum) {
         parent_id: ?prv.Swarm.AgentId = null,
         agent_id: prv.Swarm.AgentId,
         prompt: []const prv.adapter.ContentPart,
-        agent_type: u8 = @intFromEnum(reg.AgentType.main),
+        agent_type: u8 = @intFromEnum(r.reg.AgentType.main),
         tool_budget: u32 = 64,
         effort: prv.config.EffortLevel = .min,
         fork: bool = false,
@@ -2539,8 +2531,8 @@ pub const Command = union(enum) {
                 if (app.scroll_offset == 0) app.auto_scroll = true;
             },
             .queue_agent_message => |arg| {
-                const parts = try util.deepClone(@TypeOf(arg.parts), arg.parts, alloc);
-                const entry = if (arg.chat_entry) |en| try util.deepClone(ChatEntry, en, alloc) else null;
+                const parts = try r.util.deepClone(@TypeOf(arg.parts), arg.parts, alloc);
+                const entry = if (arg.chat_entry) |en| try r.util.deepClone(ChatEntry, en, alloc) else null;
                 try app.queued.push(alloc, arg.agent_id, entry, parts);
             },
             .compact => {
@@ -2582,11 +2574,11 @@ pub const Command = union(enum) {
                 }
 
                 if (arg.chat_entry) |en| {
-                    const entry = try util.deepClone(ChatEntry, en, alloc);
+                    const entry = try r.util.deepClone(ChatEntry, en, alloc);
                     try app.chat_entries.append(alloc, entry);
                 }
 
-                const prompt = try util.deepClone(@TypeOf(arg.prompt), arg.prompt, alloc);
+                const prompt = try r.util.deepClone(@TypeOf(arg.prompt), arg.prompt, alloc);
                 try app.swarm.runAgent(arg.agent_id, prompt);
                 app.running = true;
             },
@@ -2595,7 +2587,7 @@ pub const Command = union(enum) {
                 // app.pushSystemMessage("{s}", .{msg});
             },
             .push_chat_entry => |en| {
-                const entry = try util.deepClone(ChatEntry, en, alloc);
+                const entry = try r.util.deepClone(ChatEntry, en, alloc);
                 try app.chat_entries.append(alloc, entry);
             },
             .custom => |arg| {
@@ -2606,7 +2598,7 @@ pub const Command = union(enum) {
                 var buf: [64]u8 = undefined;
                 var reader = file.reader(app.context_factory.io, &buf);
 
-                session.loadSession(app, &reader.interface) catch {
+                r.session.loadSession(app, &reader.interface) catch {
                     // --
                 };
             },
@@ -2618,7 +2610,7 @@ pub const Command = union(enum) {
                 var buf: [64]u8 = undefined;
                 var writer = file.writer(app.context_factory.io, &buf);
 
-                session.saveSession(app, &writer.interface) catch {
+                r.session.saveSession(app, &writer.interface) catch {
                     // ---
                 };
             },
@@ -2739,7 +2731,7 @@ test "emitDiffLines owns rendered content" {
     const after = try std.testing.allocator.dupe(u8, "alpha\nBETA\n");
     defer std.testing.allocator.free(after);
 
-    var lines: std.ArrayList(tui.DiffLine) = .empty;
+    var lines: std.ArrayList(r.tui.DiffLine) = .empty;
     emitDiffLines(&lines, .{
         .path = "demo.txt",
         .before = before,
