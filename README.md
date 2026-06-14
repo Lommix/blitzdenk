@@ -101,9 +101,6 @@ blitz.register_tool({
 })
 
 -- MCP configuration and activation
-
-local is_active = false
-
 local playmcp = blitz.mcp.add({
 	name = "playwright",
 	command = "npx",
@@ -116,7 +113,7 @@ local playmcp = blitz.mcp.add({
 	tools_prefix = "pw_",
 })
 
-
+local is_active = false
 blitz.add_command(":browser", function()
 	if is_active == true then
 		return
