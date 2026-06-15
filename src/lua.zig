@@ -1766,7 +1766,8 @@ fn luaRegisterTool(L: ?*c.lua_State) callconv(.c) c_int {
 
     vm.tool_entries.appendAssumeCapacity(entry);
 
-    return 0;
+    pushAny(state, entry.name[0..entry.name_len]);
+    return 1;
 }
 
 // ── Trampoline: Zig ToolFn → Lua function call ─────────────────────

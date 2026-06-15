@@ -183,6 +183,7 @@ function blitz.get_main_agent() end
 
 ---Register a tool
 ---@param def BlitzToolDef
+---@return string
 function blitz.register_tool(def) end
 
 ---Override the tool set for a given agent type. Replaces defaults entirely.
