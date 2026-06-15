@@ -21,6 +21,13 @@ There are no official docs yet. Checkout the provided [lua meta file](./src/blit
 
 You can also look at [my configuration](https://github.com/Lommix/dotfiles/blob/master/config/blitzdenk/blitz.lua), which covers at least one example per use case.
 
+## Default tools
+
+- `write`,`edit`, `bash`,`read`, `patch` = SSH compliant
+- `Subagents` and`Forks`
+- `list_tasks`, `update_task_state`, `create_task`
+- `ask_user` simple multiple choice questions
+
 ## Install
 
 You need the Zig 0.16 compiler.
