@@ -233,6 +233,22 @@ function blitz.set_mode_name(mode, name) end
 ---@param mode integer One of blitz.MODE_EXEC | blitz.MODE_RESEARCH
 function blitz.set_mode(mode) end
 
+---@class BlitzAppFlags
+---@field show_thinking boolean
+---@field debug_log boolean
+---@field ssh_agent_control boolean
+---@field skip_permissions boolean
+local BlitzAppFlags = {}
+
+---Return the current app flags.
+---@return BlitzAppFlags
+function blitz.get_flags() end
+
+---Set the app flags from a table. Missing fields are set to their
+---default values (all true), not preserved from the current state.
+---@param flags BlitzAppFlags
+function blitz.set_flags(flags) end
+
 ---Bind a vim-style key combo to a lua callback
 ---Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
 ---@param key string Vim-style key combo

@@ -173,6 +173,23 @@ fn readAnyValue(comptime T: type, state: *c.lua_State, idx: c_int) ?T {
             if (c.lua_type(state, idx) != c.LUA_TBOOLEAN) return null;
             return c.lua_toboolean(state, idx) != 0;
         },
+        .@"enum" => {
+            if (c.lua_type(state, idx) != c.LUA_TNUMBER) return null;
+            const n = c.lua_tointegerx(state, idx, null);
+            const tag_type = @typeInfo(T).@"enum".tag_type;
+            if (n < 0 or n > std.math.maxInt(tag_type)) return null;
+            return @enumFromInt(@as(tag_type, @intCast(n)));
+        },
+        .@"struct" => |str| {
+            if (c.lua_type(state, idx) != c.LUA_TTABLE) return null;
+            var result: T = .{};
+            inline for (str.fields) |field| {
+                if (readAnyField(field.type, state, idx, field.name)) |val| {
+                    @field(result, field.name) = val;
+                }
+            }
+            return result;
+        },
         else => @compileError("readAnyValue: unsupported type " ++ @typeName(T)),
     }
 }
@@ -728,6 +745,8 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "set_mode_name", &luaSetModeName },
         .{ "add_mode", &luaAddMode },
         .{ "set_mode", &luaSetMode },
+        .{ "get_flags", &luaGetFlags },
+        .{ "set_flags", &luaSetFlags },
         .{ "log", &luaLog },
         .{ "shell", &luaShell },
         .{ "push_notification", &luaPushNotification },
@@ -1396,6 +1415,8 @@ fn readAnyArg(
             .pointer => "string",
             .int, .comptime_int, .float, .comptime_float => "number",
             .bool => "boolean",
+            .@"enum" => "number (enum)",
+            .@"struct" => "table",
             else => @compileError("readAnyArg: unsupported type " ++ @typeName(T)),
         };
         _ = c.luaL_error(state, name ++ ": arg %d must be a " ++ expected, @as(c_int, idx));
@@ -1506,6 +1527,35 @@ fn luaAddMode(L: ?*c.lua_State) callconv(.c) c_int {
 
     c.lua_pushinteger(state, @intFromEnum(mode));
     return 1;
+}
+
+fn luaGetFlags(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "get_flags: app not initialized");
+        return 0;
+    };
+
+    pushAny(state, a.flags);
+
+    return 1;
+}
+
+fn luaSetFlags(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_flags: app not initialized");
+        return 0;
+    };
+
+    const flags = readAnyArg(r.app.AppFlags, state, "set_flags", 1) orelse {
+        _ = c.luaL_error(state, "set_flags: arg 1 must be a table with boolean fields");
+        return 0;
+    };
+
+    a.cmd_queue.append(a.context_factory.io, .{ .set_flags = flags }) catch {};
+
+    return 0;
 }
 
 fn luaSetMode(L: ?*c.lua_State) callconv(.c) c_int {
