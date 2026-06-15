@@ -12,3 +12,4 @@ pub const tools = @import("tools/root.zig");
 pub const tui = @import("tui/root.zig");
 pub const cmd = @import("commands.zig");
 pub const c = @import("c");
+pub const inject = @import("inject.zig");

@@ -2,6 +2,7 @@ const std = @import("std");
 const r = @import("root.zig");
 const prv = @import("provider");
 const text_utils = r.tui.text_utils;
+const log = std.log.scoped(.app);
 
 pub const FULL_MODE_REMINDER_AFTER_USER_MSG_COUNT = 4;
 pub const PROMPT_HISTORY_FILENAME = "prompt_history.json";
@@ -270,6 +271,7 @@ pub const App = struct {
     mcp_manager: r.mcp.Manager,
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
+    injection_hooks: r.inject.InjectionsHooks = .{},
 
     // TODO: cleanup io
     pub fn init(
@@ -291,6 +293,7 @@ pub const App = struct {
             .cmd_queue = try r.cmd.CommandQueue.init(allocator),
             .lua_vm = lua_vm,
             .mcp_manager = r.mcp.Manager.init(allocator, agent_factory.io),
+            .injection_hooks = try r.inject.InjectionsHooks.init(allocator),
         };
     }
 
@@ -464,137 +467,12 @@ pub const App = struct {
         self.dirty = true;
     }
 
-    // TODO: investigate throttling by frame count
-    // - plan file ref
-    // - skill reminder
-    pub fn genSystemReminders(self: *App, agent: *prv.agent.Agent) !void {
-        var parts = std.ArrayList(prv.adapter.ContentPart).empty;
-        const alloc = agent.arena.allocator();
-
-        // env reminder
-        {
-            var w = std.Io.Writer.Allocating.init(alloc);
-            try w.writer.print("<env>\n", .{});
-
-            const cwd = if (self.swarm.exec.ssh_target != null and self.swarm.exec.ssh_active)
-                self.remote_cwd
-            else
-                self.cwd;
-
-            try w.writer.print("CWD: {s}\n", .{cwd});
-            try w.writer.print("</env>\n", .{});
-            try w.writer.flush();
-
-            try parts.append(alloc, .{ .text = w.toArrayList().items });
-        }
-
-        // mode reminder
-        {
-            const mode: r.reg.Mode = @enumFromInt(agent.mode_idx);
-            const reminder = if (agent.flags.force_full_reminder)
-                self.context_factory.mode_prompts.get(mode)
-            else
-                self.context_factory.sparse_mode_prompts.get(mode);
-
-            var w = std.Io.Writer.Allocating.init(alloc);
-            try w.writer.print("<mode>\n", .{});
-            _ = try w.writer.write(reminder);
-            try w.writer.print("</mode>\n", .{});
-            try w.writer.flush();
-            try parts.append(alloc, .{ .text = w.toArrayList().items });
-
-            if (agent.flags.force_full_reminder) {
-                agent.flags.force_full_reminder = false;
-            }
-        }
-
-        // tasks
-        {
-            var w = std.Io.Writer.Allocating.init(alloc);
-            try w.writer.print("<tasks>\n", .{});
-
-            var has_tasks: bool = false;
-            if (agent.task_list.tryLock(self.swarm.pool.io)) |g| {
-                defer g.unlock();
-                var unfinished: u32 = 0;
-
-                for (g.ptr.tasks[0..g.ptr.count]) |t| {
-                    if (t.state != .done) unfinished += 1;
-                }
-
-                for (g.ptr.tasks[0..g.ptr.count]) |t| {
-                    switch (t.state) {
-                        .in_progress => {
-                            try w.writer.print("[Active Task] id:{d} subject: {s}\n{s}\n", .{ t.id, t.subject, t.description });
-                            has_tasks = true;
-                        },
-                        .pending => {
-                            try w.writer.print("[Pending] id:{d} subject: {s}\n", .{ t.id, t.subject });
-                            has_tasks = true;
-                        },
-                        else => {},
-                    }
-                }
-            }
-            if (!has_tasks) try w.writer.print("No active tasks yet. Consider creating one.\n", .{});
-
-            try w.writer.print("</tasks>\n", .{});
-            try w.writer.flush();
-            try parts.append(alloc, .{ .text = w.toArrayList().items });
-        }
-
-        // background
-        if (agent.bg_tasks.tryLock(self.swarm.pool.io)) |g| blk: {
-            defer g.unlock();
-            var i = g.ptr.list.items.len;
-
-            if (i == 0) break :blk;
-
-            var w = std.Io.Writer.Allocating.init(alloc);
-            try w.writer.print("<processes>\n", .{});
-
-            while (i > 0) {
-                i -|= 1;
-                const en = &g.ptr.list.items[i];
-                if (self.swarm.exec.isDone(en.handle)) {
-                    try w.writer.print("Path: {s} cmd: {s} status: COMPLETED! Read the result!\n", .{ en.path, en.command });
-                    // TODO: it's not the responsibilty of the reminder to clean this up
-                    _ = g.ptr.list.swapRemove(i);
-                } else {
-                    try w.writer.print("Path: {s} cmd: {s} status: working\n", .{ en.path, en.command });
-                }
-            }
-
-            try w.writer.print("</processes>\n", .{});
-            try w.writer.flush();
-
-            try parts.append(alloc, .{ .text = w.toArrayList().items });
-        }
-
-        // budget
-        {
-            var w = std.Io.Writer.Allocating.init(alloc);
-            try w.writer.print("<budget>\n", .{});
-
-            const tool_call_limit_reached = agent.tool_call_count >= agent.max_allowed_tool_calls;
-            if (tool_call_limit_reached) {
-                try w.writer.print("Budget limit reached! Summarize your findings and report back to the user", .{});
-            } else {
-                try w.writer.print("Remaining tool call budget: {d}\n", .{agent.max_allowed_tool_calls -| agent.tool_call_count});
-            }
-
-            try w.writer.print("</budget>\n", .{});
-            try w.writer.flush();
-
-            try parts.append(alloc, .{ .text = w.toArrayList().items });
-        }
-
-        try agent.chat.addMessage(alloc, .user, parts.items);
-    }
-
     pub fn genSystemRemindersOpaque(ptr: *anyopaque, agent: *prv.agent.Agent) void {
         const self: *App = @ptrCast(@alignCast(ptr));
-        return self.genSystemReminders(agent) catch {};
+
+        self.injection_hooks.build(self, agent) catch |err| {
+            log.err("failed reminder injection {any}", .{err});
+        };
     }
 
     pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
@@ -1961,18 +1839,18 @@ fn buildToolCallParagraph(
             }
         }
 
-        for (s.log.items, 0..) |log, i| {
+        for (s.log.items, 0..) |log_slice, i| {
             var l = r.tui.Line{};
             if (s.log.items.len == i + 1)
                 l.pushSpan(arena, .{ .content = r.tui.icon.box_bl ++ r.tui.icon.box_h }) catch {}
             else
                 l.pushSpan(arena, .{ .content = r.tui.icon.box_t_right ++ r.tui.icon.box_h }) catch {};
 
-            const display_log: []const u8 = if (log_max > 0 and log.len > log_max) blk: {
-                const truncated = log[0 .. log_max - 4];
-                const combined = std.fmt.allocPrint(arena, "{s}...", .{truncated}) catch log;
+            const display_log: []const u8 = if (log_max > 0 and log_slice.len > log_max) blk: {
+                const truncated = log_slice[0 .. log_max - 4];
+                const combined = std.fmt.allocPrint(arena, "{s}...", .{truncated}) catch log_slice;
                 break :blk combined;
-            } else log;
+            } else log_slice;
 
             l.pushText(arena, display_log, .{ .fg = .white }) catch {};
             p.lines.append(arena, l) catch {};
