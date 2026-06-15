@@ -42,6 +42,8 @@ pub const InjectionsHooks = struct {
 
         var it = self._hooks.iterator();
 
+        // applying standard name conventions for now
+        try w.print("<system-reminder>\n", .{});
         while (it.next()) |en| {
             try w.print("<{s}>\n", .{en.key_ptr.*});
             for (en.value_ptr.items) |hook| {
@@ -60,6 +62,8 @@ pub const InjectionsHooks = struct {
             const text = w.toArrayList().items;
             try parts.append(alloc, .{ .text = text });
         }
+
+        try w.print("</system-reminder>\n", .{});
 
         try agent.chat.addMessage(alloc, .user, parts.items);
     }

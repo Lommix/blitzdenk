@@ -630,7 +630,9 @@ pub const App = struct {
             .diff => |diff| {
                 var lines: std.ArrayList(r.tui.DiffLine) = .empty;
                 emitDiffLines(&lines, diff, self.sessionAlloc());
+                const path_dup = self.sessionAlloc().dupe(u8, diff.path) catch return null;
                 self.chat_entries.append(self.sessionAlloc(), .{ .diff = .{
+                    .path = path_dup,
                     .diff_lines = lines.items,
                 } }) catch return null;
 
@@ -678,7 +680,9 @@ pub const App = struct {
                 var lines: std.ArrayList(r.tui.DiffLine) = .empty;
                 emitDiffLines(&lines, d, alloc);
                 if (lines.items.len == 0) return null;
+                const path_dup = alloc.dupe(u8, d.path) catch return null;
                 self.chat_entries.append(alloc, .{ .diff = .{
+                    .path = path_dup,
                     .diff_lines = lines.items,
                 } }) catch return null;
                 return self.chat_entries.items.len - 1;
@@ -1158,6 +1162,7 @@ pub const ChatEntry = union(enum) {
     };
 
     pub const DiffEntry = struct {
+        path: []const u8,
         diff_lines: []const r.tui.DiffLine,
     };
 
@@ -1883,6 +1888,12 @@ fn buildDiffParagraph(arena: std.mem.Allocator, d: ChatEntry.DiffEntry) r.tui.Pa
         .reverse = true,
         .style = .{ .bg = theme.diff_surface },
     };
+
+    // File path header
+    var header_line = r.tui.Line{};
+    header_line.pushSpan(arena, .{ .content = "file: ", .style = .{ .fg = theme.muted, .modifier = .{ .bold = true } } }) catch {};
+    header_line.pushSpan(arena, .{ .content = d.path, .style = .{ .fg = theme.info } }) catch {};
+    p.lines.append(arena, header_line) catch {};
 
     for (d.diff_lines) |dl| {
         const dl_info: struct { prefix: []const u8, fg: r.tui.Color, bg: r.tui.Color } = switch (dl.kind) {
