@@ -19,8 +19,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          cache-size-limit: 1024
-      - run: zig build -Doptimize=ReleaseSmall -j2
+          cache-size-limit: 4096
+      - run: zig build -Doptimize=ReleaseSmall -j1
       - name: rename binary
         run: mv zig-out/bin/blitz zig-out/bin/blitz-${{ matrix.suffix }}
       - uses: softprops/action-gh-release@v2
