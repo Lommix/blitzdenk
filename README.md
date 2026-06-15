@@ -32,7 +32,7 @@ If you want web search and fetch you have to do it in Lua. You'll find an exampl
 
 ## Install
 
-You need the Zig 0.16 compiler.
+You can download the pre compiled binaries from [the release page](https://github.com/Lommix/blitzdenk/releases) or build it yourself:
 
 ```
 zig build --release=small
