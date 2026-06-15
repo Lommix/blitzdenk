@@ -179,7 +179,7 @@ pub const Notifications = struct {
             else => {},
         }
 
-        std.mem.copyForwards(Entry, self.list[1..], self.list[0 .. MAX_ENTRIES - 1]);
+        std.mem.copyBackwards(Entry, self.list[1..], self.list[0 .. MAX_ENTRIES - 1]);
         const text = try std.fmt.allocPrint(alloc, fmt, args);
         self.list[0] = .{ .used = .{ .msg = text, .alive = 0 } };
     }

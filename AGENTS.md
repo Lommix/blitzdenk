@@ -1,7 +1,9 @@
 # Blitzdenk
 
-Zig swarm agent research tool. Zero external dependencies. Extendable via Lua.
-zig version: 0.16
+Coding and research Harness. Zero external dependencies. Extendable via Lua.
+Zig version: 0.16
+
+User config: '/home/lommix/.config/blitzdenk/blitz.lua'
 
 Modules:
 

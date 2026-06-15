@@ -58,7 +58,6 @@ pub const Command = union(enum) {
     save_session: []const u8,
     attach_screenshot: ScreenshotArgs,
     add_tool: AddToolArgs,
-    set_flags: r.app.AppFlags,
     // -------------------------------------------
 
     pub const AddToolArgs = struct {
@@ -248,7 +247,6 @@ pub const Command = union(enum) {
                     }
                 }
             },
-            .set_flags => |flags| app.flags = flags,
         }
     }
 };

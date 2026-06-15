@@ -1553,7 +1553,8 @@ fn luaSetFlags(L: ?*c.lua_State) callconv(.c) c_int {
         return 0;
     };
 
-    a.cmd_queue.append(a.context_factory.io, .{ .set_flags = flags }) catch {};
+    a.flags = flags;
+    a.dirty = true;
 
     return 0;
 }
