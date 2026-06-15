@@ -439,7 +439,9 @@ pub fn getSlotState(self: *Self, id: AgentId) ?SlotState {
     if (id.index >= MAX_AGENTS) return null;
     const slot = &self.slots[id.index];
     if (slot.generation != id.generation) return null;
-    return slot.state.load(.acquire);
+    const state = slot.state.load(.acquire);
+    if (state == .free) return null;
+    return state;
 }
 
 pub fn countActive(self: *const Self) u32 {
