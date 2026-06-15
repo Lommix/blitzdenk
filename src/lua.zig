@@ -1119,7 +1119,7 @@ fn luaLoadSession(L: ?*c.lua_State) callconv(.c) c_int {
         return 0;
     };
     const path = readAnyArg([]const u8, state, "load_session", 1) orelse return 0;
-    const cmd: app.Command = .{ .load_session = path };
+    const cmd: r.cmd.Command = .{ .load_session = path };
     appQueueEnqueue(state, "load_session", a, cmd);
     return 0;
 }
@@ -1131,7 +1131,7 @@ fn luaSaveSession(L: ?*c.lua_State) callconv(.c) c_int {
         return 0;
     };
     const path = readAnyArg([]const u8, state, "save_session", 1) orelse return 0;
-    const cmd: app.Command = .{ .save_session = path };
+    const cmd: r.cmd.Command = .{ .save_session = path };
     appQueueEnqueue(state, "save_session", a, cmd);
     return 0;
 }
@@ -2218,7 +2218,7 @@ fn readAgentIdArg(state: *c.lua_State, comptime fname: []const u8, idx: c_int) p
     };
 }
 
-fn appQueueEnqueue(state: *c.lua_State, comptime fname: []const u8, a: *app.App, cmd: app.Command) void {
+fn appQueueEnqueue(state: *c.lua_State, comptime fname: []const u8, a: *app.App, cmd: r.cmd.Command) void {
     a.cmd_queue.append(a.swarm.pool.io, cmd) catch {
         _ = c.luaL_error(state, fname ++ ": command queue full");
     };
@@ -2331,7 +2331,7 @@ fn luaQueueSpawnAgent(L: ?*c.lua_State) callconv(.c) c_int {
         return 0;
     }
 
-    var args: app.Command.SpawnArgs = .{
+    var args: r.cmd.Command.SpawnArgs = .{
         .agent_id = .{ .index = 0, .generation = 0 },
         .prompt = &.{},
     };

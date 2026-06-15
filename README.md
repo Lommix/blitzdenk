@@ -98,10 +98,12 @@ blitz.add_command("/goal", function(prompt)
 		end
 
 		blitz.queue.queue_agent_message(agent_id, [[
-			Your goal is unfinished. Validate the current state.
+			You are in goal mode. Validate the current state of your changes against the goal.
             If the goal is determined to be finished, call `goal_completed` with a status report.
 
-            Original goal instructions: ]] .. prompt)
+            Original goal instructions:
+
+            ]] .. prompt)
 	end)
 
     --- add the tool to the current set
