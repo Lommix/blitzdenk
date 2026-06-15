@@ -402,8 +402,10 @@ pub fn run(
                 app.lua_vm.readConfigFields();
                 app.dirty = true;
 
-                for (lua_tools) |tool| context_factory.remove(tool.def.name);
-                for (mcp_tools) |tool| context_factory.remove(tool.tool.def.name);
+                context_factory.clearTools();
+                inline for (reg.default_tool_set) |entry| {
+                    try context_factory.add(arena, entry[0], entry[1]);
+                }
                 lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
                     std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
                     break :blk;

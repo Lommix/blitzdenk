@@ -386,6 +386,10 @@ pub const ContextFactory = struct {
         self.agent_overrides = .initFill(.{});
     }
 
+    pub fn clearTools(self: *Self) void {
+        self.loaded_tools.clearRetainingCapacity();
+    }
+
     pub fn build_prompt(
         self: *const Self,
         alloc: std.mem.Allocator,
