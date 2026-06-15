@@ -28,6 +28,8 @@ You can also look at [my configuration](https://github.com/Lommix/dotfiles/blob/
 - `list_tasks`, `update_task_state`, `create_task`
 - `ask_user` simple multiple choice questions
 
+If you want web search and fetch you have to do it in Lua. You'll find an example in [my configuration](https://github.com/Lommix/dotfiles/blob/master/config/blitzdenk/blitz.lua).
+
 ## Install
 
 You need the Zig 0.16 compiler.
