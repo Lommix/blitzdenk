@@ -656,9 +656,28 @@ pub const App = struct {
             used_chat_lines = renderChatArea(app, _chat_area, buf);
         }
 
-        const status_y: u16 = _chat_status_area.y +| @as(u16, @intCast(used_chat_lines));
-        const status_remaining: u16 = (_chat_status_area.y +| _chat_status_area.height) -| status_y;
-        renderMainProgress(app, .{
+        var status_y: u16 = _chat_status_area.y +| @as(u16, @intCast(used_chat_lines));
+        var status_remaining: u16 = (_chat_status_area.y +| _chat_status_area.height) -| status_y;
+
+        const main_agent_id = app.main_agent_id;
+
+        if (main_agent_id) |ma_id| {
+            if (!app.flags.show_thinking and status_remaining > 0) {
+                if (app.swarm.getSlot(ma_id)) |slot_ref| {
+                    const agent_ref = &slot_ref.agent;
+                    if (agent_ref.flags.is_thinking) {
+                        const spinner = text_utils.spinnerBar(app.frame_count);
+                        var sbuf: [128]u8 = undefined;
+                        const content = std.fmt.bufPrint(&sbuf, "thinking {s}", .{spinner}) catch "thinking ..";
+                        buf.setString(_chat_status_area.x + 10, status_y -| 1, content, .{ .fg = app.theme.muted });
+                        status_y +|= 1;
+                        status_remaining -|= 1;
+                    }
+                }
+            }
+        }
+
+        renderMainProgress(app, main_agent_id, .{
             .x = _chat_status_area.x,
             .y = status_y,
             .width = _chat_status_area.width,
@@ -2189,12 +2208,12 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) usize {
     return @min(@as(usize, inner_h), consumed);
 }
 
-fn renderMainProgress(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     if (area.width == 0 or area.height == 0) return;
     if (!app.running) return;
 
-    const id = app.main_agent_id orelse return;
-    const slot = &app.swarm.slots[id.index];
+    const aid = id orelse return;
+    const slot = &app.swarm.slots[aid.index];
     if (slot.state.load(.acquire) != .active) return;
 
     const alloc = app.sessionAlloc();

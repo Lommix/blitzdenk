@@ -264,6 +264,7 @@ pub const Agent = struct {
         force_full_reminder: bool = false,
         is_fork: bool = false,
         turn_has_reminder: bool = false,
+        is_thinking: bool = false,
     } = .{},
     loop_guard: LoopGuard = .{},
 
@@ -619,6 +620,7 @@ pub const Agent = struct {
         const arena = self.arena.allocator();
         _ = try self.chat.beginStreamingMessage(arena, .agent);
         self.stream = apt.openStream(self.pool, handle, arena, std.meta.activeTag(self.config.provider));
+        self.flags.is_thinking = false;
         self.in_flight_usage = .{};
         self.approx_output_bytes = 0;
         self.state = .streaming_response;
@@ -654,11 +656,13 @@ pub const Agent = struct {
                     try self.chat.appendTextChunk(arena, msg_idx, t);
                     self.approx_output_bytes += t.len;
                     self.in_flight_usage.output_tokens = self.approx_output_bytes / 3;
+                    self.flags.is_thinking = false;
                 },
                 .thinking_chunk => |t| {
                     try self.chat.appendThinkingChunk(arena, msg_idx, t);
                     self.approx_output_bytes += t.len;
                     self.in_flight_usage.output_tokens = self.approx_output_bytes / 3;
+                    self.flags.is_thinking = true;
                 },
                 .tool_call_start, .tool_input_delta => {
                     // Nothing to render incrementally — final parts come from finalize.
@@ -678,6 +682,7 @@ pub const Agent = struct {
     }
 
     fn finishStream(self: *Agent, ctx: AgentContext) !TickResult {
+        self.flags.is_thinking = false;
         const arena = self.arena.allocator();
         if (self.stream == null) return error.NoStream;
         const stream = &self.stream.?;
