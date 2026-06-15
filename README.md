@@ -15,12 +15,6 @@ Configure, override and extend in Lua.
 - Multi-provider: Any OpenAI or Anthropic chat schema supported. Includes local AI.
 - Customize in Lua. Code your own tools, system prompts, modes, commands and loops.
 
-## Configuration in Lua
-
-There are no official docs yet. Checkout the provided [lua meta file](./src/blitz_defs.lua) for all available bindings.
-
-You can also look at [my configuration](https://github.com/Lommix/dotfiles/blob/master/config/blitzdenk/blitz.lua), which covers at least one example per use case.
-
 ## Default tools
 
 - `write`,`edit`, `bash`,`read`, `patch` = SSH compliant
@@ -59,13 +53,12 @@ vim.keymap.set("n", "<leader>o", function()
 end, { silent = true })
 ```
 
-## Contribution
-
-No Issue, no merge. Open source, but not open contribution. Too much slop, to little time to validate. Small bug fixes are welcome.
-
 ## Lua and goal loop example
 
 Configuration default file is under `~/.config/blitzdenk/blitz.lua`. You can put a `blitz.lua` in your local CWD for project based configuration.
+There are no official docs yet. Checkout the provided [lua meta file](./src/blitz_defs.lua) for all available bindings.
+You can also look at [my configuration](https://github.com/Lommix/dotfiles/blob/master/config/blitzdenk/blitz.lua), which covers at least one example per use case.
+
 Here is some inspiration on how simple goal loops are:
 
 ```lua
@@ -131,3 +124,7 @@ blitz.add_command("/goal", function(prompt)
 	end
 end)
 ```
+
+## Contribution
+
+No Issue, no merge. Open source, but not open contribution. Too much slop, to little time to validate. Small bug fixes are welcome.
