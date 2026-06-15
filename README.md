@@ -57,13 +57,13 @@ No Issue, no merge. Open source, but not open contribution. Too much slop, to li
 ## Lua and goal loop example
 
 Configuration default file is under `~/.config/blitzdenk/blitz.lua`. You can put a `blitz.lua` in your local CWD for project based configuration.
-Here is some inspiration:
+Here is some inspiration on how simple goal loops are:
 
 ```lua
-
 --- global state
 local goal_finished = false
 
+--- the exit tool
 blitz.register_tool({
 	name = "goal_completed",
 	description = "Only call this tool, when your goal is completed",
