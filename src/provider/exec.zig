@@ -142,8 +142,7 @@ pub const CmdPool = struct {
         @memcpy(buf[0..path.len], path);
         buf[path.len] = 0;
         const z: [*:0]const u8 = @ptrCast(&buf);
-        const rc = std.os.linux.access(z, std.posix.F_OK); // TODO: cheap linux fix, needs to harden
-        return std.os.linux.errno(rc) == .SUCCESS;
+        return std.c.access(z, std.c.F_OK) == 0;
     }
 
     /// Parses ssh-agent -s output. Format (stable across openssh versions):

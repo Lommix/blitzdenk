@@ -69,8 +69,11 @@ fn build_lua_c(
 
     const mod = trans.createModule();
 
-    if (target.result.os.tag != .windows) {
+    if (target.result.os.tag == .linux) {
         mod.addCMacro("LUA_USE_LINUX", "1");
+    }
+    if (target.result.os.tag.isDarwin()) {
+        mod.addCMacro("LUA_USE_MACOSX", "1");
     }
 
     mod.addCSourceFiles(.{

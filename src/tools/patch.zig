@@ -264,8 +264,8 @@ fn buildPreview(
 }
 
 fn updateFileStats(ctx: prv.tool.ToolContext, resolved: []const u8, cmd: PatchCommand) void {
-    var ts: std.os.linux.timespec = undefined;
-    const now = if (std.os.linux.clock_gettime(std.os.linux.clockid_t.REALTIME, &ts) == 0)
+    var ts: std.posix.timespec = undefined;
+    const now = if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) == 0)
         ts.sec
     else
         0;

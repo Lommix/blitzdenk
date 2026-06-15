@@ -1,6 +1,5 @@
 const std = @import("std");
 const posix = std.posix;
-const linux = std.os.linux;
 const buffer_mod = @import("buffer.zig");
 const cell_mod = @import("cell.zig");
 const rect_mod = @import("rect.zig");
@@ -71,8 +70,8 @@ pub const Terminal = struct {
         raw.lflag.ISIG = false;
         raw.lflag.IEXTEN = false;
         // Read returns after 1 byte, no timeout
-        raw.cc[@intFromEnum(linux.V.MIN)] = 1;
-        raw.cc[@intFromEnum(linux.V.TIME)] = 0;
+        raw.cc[@intFromEnum(posix.V.MIN)] = 1;
+        raw.cc[@intFromEnum(posix.V.TIME)] = 0;
 
         try posix.tcsetattr(fd, .FLUSH, raw);
 
@@ -116,9 +115,8 @@ pub const Terminal = struct {
 
     fn getSize(fd: posix.fd_t) Rect {
         var wsz: posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
-        const ufd: usize = @bitCast(@as(isize, fd));
-        const rc = linux.syscall3(.ioctl, ufd, linux.T.IOCGWINSZ, @intFromPtr(&wsz));
-        if (linux.errno(rc) == .SUCCESS and wsz.col > 0 and wsz.row > 0) {
+        const rc = std.c.ioctl(fd, posix.T.IOCGWINSZ, &wsz);
+        if (rc >= 0 and wsz.col > 0 and wsz.row > 0) {
             return .{ .x = 0, .y = 0, .width = @max(10, wsz.col), .height = @max(4, wsz.row) };
         }
         return .{ .x = 0, .y = 0, .width = 80, .height = 24 };

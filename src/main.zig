@@ -931,7 +931,7 @@ fn handleSshUnlock(state: *App, cmd_pool: *prv.exec.CmdPool, gpa: std.mem.Alloca
     };
 
     // Write helper script to /tmp/blitz-askpass-<pid>.sh (mode 0700).
-    const pid = std.os.linux.getpid();
+    const pid = std.c.getpid();
     const script_path = std.fmt.allocPrint(gpa, "/tmp/blitz-askpass-{d}.sh", .{pid}) catch {
         state.pushSystemMessage("ssh: out of memory", .{});
         return;
