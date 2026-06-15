@@ -113,7 +113,12 @@ blitz.add_command("/goal", function(prompt)
 	if main_agent_id ~= nil then
 		blitz.queue.queue_agent_message(main_agent_id, "Complete the goal: " .. prompt)
 	else
-		blitz.queue.spawn_agent({ effort = "max", prompt = "Complete the goal: " .. prompt, tool_budget = 1024 })
+		blitz.queue.spawn_agent({
+			effort = "max",
+			prompt = "Complete the goal: " .. prompt,
+			tool_budget = 1024,
+			level = "write",
+		})
 	end
 end)
 ```
