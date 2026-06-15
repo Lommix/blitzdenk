@@ -294,18 +294,6 @@ pub fn run(
         .ptr = &app,
         .gen_system_reminders = &App.genSystemRemindersOpaque,
         .pop_queued_message = &App.popQueuedMessageOpaque,
-        .configure_agent = (struct {
-            fn configure(ptr: *anyopaque, agent: *prv.agent.Agent) !void {
-                const a: *App = @ptrCast(@alignCast(ptr));
-                try a.configureAgent(agent);
-            }
-        }).configure,
-        .push_system_message = (struct {
-            fn pushMsg(ptr: *anyopaque, agent: prv.Swarm.AgentId, msg: []const u8) void {
-                const a: *App = @ptrCast(@alignCast(ptr));
-                a.pushSystemMessage("(Agent {d}v{d}) {s}", .{ agent.index, agent.generation, msg });
-            }
-        }).pushMsg,
     };
 
     if (config_lua) |info| app.loadHistory(app.appAlloc(), info.dir_path);

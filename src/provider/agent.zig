@@ -3,7 +3,6 @@ const r = @import("root.zig");
 const Swarm = @import("swarm.zig");
 const apt = r.adapter;
 const http = r.http;
-const inbuilt = r.inbuilt;
 const tc = r.tool;
 const compact = r.compact;
 
@@ -16,18 +15,12 @@ const log = std.log.scoped(.agent);
 pub const AgentContext = struct {
     ptr: *anyopaque = undefined,
 
-    // TODO: mostly depricated after command quque, cleanup
-
-    configure_agent: *const fn (*anyopaque, agent: *Agent) anyerror!void,
     gen_system_reminders: ?*const fn (*anyopaque, agent: *Agent) void = null,
     pop_queued_message: ?*const fn (*anyopaque, agent: Swarm.AgentId, alloc: std.mem.Allocator) ?[]const apt.ContentPart = null,
-    push_system_message: ?*const fn (*anyopaque, agent: Swarm.AgentId, message: []const u8) void = null,
 
     pub fn cast(self: AgentContext, comptime T: type) *T {
         return @ptrCast(@alignCast(self.ptr));
     }
-
-    pub const empty = AgentContext{};
 };
 
 pub const ToolCallDisplay = struct {
@@ -328,12 +321,6 @@ pub const Agent = struct {
         try self.chat.setSystemPrompt(self.arena.allocator(), prompt);
     }
 
-    pub fn clearChat(self: *Agent) void {
-        while (self.chat.messages.items.len > 1) {
-            _ = self.chat.messages.pop();
-        }
-    }
-
     pub fn deinit(self: *const Agent) void {
         self.arena.deinit();
     }
@@ -408,7 +395,6 @@ pub const Agent = struct {
                     return .pending;
                 }
 
-                // self.injectSystemReminder(ctx);
                 if (!self.flags.turn_has_reminder) {
                     if (ctx.gen_system_reminders) |func| {
                         func(ctx.ptr, self);
@@ -519,37 +505,6 @@ pub const Agent = struct {
         const limit: f32 = @floatFromInt(self.context_limit);
 
         return (cs / limit) * 100;
-    }
-
-    pub fn getUsage(self: *const Agent) apt.TokenUsage {
-        var u = apt.TokenUsage{};
-        u.add(self.total_usage);
-        u.add(self.in_flight_usage);
-        return u;
-    }
-
-    /// Append a system-reminder to the last message. Skips if a reminder
-    /// part is already present (dedupe by `<system-reminder>` prefix).
-    fn injectSystemReminder(self: *Agent, ctx: AgentContext) void {
-        const gen = ctx.gen_system_reminders orelse return;
-        if (self.chat.messages.items.len == 0) return;
-        const msg = &self.chat.messages.items[self.chat.messages.items.len - 1];
-
-        for (msg.parts) |part| {
-            switch (part) {
-                .text => |t| if (std.mem.startsWith(u8, t, "<system-reminder>")) return,
-                else => {},
-            }
-        }
-
-        const reminder = gen(ctx.ptr, self);
-        if (reminder.len == 0) return;
-
-        const alloc = self.arena.allocator();
-        const augmented = alloc.alloc(apt.ContentPart, msg.parts.len + 1) catch return;
-        @memcpy(augmented[0..msg.parts.len], msg.parts);
-        augmented[msg.parts.len] = .{ .text = reminder };
-        msg.parts = augmented;
     }
 
     fn fail(self: *Agent, err: ?anyerror) TickResult {

@@ -536,7 +536,7 @@ pub const App = struct {
                     }
                 }
             }
-            if (!has_tasks) try w.writer.print("No active tasks yet\n", .{});
+            if (!has_tasks) try w.writer.print("No active tasks yet. Consider creating one.\n", .{});
 
             try w.writer.print("</tasks>\n", .{});
             try w.writer.flush();
