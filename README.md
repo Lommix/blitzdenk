@@ -66,7 +66,7 @@ Here is some inspiration on how simple goal loops are:
 local goal_finished = false
 
 --- the exit tool
-blitz.register_tool({
+local goal_tool = blitz.register_tool({
 	name = "goal_completed",
 	description = "Only call this tool, when your goal is completed",
 	args = {
@@ -105,7 +105,7 @@ blitz.add_command("/goal", function(prompt)
 	end)
 
     --- add the tool to the current set
-	blitz.add_tool(blitz.AGENT_MAIN, "goal_completed")
+	blitz.add_tool(blitz.AGENT_MAIN, goal_tool)
 
 	goal_finished = false
 	local main_agent_id = blitz.get_main_agent()

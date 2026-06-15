@@ -7,3 +7,6 @@ install:
 
 test:
 	zig build test
+
+sync:
+	cp src/blitz_defs.lua ~/.config/blitzdenk/meta.lua
