@@ -65,12 +65,11 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         return r.errResult(call, "No changes to make: old_string and new_string are exactly the same.");
     }
 
-    {
-        const g = ctx.agent().file_stats.lock(ctx.io);
-        defer g.unlock();
-        if (g.ptr.get(resolved) == null) {
-            return r.errResult(call, "File has not been read yet. Read it first before writing to it.");
-        }
+    const g = ctx.agent().file_stats.lock(ctx.io);
+    defer g.unlock();
+
+    if (g.ptr.get(resolved) == null) {
+        return r.errResult(call, "File has not been read yet. Read it first before writing to it.");
     }
 
     // Read current content.
