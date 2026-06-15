@@ -20,9 +20,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           cache-size-limit: 1024
-      - run: zig build -Doptimize=ReleaseSmall
+      - run: zig build -Doptimize=ReleaseSmall -j2
       - name: rename binary
-        run: mv zig-out/bin/blitzdenk zig-out/bin/blitzdenk-${{ matrix.suffix }}
+        run: mv zig-out/bin/blitz zig-out/bin/blitz-${{ matrix.suffix }}
       - uses: softprops/action-gh-release@v2
         with:
-          files: zig-out/bin/blitzdenk-*
+          files: zig-out/bin/blitz-*
