@@ -96,6 +96,9 @@ function BlitzCtx:ask(header, question, options) end
 ---@field TOOL_PLAN_AGENT string experimental subagent for planning implementations.
 ---@field TOOL_ENTER_SSH string agent tool to change tool target and cwd
 ---@field TOOL_EXIT_SSH string agent tool to change tool target and cwd
+---@field TOOL_SEND_MESSAGE_TO_AGENT string Send a message to a running agent
+---@field TOOL_READ_BACKGROUND_AGENT string Read the result of a background agent
+---@field TOOL_CANCEL_BACKGROUND_AGENT string Cancel a running background agent
 ---@field REQ_STATUS_PENDING integer 0
 ---@field REQ_STATUS_APPROVED integer 1
 ---@field REQ_STATUS_DENIED integer 2

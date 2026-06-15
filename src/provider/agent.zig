@@ -69,6 +69,18 @@ pub const BackgroundTaskList = struct {
     list: std.ArrayList(BackgroundTask) = .empty,
 };
 
+pub const BackgroundAgentStatus = enum { running, complete, failed };
+
+pub const BackgroundAgent = struct {
+    agent_id: Swarm.AgentId,
+    description: []const u8,
+    status: BackgroundAgentStatus,
+};
+
+pub const BackgroundAgentList = struct {
+    list: std.ArrayList(BackgroundAgent) = .empty,
+};
+
 pub const TaskState = enum {
     pending,
     in_progress,
@@ -233,6 +245,7 @@ pub const Agent = struct {
     depth: u16 = 0,
     file_stats: Locked(FileStats) = .{},
     bg_tasks: Locked(BackgroundTaskList) = .{},
+    bg_agents: Locked(BackgroundAgentList) = .{},
     task_list: Locked(TaskList) = .{},
     retry_count: u32 = 0,
     timeout: f32 = 0,
@@ -291,6 +304,7 @@ pub const Agent = struct {
         self.last_error = null;
         self.file_stats = .{};
         self.bg_tasks = .{};
+        self.bg_agents = .{};
         self.task_list = .{};
         self.retry_count = 0;
         self.timeout = 0;
@@ -391,6 +405,13 @@ pub const Agent = struct {
                 return .pending;
             },
             .sending_request => {
+                while (self.popQueuedParts(ctx)) |queued_parts| {
+                    self.chat.addMessage(self.arena.allocator(), .user, queued_parts) catch |err| return self.fail(err);
+                    self.iteration = 0;
+                    self.retry_count = 0;
+                    self.last_error = null;
+                }
+
                 if (compact.maybeStart(self) catch |err| return self.fail(err)) {
                     return .pending;
                 }
@@ -636,7 +657,7 @@ pub const Agent = struct {
         return .pending;
     }
 
-    fn finishStream(self: *Agent, ctx: AgentContext) !TickResult {
+    fn finishStream(self: *Agent, _: AgentContext) !TickResult {
         self.flags.is_thinking = false;
         const arena = self.arena.allocator();
         if (self.stream == null) return error.NoStream;
@@ -677,12 +698,6 @@ pub const Agent = struct {
 
         if (has_tool_calls) {
             self.state = .executing_tools;
-            return .pending;
-        }
-
-        if (self.popQueuedParts(ctx)) |queued_parts| {
-            try self.chat.addMessage(arena, .user, queued_parts);
-            self.state = .sending_request;
             return .pending;
         }
 

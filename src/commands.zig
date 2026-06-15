@@ -145,7 +145,11 @@ pub const Command = union(enum) {
                 app.running = true;
                 app.auto_scroll = true;
                 app.scroll_offset = 0;
-                try app.swarm.runAgent(arg.agent_id);
+
+                const state = app.swarm.getSlotState(arg.agent_id);
+                if (state != .active) {
+                    try app.swarm.runAgent(arg.agent_id);
+                }
             },
             .compact => {
                 if (app.main_agent_id) |id| {

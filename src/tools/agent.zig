@@ -41,7 +41,8 @@ pub const AgentTool = prv.tool.Tool{
         \\      "budget": {"type": "number", "description": "The amount of allowed tool calls before stopping. For most tasks between 10 - 30 depending on complexity is a good amount"},
         \\      "effort": {"type": "string", "enum": ["min", "mid", "max"], "description": "Effort level deciding which model the child agent uses"},
         \\      "type": {"type": "string", "enum": ["fork", "fresh"], "description": "forked agents inherit chat history, fresh start with an empty history"},
-        \\      "allow_write": {"type": "boolean", "default": false, "description": "allow write"}
+        \\      "allow_write": {"type": "boolean", "default": false, "description": "allow write"},
+        \\      "run_in_background": {"type": "boolean", "default": false, "description": "Set to true to run this agent in the background"}
         \\  },
         \\  "required": ["description","prompt","budget","effort","type"]
         \\}
@@ -65,6 +66,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         effort: []const u8,
         type: []const u8,
         allow_write: bool = false,
+        run_in_background: bool = false,
     };
 
     const parsed = std.json.parseFromSlice(
@@ -122,6 +124,23 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         ctx.updateToolStatus(call, "(New {s} Agent) {s} ({d})", .{ args.effort, args.description, args.budget });
     }
 
+    if (args.run_in_background) {
+        const g = ctx.agent().bg_agents.lock(ctx.io);
+        defer g.unlock();
+        g.ptr.list.append(ctx.alloc, .{
+            .agent_id = child_id,
+            .description = args.description,
+            .status = .running,
+        }) catch {};
+
+        const text = std.fmt.allocPrint(
+            ctx.alloc,
+            "Agent running in background. Agent id: {d}. Description: {s}",
+            .{ child_id.pack(), args.description },
+        ) catch return r.errResult(call, "oom");
+        return r.okResult(call, text);
+    }
+
     // Wait for the child slot to terminate. The swarm's tickAll on the UI
     // thread sets slot.event when state transitions to .complete/.failed.
     const slot = swarm.getSlot(child_id).?;
@@ -151,4 +170,145 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         .content = owned,
         .is_error = is_err,
     };
+}
+
+pub const SendMessageToAgent = prv.tool.Tool{
+    .def = .{
+        .name = "send_message_to_agent",
+        .description = "send a message to running agent",
+        .parameters_schema =
+        \\{"type":"object","properties":{
+        \\  "agent_id":{"type":"number","description":"the agent ID"},
+        \\  "message":{"type":"string","description":"the message to the agent"}
+        \\},"required":["agent_id", "message"]}
+        ,
+    },
+    .func = &run_send_message_to_agent,
+};
+
+fn run_send_message_to_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+    const Args = struct {
+        agent_id: u32,
+        message: []const u8,
+    };
+
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+        .ignore_unknown_fields = true,
+    }) catch return r.errResult(call, "invalid arguments");
+
+    ctx.updateToolStatus(call, "(Sending Message) - to {d}", .{args.agent_id});
+    const agent_id = prv.Swarm.AgentId.unpack(args.agent_id);
+
+    const app = ctx.interface.cast(@import("../app.zig").App);
+
+    app.cmd_queue.append(ctx.io, .{ .queue_agent_message = .{
+        .agent_id = agent_id,
+        .parts = &.{.{ .text = args.message }},
+    } }) catch return r.errResult(call, "failed to queue message");
+
+    return r.okResult(call, "message sent");
+}
+
+pub const ReadBackgroundAgent = prv.tool.Tool{
+    .def = .{
+        .name = "read_background_agent",
+        .description = "Read the result of a background agent",
+        .parameters_schema =
+        \\{"type":"object","properties":{
+        \\  "agent_id":{"type":"number","description":"the agent ID"}
+        \\},"required":["agent_id"]}
+        ,
+    },
+    .func = &run_read_bg,
+};
+
+fn run_read_bg(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+    const Args = struct {
+        agent_id: u32,
+    };
+
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+        .ignore_unknown_fields = true,
+    }) catch return r.errResult(call, "invalid arguments");
+
+    const child_id = prv.Swarm.AgentId.unpack(args.agent_id);
+
+    ctx.updateToolStatus(call, "(Reading Agent Report) - from {d}", .{args.agent_id});
+
+    const slot = ctx.swarm.getSlot(child_id) orelse
+        return r.errResult(call, "background agent slot not found");
+
+    const state = slot.state.load(.acquire);
+    if (state == .active) {
+        return r.errResult(call, "background agent is still running");
+    }
+
+    const is_err = state == .failed;
+    const text = prv.tool.extractChildResult(ctx.swarm, child_id);
+    const owned = ctx.alloc.dupe(u8, text) catch return r.errResult(call, "oom");
+
+    ctx.swarm.releaseAgent(child_id);
+
+    {
+        const g = ctx.agent().bg_agents.lock(ctx.io);
+        defer g.unlock();
+        for (g.ptr.list.items, 0..) |bg, i| {
+            if (bg.agent_id.index == child_id.index and bg.agent_id.generation == child_id.generation) {
+                _ = g.ptr.list.swapRemove(i);
+                break;
+            }
+        }
+    }
+
+    return .{
+        .call_id = call.id,
+        .name = call.name,
+        .content = owned,
+        .is_error = is_err,
+    };
+}
+
+pub const CancelBackgroundAgent = prv.tool.Tool{
+    .def = .{
+        .name = "cancel_background_agent",
+        .description = "Cancel a running background agent",
+        .parameters_schema =
+        \\{"type":"object","properties":{
+        \\  "agent_id":{"type":"number","description":"packed AgentId (u32)"}
+        \\},"required":["agent_id"]}
+        ,
+    },
+    .func = &run_cancel_bg,
+};
+
+fn run_cancel_bg(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+    const Args = struct {
+        agent_id: u32,
+    };
+
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+        .ignore_unknown_fields = true,
+    }) catch return r.errResult(call, "invalid arguments");
+
+    const child_id = prv.Swarm.AgentId.unpack(args.agent_id);
+
+    if (ctx.swarm.getSlot(child_id)) |slot| {
+        if (slot.state.load(.acquire) == .active) {
+            slot.agent.cancel();
+        }
+        ctx.swarm.releaseAgent(child_id);
+    }
+
+    {
+        const g = ctx.agent().bg_agents.lock(ctx.io);
+        defer g.unlock();
+        for (g.ptr.list.items, 0..) |bg, i| {
+            if (bg.agent_id.index == child_id.index and bg.agent_id.generation == child_id.generation) {
+                _ = g.ptr.list.swapRemove(i);
+                break;
+            }
+        }
+    }
+
+    return r.okResult(call, "Background agent canceled");
 }

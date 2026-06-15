@@ -8,9 +8,8 @@ pub const Callback = union(enum) {
     lua: c_int,
 };
 
-///! System reminder injection
-///! Too make models behave and don't loose focus
-///! smort teq
+///!Inject system reminder on tool turn finish
+///!Too make models behave and don't loose focus
 pub const InjectionsHooks = struct {
     const Self = @This();
     _hooks: std.StringHashMapUnmanaged(std.ArrayList(Callback)) = .empty,
@@ -24,6 +23,7 @@ pub const InjectionsHooks = struct {
             .{ "task", &inject_task_information },
             .{ "budget", &inject_budget_information },
             .{ "processes", &inject_processes_information },
+            // .{ "bg_agents", &inject_bg_agents_information },
         }) |entry| {
             var list = std.ArrayList(Callback).empty;
             try list.append(alloc, .{ .zig = entry[1] });
@@ -86,6 +86,31 @@ fn inject_processes_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.pr
     }
 }
 
+fn inject_bg_agents_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
+    if (agent.bg_agents.tryLock(app.swarm.pool.io)) |g| blk: {
+        defer g.unlock();
+        var i = g.ptr.list.items.len;
+        if (i == 0) break :blk;
+        while (i > 0) {
+            i -= 1;
+            const bg = &g.ptr.list.items[i];
+            const state = if (app.swarm.getSlotState(bg.agent_id)) |s| s else .failed;
+            bg.status = switch (state) {
+                .complete => .complete,
+                .failed => .failed,
+                else => .running,
+            };
+            if (bg.status == .complete) {
+                try w.print("Background agent complete: agent_id={d} description: {s}. Read the result with read_background_agent\n", .{ bg.agent_id.pack(), bg.description });
+            } else if (bg.status == .failed) {
+                try w.print("Background agent failed: agent_id={d} description: {s}. Read the result with read_background_agent\n", .{ bg.agent_id.pack(), bg.description });
+            } else {
+                try w.print("Background agent running: agent_id={d} description: {s}\n", .{ bg.agent_id.pack(), bg.description });
+            }
+        }
+    }
+}
+
 fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.prv.agent.Agent) !void {
     const tool_call_limit_reached = agent.tool_call_count >= agent.max_allowed_tool_calls;
     if (tool_call_limit_reached) {
@@ -134,11 +159,23 @@ fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.age
     try w.flush();
 }
 
-fn inject_env_information(w: *std.Io.Writer, app: *r.app.App, _: *r.prv.agent.Agent) !void {
+fn inject_env_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
     const cwd = if (app.swarm.exec.ssh_target != null and app.swarm.exec.ssh_active)
         app.remote_cwd
     else
         app.cwd;
 
     try w.print("CWD: {s}\n", .{cwd});
+
+    if (agent.depth > 0) {
+        if (agent.swarm) |swarm| {
+            if (agent.swarm_id) |self_id| {
+                if (swarm.getSlot(self_id)) |slot| {
+                    if (slot.parent_id) |pid| {
+                        try w.print("PARENT_AGENT_ID: {d}\n", .{pid.pack()});
+                    }
+                }
+            }
+        }
+    }
 }

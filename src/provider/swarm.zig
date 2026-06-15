@@ -64,6 +64,14 @@ pub const ToolDiff = struct {
 pub const AgentId = packed struct {
     index: u16,
     generation: u16,
+
+    pub fn pack(self: AgentId) u32 {
+        return @bitCast(self);
+    }
+
+    pub fn unpack(val: u32) AgentId {
+        return @bitCast(val);
+    }
 };
 
 pub const SlotState = enum(u8) {
