@@ -149,6 +149,11 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     if (args.command.len == 0) return r.errResult(call, "empty command");
 
+    // NOTE: quick rg pattern fix
+    if (containsUnquotedDollar(args.command) and isRgCommand(args.command)) {
+        return r.errResult(call, "rg pattern contains unquoted `$`. Shell expands `$var` before rg sees it, silently corrupting the regex. Single-quote the pattern: `rg 'pattern'`");
+    }
+
     ctx.updateToolStatus(call, "(Bash) {s}", .{args.command[0..@min(args.command.len, 248)]});
 
     const need_perm = switch (classifyCommand(args.command)) {
@@ -349,6 +354,31 @@ fn nextSegment(input: []const u8) struct { []const u8, []const u8 } {
         }
     }
     return .{ input, "" };
+}
+
+fn isRgCommand(cmd: []const u8) bool {
+    const trimmed = std.mem.trim(u8, cmd, " \t");
+    return std.mem.startsWith(u8, trimmed, "rg") or std.mem.startsWith(u8, trimmed, "ripgrep");
+}
+
+fn containsUnquotedDollar(cmd: []const u8) bool {
+    var in_single: bool = false;
+    var in_double: bool = false;
+    for (cmd) |c| {
+        switch (c) {
+            '\'' => {
+                if (!in_double) in_single = !in_single;
+            },
+            '"' => {
+                if (!in_single) in_double = !in_double;
+            },
+            '$' => {
+                if (!in_single and !in_double) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
 }
 
 fn isInList(name: []const u8, list: []const []const u8) bool {
