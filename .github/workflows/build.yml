@@ -26,6 +26,8 @@ jobs:
       - run: zig build -Doptimize=ReleaseSmall -j1
       - name: rename binary
         run: mv zig-out/bin/blitz zig-out/bin/blitz-${{ matrix.suffix }}
+      - name: gzip binary
+        run: gzip zig-out/bin/blitz-${{ matrix.suffix }}
       - uses: softprops/action-gh-release@v2
         with:
           files: zig-out/bin/blitz-*
