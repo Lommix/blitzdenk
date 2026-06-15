@@ -59,70 +59,63 @@ No Issue, no merge. Open source, but not open contribution. Too much slop, to li
 Configuration default file is under `~/.config/blitzdenk/blitz.lua`. You can put a `blitz.lua` in your local CWD for project based configuration.
 Here is some inspiration:
 
+Example of how you would setup a Goal loop:
+
 ```lua
 
-local llama = blitz.add_provider({
-	type = "openai",
-	url = "http://127.0.0.1:8118",
-	key_envar = "",
-	max_tokens = 32000,
-	reasoning = { effort = "high" },
-	temperature = 1,
-})
+--- global state
+local goal_finished = false
 
-local local_model = "gemma-4-12b-it"
-blitz.set_model("max", local_model, llama)
-blitz.set_model("mid", local_model, llama)
-blitz.set_model("min", local_model, llama)
-blitz.set_compact_edge(128000)
-
-
--- custom tool example
 blitz.register_tool({
-	name = "lua_repl",
-	description = "Execute arbitrary Lua code and return the result. Use this tool for any math calculations",
+	name = "goal_completed",
+	description = "Only call this tool, when your goal is completed",
 	args = {
-		code = { type = "string", description = "Lua code to execute", required = true },
+		goal_message = {
+			type = "string",
+			description = "Structured goal status report",
+			required = true,
+		},
 	},
 	func = function(ctx, call)
-		ctx:set_status("(Lua) `" .. call.arguments.code .. "`")
-
-		local fn, err = load(call.arguments.code)
-		if not fn then
-			return blitz.err(err)
-		end
-
-		local ok, result = pcall(fn)
-		if not ok then
-			return blitz.err(tostring(result))
-		end
-
-		return blitz.ok(tostring(result or "nil"))
+		ctx:set_status("Goaling completed!")
+		blitz.queue.push_chat_entry("user", call.arguments.goal_message)
+		goal_finished = true
+		return blitz.exit_loop("Goaling completed!")
 	end,
 })
 
--- MCP configuration and activation
-local playmcp = blitz.mcp.add({
-	name = "playwright",
-	command = "npx",
-	args = {
-		"-y",
-		"@playwright/mcp@latest",
-		"--browser=chromium",
-		"--executable-path=/usr/bin/chromium",
-	},
-	tools_prefix = "pw_",
-})
+blitz.add_command("/goal", function(prompt)
 
-local is_active = false
-blitz.add_command(":browser", function()
-	if is_active == true then
-		return
+	-- add event listener to session
+	blitz.add_listener(blitz.EVENT_AGENT_COMPLETE, function(agent_id)
+		-- only main agent
+		if blitz.get_main_agent().index ~= agent_id.index then
+			return
+		end
+
+		if goal_finished then
+			return
+		end
+
+		blitz.queue.queue_agent_message(agent_id, [[
+			Your goal is unfinished. Validate the current state.
+            If the goal is determined to be finished, call `goal_completed` with a status report.
+
+            Original goal instructions: ]] .. prompt)
+	end)
+
+    --- add the tool to the current set
+	blitz.add_tool(blitz.AGENT_MAIN, "goal_completed")
+
+	goal_finished = false
+	local main_agent_id = blitz.get_main_agent()
+
+	blitz.queue.push_chat_entry("user", "Goal: " .. prompt)
+
+	if main_agent_id ~= nil then
+		blitz.queue.queue_agent_message(main_agent_id, "Complete the goal: " .. prompt)
+	else
+		blitz.queue.spawn_agent({ effort = "max", prompt = "Complete the goal: " .. prompt, tool_budget = 1024 })
 	end
-
-	blitz.push_notification("Playwright MCP enabled!")
-	blitz.mcp.enable(playmcp, blitz.AGENT_MAIN)
-	is_active = true
 end)
-
 ```
