@@ -469,6 +469,7 @@ pub fn nextPendingPermission(self: *Self) ?PermissionEntry {
 }
 
 pub fn requestPermission(self: *Self, call_id: []const u8, req: PermissionReq) !void {
+    // TODO: emit event_bus.permission_requested — needs event bus threaded through swarm
     try self.permission_requests.put(self.arena.allocator(), call_id, req);
 }
 
@@ -476,6 +477,7 @@ pub fn requestPermission(self: *Self, call_id: []const u8, req: PermissionReq) !
 /// `.message` payloads are duped into the swarm arena so the worker can read
 /// them after the UI's input buffer is reused.
 pub fn resolvePermission(self: *Self, call_id: []const u8, state: PermissionState) void {
+    // TODO: emit event_bus.permission_resolved — needs event bus threaded through swarm
     if (self.permission_requests.getPtr(call_id)) |req| {
         req.state = switch (state) {
             .message => |m| blk: {
@@ -505,6 +507,7 @@ pub fn getSlot(self: *Self, id: AgentId) ?*AgentSlot {
 }
 
 pub fn recordBroadcast(self: *Self, agent_id: AgentId, role: apt.Role, parts: []const apt.ContentPart) void {
+    // TODO: emit event_bus.agent_broadcast — needs event bus threaded through swarm
     const alloc = self.arena.allocator();
     const duped_parts = deepCopyParts(alloc, parts) catch return;
     // Ring buffer: drop oldest entry once we reach cap. broadcast_dropped is

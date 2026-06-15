@@ -17,10 +17,15 @@ pub const AppEvent = union(enum) {
     agent_cancelled: struct { id: AgentId },
     compaction_started: struct { id: AgentId }, // done
     compaction_complete: struct { id: AgentId },
+    // TODO: emit from agent.zig — needs event bus accessible from Agent
     tool_call_started: struct { agent_id: AgentId, call_id: []const u8, name: []const u8 },
+    // TODO: emit from agent.zig — needs event bus accessible from Agent
     tool_call_complete: struct { agent_id: AgentId, call_id: []const u8, name: []const u8, is_error: bool },
+    // TODO: emit from swarm.zig recordBroadcast — needs event bus threaded through Swarm
     agent_broadcast: struct { id: AgentId, role: Role },
+    // TODO: emit from swarm.zig requestPermission — needs event bus threaded through Swarm
     permission_requested: struct { call_id: ?[]const u8, level: r.prv.Swarm.PermissionLevel },
+    // TODO: emit from swarm.zig resolvePermission — needs event bus threaded through Swarm
     permission_resolved: struct { call_id: ?[]const u8, state: r.prv.Swarm.PermissionState },
     user_message_sent: []const u8,
     mcp_tools_reloaded,

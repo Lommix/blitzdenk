@@ -351,6 +351,7 @@ pub const App = struct {
         self.chat_entries = .empty;
         self.queued = .{};
         self.lua_vm.disableAllMcp();
+        self.event_bus.emit(self, .session_reset) catch {};
         self.reloadMcpTools() catch {};
     }
 
@@ -409,6 +410,7 @@ pub const App = struct {
             try slot.agent.setTools(set.slice());
         }
 
+        self.event_bus.emit(self, .mcp_tools_reloaded) catch {};
         self.dirty = true;
     }
 
@@ -446,13 +448,20 @@ pub const App = struct {
     }
 
     pub fn syncCompactionIndicator(self: *App) void {
-        const agent = self.mainAgent() orelse {
+        const agent_id = self.main_agent_id orelse {
+            self.compaction_indicator_active = false;
+            return;
+        };
+        const agent = self.swarm.getAgent(agent_id) orelse {
             self.compaction_indicator_active = false;
             return;
         };
 
         if (agent.state == .compacting) {
-            self.compaction_indicator_active = true;
+            if (!self.compaction_indicator_active) {
+                self.compaction_indicator_active = true;
+                self.event_bus.emit(self, .{ .compaction_started = .{ .id = agent_id } }) catch {};
+            }
             return;
         }
 
@@ -463,6 +472,7 @@ pub const App = struct {
         if (compacted_count == 0 or compacted_count == self.compaction_completion_seen_count) return;
 
         self.compaction_completion_seen_count = compacted_count;
+        self.event_bus.emit(self, .{ .compaction_complete = .{ .id = agent_id } }) catch {};
         self.pushSystemMessage("compact complete", .{});
         self.dirty = true;
     }

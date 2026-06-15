@@ -103,6 +103,9 @@ pub const Command = union(enum) {
         switch (self.*) {
             .reset_session => app.reset(),
             .cancel => {
+                if (app.main_agent_id) |id| {
+                    app.event_bus.emit(app, .{ .agent_cancelled = .{ .id = id } }) catch {};
+                }
                 app.swarm.cancelAll();
                 app.dropStreamingPreview();
                 app.cleanupCancelledTurn();
@@ -181,6 +184,10 @@ pub const Command = union(enum) {
                 agent.permission_level = arg.level;
                 agent.max_allowed_tool_calls = arg.tool_budget;
 
+                try app.event_bus.emit(app, .{
+                    .agent_created = .{ .id = arg.agent_id, .type_idx = agent.type_idx, .depth = agent.depth },
+                });
+
                 if (arg.parent_id == null) {
                     if (app.main_agent_id) |ag_id| {
                         std.log.warn("Dropping active agent without reset!", .{});
@@ -197,6 +204,7 @@ pub const Command = union(enum) {
 
                 const prompt = try r.util.deepClone(@TypeOf(arg.prompt), arg.prompt, alloc);
                 try app.swarm.runAgentWithMsg(arg.agent_id, prompt);
+                try app.event_bus.emit(app, .{ .agent_started = arg.agent_id });
                 app.running = true;
             },
             .push_notification => |msg| {

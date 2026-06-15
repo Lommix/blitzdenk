@@ -757,6 +757,7 @@ pub const Agent = struct {
             if (self.tool_call_runs.get(call.id)) |slot| {
                 if (slot.done.load(.acquire)) {
                     const result = slot.fut.await(self.pool.io);
+                    // TODO: emit event_bus.tool_call_complete — needs event bus accessible from Agent
                     try self.tool_call_done.put(alloc, call.id, result);
                     _ = self.tool_call_runs.remove(call.id);
                 } else {
@@ -816,6 +817,7 @@ pub const Agent = struct {
                 .cancel = &slot.cancel,
             };
             slot.fut = std.Io.async(self.pool.io, runToolWrapper, .{ tool.func, tool_ctx, call, &slot.done });
+            // TODO: emit event_bus.tool_call_started — needs event bus accessible from Agent
             try self.tool_call_runs.put(alloc, call.id, slot);
             self.tool_call_count += 1;
             all_settled = false;

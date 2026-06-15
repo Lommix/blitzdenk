@@ -319,7 +319,12 @@ pub fn run(
         if (app.running) {
             if (!app.swarm.tickAll(agent_ctx)) {
                 if (app.main_agent_id) |agent_id| {
-                    try app.event_bus.emit(&app, .{ .agent_complete = agent_id });
+                    const slot_state = app.swarm.getSlotState(agent_id);
+                    if (slot_state == .failed) {
+                        try app.event_bus.emit(&app, .{ .agent_failed = .{ .id = agent_id, .err = "" } });
+                    } else {
+                        try app.event_bus.emit(&app, .{ .agent_complete = agent_id });
+                    }
                 }
                 app.running = false;
             }
@@ -699,6 +704,7 @@ pub fn run(
                                 if (app.running) {
                                     app.pushHistory(app.appAlloc(), input);
                                     if (config_lua) |info| app.saveHistory(info.dir_path);
+                                    try app.event_bus.emit(&app, .{ .user_message_sent = input });
                                     if (app.main_agent_id) |agent_id| {
                                         const ag = app.swarm.getAgent(agent_id).?;
                                         const alloc = ag.arena.allocator();
@@ -730,6 +736,7 @@ pub fn run(
 
                                 app.pushHistory(app.appAlloc(), app.inputSlice());
                                 if (config_lua) |info| app.saveHistory(info.dir_path);
+                                try app.event_bus.emit(&app, .{ .user_message_sent = app.inputSlice() });
 
                                 // -- user commands
                                 if (input[0] == ':' or input[0] == '/') {
