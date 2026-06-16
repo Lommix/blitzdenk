@@ -2,8 +2,8 @@ const prv = @import("provider");
 const r = @import("root.zig");
 const std = @import("std");
 
-const MAX_DISPLAY_BYTES = 64 * 1024;
-const MAX_DISPLAY_LINES = 3000;
+const MAX_DISPLAY_BYTES = 16 * 1024;
+const MAX_DISPLAY_LINES = 300;
 
 pub const ReadTool = prv.tool.Tool{
     .def = .{
@@ -105,10 +105,16 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     const full_read = args.offset == null and args.limit == null;
 
-    if (args.limit) |l| {
-        ctx.updateToolStatus(call, "(Read) {s} ({d} lines)", .{ args.path, l });
-    } else {
+    if (args.offset == null and args.limit == null) {
         ctx.updateToolStatus(call, "(Read) {s}", .{args.path});
+    } else if (args.limit) |l| {
+        if (args.offset) |o| {
+            ctx.updateToolStatus(call, "(Read) {s} from line {d} ({d} lines)", .{ args.path, o, l });
+        } else {
+            ctx.updateToolStatus(call, "(Read) {s} ({d} lines)", .{ args.path, l });
+        }
+    } else if (args.offset) |o| {
+        ctx.updateToolStatus(call, "(Read) {s} from line {d}", .{ args.path, o });
     }
 
     // Stat for mtime first so we can short-circuit unchanged re-reads.
