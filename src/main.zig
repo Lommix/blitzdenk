@@ -434,8 +434,6 @@ pub fn run(
             const next_event = term.nextEvent();
             if (next_event != .none) app.dirty = true;
             switch (next_event) {
-                .wheel_down => try app.cmd_queue.append(io, .{ .scroll_down = 1 }),
-                .wheel_up => try app.cmd_queue.append(io, .{ .scroll_up = 1 }),
                 .key => |k| {
                     if (app.keymap.parse(k)) |action| {
                         switch (action) {

@@ -85,7 +85,7 @@ pub const Terminal = struct {
         // Enter alternate screen + hide cursor
         var buf: [64]u8 = undefined;
         var w = stdout.writerStreaming(io, &buf);
-        w.interface.writeAll("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1006h\x1b[?2004h") catch {};
+        w.interface.writeAll("\x1b[?1049h\x1b[?25l\x1b[2J") catch {};
         w.interface.flush() catch {};
 
         return .{
@@ -103,7 +103,7 @@ pub const Terminal = struct {
         // Show cursor + leave alternate screen
         var buf: [64]u8 = undefined;
         var w = self.stdout.writerStreaming(self.io, &buf);
-        w.interface.writeAll("\x1b[?2004l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l") catch {};
+        w.interface.writeAll("\x1b[?25h\x1b[?1049l") catch {};
         w.interface.flush() catch {};
 
         // Restore original termios
@@ -233,8 +233,7 @@ pub const Terminal = struct {
     pub const Event = union(enum) {
         key: Key,
         paste: []const u8,
-        wheel_up,
-        wheel_down,
+        
         resize: Rect,
         none,
     };
@@ -350,30 +349,6 @@ pub const Terminal = struct {
                 const event = readPaste(data[i + 6 ..]);
                 self.input_queue.push(event);
                 return; // paste consumes the rest
-            }
-
-            // SGR mouse: ESC [ <
-            if (i + 4 <= data.len and data[i] == 0x1B and data[i + 1] == '[' and data[i + 2] == '<') {
-                var j = i + 3;
-                while (j < data.len and data[j] >= '0' and data[j] <= '9') : (j += 1) {}
-                if (j >= data.len or data[j] != ';') {
-                    i = j;
-                    continue;
-                }
-                const btn = std.fmt.parseInt(u8, data[i + 3 .. j], 10) catch {
-                    i = j;
-                    continue;
-                };
-                while (j < data.len and data[j] != 'M' and data[j] != 'm') : (j += 1) {}
-                if (j >= data.len) {
-                    i = j;
-                    continue;
-                }
-                j += 1; // consume 'M'/'m'
-                if (btn == 64) self.input_queue.push(.wheel_up);
-                if (btn == 65) self.input_queue.push(.wheel_down);
-                i = j;
-                continue;
             }
 
             // CSI sequences: ESC [ ...
