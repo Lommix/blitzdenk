@@ -544,8 +544,8 @@ pub const App = struct {
             used_chat_lines = renderChatArea(app, _chat_area, buf);
         }
 
-        var status_y: u16 = _chat_status_area.y +| @as(u16, @intCast(used_chat_lines));
-        var status_remaining: u16 = (_chat_status_area.y +| _chat_status_area.height) -| status_y;
+        const status_y: u16 = _chat_status_area.y +| @as(u16, @intCast(used_chat_lines));
+        const status_remaining: u16 = (_chat_status_area.y +| _chat_status_area.height) -| status_y;
 
         const main_agent_id = app.main_agent_id;
 
@@ -558,8 +558,8 @@ pub const App = struct {
                         var sbuf: [128]u8 = undefined;
                         const content = std.fmt.bufPrint(&sbuf, "thinking {s}", .{spinner}) catch "thinking ..";
                         buf.setString(_chat_status_area.x + 10, status_y -| 1, content, .{ .fg = app.theme.muted });
-                        status_y +|= 1;
-                        status_remaining -|= 1;
+                        // Spinner is drawn above the status area (at status_y - 1),
+                        // so it does NOT consume from status_remaining.
                     }
                 }
             }
