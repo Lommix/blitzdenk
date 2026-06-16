@@ -20,6 +20,7 @@ pub const PROMPT =
 
 pub const SUMMARY_PREFIX =
     \\Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:
+    \\
 ;
 
 const AUTO_COMPACT_NUMERATOR: u64 = 9;
@@ -202,6 +203,8 @@ fn buildCompactPrompt(alloc: std.mem.Allocator, chat: *const apt.Chat) !apt.Chat
     try transcript.writer.writeAll(PROMPT);
     try transcript.writer.writeAll("\n\n<conversation>\n");
 
+    // TODO:prune old tool calls?
+    // reserach some criteria for a filter
     for (chat.messages.items) |msg| {
         if (msg.role == .system) continue;
         try transcript.writer.print("\n[{s}]\n", .{@tagName(msg.role)});

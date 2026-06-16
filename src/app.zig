@@ -549,22 +549,6 @@ pub const App = struct {
 
         const main_agent_id = app.main_agent_id;
 
-        if (main_agent_id) |ma_id| {
-            if (!app.flags.show_thinking and status_remaining > 0) {
-                if (app.swarm.getSlot(ma_id)) |slot_ref| {
-                    const agent_ref = &slot_ref.agent;
-                    if (agent_ref.flags.is_thinking) {
-                        const spinner = text_utils.spinnerBar(app.frame_count);
-                        var sbuf: [128]u8 = undefined;
-                        const content = std.fmt.bufPrint(&sbuf, "thinking {s}", .{spinner}) catch "thinking ..";
-                        buf.setString(_chat_status_area.x + 10, status_y -| 1, content, .{ .fg = app.theme.muted });
-                        // Spinner is drawn above the status area (at status_y - 1),
-                        // so it does NOT consume from status_remaining.
-                    }
-                }
-            }
-        }
-
         renderMainProgress(app, main_agent_id, .{
             .x = _chat_status_area.x,
             .y = status_y,
@@ -1706,11 +1690,11 @@ fn buildEntryParagraph(
     agent: ?*prv.agent.Agent,
     app: *App,
     entry: ChatEntry,
-    show_thinking: bool,
+    is_thinking: bool,
     inner_w: u16,
 ) r.tui.Paragraph {
     return switch (entry) {
-        .message => |m| buildMessageParagraph(arena, m, show_thinking),
+        .message => |m| buildMessageParagraph(arena, m, app.flags.show_thinking, is_thinking, text_utils.spinnerBar(app.frame_count)),
         .plan => |p| buildPlanParagraph(arena, p),
         .diff => |d| buildDiffParagraph(arena, d),
         .tool_call => |c| if (agent) |ag|
@@ -1741,6 +1725,8 @@ fn buildMessageParagraph(
     arena: std.mem.Allocator,
     m: ChatEntry.MessageEntry,
     show_thinking: bool,
+    is_thinking: bool,
+    spinner: []const u8,
 ) r.tui.Paragraph {
     var p: r.tui.Paragraph = .{
         .border = .none,
@@ -1750,13 +1736,21 @@ fn buildMessageParagraph(
         .reverse = true,
     };
 
-    // Role prefix as the first content line.
     const role_text: []const u8 = if (m.role == .user) "❯ you:" else "❯ blitz:";
     const role_style: r.tui.Style = if (m.role == .user)
         .{ .fg = Theme.default.info, .modifier = .{ .bold = true } }
     else
         .{ .fg = Theme.default.ok, .modifier = .{ .bold = true } };
-    appendPlainLine(&p, arena, role_text, role_style);
+
+    {
+        var role_line = r.tui.Line{ .style = role_style };
+        role_line.pushText(arena, role_text, role_style) catch {};
+        if (m.role == .agent and is_thinking and !show_thinking) {
+            role_line.pushText(arena, " thinking ", .{ .fg = Theme.default.muted }) catch {};
+            role_line.pushText(arena, spinner, .{ .fg = Theme.default.muted }) catch {};
+        }
+        p.lines.append(arena, role_line) catch {};
+    }
 
     const muted: r.tui.Style = .{ .fg = Theme.default.muted };
 
@@ -2016,7 +2010,6 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) usize {
 
     const inner_w: u16 = area.width;
     const inner_h: u16 = area.height;
-    const show_thinking = app.flags.show_thinking;
 
     // Failed agent path
     if (app.main_agent_id) |id| {
@@ -2061,7 +2054,9 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) usize {
         // when there's no main agent yet (e.g. a system message before the
         // first prompt).
         if (entry == .tool_call and maybe_agent == null) continue;
-        var p = buildEntryParagraph(alloc, maybe_agent, app, entry, show_thinking, inner_w);
+        const is_last = i == app.chat_entries.items.len - 1;
+        const is_thinking = is_last and if (maybe_agent) |ag| ag.flags.is_thinking else false;
+        var p = buildEntryParagraph(alloc, maybe_agent, app, entry, is_thinking, inner_w);
         const h = p.totalHeight(alloc, inner_w);
         stack.append(alloc, .{ .p = p, .h = h }) catch break;
         total += h;

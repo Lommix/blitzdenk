@@ -5,7 +5,7 @@ const prompts = @import("../prompts.zig");
 
 pub const AgentTool = prv.tool.Tool{
     .def = .{
-        .name = "Agent",
+        .name = "spawn_agent",
         .description =
         \\Spawns a single sub-agent to research, explore, or execute a multi-step task.
         \\Each tool call spawns exactly one sub-agent. To run multiple sub-agents in parallel, emit multiple Agent tool calls in the same response.
