@@ -82,7 +82,7 @@ function BlitzCtx:ask(header, question, options) end
 ---@field AGENT_PLAN integer Plan agent type id
 ---@field MODE_EXEC integer Exec mode id
 ---@field TOOL_BASH string Built-in tool name
----@field TOOL_CANCEL_BACKGROUND string Built-in tool name
+---@field TOOL_CANCEL_AGENT string Built-in tool name
 ---@field TOOL_READ string Built-in tool name
 ---@field TOOL_WRITE string Built-in tool name
 ---@field TOOL_EDIT string Built-in tool name
@@ -97,8 +97,8 @@ function BlitzCtx:ask(header, question, options) end
 ---@field TOOL_ENTER_SSH string agent tool to change tool target and cwd
 ---@field TOOL_EXIT_SSH string agent tool to change tool target and cwd
 ---@field TOOL_SEND_MESSAGE_TO_AGENT string Send a message to a running agent
----@field TOOL_READ_BACKGROUND_AGENT string Read the result of a background agent
----@field TOOL_CANCEL_BACKGROUND_AGENT string Cancel a running background agent
+---@field TOOL_AWAIT_AGENT string Wait for an agent to finish and read its result
+---@field TOOL_CANCEL_AGENT string Cancel a running agent
 ---@field REQ_STATUS_PENDING integer 0
 ---@field REQ_STATUS_APPROVED integer 1
 ---@field REQ_STATUS_DENIED integer 2

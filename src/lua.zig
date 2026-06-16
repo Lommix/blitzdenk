@@ -827,8 +827,8 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "TOOL_ENTER_SSH", tl.ssh.EnterSshMode.def.name },
         .{ "TOOL_EXIT_SSH", tl.ssh.ExitSshMode.def.name },
         .{ "TOOL_SEND_MESSAGE_TO_AGENT", tl.agent.SendMessageToAgent.def.name },
-        .{ "TOOL_READ_BACKGROUND_AGENT", tl.agent.ReadBackgroundAgent.def.name },
-        .{ "TOOL_CANCEL_BACKGROUND_AGENT", tl.agent.CancelBackgroundAgent.def.name },
+        .{ "TOOL_AWAIT_AGENT", tl.agent.AwaitAgent.def.name },
+        .{ "TOOL_CANCEL_AGENT", tl.agent.CancelAgent.def.name },
     }) |pair| {
         setFieldAny(L, -2, pair[0], pair[1]);
     }

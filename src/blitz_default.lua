@@ -122,7 +122,9 @@ blitz.set_compact_edge(128000)
 -- You need to overwrite this, if you want to add your custom tools
 blitz.set_agent_tools(blitz.AGENT_MAIN, {
 	blitz.TOOL_BASH,
-	blitz.TOOL_CANCEL_BACKGROUND,
+	blitz.TOOL_CANCEL_AGENT,
+	blitz.TOOL_AWAIT_AGENT,
+	blitz.TOOL_SEND_MESSAGE_TO_AGENT,
 	blitz.TOOL_READ,
 	blitz.TOOL_LIST_TASKS,
 	blitz.TOOL_UPDATE_TASK_STATE,

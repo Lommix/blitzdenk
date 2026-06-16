@@ -106,9 +106,9 @@ fn inject_bg_agents_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.pr
                 else => .running,
             };
             if (bg.status == .complete) {
-                try w.print("Background agent complete: agent_id={d} description: {s}. Read the result with read_background_agent\n", .{ bg.agent_id.pack(), bg.description });
+                try w.print("Background agent complete: agent_id={d} description: {s}. Read the result with await_agent\n", .{ bg.agent_id.pack(), bg.description });
             } else if (bg.status == .failed) {
-                try w.print("Background agent failed: agent_id={d} description: {s}. Read the result with read_background_agent\n", .{ bg.agent_id.pack(), bg.description });
+                try w.print("Background agent failed: agent_id={d} description: {s}. Read the result with await_agent\n", .{ bg.agent_id.pack(), bg.description });
             } else {
                 try w.print("Background agent running: agent_id={d} description: {s}\n", .{ bg.agent_id.pack(), bg.description });
             }

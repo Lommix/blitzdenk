@@ -7,7 +7,9 @@ pub const AgentTool = prv.tool.Tool{
     .def = .{
         .name = "spawn_agent",
         .description =
-        \\Spawns a single sub-agent to research, explore, or execute a multi-step task.
+        \\Spawns a sub-agent in the background and returns immediately with an agent id.
+        \\Use await_agent with the returned id to wait for completion and retrieve the result.
+        \\Use cancel_agent to cancel a running sub-agent.
         \\Each tool call spawns exactly one sub-agent. To run multiple sub-agents in parallel, emit multiple Agent tool calls in the same response.
         \\
         \\## When to fork
@@ -41,8 +43,7 @@ pub const AgentTool = prv.tool.Tool{
         \\      "budget": {"type": "number", "description": "The amount of allowed tool calls before stopping. For most tasks between 10 - 30 depending on complexity is a good amount"},
         \\      "effort": {"type": "string", "enum": ["min", "mid", "max"], "description": "Effort level deciding which model the child agent uses"},
         \\      "type": {"type": "string", "enum": ["fork", "fresh"], "description": "forked agents inherit chat history, fresh start with an empty history"},
-        \\      "allow_write": {"type": "boolean", "default": false, "description": "allow write"},
-        \\      "run_in_background": {"type": "boolean", "default": false, "description": "Set to true to run this agent in the background"}
+        \\      "allow_write": {"type": "boolean", "default": false, "description": "allow write"}
         \\  },
         \\  "required": ["description","prompt","budget","effort","type"]
         \\}
@@ -66,7 +67,6 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         effort: []const u8,
         type: []const u8,
         allow_write: bool = false,
-        run_in_background: bool = false,
     };
 
     const parsed = std.json.parseFromSlice(
@@ -124,7 +124,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         ctx.updateToolStatus(call, "(New {s} Agent) {s} ({d})", .{ args.effort, args.description, args.budget });
     }
 
-    if (args.run_in_background) {
+    {
         const g = ctx.agent().bg_agents.lock(ctx.io);
         defer g.unlock();
         g.ptr.list.append(ctx.alloc, .{
@@ -132,44 +132,14 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
             .description = args.description,
             .status = .running,
         }) catch {};
-
-        const text = std.fmt.allocPrint(
-            ctx.alloc,
-            "Agent running in background. Agent id: {d}. Description: {s}",
-            .{ child_id.pack(), args.description },
-        ) catch return r.errResult(call, "oom");
-        return r.okResult(call, text);
     }
 
-    // Wait for the child slot to terminate. The swarm's tickAll on the UI
-    // thread sets slot.event when state transitions to .complete/.failed.
-    const slot = swarm.getSlot(child_id).?;
-    slot.event.wait(ctx.io) catch {
-        swarm.releaseAgent(child_id);
-        return r.errResult(call, "canceled");
-    };
-
-    if (ctx.isCanceled()) {
-        swarm.releaseAgent(child_id);
-        return r.errResult(call, "canceled");
-    }
-
-    const post_slot = swarm.getSlot(child_id) orelse return r.errResult(call, "child slot vanished");
-    const is_err = post_slot.state.load(.acquire) == .failed;
-    const text = prv.tool.extractChildResult(swarm, child_id);
-    // Dupe before releaseAgent — `text` aliases the child arena.
-    const owned = ctx.alloc.dupe(u8, text) catch {
-        swarm.releaseAgent(child_id);
-        return r.errResult(call, "oom");
-    };
-    swarm.releaseAgent(child_id);
-
-    return .{
-        .call_id = call.id,
-        .name = call.name,
-        .content = owned,
-        .is_error = is_err,
-    };
+    const text = std.fmt.allocPrint(
+        ctx.alloc,
+        "Agent spawned. Agent id: {d}",
+        .{child_id.pack()},
+    ) catch return r.errResult(call, "oom");
+    return r.okResult(call, text);
 }
 
 pub const SendMessageToAgent = prv.tool.Tool{
@@ -209,20 +179,20 @@ fn run_send_message_to_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCa
     return r.okResult(call, "message sent");
 }
 
-pub const ReadBackgroundAgent = prv.tool.Tool{
+pub const AwaitAgent = prv.tool.Tool{
     .def = .{
-        .name = "read_background_agent",
-        .description = "Read the result of a background agent",
+        .name = "await_agent",
+        .description = "Wait for a agent to finish and read its result",
         .parameters_schema =
         \\{"type":"object","properties":{
         \\  "agent_id":{"type":"number","description":"the agent ID"}
         \\},"required":["agent_id"]}
         ,
     },
-    .func = &run_read_bg,
+    .func = &run_await_agent,
 };
 
-fn run_read_bg(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run_await_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
     const Args = struct {
         agent_id: u32,
     };
@@ -233,19 +203,31 @@ fn run_read_bg(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapte
 
     const child_id = prv.Swarm.AgentId.unpack(args.agent_id);
 
-    ctx.updateToolStatus(call, "(Reading Agent Report) - from {d}", .{args.agent_id});
+    ctx.updateToolStatus(call, "(Awaiting Agent) - {d}", .{args.agent_id});
 
     const slot = ctx.swarm.getSlot(child_id) orelse
-        return r.errResult(call, "background agent slot not found");
+        return r.errResult(call, "agent slot not found");
 
     const state = slot.state.load(.acquire);
     if (state == .active) {
-        return r.errResult(call, "background agent is still running");
+        slot.event.wait(ctx.io) catch {
+            ctx.swarm.releaseAgent(child_id);
+            return r.errResult(call, "canceled");
+        };
     }
 
-    const is_err = state == .failed;
+    if (ctx.isCanceled()) {
+        ctx.swarm.releaseAgent(child_id);
+        return r.errResult(call, "canceled");
+    }
+
+    const post_slot = ctx.swarm.getSlot(child_id) orelse return r.errResult(call, "agent slot vanished");
+    const is_err = post_slot.state.load(.acquire) == .failed;
     const text = prv.tool.extractChildResult(ctx.swarm, child_id);
-    const owned = ctx.alloc.dupe(u8, text) catch return r.errResult(call, "oom");
+    const owned = ctx.alloc.dupe(u8, text) catch {
+        ctx.swarm.releaseAgent(child_id);
+        return r.errResult(call, "oom");
+    };
 
     ctx.swarm.releaseAgent(child_id);
 
@@ -268,20 +250,20 @@ fn run_read_bg(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapte
     };
 }
 
-pub const CancelBackgroundAgent = prv.tool.Tool{
+pub const CancelAgent = prv.tool.Tool{
     .def = .{
-        .name = "cancel_background_agent",
-        .description = "Cancel a running background agent",
+        .name = "cancel_agent",
+        .description = "Cancel a running agent",
         .parameters_schema =
         \\{"type":"object","properties":{
         \\  "agent_id":{"type":"number","description":"packed AgentId (u32)"}
         \\},"required":["agent_id"]}
         ,
     },
-    .func = &run_cancel_bg,
+    .func = &run_cancel_agent,
 };
 
-fn run_cancel_bg(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run_cancel_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
     const Args = struct {
         agent_id: u32,
     };
@@ -310,5 +292,5 @@ fn run_cancel_bg(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adap
         }
     }
 
-    return r.okResult(call, "Background agent canceled");
+    return r.okResult(call, "agent canceled");
 }
