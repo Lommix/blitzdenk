@@ -13,6 +13,9 @@ pub const parse = @import("htmlparser.zig");
 pub const reg = @import("../registry.zig");
 pub const patch = @import("patch.zig");
 
+pub const MAX_DISPLAY_BYTES = 16 * 1024;
+pub const MAX_DISPLAY_LINES = 500;
+
 pub fn errResult(call: prv.adapter.ToolCall, msg: []const u8) prv.adapter.ToolResult {
     return .{
         .call_id = call.id,

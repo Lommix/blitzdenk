@@ -2,13 +2,10 @@ const prv = @import("provider");
 const r = @import("root.zig");
 const std = @import("std");
 
-const MAX_DISPLAY_BYTES = 16 * 1024;
-const MAX_DISPLAY_LINES = 300;
-
 pub const ReadTool = prv.tool.Tool{
     .def = .{
         .name = "read",
-        .description = "Read the contents of a file. Output is truncated to" ++ std.fmt.comptimePrint("{d} lines or {d} KB", .{ MAX_DISPLAY_LINES, @divTrunc(MAX_DISPLAY_BYTES, 1024) }) ++
+        .description = "Read the contents of a file. Output is truncated to" ++ std.fmt.comptimePrint("{d} lines or {d} KB", .{ r.MAX_DISPLAY_LINES, @divTrunc(r.MAX_DISPLAY_BYTES, 1024) }) ++
             \\(whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.\n" ++
             \\OUTPUT FORMAT: each line is prefixed with `<right-aligned line number><TAB>`, e.g. `   42\\tcode`. The number+tab is display only and is NOT part of the file. " ++
             \\When using oldText for the edit tool, strip the prefix and use the raw line content exactly (preserve original tabs/spaces verbatim, no line numbers)."
@@ -91,7 +88,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
                 \\Stderr:
                 \\{s}
             , .{ res.stdout, res.stderr }) catch "failed to read command pipe";
-            return r.okResult(call, r.truncateOutput(ctx.alloc, content, MAX_DISPLAY_BYTES, MAX_DISPLAY_LINES));
+            return r.okResult(call, r.truncateOutput(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
         }
         const slot = &ctx.swarm.exec.slots[@intFromEnum(m.handle)];
         const content = std.fmt.allocPrint(ctx.alloc,
@@ -103,7 +100,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
             \\Stderr:
             \\{s}
         , .{ slot.stdout.items, slot.stderr.items }) catch "failed to read command pipe";
-        return r.okResult(call, r.truncateOutput(ctx.alloc, content, MAX_DISPLAY_BYTES, MAX_DISPLAY_LINES));
+        return r.okResult(call, r.truncateOutput(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
     }
 
     const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, args.path }) catch
@@ -158,7 +155,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     // Read with cat -n for line numbering, sliced by offset/limit.
     const start_line: u64 = if (args.offset) |o| (if (o > 0) o else 1) else 1;
-    const max_lines: u64 = if (args.limit) |l| l else MAX_DISPLAY_LINES;
+    const max_lines: u64 = if (args.limit) |l| l else r.MAX_DISPLAY_LINES;
     const command = std.fmt.allocPrint(ctx.alloc, "cat -n '{s}' | tail -n +{d} | head -n {d}", .{
         resolved, start_line, max_lines,
     }) catch return r.errResult(call, "out of memory");
@@ -169,5 +166,5 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     defer ctx.swarm.exec.alloc.free(read_res.stderr);
 
     const out = read_res.toOwned(ctx.alloc) catch return r.errResult(call, "oom");
-    return r.okResult(call, r.truncateOutput(ctx.alloc, out, MAX_DISPLAY_BYTES, MAX_DISPLAY_LINES));
+    return r.okResult(call, r.truncateOutput(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
 }

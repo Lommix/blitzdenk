@@ -24,9 +24,6 @@ const approval_commands = [_][]const u8{
     "awk",     "tee",
 };
 
-const MAX_DISPLAY_BYTES = 50 * 1024;
-const MAX_DISPLAY_LINES = 2000;
-
 const Classification = enum {
     blocked,
     needs_approval,
@@ -231,7 +228,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     const response = ctx.alloc.alloc(u8, res.stderr.len + res.stdout.len) catch return r.errResult(call, "oom");
     @memcpy(response[0..res.stdout.len], res.stdout);
     @memcpy(response[res.stdout.len..], res.stderr);
-    return r.okResult(call, r.truncateOutput(ctx.alloc, response, MAX_DISPLAY_BYTES, MAX_DISPLAY_LINES));
+    return r.okResult(call, r.truncateOutput(ctx.alloc, response, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
 }
 
 const RunError = error{ Timeout, Canceled, ExecFailed };
