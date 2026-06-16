@@ -37,6 +37,14 @@ pub fn parseArgs(comptime T: type, alloc: std.mem.Allocator, call: prv.adapter.T
     return parsed.value;
 }
 
+pub fn replaceAll(input: []const u8, needle: []const u8, replacement: []const u8, buffer: []u8) []const u8 {
+    if (needle.len == 0) return input;
+    const out_len = std.mem.replacementSize(u8, input, needle, replacement);
+    if (out_len > buffer.len) return input;
+    _ = std.mem.replace(u8, input, needle, replacement, buffer[0..out_len]);
+    return buffer[0..out_len];
+}
+
 pub fn truncateOutput(
     alloc: std.mem.Allocator,
     output: []const u8,

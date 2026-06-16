@@ -61,7 +61,13 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     };
 
     if (bg_match) |m| {
-        ctx.updateToolStatus(call, "(Reading Process) {s}", .{args.path});
+        var buf: [512]u8 = undefined;
+        const cleaned_path = if (ctx.cwd.len > 0)
+            r.replaceAll(args.path, ctx.cwd, ".", &buf)
+        else
+            args.path;
+
+        ctx.updateToolStatus(call, "(Reading Process) {s}", .{cleaned_path});
         if (ctx.swarm.exec.poll(m.handle)) |res| {
             defer ctx.swarm.exec.release(m.handle);
             {

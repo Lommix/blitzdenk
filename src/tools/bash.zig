@@ -154,7 +154,14 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         return r.errResult(call, "rg pattern contains unquoted `$`. Shell expands `$var` before rg sees it, silently corrupting the regex. Single-quote the pattern: `rg 'pattern'`");
     }
 
-    ctx.updateToolStatus(call, "(Bash) {s}", .{args.command[0..@min(args.command.len, 248)]});
+    // Replace full cwd paths with "." for cleaner output (stack buffer)
+    var buf: [512]u8 = undefined;
+    const cleaned_command_str = if (ctx.cwd.len > 0)
+        r.replaceAll(args.command, ctx.cwd, ".", &buf)
+    else
+        args.command;
+
+    ctx.updateToolStatus(call, "(Bash) {s}", .{cleaned_command_str[0..@min(cleaned_command_str.len, 248)]});
 
     const need_perm = switch (classifyCommand(args.command)) {
         .blocked => return r.errResult(call, "command is blocked for safety"),
