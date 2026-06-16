@@ -214,30 +214,54 @@ pub fn run(
     flags: CliFlags,
     prompt: ?[]const u8,
 ) !void {
-    var cfg: BlitzdenkCfg = .{};
-
     // Ensure config blitz.lua exists, get paths
     const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;
 
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
     var context_factory = try reg.ContextFactory.init(arena, io, HOME);
 
-    var pool: prv.http.RequestPool = .{};
-    try pool.init(gpa, io);
-    defer pool.deinit();
-
-    var cmd_pool = prv.exec.CmdPool.init(gpa, io, env);
-    defer cmd_pool.deinit();
-
-    var swarm = try prv.Swarm.init(arena, &pool, &cmd_pool, &cfg, env, cwd);
-    defer swarm.deinit();
-
     var term = try tui.Terminal.init(arena, io);
     errdefer term.deinit();
     defer term.deinit();
 
-    var app = try App.init(arena, gpa, &swarm, &context_factory, cwd);
+    var app = try App.init(arena, gpa, &context_factory, cwd);
     defer app.deinit();
+
+    var swarm = try prv.Swarm.init(arena, io, .{
+        .ptr = &app,
+        //TODO: impl & wire
+        .broadcast = (struct {
+            fn func(ptr: *anyopaque, en: prv.Swarm.BroadcastEntry) void {
+                _ = ptr; // autofix
+                _ = en; // autofix
+            }
+        }).func,
+        //TODO: impl & wire
+        .permission = (struct {
+            fn func(ptr: *anyopaque, en: prv.Swarm.PermissionReq) void {
+                _ = ptr; // autofix
+                _ = en; // autofix
+            }
+        }).func,
+        .build_config = (struct {
+            fn func(ptr: *anyopaque, effort: r.prv.config.EffortLevel) anyerror!r.prv.adapter.Config {
+                const a: *App = @ptrCast(@alignCast(ptr));
+                const config = a.config.buildConfig(effort, a.swarm.exec.env) orelse return error.FailedToBuildAgent;
+                return config;
+            }
+        }).func,
+        .cwd = (struct {
+            fn func(ptr: *anyopaque) []const u8 {
+                const a: *App = @ptrCast(@alignCast(ptr));
+                return a.cwd;
+            }
+        }).func,
+        .gen_system_reminders = &App.genSystemRemindersOpaque,
+        .pop_queued_message = &App.popQueuedMessageOpaque,
+    }, env);
+
+    defer swarm.deinit();
+    app.swarm = &swarm;
 
     // Lua VM holds an opaque pointer to App + a getter for the mutable cfg
     // (swarm.cfg is *const, so a sibling accessor unwraps the const).
@@ -290,12 +314,6 @@ pub fn run(
     app.reset();
     app.flags.skip_permissions = !flags.strict_mode;
 
-    const agent_ctx: prv.agent.AgentContext = .{
-        .ptr = &app,
-        .gen_system_reminders = &App.genSystemRemindersOpaque,
-        .pop_queued_message = &App.popQueuedMessageOpaque,
-    };
-
     if (config_lua) |info| app.loadHistory(app.appAlloc(), info.dir_path);
 
     if (prompt) |p| {
@@ -317,7 +335,7 @@ pub fn run(
 
         // TODO: cleanup state
         if (app.running) {
-            if (!app.swarm.tickAll(agent_ctx)) {
+            if (!app.swarm.tickAll()) {
                 if (app.main_agent_id) |agent_id| {
                     const slot_state = app.swarm.getSlotState(agent_id);
                     if (slot_state == .failed) {
@@ -760,7 +778,7 @@ pub fn run(
                                                 app.pushSystemMessage("Not yet implemented. You are on your own!", .{});
                                             },
                                             .ssh => |args| {
-                                                handleSshCommand(&app, &cmd_pool, gpa, args);
+                                                handleSshCommand(&app, &app.swarm.exec, gpa, args);
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
                                             .cd => |path| {
@@ -768,7 +786,7 @@ pub fn run(
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
                                             .ssh_off => {
-                                                cmd_pool.clearSsh();
+                                                app.swarm.exec.clearSsh();
                                                 app.pushSystemMessage("ssh mode disabled", .{});
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
@@ -816,7 +834,7 @@ pub fn run(
                                 app.input_buffer.clearRetainingCapacity();
                             },
                             .passphrase => {
-                                handleSshUnlock(&app, &cmd_pool, gpa);
+                                handleSshUnlock(&app, &app.swarm.exec, gpa);
                             },
                         },
                         .esc => switch (app.input_mode) {
@@ -917,7 +935,7 @@ fn handleSshUnlock(state: *App, cmd_pool: *prv.exec.CmdPool, gpa: std.mem.Alloca
 
     // ssh-add talks to the agent over $SSH_AUTH_SOCK. Reuse an inherited
     // agent if its socket is alive; otherwise spawn one we own (killed on exit).
-    const inherited = state.swarm.env.get("SSH_AUTH_SOCK");
+    const inherited = cmd_pool.env.get("SSH_AUTH_SOCK");
     const sock = cmd_pool.ensureAgent(inherited) catch |err| {
         state.pushSystemMessage("ssh: failed to start ssh-agent ({s})", .{@errorName(err)});
         return;
@@ -966,7 +984,7 @@ fn handleSshUnlock(state: *App, cmd_pool: *prv.exec.CmdPool, gpa: std.mem.Alloca
 
     const inherit_keys = [_][]const u8{ "HOME", "USER", "PATH", "TERM", "LANG", "LC_ALL" };
     for (inherit_keys) |k| {
-        if (state.swarm.env.get(k)) |v| env.put(k, v) catch {};
+        if (cmd_pool.env.get(k)) |v| env.put(k, v) catch {};
     }
     env.put("SSH_AUTH_SOCK", sock) catch {};
     env.put("SSH_ASKPASS", script_path) catch {};

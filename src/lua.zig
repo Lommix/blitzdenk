@@ -480,7 +480,7 @@ pub const LuaVm = struct {
         self.failed_ref = c.LUA_NOREF;
         self.exit_loop_ref = c.LUA_NOREF;
         if (self.app) |a| {
-            @constCast(a.swarm.cfg).resetProviders();
+            a.config.resetProviders();
             a.default_context_limit = app.CONTEXT_LIMIT;
         }
         try self.initLuaState();
@@ -958,7 +958,7 @@ fn getVmFromRegistry(L: *c.lua_State) ?*LuaVm {
 
 fn getCfgFromRegistry(L: *c.lua_State) ?*prv.config.BlitzdenkCfg {
     const a = getAppFromRegistry(L) orelse return null;
-    return @constCast(a.swarm.cfg);
+    return &a.config;
 }
 
 /// Read a required string field from the table at `table_idx`. On failure calls
@@ -1861,7 +1861,7 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
 
     // Build ctx bridge and push as arg 1
     var bridge = CtxBridge{
-        .cwd = ctx.cwd,
+        .cwd = ctx.swarm.context.cwd(ctx.swarm.context.ptr),
         .tool_ctx = ctx,
         .tool_call = call,
     };

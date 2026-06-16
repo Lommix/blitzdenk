@@ -50,7 +50,7 @@ pub const CmdPool = struct {
 
     alloc: std.mem.Allocator,
     io: std.Io,
-    parent_env: *const std.process.Environ.Map,
+    env: *const std.process.Environ.Map,
     slots: [SLOT_COUNT]CmdSlot = @splat(.{}),
     ssh_target: ?SshTarget = null,
     ssh_active: bool = false,
@@ -58,7 +58,7 @@ pub const CmdPool = struct {
     agent_sock: ?[]const u8 = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, parent_env: *const std.process.Environ.Map) Self {
-        return .{ .alloc = alloc, .io = io, .parent_env = parent_env };
+        return .{ .alloc = alloc, .io = io, .env = parent_env };
     }
 
     pub fn deinit(self: *Self) void {
@@ -271,8 +271,8 @@ pub const CmdPool = struct {
         box.* = .init(self.alloc);
         errdefer box.deinit();
 
-        const keys = self.parent_env.keys();
-        const vals = self.parent_env.values();
+        const keys = self.env.keys();
+        const vals = self.env.values();
         for (keys, vals) |k, v| try box.put(k, v);
         try box.put("SSH_AUTH_SOCK", sock);
         return box;

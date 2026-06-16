@@ -234,7 +234,8 @@ pub const App = struct {
     input_buffer: std.ArrayList(u8) = .empty,
     input_cursor: u32 = 0,
     input_scroll_offset: u16 = 0,
-    swarm: *prv.Swarm,
+    swarm: *prv.Swarm = undefined,
+    config: prv.config.BlitzdenkCfg = .{},
     main_agent_id: ?prv.Swarm.AgentId = null,
     running: bool = false,
     frame_count: usize = 0,
@@ -277,7 +278,6 @@ pub const App = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         lua_allocator: std.mem.Allocator,
-        swarm: *prv.Swarm,
         agent_factory: *r.reg.ContextFactory,
         cwd: []const u8,
     ) !App {
@@ -287,7 +287,6 @@ pub const App = struct {
         return App{
             .arena_app = .init(allocator, agent_factory.io),
             .arena_session = .init(allocator),
-            .swarm = swarm,
             .context_factory = agent_factory,
             .cwd = cwd,
             .cmd_queue = try r.cmd.CommandQueue.init(allocator),
@@ -431,7 +430,7 @@ pub const App = struct {
     }
 
     pub fn configureAgent(self: *const App, agent: *prv.agent.Agent) !void {
-        try self.context_factory.configureAgent(agent, self.swarm.cfg);
+        try self.context_factory.configureAgent(agent, &self.config);
         agent.context_limit = self.default_context_limit;
     }
 
@@ -2176,17 +2175,17 @@ fn renderWelcome(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
 
     var status_buf: [128]u8 = undefined;
     const status = std.fmt.bufPrint(&status_buf, "Loaded {d} Provider {d} Docs {d} Skills", .{
-        app.swarm.cfg.provider_count,
-        app.swarm.cfg.doc_count,
-        app.swarm.cfg.skill_count,
+        app.config.provider_count,
+        app.config.doc_count,
+        app.config.skill_count,
     }) catch "error loading status";
 
     var buf_a: [255]u8 = undefined;
     var buf_b: [255]u8 = undefined;
     while (line_iter.next()) |line| : (c.y += 1) {
-        const l1 = str_replace(&buf_a, "{MODEL_MAX}", app.swarm.cfg.model_max.getName(), line);
-        const l2 = str_replace(&buf_b, "{MODEL_MID}", app.swarm.cfg.model_mid.getName(), l1);
-        const l3 = str_replace(&buf_a, "{MODEL_MIN}", app.swarm.cfg.model_min.getName(), l2);
+        const l1 = str_replace(&buf_a, "{MODEL_MAX}", app.config.model_max.getName(), line);
+        const l2 = str_replace(&buf_b, "{MODEL_MID}", app.config.model_mid.getName(), l1);
+        const l3 = str_replace(&buf_a, "{MODEL_MIN}", app.config.model_min.getName(), l2);
         const l4 = str_replace(&buf_b, "{INFO}", status, l3);
         const l5 = str_replace(&buf_a, "{cwd}", app.cwd, l4);
 

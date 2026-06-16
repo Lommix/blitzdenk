@@ -38,16 +38,40 @@ pub const PermissionState = union(enum) {
     message: []const u8,
 };
 
+pub const SwarmContextV = struct {
+    ptr: *anyopaque,
+    broadcast: *const fn (*anyopaque, BroadcastEntry) void,
+    permission: *const fn (*anyopaque, PermissionReq) void,
+    build_config: *const fn (*anyopaque, cfg_mod.EffortLevel) anyerror!r.adapter.Config,
+    cwd: *const fn (*anyopaque) []const u8,
+    gen_system_reminders: *const fn (*anyopaque, agent: *Agent) void,
+    pop_queued_message: *const fn (*anyopaque, agent: AgentId, alloc: std.mem.Allocator) ?[]const apt.ContentPart,
+
+    // cwd
+    // events
+
+    pub fn cast(self: SwarmContextV, comptime T: type) *T {
+        return @ptrCast(@alignCast(self.ptr));
+    }
+};
+
 // ----------------------------------
 arena: std.heap.ArenaAllocator,
 slots: [MAX_AGENTS]AgentSlot = [_]AgentSlot{.{}} ** MAX_AGENTS,
-pool: *http.RequestPool,
-exec: *r.exec.CmdPool,
-cfg: *const cfg_mod.BlitzdenkCfg,
-env: *const std.process.Environ.Map,
+
+// let it own
+pool: http.RequestPool,
+exec: r.exec.CmdPool,
+context: SwarmContextV,
+
+// bind
+// cfg: *const cfg_mod.BlitzdenkCfg,
+// env: *const std.process.Environ.Map,
+
+// move
 broadcast: std.ArrayListUnmanaged(BroadcastEntry) = .empty,
 broadcast_dropped: u64 = 0,
-cwd: []const u8,
+// cwd: []const u8,
 // call_id -> req
 permission_requests: std.StringHashMapUnmanaged(PermissionReq) = .{},
 
@@ -135,19 +159,18 @@ pub const PlanApprovalPayload = struct {
 
 pub fn init(
     alloc: std.mem.Allocator,
-    pool: *http.RequestPool,
-    exec: *r.exec.CmdPool,
-    cfg: *const cfg_mod.BlitzdenkCfg,
+    io: std.Io,
+    context: SwarmContextV,
     env: *const std.process.Environ.Map,
-    cwd: []const u8,
 ) !Self {
+    var pool: http.RequestPool = .{};
+    try pool.init(alloc, io);
+
     var self: Self = .{
         .arena = std.heap.ArenaAllocator.init(alloc),
         .pool = pool,
-        .exec = exec,
-        .cfg = cfg,
-        .env = env,
-        .cwd = cwd,
+        .exec = r.exec.CmdPool.init(alloc, io, env),
+        .context = context,
     };
     // Pre-reserve so concurrent inserts from worker threads do not rehash
     // and invalidate getPtr results held by the UI.
@@ -175,6 +198,8 @@ pub fn reset(self: *Self) void {
 
 pub fn deinit(self: *Self) void {
     self.arena.deinit();
+    self.pool.deinit();
+    self.exec.deinit();
 }
 
 pub fn usage(self: *const Self) apt.TokenUsage {
@@ -285,10 +310,10 @@ pub fn newAgent(
     const slot = &self.slots[id.index];
     slot.parent_id = parent_id;
 
-    const config = self.cfg.buildConfig(effort, self.env) orelse return error.ConfigBuildFailed;
+    const config = try self.context.build_config(self.context.ptr, effort);
     slot.agent = Agent.new(
         config,
-        self.pool,
+        &self.pool,
         self.arena.allocator(),
         agent_type_idx,
         mode_type_idx,
@@ -319,10 +344,10 @@ pub fn newAgentInSlot(
     const slot = &self.slots[idx.index];
     if (slot.generation != idx.generation) return error.AgentSlotGenerationMissmatch;
 
-    const config = self.cfg.buildConfig(effort, self.env) orelse return error.ConfigBuildFailed;
+    const config = try self.context.build_config(self.context.ptr, effort);
     slot.agent = Agent.new(
         config,
-        self.pool,
+        &self.pool,
         self.arena.allocator(),
         agent_type_idx,
         mode_type_idx,
@@ -361,13 +386,13 @@ pub fn retryAgent(self: *Self, id: AgentId) void {
     slot.state.store(.active, .release);
 }
 
-pub fn tickAll(self: *Self, ctx: r.agent.AgentContext) bool {
+pub fn tickAll(self: *Self) bool {
     var running = false;
     const dt = self.progress_time();
     for (&self.slots) |*slot| {
         if (slot.state.load(.acquire) != .active) continue;
         slot.time_elapsed += dt;
-        const result = slot.agent.tick(dt, ctx);
+        const result = slot.agent.tick(dt, self.context);
         switch (result) {
             .complete => {
                 slot.state.store(.complete, .release);

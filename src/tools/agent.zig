@@ -105,7 +105,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     parts[0] = .{ .text = prompt };
 
-    const app = ctx.interface.cast(@import("../app.zig").App);
+    const app = ctx.swarm.context.cast(@import("../app.zig").App);
     app.cmd_queue.append(ctx.io, .{ .spawn_agent = .{
         .agent_id = child_id,
         .parent_id = ctx.self_id,
@@ -169,7 +169,7 @@ fn run_send_message_to_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCa
     ctx.updateToolStatus(call, "(Sending Message) - to {d}", .{args.agent_id});
     const agent_id = prv.Swarm.AgentId.unpack(args.agent_id);
 
-    const app = ctx.interface.cast(@import("../app.zig").App);
+    const app = ctx.swarm.context.cast(@import("../app.zig").App);
 
     app.cmd_queue.append(ctx.io, .{ .queue_agent_message = .{
         .agent_id = agent_id,

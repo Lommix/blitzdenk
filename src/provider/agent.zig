@@ -8,21 +8,6 @@ const compact = r.compact;
 
 const log = std.log.scoped(.agent);
 
-// inject outer state via interface
-
-// TODO: review, what else could benefit -> remove swarm circle ref
-/// opaque user context interface
-pub const AgentContext = struct {
-    ptr: *anyopaque = undefined,
-
-    gen_system_reminders: ?*const fn (*anyopaque, agent: *Agent) void = null,
-    pop_queued_message: ?*const fn (*anyopaque, agent: Swarm.AgentId, alloc: std.mem.Allocator) ?[]const apt.ContentPart = null,
-
-    pub fn cast(self: AgentContext, comptime T: type) *T {
-        return @ptrCast(@alignCast(self.ptr));
-    }
-};
-
 pub const ToolCallDisplay = struct {
     // main status text
     status_text: std.ArrayList(u8) = .empty,
@@ -372,7 +357,7 @@ pub const Agent = struct {
         }
     }
 
-    pub fn tick(self: *Agent, dt: f32, ctx: AgentContext) TickResult {
+    pub fn tick(self: *Agent, dt: f32, ctx: r.Swarm.SwarmContextV) TickResult {
         switch (self.state) {
             .idle => return .idle,
             .compacting => {
@@ -417,10 +402,8 @@ pub const Agent = struct {
                 }
 
                 if (!self.flags.turn_has_reminder) {
-                    if (ctx.gen_system_reminders) |func| {
-                        func(ctx.ptr, self);
-                        self.flags.turn_has_reminder = true;
-                    }
+                    ctx.gen_system_reminders(ctx.ptr, self);
+                    self.flags.turn_has_reminder = true;
                 }
 
                 self.pending_handle = apt.complete(
@@ -610,7 +593,7 @@ pub const Agent = struct {
         return self.chat.messages.items.len - 1;
     }
 
-    fn pumpStream(self: *Agent, ctx: AgentContext) !TickResult {
+    fn pumpStream(self: *Agent, ctx: Swarm.SwarmContextV) !TickResult {
         const arena = self.arena.allocator();
         if (self.stream == null) return error.NoStream;
         const stream = &self.stream.?;
@@ -657,7 +640,7 @@ pub const Agent = struct {
         return .pending;
     }
 
-    fn finishStream(self: *Agent, _: AgentContext) !TickResult {
+    fn finishStream(self: *Agent, _: Swarm.SwarmContextV) !TickResult {
         self.flags.is_thinking = false;
         const arena = self.arena.allocator();
         if (self.stream == null) return error.NoStream;
@@ -705,9 +688,8 @@ pub const Agent = struct {
         return .complete;
     }
 
-    fn popQueuedParts(self: *Agent, ctx: AgentContext) ?[]const apt.ContentPart {
-        const pop = ctx.pop_queued_message orelse return null;
-        return pop(ctx.ptr, self.swarm_id.?, self.arena.allocator());
+    fn popQueuedParts(self: *Agent, ctx: Swarm.SwarmContextV) ?[]const apt.ContentPart {
+        return ctx.pop_queued_message(ctx.ptr, self.swarm_id.?, self.arena.allocator());
     }
 
     fn appendPartsToLastMessage(self: *Agent, parts: []const apt.ContentPart) !void {
@@ -732,7 +714,8 @@ pub const Agent = struct {
         return func(ctx, call);
     }
 
-    fn tickToolCalls(self: *Agent, ctx: AgentContext) !bool {
+    fn tickToolCalls(self: *Agent, ctx: Swarm.SwarmContextV) !bool {
+        _ = ctx; // autofix
         const last_msg = self.chat.lastMessage() orelse {
             self.state = .failed;
             return error.NoMessage;
@@ -805,16 +788,12 @@ pub const Agent = struct {
             const slot = try alloc.create(tc.RunningTool);
             slot.* = .{ .fut = .{ .any_future = null, .result = undefined } };
             const tool_ctx = tc.ToolContext{
-                .pool = self.pool,
                 .alloc = alloc,
                 .io = self.pool.io,
-                .config = self.config,
-                .cfg = swarm.cfg,
                 .swarm = swarm,
                 .self_id = self_id,
-                .cwd = swarm.exec.effectiveCwd(swarm.cwd),
-                .interface = ctx,
                 .cancel = &slot.cancel,
+                .cwd = swarm.context.cwd(swarm.context.ptr),
             };
             slot.fut = std.Io.async(self.pool.io, runToolWrapper, .{ tool.func, tool_ctx, call, &slot.done });
             // TODO: emit event_bus.tool_call_started — needs event bus accessible from Agent
@@ -826,7 +805,7 @@ pub const Agent = struct {
         return all_settled;
     }
 
-    fn commitSettledResults(self: *Agent, ctx: AgentContext) !bool {
+    fn commitSettledResults(self: *Agent, ctx: Swarm.SwarmContextV) !bool {
         const last_msg = self.chat.lastMessage() orelse return false;
         var results: [MAX_TOOL_CALLS]apt.ToolResult = undefined;
         var count: u32 = 0;

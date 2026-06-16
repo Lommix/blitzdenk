@@ -27,17 +27,18 @@ pub const RunningTool = struct {
 };
 
 pub const ToolContext = struct {
-    pool: *r.http.RequestPool,
+    // pool: *r.http.RequestPool,
     alloc: std.mem.Allocator,
     io: std.Io,
-    config: apt.Config,
+    // config: apt.Config,
     swarm: *Swarm,
     self_id: Swarm.AgentId,
     cwd: []const u8,
-    interface: r.agent.AgentContext,
+    // interface: r.agent.AgentContext,
+    // interface: r.Swarm.SwarmContextV,
 
     // TODO: cleanup user context
-    cfg: *const r.config.BlitzdenkCfg,
+    // cfg: *const r.config.BlitzdenkCfg,
     // app_ptr: *anyopaque,
 
     /// Set by the agent driver when this tool's future is being canceled.
