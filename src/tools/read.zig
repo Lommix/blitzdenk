@@ -57,14 +57,14 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         break :blk null;
     };
 
-    if (bg_match) |m| {
-        var buf: [512]u8 = undefined;
-        const cleaned_path = if (ctx.cwd.len > 0)
-            r.replaceAll(args.path, ctx.cwd, ".", &buf)
-        else
-            args.path;
+    var buf: [512]u8 = undefined;
+    const rel_path = if (ctx.cwd.len > 0)
+        r.replaceAll(args.path, ctx.cwd, ".", &buf)
+    else
+        args.path;
 
-        ctx.updateToolStatus(call, "(Reading Process) {s}", .{cleaned_path});
+    if (bg_match) |m| {
+        ctx.updateToolStatus(call, "(Reading Process) {s}", .{rel_path});
         if (ctx.swarm.exec.poll(m.handle)) |res| {
             defer ctx.swarm.exec.release(m.handle);
             {
@@ -112,12 +112,12 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         ctx.updateToolStatus(call, "(Read) {s}", .{args.path});
     } else if (args.limit) |l| {
         if (args.offset) |o| {
-            ctx.updateToolStatus(call, "(Read) {s} from line {d} ({d} lines)", .{ args.path, o, l });
+            ctx.updateToolStatus(call, "(Read) {s} from line {d} ({d} lines)", .{ rel_path, o, l });
         } else {
-            ctx.updateToolStatus(call, "(Read) {s} ({d} lines)", .{ args.path, l });
+            ctx.updateToolStatus(call, "(Read) {s} ({d} lines)", .{ rel_path, l });
         }
     } else if (args.offset) |o| {
-        ctx.updateToolStatus(call, "(Read) {s} from line {d}", .{ args.path, o });
+        ctx.updateToolStatus(call, "(Read) {s} from line {d}", .{ rel_path, o });
     }
 
     // Stat for mtime first so we can short-circuit unchanged re-reads.
