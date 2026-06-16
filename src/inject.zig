@@ -22,8 +22,8 @@ pub const InjectionsHooks = struct {
             .{ "mode", &inject_mode_information },
             .{ "task", &inject_task_information },
             .{ "budget", &inject_budget_information },
-            .{ "processes", &inject_processes_information },
-            // .{ "bg_agents", &inject_bg_agents_information },
+            .{ "background_bash", &inject_processes_information },
+            .{ "background_agents", &inject_bg_agents_information },
         }) |entry| {
             var list = std.ArrayList(Callback).empty;
             try list.append(alloc, .{ .zig = entry[1] });
@@ -44,9 +44,10 @@ pub const InjectionsHooks = struct {
 
         // applying standard name conventions for now
         try w.print("<system-reminder>\n", .{});
+
         while (it.next()) |en| {
-            try w.print("<{s}>\n", .{en.key_ptr.*});
             for (en.value_ptr.items) |hook| {
+                try w.print("<{s}>\n", .{en.key_ptr.*});
                 switch (hook) {
                     .zig => |call| {
                         try call(w, app, agent);
@@ -55,8 +56,8 @@ pub const InjectionsHooks = struct {
                         @panic("not yet implemented");
                     },
                 }
+                try w.print("</{s}>\n", .{en.key_ptr.*});
             }
-            try w.print("</{s}>\n", .{en.key_ptr.*});
             try w.flush();
 
             const text = w.toArrayList().items;
