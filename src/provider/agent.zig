@@ -397,13 +397,13 @@ pub const Agent = struct {
                     self.last_error = null;
                 }
 
-                if (compact.maybeStart(self) catch |err| return self.fail(err)) {
-                    return .pending;
-                }
-
                 if (!self.flags.turn_has_reminder) {
                     ctx.gen_system_reminders(ctx.ptr, self);
                     self.flags.turn_has_reminder = true;
+                }
+
+                if (compact.maybeStart(self) catch |err| return self.fail(err)) {
+                    return .pending;
                 }
 
                 self.pending_handle = apt.complete(
@@ -649,7 +649,8 @@ pub const Agent = struct {
         const msg_idx = self.chat.messages.items.len - 1;
 
         const result = try stream.finalize();
-        try self.chat.finalizeStreamingMessage(arena, msg_idx, result.message.parts);
+        const final_parts = try filterEmptyTextParts(arena, result.message.parts);
+        try self.chat.finalizeStreamingMessage(arena, msg_idx, final_parts);
 
         if (self.swarm) |swarm| {
             // Prefer finalize's authoritative usage; fall back to last in-flight
@@ -658,7 +659,7 @@ pub const Agent = struct {
             self.total_usage.add(final_usage);
             swarm.token_stats.add(final_usage);
             if (self.swarm_id) |id| {
-                swarm.recordBroadcast(id, result.message.role, result.message.parts);
+                swarm.recordBroadcast(id, result.message.role, final_parts);
             }
         }
         self.in_flight_usage = .{};
@@ -670,7 +671,7 @@ pub const Agent = struct {
         }
 
         var has_tool_calls = false;
-        for (result.message.parts) |part| {
+        for (final_parts) |part| {
             switch (part) {
                 .tool_call => {
                     has_tool_calls = true;
@@ -687,6 +688,33 @@ pub const Agent = struct {
 
         self.state = .complete;
         return .complete;
+    }
+
+    fn filterEmptyTextParts(alloc: std.mem.Allocator, parts: []const apt.ContentPart) ![]const apt.ContentPart {
+        var kept: usize = 0;
+        for (parts) |part| {
+            kept += switch (part) {
+                .text => |text| @intFromBool(std.mem.trim(u8, text, " \t\r\n").len > 0),
+                else => 1,
+            };
+        }
+        if (kept == parts.len) return parts;
+
+        const out = try alloc.alloc(apt.ContentPart, kept);
+        var i: usize = 0;
+        for (parts) |part| {
+            switch (part) {
+                .text => |text| if (std.mem.trim(u8, text, " \t\r\n").len > 0) {
+                    out[i] = part;
+                    i += 1;
+                },
+                else => {
+                    out[i] = part;
+                    i += 1;
+                },
+            }
+        }
+        return out;
     }
 
     fn popQueuedParts(self: *Agent, ctx: Swarm.SwarmContextV) ?[]const apt.ContentPart {
@@ -830,7 +858,29 @@ pub const Agent = struct {
         if (count == 0) return false;
 
         self.broadcastToolResults(results[0..count]);
-        try self.chat.addToolResults(self.arena.allocator(), results[0..count], self.loopGuardWarningForResults(results[0..count]));
+
+        var parts = std.ArrayList(r.adapter.ContentPart).empty;
+
+        const alloc = self.arena.allocator();
+        for (results[0..count]) |result| {
+            try parts.append(self.arena.allocator(), .{ .tool_result = .{
+                .call_id = try alloc.dupe(u8, result.call_id),
+                .name = try alloc.dupe(u8, result.name),
+                .content = try alloc.dupe(u8, result.content),
+                .is_error = result.is_error,
+            } });
+            // --
+        }
+
+        if (self.loopGuardWarningForResults(results[0..count])) |warn| {
+            try parts.append(alloc, .{ .text = try alloc.dupe(u8, warn) });
+        }
+
+        try self.chat.messages.append(alloc, .{
+            .role = .user,
+            .parts = try parts.toOwnedSlice(alloc),
+        });
+
         self.tool_call_done.clearRetainingCapacity();
         self.loop_guard.warnings.clearRetainingCapacity();
 

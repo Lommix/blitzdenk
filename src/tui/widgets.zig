@@ -499,7 +499,7 @@ test "Paragraph renders markdown table full width" {
     try body.pushSpan(alloc, .{ .content = "| a | 1 |", .kind = .table_row });
     try p.lines.append(alloc, body);
 
-    try std.testing.expectEqual(@as(u16, 3), p.totalHeight(alloc, 20));
+    try std.testing.expectEqual(@as(u16, 3), p.totalHeight(20));
 
     var buf = try Buffer.init(alloc, .{ .x = 0, .y = 0, .width = 20, .height = 3 });
     defer buf.deinit();
@@ -841,18 +841,13 @@ pub const Paragraph = struct {
 
     /// Total visual height after wrapping, including border rows. Caller uses
     /// this to size the area before render.
-    pub fn totalHeight(self: *const Paragraph, scratch: std.mem.Allocator, width: u16) u16 {
+    pub fn totalHeight(self: *const Paragraph, width: u16) u16 {
         const border_rows: u16 = self.topRows() + self.bottomRows();
         const inner_w = self.innerWidth(width);
         if (inner_w == 0) return border_rows;
 
-        var rows: std.ArrayList(Line) = .empty;
-        defer {
-            for (rows.items) |*row| row.deinit(scratch);
-            rows.deinit(scratch);
-        }
-        buildParagraphRows(scratch, self.lines.items, inner_w, &rows) catch return border_rows;
-        return border_rows +| @as(u16, @intCast(@min(rows.items.len, std.math.maxInt(u16))));
+        const rows = countParagraphRows(self.lines.items, inner_w);
+        return border_rows +| @as(u16, @intCast(@min(rows, std.math.maxInt(u16))));
     }
 
     /// Convenience: render with clip = area. Use `render` directly for cases
@@ -1070,6 +1065,84 @@ fn buildParagraphRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: 
         }
         i += 1;
     }
+}
+
+fn countParagraphRows(lines: []Line, width: u16) usize {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < lines.len) {
+        if (tableLineKind(&lines[i]) == .row and i + 1 < lines.len and tableLineKind(&lines[i + 1]) == .separator) {
+            var table_rows: usize = 1;
+            i += 2;
+            while (i < lines.len and tableLineKind(&lines[i]) == .row) : (i += 1) table_rows += 1;
+            count += table_rows + 1;
+            continue;
+        }
+
+        const wrapped = countWrappedRows(&lines[i], width);
+        count += if (wrapped == 0) 1 else wrapped;
+        i += 1;
+    }
+    return count;
+}
+
+fn countWrappedRows(src: *const Line, width: u16) usize {
+    var rows: usize = 0;
+    var col: usize = 0;
+
+    for (src.spans.items) |span| {
+        var pos: usize = 0;
+        while (pos < span.content.len) {
+            const is_space = span.content[pos] == ' ';
+            var end = pos + 1;
+            while (end < span.content.len and (span.content[end] == ' ') == is_space) end += 1;
+            const run = span.content[pos..end];
+            pos = end;
+
+            const run_cols = std.unicode.utf8CountCodepoints(run) catch run.len;
+            if (is_space) {
+                if (col > 0 and col + run_cols > width) {
+                    rows += 1;
+                    col = 0;
+                    continue;
+                }
+                col += run_cols;
+            } else if (run_cols <= width) {
+                if (col + run_cols > width) {
+                    rows += 1;
+                    col = 0;
+                }
+                col += run_cols;
+            } else {
+                var bi: usize = 0;
+                while (bi < run.len) {
+                    const remaining = width -| col;
+                    var take_bytes: usize = 0;
+                    var take_cols: usize = 0;
+                    while (bi + take_bytes < run.len and take_cols < remaining) {
+                        const len = std.unicode.utf8ByteSequenceLength(run[bi + take_bytes]) catch 1;
+                        if (bi + take_bytes + len > run.len) break;
+                        take_bytes += len;
+                        take_cols += 1;
+                    }
+                    if (take_cols == 0) {
+                        rows += 1;
+                        col = 0;
+                        continue;
+                    }
+                    col += take_cols;
+                    bi += take_bytes;
+                    if (col >= width and bi < run.len) {
+                        rows += 1;
+                        col = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    if (col > 0 or src.spans.items.len == 0) rows += 1;
+    return rows;
 }
 
 fn appendTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: *std.ArrayList(Line)) !void {

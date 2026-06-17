@@ -1432,7 +1432,7 @@ fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rec
                 l.pushText(arena, en.msg, .{}) catch {};
                 para.lines.append(arena, l) catch {};
 
-                const total_h = para.totalHeight(arena, notif_w);
+                const total_h = para.totalHeight(notif_w);
                 if (total_h == 0) continue;
 
                 const area = r.tui.Rect{
@@ -1529,7 +1529,7 @@ fn luaErrorHeight(app: *App, arena: std.mem.Allocator, width: u16, max_height: u
     if (msg.len == 0 or width == 0 or max_height == 0) return 0;
 
     var p = try luaErrorParagraph(arena, msg);
-    return @min(p.totalHeight(arena, width), max_height);
+    return @min(p.totalHeight(width), max_height);
 }
 
 fn renderLuaError(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
@@ -1587,14 +1587,14 @@ fn buildEntryParagraph(
             .thinking => |text| {
                 var p = r.tui.Paragraph{};
                 try p.appendText(arena, text, .{ .fg = app.theme.muted });
-                const h = p.totalHeight(arena, inner_w);
+                const h = p.totalHeight(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
             },
             .message => |text| {
                 var p = r.tui.Paragraph{};
                 try appendMarkdownText(&p, arena, text);
-                const h = p.totalHeight(arena, inner_w);
+                const h = p.totalHeight(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
             },
@@ -1603,13 +1603,13 @@ fn buildEntryParagraph(
             },
             .diff => |diff| {
                 const p = buildDiffParagraph(arena, diff);
-                const h = p.totalHeight(arena, inner_w);
+                const h = p.totalHeight(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
             },
             .tool_call => |call| {
                 const p = buildToolCallParagraph(arena, main_agent, app, call, inner_w);
-                const h = p.totalHeight(arena, inner_w);
+                const h = p.totalHeight(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
             },
@@ -1929,7 +1929,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
 
     if (app.isMainAgentCompacting()) {
         var p = buildCompactionIndicatorParagraph(alloc, app);
-        const h = p.totalHeight(alloc, inner_w);
+        const h = p.totalHeight(inner_w);
         stack.append(alloc, .{ .p = p, .h = h }) catch {};
         total += h;
     }
@@ -1958,7 +1958,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
             if (detail) |txt| {
                 try para.appendText(alloc, txt, .{ .fg = app.theme.warn, .modifier = .{ .italic = true } });
             }
-            const h = para.totalHeight(alloc, inner_w);
+            const h = para.totalHeight(inner_w);
             try stack.append(alloc, .{ .p = para, .h = h });
             total += h;
         }

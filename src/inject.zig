@@ -34,9 +34,8 @@ pub const InjectionsHooks = struct {
     }
 
     pub fn build(self: *const Self, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
-        var parts = std.ArrayList(r.prv.adapter.ContentPart).empty;
-
         const alloc = agent.arena.allocator();
+
         var writer = std.Io.Writer.Allocating.init(alloc);
         var w = &writer.writer;
 
@@ -59,14 +58,14 @@ pub const InjectionsHooks = struct {
                 try w.print("</{s}>\n", .{en.key_ptr.*});
             }
             try w.flush();
-
-            const text = w.toArrayList().items;
-            try parts.append(alloc, .{ .text = text });
         }
 
         try w.print("</system-reminder>\n", .{});
+        try w.flush();
 
-        try agent.chat.addMessage(alloc, .user, parts.items);
+        var parts = try alloc.alloc(r.prv.adapter.ContentPart, 1);
+        parts[0] = .{ .text = w.toArrayList().items };
+        try agent.chat.addMessage(alloc, .user, parts);
     }
 };
 

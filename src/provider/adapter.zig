@@ -350,34 +350,6 @@ pub const Chat = struct {
         });
     }
 
-    pub fn addToolResults(
-        self: *Chat,
-        alloc: Allocator,
-        results: []const ToolResult,
-        inject_user_note: ?[]const u8,
-    ) !void {
-        const len: u32 = @as(u32, @intCast(results.len)) + if (inject_user_note == null) @as(u32, 0) else @as(u32, 1);
-        const parts = try alloc.alloc(ContentPart, len);
-
-        for (results, 0..) |result, i| {
-            parts[i] = .{ .tool_result = .{
-                .call_id = try alloc.dupe(u8, result.call_id),
-                .name = try alloc.dupe(u8, result.name),
-                .content = try alloc.dupe(u8, result.content),
-                .is_error = result.is_error,
-            } };
-        }
-
-        if (inject_user_note) |note| {
-            parts[len - 1] = .{ .text = note };
-        }
-
-        try self.messages.append(alloc, .{
-            .role = .user,
-            .parts = parts,
-        });
-    }
-
     pub fn addTool(self: *Chat, alloc: Allocator, tool: ToolDef) !void {
         try self.tools.append(alloc, tool);
     }
