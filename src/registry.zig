@@ -57,21 +57,9 @@ pub const ToolFlags = struct {
         return s;
     }
 
-    pub fn addAgent(self: Self, val: AgentType) Self {
-        var s = self;
-        s.allowed_agents.insert(val);
-        return s;
-    }
-
     pub fn removeAgent(self: Self, val: AgentType) Self {
         var s = self;
         s.allowed_agents.remove(val);
-        return s;
-    }
-
-    pub fn always(self: Self) Self {
-        var s = self;
-        s.include_with_overrides = true;
         return s;
     }
 };
@@ -455,35 +443,23 @@ pub const ContextFactory = struct {
             }
         }
 
-        const m = @import("main.zig");
-        const global_context_path = m.DEFAULT_CONFIG_PATH ++ "CONTEXT.md";
-        if (std.Io.Dir.cwd().openFile(self.io, global_context_path, .{})) |user_ctx_file| {
-            var buf: [100]u8 = undefined;
-            var filer_reader = user_ctx_file.reader(self.io, &buf);
-            _ = try w.write("<user_context>\n");
-            _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-            _ = try w.write("</user_context>\n");
-        } else |_| {}
-
+        // global context
         if (self.config_dir) |dir| {
             inline for (CONTEXT_FILES) |context_file| {
                 if (dir.openFile(self.io, context_file, .{})) |user_ctx_file| {
                     var buf: [100]u8 = undefined;
                     var filer_reader = user_ctx_file.reader(self.io, &buf);
-                    _ = try w.write("<user_context>\n");
                     _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-                    _ = try w.write("</user_context>\n");
                 } else |_| {}
             }
         }
 
+        // local context
         inline for (CONTEXT_FILES) |context_file| {
             if (std.Io.Dir.cwd().openFile(self.io, context_file, .{})) |user_ctx_file| {
                 var buf: [100]u8 = undefined;
                 var filer_reader = user_ctx_file.reader(self.io, &buf);
-                _ = try w.write("<user_context>\n");
                 _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-                _ = try w.write("</user_context>\n");
             } else |_| {}
         }
 
