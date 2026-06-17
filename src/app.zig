@@ -1555,7 +1555,6 @@ fn buildEntryParagraph(
     inner_w: u16,
 ) !u32 {
     _ = agent; // autofix
-    _ = is_thinking; // autofix
     // var buf: [255]u8 = undefined;
 
     const main_agent = app.mainAgent() orelse return 0;
@@ -1577,19 +1576,28 @@ fn buildEntryParagraph(
     };
 
     try header_line.pushSpan(arena, .{ .content = role_text, .style = .{ .modifier = .{ .bold = true }, .fg = role_color } });
-    try header_para.lines.append(arena, header_line);
-    // Header last so it renders on top (stack is bottom-up)
-    try out.append(arena, .{ .p = header_para, .h = 1 });
-    total += 1;
 
-    for (entry.parts) |part| {
+    if (is_thinking) {
+        const spinner = text_utils.spinnerDots(app.frame_count);
+        try header_line.pushSpan(arena, .{ .content = "  thinking .. ", .style = .{ .fg = app.theme.muted } });
+        try header_line.pushSpan(arena, .{ .content = spinner, .style = .{ .modifier = .{ .bold = true } } });
+    }
+
+    // Header last so it renders on top (stack is bottom-up)
+
+    for (0..entry.parts.len) |i| {
+        const part = entry.parts[entry.parts.len - i - 1];
         switch (part) {
             .thinking => |text| {
-                var p = r.tui.Paragraph{};
-                try p.appendText(arena, text, .{ .fg = app.theme.muted });
-                const h = p.totalHeight(inner_w);
-                try out.append(arena, .{ .p = p, .h = h });
-                total += h;
+                if (app.flags.show_thinking) {
+                    var p = r.tui.Paragraph{};
+                    try p.appendText(arena, text, .{ .fg = app.theme.muted });
+                    const h = p.totalHeight(inner_w);
+                    try out.append(arena, .{ .p = p, .h = h });
+                    total += h;
+                } else if (!is_thinking) {
+                    try header_line.pushSpan(arena, .{ .content = "  had thought", .style = .{ .fg = app.theme.muted } });
+                }
             },
             .message => |text| {
                 var p = r.tui.Paragraph{};
@@ -1615,6 +1623,10 @@ fn buildEntryParagraph(
             },
         }
     }
+
+    try header_para.lines.append(arena, header_line);
+    try out.append(arena, .{ .p = header_para, .h = 1 });
+    total += 1;
 
     return total;
 }
@@ -1967,8 +1979,9 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
     // build in reverse
     var i = app.chat_entries.items.len;
 
+    const is_thinking = if (maybe_agent) |ag| ag.flags.is_thinking else false;
     if (app.streaming_entry) |entry| {
-        const block_height = try buildEntryParagraph(alloc, &stack, maybe_agent, app, entry, false, inner_w);
+        const block_height = try buildEntryParagraph(alloc, &stack, maybe_agent, app, entry, is_thinking, inner_w);
         total += block_height;
     }
 
@@ -1978,14 +1991,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
 
         if (maybe_agent == null) continue;
 
-        // Tool-call entries need a live agent to render; skip them entirely
-        // when there's no main agent yet (e.g. a system message before the
-        // first prompt).
-        // if (part == .tool_call) continue;
-        const is_last = i == app.chat_entries.items.len - 1;
-        const is_thinking = is_last and if (maybe_agent) |ag| ag.flags.is_thinking else false;
-
-        const block_height = try buildEntryParagraph(alloc, &stack, maybe_agent, app, entry, is_thinking, inner_w);
+        const block_height = try buildEntryParagraph(alloc, &stack, maybe_agent, app, entry, false, inner_w);
         total += block_height;
     }
 
