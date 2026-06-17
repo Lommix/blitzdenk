@@ -40,15 +40,16 @@ pub const PermissionState = union(enum) {
 
 pub const SwarmContextV = struct {
     ptr: *anyopaque,
-    broadcast: *const fn (*anyopaque, BroadcastEntry) void,
-    permission: *const fn (*anyopaque, PermissionReq) void,
-    build_config: *const fn (*anyopaque, cfg_mod.EffortLevel) anyerror!r.adapter.Config,
+
+    //async
+    permission: *const fn (*anyopaque, *PermissionReq) void,
     cwd: *const fn (*anyopaque) []const u8,
+    build_config: *const fn (*anyopaque, cfg_mod.EffortLevel) anyerror!r.adapter.Config,
+
+    //sync
+    broadcast: *const fn (*anyopaque, BroadcastEntry) void,
     gen_system_reminders: *const fn (*anyopaque, agent: *Agent) void,
     pop_queued_message: *const fn (*anyopaque, agent: AgentId, alloc: std.mem.Allocator) ?[]const apt.ContentPart,
-
-    // cwd
-    // events
 
     pub fn cast(self: SwarmContextV, comptime T: type) *T {
         return @ptrCast(@alignCast(self.ptr));
@@ -63,18 +64,7 @@ slots: [MAX_AGENTS]AgentSlot = [_]AgentSlot{.{}} ** MAX_AGENTS,
 pool: http.RequestPool,
 exec: r.exec.CmdPool,
 context: SwarmContextV,
-
-// bind
-// cfg: *const cfg_mod.BlitzdenkCfg,
-// env: *const std.process.Environ.Map,
-
-// move
-broadcast: std.ArrayListUnmanaged(BroadcastEntry) = .empty,
-broadcast_dropped: u64 = 0,
-// cwd: []const u8,
-// call_id -> req
 permission_requests: std.StringHashMapUnmanaged(PermissionReq) = .{},
-
 last_run_timestamp: ?i64 = null,
 token_stats: apt.TokenUsage = .{},
 
@@ -179,8 +169,6 @@ pub fn init(
 }
 
 pub fn reset(self: *Self) void {
-    self.broadcast.clearRetainingCapacity();
-    self.broadcast_dropped = 0;
     self.last_run_timestamp = null;
     self.wakeAllPermissions();
     self.permission_requests = .{};
@@ -533,55 +521,9 @@ pub fn getSlot(self: *Self, id: AgentId) ?*AgentSlot {
 
 pub fn recordBroadcast(self: *Self, agent_id: AgentId, role: apt.Role, parts: []const apt.ContentPart) void {
     // TODO: emit event_bus.agent_broadcast — needs event bus threaded through swarm
-    const alloc = self.arena.allocator();
-    const duped_parts = deepCopyParts(alloc, parts) catch return;
-    // Ring buffer: drop oldest entry once we reach cap. broadcast_dropped is
-    // bumped so consumers tracking absolute ids can rebase their cursor.
-    if (self.broadcast.items.len >= MAX_AGENTS) {
-        _ = self.broadcast.orderedRemove(0);
-        self.broadcast_dropped +%= 1;
-    }
-    self.broadcast.append(alloc, .{
+    self.context.broadcast(self.context.ptr, .{
         .agent_id = agent_id,
         .role = role,
-        .parts = duped_parts,
-    }) catch return;
-}
-
-pub fn getBroadcast(self: *const Self) []const BroadcastEntry {
-    return self.broadcast.items;
-}
-
-/// Absolute id for the first live entry in the ring.
-pub fn broadcastBaseId(self: *const Self) u64 {
-    return self.broadcast_dropped;
-}
-
-fn deepCopyParts(alloc: std.mem.Allocator, parts: []const apt.ContentPart) ![]const apt.ContentPart {
-    const duped = try alloc.alloc(apt.ContentPart, parts.len);
-    for (parts, 0..) |part, i| {
-        duped[i] = switch (part) {
-            .text => |txt| .{ .text = try alloc.dupe(u8, txt) },
-            .thinking => |th| .{ .thinking = .{
-                .text = try alloc.dupe(u8, th.text),
-                .signature = if (th.signature) |s| try alloc.dupe(u8, s) else null,
-            } },
-            .image => |img| .{ .image = .{
-                .media_type = try alloc.dupe(u8, img.media_type),
-                .data = try alloc.dupe(u8, img.data),
-            } },
-            .tool_call => |call| .{ .tool_call = .{
-                .id = try alloc.dupe(u8, call.id),
-                .name = try alloc.dupe(u8, call.name),
-                .arguments = try alloc.dupe(u8, call.arguments),
-            } },
-            .tool_result => |res| .{ .tool_result = .{
-                .call_id = try alloc.dupe(u8, res.call_id),
-                .name = try alloc.dupe(u8, res.name),
-                .content = try alloc.dupe(u8, res.content),
-                .is_error = res.is_error,
-            } },
-        };
-    }
-    return duped;
+        .parts = parts,
+    });
 }

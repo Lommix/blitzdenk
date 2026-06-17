@@ -2549,37 +2549,35 @@ fn luaSwarmAwaitAgentResult(L: ?*c.lua_State) callconv(.c) c_int {
     };
     const id = readAgentIdArg(state, "queue.await_agent_result", 1);
 
-    // Walk broadcast in reverse for the latest agent-role entry from this id.
-    const entries = a.swarm.broadcast.items;
-    var i: usize = entries.len;
-    while (i > 0) {
-        i -= 1;
-        const e = entries[i];
-        if (e.agent_id.index != id.index or e.agent_id.generation != id.generation) continue;
-        if (e.role != .agent) continue;
+    const agent = a.swarm.getAgent(id) orelse {
+        _ = c.luaL_error(state, "queue.await_agent_result: agent not found");
+        return 0;
+    };
 
-        var total: usize = 0;
-        for (e.parts) |p| switch (p) {
-            .text => |t| total += t.len,
-            else => {},
-        };
-        if (total == 0) {
-            _ = c.lua_pushlstring(state, "", 0);
-            return 1;
-        }
+    if (agent.chat.messages.items.len == 0) {
+        _ = c.luaL_error(state, "queue.await_agent_result: agent has no chat entries");
+        return 0;
+    }
 
-        // luaL_Buffer keeps the string off the Zig heap.
-        var b: c.luaL_Buffer = undefined;
-        c.luaL_buffinit(state, &b);
-        for (e.parts) |p| switch (p) {
-            .text => |t| c.luaL_addlstring(&b, t.ptr, t.len),
-            else => {},
-        };
-        c.luaL_pushresult(&b);
+    const last_msg = &agent.chat.messages.items[agent.chat.messages.items.len -| 1];
+
+    var total: usize = 0;
+    for (last_msg.parts) |p| switch (p) {
+        .text => |t| total += t.len,
+        else => {},
+    };
+    if (total == 0) {
+        _ = c.lua_pushlstring(state, "", 0);
         return 1;
     }
 
-    c.lua_pushnil(state);
+    var b: c.luaL_Buffer = undefined;
+    c.luaL_buffinit(state, &b);
+    for (last_msg.parts) |p| switch (p) {
+        .text => |t| c.luaL_addlstring(&b, t.ptr, t.len),
+        else => {},
+    };
+    c.luaL_pushresult(&b);
     return 1;
 }
 

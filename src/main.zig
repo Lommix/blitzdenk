@@ -224,23 +224,66 @@ pub fn run(
     errdefer term.deinit();
     defer term.deinit();
 
-    var app = try App.init(arena, gpa, &context_factory, cwd);
+    var app = try App.init(arena, io, gpa, &context_factory, cwd);
     defer app.deinit();
 
+    const log = std.log.scoped(.bridge);
+    _ = log; // autofix
     var swarm = try prv.Swarm.init(arena, io, .{
         .ptr = &app,
         //TODO: impl & wire
         .broadcast = (struct {
             fn func(ptr: *anyopaque, en: prv.Swarm.BroadcastEntry) void {
-                _ = ptr; // autofix
-                _ = en; // autofix
+                const a: *App = @ptrCast(@alignCast(ptr));
+
+                if (en.agent_id != a.main_agent_id) return;
+                if (en.role == .user) return;
+                if (en.role == .system) return;
+
+                const g = a.broadcast_queue.lock(a.io);
+                defer g.unlock();
+
+                g.ptr.appendBounded(en) catch return;
+
+                // var out: std.ArrayList(ChatEntry.MessagePart) = .empty;
+                // // use session alloc
+                // const alloc = a.sessionAlloc();
+                //
+                // for (en.parts) |part| {
+                //     switch (part) {
+                //         .tool_call => |call| {
+                //             a.chat_entries.append(alloc, .{ .tool_call = .{
+                //                 .call_id = alloc.dupe(u8, call.id) catch return,
+                //                 .tool_name = alloc.dupe(u8, call.name) catch return,
+                //             } }) catch |err| log.err("{any}", .{err});
+                //         },
+                //         .text => |msg| {
+                //             out.append(a.sessionAlloc(), .{
+                //                 .text = alloc.dupe(u8, msg) catch return,
+                //             }) catch |err| log.err("{any}", .{err});
+                //         },
+                //         else => {},
+                //     }
+                // }
+                //
+                // if (out.items.len == 0) return;
+                //
+                // a.chat_entries.append(alloc, .{ .message = .{
+                //     .role = en.role,
+                //     .parts = out.items,
+                // } }) catch |err| log.err("{any}", .{err});
             }
         }).func,
         //TODO: impl & wire
         .permission = (struct {
-            fn func(ptr: *anyopaque, en: prv.Swarm.PermissionReq) void {
-                _ = ptr; // autofix
-                _ = en; // autofix
+            fn func(ptr: *anyopaque, en: *prv.Swarm.PermissionReq) void {
+                const a: *App = @ptrCast(@alignCast(ptr));
+                const g = a.permission_queue.lock(a.io);
+                defer g.unlock();
+                g.ptr.appendBounded(en) catch {
+                    en.state = .denied;
+                    en.event.set(a.io);
+                };
             }
         }).func,
         .build_config = (struct {
@@ -350,7 +393,7 @@ pub fn run(
         }
 
         // Drain new agent messages from broadcast into chat_entries
-        app.drainBroadcast();
+        // app.drainBroadcast();
         // Mirror in-progress streaming message so TUI shows tokens as they arrive.
         app.syncStreamingPreview();
         app.syncCompactionIndicator();
@@ -448,6 +491,8 @@ pub fn run(
         }
 
         term.pollAndEnqueue(16);
+        try app.tick();
+
         while (true) {
             const next_event = term.nextEvent();
             if (next_event != .none) app.dirty = true;

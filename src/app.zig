@@ -225,15 +225,25 @@ pub const Notifications = struct {
     };
 };
 
+const Locked = r.prv.agent.Locked;
+
 pub const App = struct {
     /// Lives whole app run. Persistent state: history, keymap binds, cwd.
     arena_app: prv.ThreadSafeArena,
     /// Reset between sessions. Chat entries, input buffer, plans, diffs, queued msgs.
-    arena_session: std.heap.ArenaAllocator,
-
+    arena_session: prv.ThreadSafeArena,
+    mu: std.Io.Mutex = .init,
+    io: std.Io,
     input_buffer: std.ArrayList(u8) = .empty,
     input_cursor: u32 = 0,
     input_scroll_offset: u16 = 0,
+
+    // ---------------
+    // async interface
+    permission_queue: Locked(std.ArrayList(*r.prv.Swarm.PermissionReq)),
+    broadcast_queue: Locked(std.ArrayList(r.prv.Swarm.BroadcastEntry)),
+    //-----------------
+
     swarm: *prv.Swarm = undefined,
     config: prv.config.BlitzdenkCfg = .{},
     main_agent_id: ?prv.Swarm.AgentId = null,
@@ -277,6 +287,7 @@ pub const App = struct {
     // TODO: cleanup io
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         lua_allocator: std.mem.Allocator,
         agent_factory: *r.reg.ContextFactory,
         cwd: []const u8,
@@ -285,14 +296,21 @@ pub const App = struct {
         errdefer lua_vm.deinit();
 
         return App{
-            .arena_app = .init(allocator, agent_factory.io),
-            .arena_session = .init(allocator),
+            .arena_app = .init(allocator, io),
+            .arena_session = .init(allocator, io),
             .context_factory = agent_factory,
+            .io = io,
             .cwd = cwd,
             .cmd_queue = try r.cmd.CommandQueue.init(allocator),
             .lua_vm = lua_vm,
             .mcp_manager = r.mcp.Manager.init(allocator, agent_factory.io),
             .injection_hooks = try r.inject.InjectionsHooks.init(allocator),
+            .permission_queue = .{
+                .value = try .initCapacity(allocator, 16),
+            },
+            .broadcast_queue = .{
+                .value = try .initCapacity(allocator, 255),
+            },
         };
     }
 
@@ -352,6 +370,55 @@ pub const App = struct {
         self.lua_vm.disableAllMcp();
         self.event_bus.emit(self, .session_reset) catch {};
         self.reloadMcpTools() catch {};
+    }
+
+    pub fn tick(self: *App) !void {
+
+        // --------------------------------------------------
+        // drain broadcoast
+        {
+            const g = self.broadcast_queue.lock(self.io);
+            defer g.unlock();
+
+            for (g.ptr.items) |en| {
+                var out: std.ArrayList(ChatEntry.MessagePart) = .empty;
+                // use session alloc
+                const alloc = self.sessionAlloc();
+
+                for (en.parts) |part| {
+                    switch (part) {
+                        .tool_call => |call| {
+                            try self.chat_entries.append(alloc, .{ .tool_call = .{
+                                .call_id = alloc.dupe(u8, call.id) catch return,
+                                .tool_name = alloc.dupe(u8, call.name) catch return,
+                            } });
+                        },
+                        .text => |msg| {
+                            try out.append(alloc, .{
+                                .text = alloc.dupe(u8, msg) catch return,
+                            });
+                        },
+                        else => {},
+                    }
+                }
+
+                if (out.items.len > 0) {
+                    try self.chat_entries.append(alloc, .{ .message = .{
+                        .role = en.role,
+                        .parts = out.items,
+                    } });
+                }
+            }
+
+            g.ptr.clearRetainingCapacity();
+        }
+
+        // --------------------------------------------------
+        // pop permission
+        {}
+
+        self.syncStreamingPreview();
+        self.syncCompactionIndicator();
     }
 
     pub fn enterPermSelect(self: *App) void {
@@ -922,6 +989,7 @@ pub const App = struct {
             if (idx < self.chat_entries.items.len) {
                 const entry = &self.chat_entries.items[idx];
                 freeMessageParts(alloc, entry.message.parts);
+                alloc.free(entry.message.parts);
                 entry.message.parts = slice;
                 return;
             }
@@ -931,6 +999,7 @@ pub const App = struct {
             .role = msg.role,
             .parts = slice,
         } }) catch return;
+
         self.streaming_preview_idx = self.chat_entries.items.len - 1;
     }
 
@@ -961,59 +1030,6 @@ pub const App = struct {
             },
             else => {},
         };
-    }
-
-    /// Drain new broadcast entries from the swarm and push agent text messages.
-    pub fn drainBroadcast(self: *App) void {
-        const main_id = self.main_agent_id orelse return;
-        const entries = self.swarm.broadcast.items;
-        const base_id = self.swarm.broadcastBaseId();
-        const alloc = self.sessionAlloc();
-
-        if (self.broadcast_cursor < base_id) self.broadcast_cursor = base_id;
-
-        while (self.broadcast_cursor < base_id + entries.len) {
-            const local_idx: usize = @intCast(self.broadcast_cursor - base_id);
-            const entry = entries[local_idx];
-            self.broadcast_cursor += 1;
-
-            // Only main agent
-            if (entry.agent_id.index != main_id.index or entry.agent_id.generation != main_id.generation) continue;
-
-            for (entry.parts) |part| {
-                switch (part) {
-                    .tool_call => |call| {
-                        self.chat_entries.append(alloc, .{ .tool_call = .{
-                            .call_id = call.id,
-                            .tool_name = call.name,
-                        } }) catch continue;
-                    },
-                    else => {},
-                }
-            }
-
-            if (entry.role == .user) continue;
-            if (entry.role == .system) continue;
-
-            const final_parts = renderableParts(alloc, entry.parts) orelse continue;
-
-            // Replace the streaming preview with the canonical final message
-            if (self.streaming_preview_idx) |idx| {
-                if (idx < self.chat_entries.items.len) {
-                    const chat_entry = &self.chat_entries.items[idx];
-                    freeMessageParts(alloc, chat_entry.message.parts);
-                    chat_entry.message.parts = final_parts;
-                    self.streaming_preview_idx = null;
-                    continue;
-                }
-                self.streaming_preview_idx = null;
-            }
-
-            self.chat_entries.append(alloc, .{ .message = .{
-                .role = entry.role,
-                .parts = final_parts,
-            } }) catch continue;
-        }
     }
 };
 
@@ -1129,7 +1145,13 @@ fn emitAllOps(out: *std.ArrayList(r.tui.DiffLine), ops: []const DiffOp, base_lin
     }
 }
 
+pub const ChatMessage = struct {
+    role: prv.adapter.Role,
+    parts: []ChatEntry,
+};
+
 pub const ChatEntry = union(enum) {
+    // TODO redesign
     message: MessageEntry,
     diff: DiffEntry,
     plan: PlanEntry,

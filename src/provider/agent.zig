@@ -131,7 +131,7 @@ pub fn Guard(comptime T: type) type {
 pub fn Locked(comptime T: type) type {
     return struct {
         const Self = @This();
-        value: T = .{},
+        value: T = if (@hasDecl(T, "empty")) .empty else .{},
         mu: std.Io.Mutex = .init,
 
         pub fn lock(self: *Self, io: std.Io) Guard(T) {
