@@ -8,7 +8,7 @@ const cfg = prv.config;
 const tui = @import("tui/root.zig");
 
 const CONFIG_DIR = @import("main.zig").DEFAULT_CONFIG_PATH;
-const CONTEXT_FILES = .{ "CLAUDE.md", "AGENTS.md", "HERMES.md", "CONTEXT.md" };
+const CONTEXT_FILES = .{"AGENTS.md"};
 
 pub const default_tool_set = .{
     .{ tools.write.WriteTool, ToolFlags.empty.agents(&.{.main}) },
@@ -393,15 +393,39 @@ pub const ContextFactory = struct {
         _ = try w.write(self.agent_prompts.get(agent_type));
         try w.writeByte('\n');
 
+        // global context
+        if (self.config_dir) |dir| {
+            inline for (CONTEXT_FILES) |context_file| {
+                var buf: [255]u8 = undefined;
+                const path_len = try dir.realPath(self.io, &buf);
+
+                if (dir.openFile(self.io, context_file, .{})) |user_ctx_file| {
+                    try w.print("Instructions from: {s}/{s}\n", .{ buf[0..path_len], context_file });
+                    var filer_reader = user_ctx_file.reader(self.io, &buf);
+                    _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
+                } else |_| {}
+            }
+        }
+
+        try w.writeAll("\n\n");
+
+        // local context
+        inline for (CONTEXT_FILES) |context_file| {
+            if (std.Io.Dir.cwd().openFile(self.io, context_file, .{})) |user_ctx_file| {
+                var buf: [100]u8 = undefined;
+                try w.print("Instructions from: ./{s}\n", .{context_file});
+                var filer_reader = user_ctx_file.reader(self.io, &buf);
+                _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
+            } else |_| {}
+        }
+
         if (config.doc_count > 0) {
-            _ = try w.write("<docs>\n");
+            _ = try w.write("Available docs:\n");
             for (config.doc_entries[0..config.doc_count]) |entry| {
                 try w.print(
-                    \\  <doc>
-                    \\      <name>{s}</name>
-                    \\      <description>{s}</description>
-                    \\      <location>{s}</location>
-                    \\  </doc>
+                    \\name: "{s}"
+                    \\description: "{s}"
+                    \\location: "{s}"
                     \\
                 , .{
                     entry.getName(),
@@ -409,13 +433,15 @@ pub const ContextFactory = struct {
                     entry.getLocation(),
                 });
             }
-            _ = try w.write("</docs>\n");
         }
 
         if (self.skill_dir) |skill_dir| {
             var it = skill_dir.iterate();
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
             var header_buf: [4096]u8 = undefined;
+
+            _ = try w.write("Available skills:\n");
+
             while (try it.next(self.io)) |entry| {
                 if (entry.kind != .file) continue;
                 if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
@@ -429,11 +455,9 @@ pub const ContextFactory = struct {
                 };
 
                 try w.print(
-                    \\  <skill>
-                    \\      <name>{s}</name>
-                    \\      <description>{s}</description>
-                    \\      <location>{s}</location>
-                    \\  </skill>
+                    \\skill: "{s}"
+                    \\description: "{s}"
+                    \\location: "{s}"
                     \\
                 , .{
                     skill.name,
@@ -441,26 +465,6 @@ pub const ContextFactory = struct {
                     path,
                 });
             }
-        }
-
-        // global context
-        if (self.config_dir) |dir| {
-            inline for (CONTEXT_FILES) |context_file| {
-                if (dir.openFile(self.io, context_file, .{})) |user_ctx_file| {
-                    var buf: [100]u8 = undefined;
-                    var filer_reader = user_ctx_file.reader(self.io, &buf);
-                    _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-                } else |_| {}
-            }
-        }
-
-        // local context
-        inline for (CONTEXT_FILES) |context_file| {
-            if (std.Io.Dir.cwd().openFile(self.io, context_file, .{})) |user_ctx_file| {
-                var buf: [100]u8 = undefined;
-                var filer_reader = user_ctx_file.reader(self.io, &buf);
-                _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-            } else |_| {}
         }
 
         return allocating.written();

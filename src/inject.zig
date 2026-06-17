@@ -46,16 +46,25 @@ pub const InjectionsHooks = struct {
 
         while (it.next()) |en| {
             for (en.value_ptr.items) |hook| {
-                try w.print("<{s}>\n", .{en.key_ptr.*});
+                var hook_w = std.Io.Writer.Allocating.init(alloc);
+
                 switch (hook) {
                     .zig => |call| {
-                        try call(w, app, agent);
+                        try call(&hook_w.writer, app, agent);
                     },
                     .lua => {
                         @panic("not yet implemented");
                     },
                 }
-                try w.print("</{s}>\n", .{en.key_ptr.*});
+
+                const hook_res = try hook_w.toOwnedSlice();
+                defer alloc.free(hook_res);
+
+                if (hook_res.len > 0) {
+                    try w.print("<{s}>\n", .{en.key_ptr.*});
+                    try w.writeAll(hook_res);
+                    try w.print("</{s}>\n", .{en.key_ptr.*});
+                }
             }
             try w.flush();
         }
