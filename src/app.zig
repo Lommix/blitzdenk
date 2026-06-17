@@ -603,13 +603,16 @@ pub const App = struct {
                 r.tui.Constr{ .fixed = 1 }, // statusbar (pinned bottom)
             });
 
-        const lua_error_height = luaErrorHeight(app, frame_alloc, _combined_area.width, _combined_area.height);
+        const lua_error_height = luaErrorHeight(app, frame_alloc, _combined_area.width, _combined_area.height) catch 0;
         const _lua_error_area, const _chat_status_area =
             r.tui.Col(_combined_area, .{
                 r.tui.Constr{ .fixed = lua_error_height },
                 r.tui.Constr.fill,
             });
-        renderLuaError(app, frame_alloc, _lua_error_area, buf);
+
+        renderLuaError(app, frame_alloc, _lua_error_area, buf) catch |err| {
+            log.err("lua error render failed with {any}", .{err});
+        };
 
         var used_chat_lines: usize = 0;
         if (app.chat_entries.items.len == 0 and !app.isMainAgentCompacting()) {
@@ -1513,28 +1516,28 @@ fn renderCenteredStatusText(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer, sta
     }, area.width -| offset);
 }
 
-fn luaErrorParagraph(arena: std.mem.Allocator, msg: []const u8) r.tui.Paragraph {
+fn luaErrorParagraph(arena: std.mem.Allocator, msg: []const u8) !r.tui.Paragraph {
     var p: r.tui.Paragraph = .{
         .style = .{ .fg = .black, .bg = .red },
     };
-    appendPlainText(&p, arena, msg, .{ .fg = .black, .bg = .red });
+    try p.appendText(arena, msg, .{ .fg = .black, .bg = .red });
     return p;
 }
 
-fn luaErrorHeight(app: *App, arena: std.mem.Allocator, width: u16, max_height: u16) u16 {
+fn luaErrorHeight(app: *App, arena: std.mem.Allocator, width: u16, max_height: u16) !u16 {
     const msg = app.lua_vm.getLastError();
     if (msg.len == 0 or width == 0 or max_height == 0) return 0;
 
-    var p = luaErrorParagraph(arena, msg);
+    var p = try luaErrorParagraph(arena, msg);
     return @min(p.totalHeight(arena, width), max_height);
 }
 
-fn renderLuaError(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn renderLuaError(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
     if (area.width == 0 or area.height == 0) return;
     const msg = app.lua_vm.getLastError();
     if (msg.len == 0) return;
 
-    var p = luaErrorParagraph(arena, msg);
+    var p = try luaErrorParagraph(arena, msg);
     p.renderSimple(arena, area, buf);
 }
 
@@ -1590,7 +1593,7 @@ fn buildEntryParagraph(
             },
             .message => |text| {
                 var p = r.tui.Paragraph{};
-                try p.appendText(arena, text, .{});
+                try appendMarkdownText(&p, arena, text);
                 const h = p.totalHeight(arena, inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
@@ -1883,16 +1886,10 @@ fn appendThinkingText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []cons
     }
 }
 
-/// Run `raw` through the markdown highlighter, build logical Lines from spans
-/// (split on literal `"\n"` spans), append to `p.lines`. No pre-wrapping —
-/// Paragraph wraps at inner_w during render.
-fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8) void {
+fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8) !void {
     if (raw.len == 0) return;
     var hl = r.tui.MarkdownStreamingHighlighter.init(arena);
-    hl.feed(raw) catch {
-        appendPlainText(p, arena, raw, .{});
-        return;
-    };
+    try hl.feed(raw);
     hl.finish();
 
     var current: r.tui.Line = .{};
@@ -1900,15 +1897,15 @@ fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []cons
         .done, .need_bytes => break :drain,
         .span => |s| {
             if (std.mem.eql(u8, s.content, "\n")) {
-                p.lines.append(arena, current) catch return;
+                try p.lines.append(arena, current);
                 current = .{};
                 continue;
             }
-            current.pushSpan(arena, s) catch return;
+            try current.pushSpan(arena, s);
         },
     };
     if (current.spans.items.len > 0) {
-        p.lines.append(arena, current) catch return;
+        try p.lines.append(arena, current);
     }
 }
 

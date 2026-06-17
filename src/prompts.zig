@@ -56,18 +56,6 @@ pub const default_main_agent_prompt =
     \\
 ;
 
-pub const skill_prompt =
-    \\The following skills provide specialized instructions for specific tasks.
-    \\Use the read tool to load a skill's file when the task matches its description.
-    \\
-;
-
-pub const doc_prompt =
-    \\The following paths provide specialized information for specific documantation.
-    \\Use find, grep and read to search and explore.
-    \\
-;
-
 pub const default_sub_agent_prompt =
     \\You are a file search specialist. You excel at thoroughly navigating and exploring codebases.
     \\
