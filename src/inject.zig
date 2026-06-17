@@ -178,7 +178,7 @@ fn inject_env_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agen
     else
         app.cwd;
 
-    try w.print("CWD: {s}\n", .{cwd});
+    try w.print("cwd: {s}\n", .{cwd});
 
     if (agent.depth > 0) {
         if (agent.swarm) |swarm| {

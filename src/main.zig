@@ -503,7 +503,7 @@ pub fn run(
                 if (app.main_agent_id) |id| {
                     if (swarm.getAgent(id)) |agent| {
                         var set = reg.ToolSet{};
-                        context_factory.build_toolset(.main, &set) catch {};
+                        context_factory.build_toolset(.general, &set) catch {};
                         try agent.setTools(set.slice());
                     }
                 }
@@ -803,7 +803,7 @@ pub fn run(
                                         .spawn_agent = .{
                                             .agent_id = id,
                                             .effort = .max,
-                                            .agent_type = @intFromEnum(reg.AgentType.main),
+                                            .agent_type = @intFromEnum(reg.AgentType.general),
                                             .prompt = parts,
                                             .tool_budget = 1024,
                                             .chat_entry = chat_entry,

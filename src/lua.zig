@@ -1701,7 +1701,7 @@ fn luaMcpEnable(L: ?*c.lua_State) callconv(.c) c_int {
     const agent_type: @import("registry.zig").AgentType = if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL)
         readEnumArg(state, @import("registry.zig").AgentType, "mcp.enable", 2) orelse return 0
     else
-        .main;
+        .general;
 
     vm.mcp_entries.items[idx].enabled_agents.insert(agent_type);
 

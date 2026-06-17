@@ -5,33 +5,27 @@ const prompts = @import("../prompts.zig");
 
 pub const AgentTool = prv.tool.Tool{
     .def = .{
-        .name = "spawn_agent",
+        .name = "task",
         .description =
-        \\Spawns a sub-agent in the background and returns immediately with an agent id.
-        \\Use await_agent with the returned id to wait for completion and retrieve the result.
-        \\Use cancel_agent to cancel a running sub-agent.
-        \\Each tool call spawns exactly one sub-agent. To run multiple sub-agents in parallel, emit multiple Agent tool calls in the same response.
+        \\Launch a new agent to handle complex, multistep tasks autonomously.
         \\
-        \\## When to fork
+        \\When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
         \\
-        \\Fork yourself when the intermediate tool output isn't worth keeping in your context.
-        \\The criterion is qualitative — "will I need this output again" — not task size.
+        \\When NOT to use the Task tool:
+        \\- If you want to read a specific file path, use the Read or Glob tool instead of the Task tool, to find the match more quickly
+        \\- If you are searching for a specific class definition like "class Foo", use the Grep tool instead, to find the match more quickly
+        \\- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly
+        \\- If no available agent is a good fit for the task, use other tools directly
         \\
-        \\- **Research**: fork open-ended questions. If research can be broken into independent questions, launch parallel forks in one message. A fork beats a fresh subagent for this — it inherits context and shares your cache.
-        \\- **Implementation**: prefer to fork implementation work that requires more than a couple of edits. Do research before jumping to implementation.
         \\
-        \\Forks are cheap because they share your prompt cache
-        \\**Writing a fork prompt.** Since the fork inherits your context, the prompt is a _directive_ — what to do, not what the situation is. Be specific about scope: what's in, what's out, what another agent is handling. Don't re-explain background.
-        \\
-        \\## Writing the prompt
-        \\
-        \\When spawning a fresh agent it starts with zero context. Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
-        \\
-        \\- Explain what you're trying to accomplish and why.
-        \\- Describe what you've already learned or ruled out.
-        \\- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
-        \\- If you need a short response, say so ("report in under 200 words").
-        \\- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.
+        \\Usage notes:
+        \\1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
+        \\2. Once you have delegated work to an agent, do not duplicate that work yourself. Continue with non-overlapping tasks, or wait for the result. For background tasks, you will be notified automatically when the result is ready.
+        \\3. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result. The output includes a task_id you can reuse later to continue the same subagent session.
+        \\4. Each agent invocation starts with a fresh context unless you provide task_id to resume the same subagent session (which continues with its previous messages and tool outputs). When starting fresh, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
+        \\5. The agent's outputs should generally be trusted
+        \\6. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
+        \\7. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
         \\
         ,
         .parameters_schema =
@@ -40,17 +34,19 @@ pub const AgentTool = prv.tool.Tool{
         \\  "properties": {
         \\      "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
         \\      "prompt": {"type": "string", "description": "The task for the agent to perform"},
-        \\      "budget": {"type": "number", "description": "The amount of allowed tool calls before stopping. For most tasks between 10 - 30 depending on complexity is a good amount"},
-        \\      "effort": {"type": "string", "enum": ["min", "mid", "max"], "description": "Effort level deciding which model the child agent uses"},
-        \\      "type": {"type": "string", "enum": ["fork", "fresh"], "description": "forked agents inherit chat history, fresh start with an empty history"},
-        \\      "allow_write": {"type": "boolean", "default": false, "description": "allow write"}
+        \\      "agent_type": {"type": "string", "enum": ["general", "explore", "review"], "description": "The type of specialized agent to use for this task"}
         \\  },
-        \\  "required": ["description","prompt","budget","effort","type"]
+        \\  "required": ["description","prompt","agent_type"]
         \\}
         ,
     },
     .func = &run,
 };
+
+// TODO: subagents types
+// - general
+// - audit
+// - explore
 
 fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
     if (ctx.agent().depth != 0) {
@@ -58,15 +54,22 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     }
 
     const swarm = ctx.swarm;
+    _ = swarm; // autofix
     const self_id = ctx.self_id;
+    _ = self_id; // autofix
+
+    // todo: extend view lua
+    // NOTE: in sync with regitry.zig AgentType
+    const AgentType = enum {
+        general,
+        explore,
+        review,
+    };
 
     const Args = struct {
         description: []const u8,
         prompt: []const u8,
-        budget: u32,
-        effort: []const u8,
-        type: []const u8,
-        allow_write: bool = false,
+        agent_type: AgentType,
     };
 
     const parsed = std.json.parseFromSlice(
@@ -76,23 +79,9 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         .{ .ignore_unknown_fields = true },
     ) catch return r.errResult(call, "invalid arguments");
     const args = parsed.value;
-    const is_fork = std.mem.eql(u8, args.type, "fork");
-
-    if (is_fork) {
-        const slot = swarm.getSlot(self_id).?;
-        if (slot.agent.depth > 0) {
-            return r.errResult(call, "Forks are not allowed to fork again");
-        }
-    }
 
     const child_id = ctx.swarm.reserveFreeSlot() orelse
         return r.errResult(call, "No agent slots left");
-
-    const effort: prv.config.EffortLevel = elk: {
-        if (std.mem.eql(u8, "max", args.effort)) break :elk .max;
-        if (std.mem.eql(u8, "mid", args.effort)) break :elk .mid;
-        break :elk .min;
-    };
 
     const prompt = std.fmt.allocPrint(ctx.alloc,
         \\Your Task: {s}
@@ -103,25 +92,36 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     const parts = ctx.alloc.alloc(prv.adapter.ContentPart, 1) catch
         return r.errResult(call, "oom");
 
-    parts[0] = .{ .text = prompt };
+    const effort: prv.config.EffortLevel = switch (args.agent_type) {
+        .explore => .mid,
+        else => .max,
+    };
 
+    parts[0] = .{ .text = prompt };
     const app = ctx.swarm.context.cast(@import("../app.zig").App);
-    app.cmd_queue.append(ctx.io, .{ .spawn_agent = .{
-        .agent_id = child_id,
-        .parent_id = ctx.self_id,
-        .tool_budget = args.budget,
-        .prompt = parts,
-        .fork = is_fork,
-        .effort = effort,
-        .level = .read,
-    } }) catch return r.errResult(call, "command queue is full, inform user");
+    app.cmd_queue.append(ctx.io, .{
+        .spawn_agent = .{
+            .agent_id = child_id,
+            .parent_id = ctx.self_id,
+            .agent_type = @intFromEnum(args.agent_type),
+            .prompt = parts,
+            .effort = effort,
+            .level = .read, // TODO: read from type in registry or something
+        },
+    }) catch return r.errResult(call, "command queue is full, inform user");
 
     ctx.setToolChild(call, child_id);
 
-    if (is_fork) {
-        ctx.updateToolStatus(call, "(New Fork) {s} ({d})", .{ args.description, args.budget });
-    } else {
-        ctx.updateToolStatus(call, "(New {s} Agent) {s} ({d})", .{ args.effort, args.description, args.budget });
+    switch (args.agent_type) {
+        .general => {
+            ctx.updateToolStatus(call, "agent -> {s}", .{args.description});
+        },
+        .review => {
+            ctx.updateToolStatus(call, "review -> {s}", .{args.description});
+        },
+        .explore => {
+            ctx.updateToolStatus(call, "explore -> {s}", .{args.description});
+        },
     }
 
     {

@@ -45,7 +45,7 @@ pub fn loadSession(a: *app.App, w: *std.Io.Reader) !void {
     const id = try a.swarm.newAgent(
         .max,
         null,
-        @intFromEnum(reg.AgentType.main),
+        @intFromEnum(reg.AgentType.general),
         @intFromEnum(a.mode),
     );
 

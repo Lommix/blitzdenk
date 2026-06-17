@@ -11,8 +11,8 @@ const CONFIG_DIR = @import("main.zig").DEFAULT_CONFIG_PATH;
 const CONTEXT_FILES = .{"AGENTS.md"};
 
 pub const default_tool_set = .{
-    .{ tools.write.WriteTool, ToolFlags.empty.agents(&.{.main}) },
-    .{ tools.edit.EditTool, ToolFlags.empty.agents(&.{.main}) },
+    .{ tools.write.WriteTool, ToolFlags.empty.agents(&.{.general}) },
+    .{ tools.edit.EditTool, ToolFlags.empty.agents(&.{.general}) },
     .{ tools.bash.BashTool, ToolFlags.all },
     .{ tools.bash.CancelBackgroundCommand, ToolFlags.all },
     .{ tools.read.ReadTool, ToolFlags.all },
@@ -25,8 +25,8 @@ pub const default_tool_set = .{
     .{ tools.tasks.CreateTaskTool, ToolFlags.all },
     .{ tools.patch.PatchTool, ToolFlags.all },
     .{ tools.ask.AskTool, ToolFlags.all },
-    .{ tools.ssh.EnterSshMode, ToolFlags.empty.agents(&.{.main}) },
-    .{ tools.ssh.ExitSshMode, ToolFlags.empty.agents(&.{.main}) },
+    .{ tools.ssh.EnterSshMode, ToolFlags.empty.agents(&.{.general}) },
+    .{ tools.ssh.ExitSshMode, ToolFlags.empty.agents(&.{.general}) },
 };
 
 pub const Mode = enum(u6) {
@@ -37,8 +37,9 @@ pub const Mode = enum(u6) {
 
 pub const AgentType = enum(u6) {
     pub const Set = std.EnumSet(AgentType);
-    main,
-    sub,
+    general,
+    explore,
+    review,
     _,
 };
 
@@ -112,8 +113,9 @@ pub const ContextFactory = struct {
         }
 
         var agent_prompts = std.EnumArray(AgentType, []const u8).initFill("");
-        agent_prompts.set(.main, prompts.default_main_agent_prompt);
-        agent_prompts.set(.sub, prompts.default_sub_agent_prompt);
+        agent_prompts.set(.general, prompts.default_main_agent_prompt);
+        agent_prompts.set(.explore, prompts.explore_sub_agent_prompt);
+        agent_prompts.set(.review, prompts.review_sub_agent_prompt);
 
         const mode_prompts = std.EnumArray(Mode, []const u8).initFill("");
         const sparse_mode_prompts = std.EnumArray(Mode, []const u8).initFill("");
@@ -232,8 +234,9 @@ pub const ContextFactory = struct {
         self.mode_prompts.set(.exec, "");
         self.sparse_mode_prompts.set(.exec, "");
 
-        self.agent_prompts.set(.main, prompts.default_main_agent_prompt);
-        self.agent_prompts.set(.sub, prompts.default_sub_agent_prompt);
+        self.agent_prompts.set(.general, prompts.default_main_agent_prompt);
+        self.agent_prompts.set(.explore, prompts.explore_sub_agent_prompt);
+        self.agent_prompts.set(.review, prompts.review_sub_agent_prompt);
     }
 
     pub fn add(self: *Self, alloc: std.mem.Allocator, tool: prv.tool.Tool, flags: ToolFlags) !void {
