@@ -141,10 +141,10 @@ pub const Command = union(enum) {
             },
             .scroll_up => |delta| {
                 app.auto_scroll = false;
-                app.scroll_offset = @min(app.scroll_offset +| delta, std.math.maxInt(u16));
+                app.scroll_offset +|= delta;
             },
             .scroll_to => |val| {
-                app.scroll_offset = @min(val, std.math.maxInt(u16));
+                app.scroll_offset = val;
                 app.auto_scroll = false;
             },
             .scroll_down => |delta| {

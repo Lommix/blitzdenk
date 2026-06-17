@@ -513,6 +513,22 @@ test "Paragraph renders markdown table full width" {
     try std.testing.expectEqual(@as(u21, '│'), buf.get(19, 2).char);
 }
 
+test "Paragraph reverse scroll_offset skips bottom rows" {
+    const alloc = std.testing.allocator;
+    var p: Paragraph = .{ .reverse = true, .scroll_offset = 1 };
+    defer p.deinit(alloc);
+    try p.appendText(alloc, "a\nb\nc", .{});
+
+    var buf = try Buffer.init(alloc, .{ .width = 4, .height = 2 });
+    defer buf.deinit();
+    var scratch = std.heap.ArenaAllocator.init(alloc);
+    defer scratch.deinit();
+    p.renderSimple(scratch.allocator(), .{ .width = 4, .height = 2 }, &buf);
+
+    try std.testing.expectEqual(@as(u21, 'a'), buf.get(0, 0).char);
+    try std.testing.expectEqual(@as(u21, 'b'), buf.get(0, 1).char);
+}
+
 // ── Diff ──
 
 pub const DiffLineKind = enum { context, addition, deletion, header };
@@ -766,14 +782,15 @@ pub const Paragraph = struct {
     style: Style = .{},
     /// If true, lay out content bottom-up: bottom border at area bottom,
     /// content rows above it, top border on top. Rows that would land above
-    /// `area.y` are clipped. `scroll_offset` is ignored in reverse mode.
+    /// `area.y` are clipped. In reverse mode, `scroll_offset` skips rows from
+    /// the paragraph bottom.
     reverse: bool = false,
     /// Inner spacer between border (or area edge when borderless) and content.
     /// Subtracts from the content area on every side; size calculations
     /// (`innerWidth`, `totalHeight`) include it.
     padding: Padding = .{},
     lines: std.ArrayList(Line) = .empty,
-    scroll_offset: u16 = 0,
+    scroll_offset: usize = 0,
 
     pub fn deinit(self: *Paragraph, alloc: std.mem.Allocator) void {
         for (self.lines.items) |*l| l.deinit(alloc);
@@ -841,13 +858,17 @@ pub const Paragraph = struct {
 
     /// Total visual height after wrapping, including border rows. Caller uses
     /// this to size the area before render.
-    pub fn totalHeight(self: *const Paragraph, width: u16) u16 {
+    pub fn totalHeightLong(self: *const Paragraph, width: u16) usize {
         const border_rows: u16 = self.topRows() + self.bottomRows();
         const inner_w = self.innerWidth(width);
         if (inner_w == 0) return border_rows;
 
         const rows = countParagraphRows(self.lines.items, inner_w);
-        return border_rows +| @as(u16, @intCast(@min(rows, std.math.maxInt(u16))));
+        return @as(usize, border_rows) + rows;
+    }
+
+    pub fn totalHeight(self: *const Paragraph, width: u16) u16 {
+        return @intCast(@min(self.totalHeightLong(width), std.math.maxInt(u16)));
     }
 
     /// Convenience: render with clip = area. Use `render` directly for cases
@@ -952,7 +973,8 @@ pub const Paragraph = struct {
             // on rows with visible text. Layout is reverse or forward.
             if (self.reverse) {
                 const rows_count: i32 = @intCast(rows.items.len);
-                var i: i32 = rows_count - 1;
+                const skip: i32 = @intCast(@min(self.scroll_offset, rows.items.len));
+                var i: i32 = rows_count - 1 - skip;
                 var y: i32 = content_bottom;
                 while (i >= 0 and y >= content_top) : ({
                     i -= 1;
@@ -1007,7 +1029,8 @@ pub const Paragraph = struct {
         // No border kind: just lay out rows.
         if (self.reverse) {
             const rows_count: i32 = @intCast(rows.items.len);
-            var i: i32 = rows_count - 1;
+            const skip: i32 = @intCast(@min(self.scroll_offset, rows.items.len));
+            var i: i32 = rows_count - 1 - skip;
             var y: i32 = content_bottom;
             while (i >= 0 and y >= content_top) : ({
                 i -= 1;

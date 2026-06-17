@@ -391,48 +391,34 @@ pub const App = struct {
 
         // --------------------------------------------------
         // drain broadcoast
+        var saw_final_agent_broadcast = false;
         {
             const g = self.broadcast_queue.lock(self.io);
             defer g.unlock();
 
             for (g.ptr.items) |en| {
-                var out: std.ArrayList(ChatPart) = .empty;
-                // use session alloc
-                const alloc = self.sessionAlloc();
-
-                for (en.parts) |part| {
-                    switch (part) {
-                        .tool_call => |call| {
-                            try out.append(alloc, .{ .tool_call = .{
-                                .call_id = alloc.dupe(u8, call.id) catch return,
-                                .tool_name = alloc.dupe(u8, call.name) catch return,
-                            } });
-                        },
-                        .text => |msg| {
-                            try out.append(alloc, .{
-                                .message = alloc.dupe(u8, msg) catch return,
-                            });
-                        },
-                        else => {},
-                    }
+                if (en.role == .agent) {
+                    self.dropStreamingPreview();
+                    saw_final_agent_broadcast = true;
                 }
 
-                if (out.items.len > 0) {
+                const alloc = self.sessionAlloc();
+                if (renderableParts(alloc, en.parts)) |parts| {
                     try self.chat_entries.append(alloc, .{
                         .role = en.role,
-                        .parts = out.items,
+                        .parts = parts,
                     });
                 }
             }
 
             g.ptr.clearRetainingCapacity();
         }
+        if (!saw_final_agent_broadcast) self.syncStreamingPreview();
 
         // --------------------------------------------------
         // pop permission
         {}
 
-        self.syncStreamingPreview();
         self.syncCompactionIndicator();
     }
 
@@ -834,6 +820,14 @@ pub const App = struct {
                     if (trimmed.len == 0) continue;
                     const dup = alloc.dupe(u8, trimmed) catch continue;
                     out.append(alloc, .{ .thinking = dup }) catch continue;
+                },
+                .tool_call => |call| {
+                    const call_id = alloc.dupe(u8, call.id) catch continue;
+                    const tool_name = alloc.dupe(u8, call.name) catch continue;
+                    out.append(alloc, .{ .tool_call = .{
+                        .call_id = call_id,
+                        .tool_name = tool_name,
+                    } }) catch continue;
                 },
                 else => {},
             }
@@ -1541,7 +1535,7 @@ fn renderLuaError(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r
     p.renderSimple(arena, area, buf);
 }
 
-const RenderParagraphItem = struct { p: r.tui.Paragraph, h: u16 };
+const RenderParagraphItem = struct { p: r.tui.Paragraph, h: usize };
 /// Build one r.tui.Paragraph per ChatEntry. Allocations live in `arena`; do not
 /// deinit the result. All paragraphs use `reverse = true` so the chat-area
 /// caller can stack them bottom-up.
@@ -1553,13 +1547,13 @@ fn buildEntryParagraph(
     entry: ChatEntry,
     is_thinking: bool,
     inner_w: u16,
-) !u32 {
+) !usize {
     _ = agent; // autofix
     // var buf: [255]u8 = undefined;
 
     const main_agent = app.mainAgent() orelse return 0;
 
-    var total: u32 = 0;
+    var total: usize = 0;
     var header_para = r.tui.Paragraph{};
     var header_line = r.tui.Line{};
 
@@ -1592,7 +1586,7 @@ fn buildEntryParagraph(
                 if (app.flags.show_thinking) {
                     var p = r.tui.Paragraph{};
                     try p.appendText(arena, text, .{ .fg = app.theme.muted });
-                    const h = p.totalHeight(inner_w);
+                    const h = p.totalHeightLong(inner_w);
                     try out.append(arena, .{ .p = p, .h = h });
                     total += h;
                 } else if (!is_thinking) {
@@ -1602,7 +1596,7 @@ fn buildEntryParagraph(
             .message => |text| {
                 var p = r.tui.Paragraph{};
                 try appendMarkdownText(&p, arena, text);
-                const h = p.totalHeight(inner_w);
+                const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
             },
@@ -1611,13 +1605,13 @@ fn buildEntryParagraph(
             },
             .diff => |diff| {
                 const p = buildDiffParagraph(arena, diff);
-                const h = p.totalHeight(inner_w);
+                const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
             },
             .tool_call => |call| {
                 const p = buildToolCallParagraph(arena, main_agent, app, call, inner_w);
-                const h = p.totalHeight(inner_w);
+                const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
             },
@@ -1933,15 +1927,14 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
     const inner_h: u16 = area.height;
 
     var scroll_offset_usize: usize = if (app.auto_scroll) 0 else app.scroll_offset;
-    var scroll_offset: u16 = @intCast(@min(scroll_offset_usize, std.math.maxInt(u16)));
-    const target: u32 = @as(u32, inner_h) + @as(u32, scroll_offset);
+    const target: usize = @as(usize, inner_h) +| scroll_offset_usize;
 
     var stack: std.ArrayList(RenderParagraphItem) = .empty;
-    var total: u32 = 0;
+    var total: usize = 0;
 
     if (app.isMainAgentCompacting()) {
         var p = buildCompactionIndicatorParagraph(alloc, app);
-        const h = p.totalHeight(inner_w);
+        const h = p.totalHeightLong(inner_w);
         stack.append(alloc, .{ .p = p, .h = h }) catch {};
         total += h;
     }
@@ -1970,7 +1963,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
             if (detail) |txt| {
                 try para.appendText(alloc, txt, .{ .fg = app.theme.warn, .modifier = .{ .italic = true } });
             }
-            const h = para.totalHeight(inner_w);
+            const h = para.totalHeightLong(inner_w);
             try stack.append(alloc, .{ .p = para, .h = h });
             total += h;
         }
@@ -2001,7 +1994,6 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
             scroll_offset_usize = max_scroll;
             app.scroll_offset = max_scroll;
             if (max_scroll == 0) app.auto_scroll = true;
-            scroll_offset = @intCast(@min(scroll_offset_usize, std.math.maxInt(u16)));
         }
     }
 
@@ -2009,29 +2001,40 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
     // bottom border. When the stack does not fill the area, anchor below the
     // last visible row instead of the area bottom — keeps short chats top-aligned
     // and lets paragraphs grow downward until they hit the input.
-    const fill_bottom: u32 = @min(total, @as(u32, inner_h));
-    const anchor_start: i32 = @as(i32, area.y) + @as(i32, @intCast(fill_bottom)) + @as(i32, scroll_offset);
-    var anchor_y: i32 = anchor_start;
+    const viewport_top: i128 = area.y;
+    const viewport_bottom: i128 = @as(i128, area.y) + @as(i128, inner_h);
+    const fill_bottom: usize = @min(total, @as(usize, inner_h));
+    var anchor_y: i128 = @as(i128, area.y) + @as(i128, @intCast(fill_bottom)) + @as(i128, @intCast(scroll_offset_usize));
 
     for (stack.items) |e| {
-        const sub_top: i32 = anchor_y - @as(i32, e.h);
-        // sub.y must be u16; if sub_top is negative, clamp the rect's y to 0
-        // and reduce its height by the off-area amount. Paragraph.render will
-        // clip the rest against `area` via the clip rect.
-        const sub_y: u16 = if (sub_top < 0) 0 else @intCast(sub_top);
-        const sub_h_signed: i32 = anchor_y - sub_y;
-        const sub_h: u16 = if (sub_h_signed <= 0) 0 else if (sub_h_signed > std.math.maxInt(u16)) std.math.maxInt(u16) else @intCast(sub_h_signed);
-        const sub: r.tui.Rect = .{ .x = area.x, .y = sub_y, .width = inner_w, .height = sub_h };
-        // Logical area: keeps the original (possibly oversized / negative-top)
-        // footprint by preserving width/height. We pass the same sub_y but
-        // the paragraph's reverse layout anchors to sub.y + sub.height which
-        // equals anchor_y, so the bottom border lands correctly.
-        e.p.render(alloc, sub, area, buf);
-        anchor_y = sub_top;
-        if (anchor_y <= @as(i32, area.y)) break;
+        const item_bottom = anchor_y;
+        const item_top = item_bottom - @as(i128, @intCast(e.h));
+        defer anchor_y = item_top;
+
+        if (item_bottom <= viewport_top) break;
+        if (item_top >= viewport_bottom) continue;
+
+        const visible_top = @max(item_top, viewport_top);
+        const visible_bottom = @min(item_bottom, viewport_bottom);
+        if (visible_top >= visible_bottom) continue;
+
+        var p = e.p;
+        if (p.reverse) {
+            p.scroll_offset = @intCast(item_bottom - visible_bottom);
+        } else {
+            p.scroll_offset +|= @intCast(visible_top - item_top);
+        }
+
+        const sub: r.tui.Rect = .{
+            .x = area.x,
+            .y = @intCast(visible_top),
+            .width = inner_w,
+            .height = @intCast(visible_bottom - visible_top),
+        };
+        p.render(alloc, sub, area, buf);
     }
 
-    const consumed: u32 = if (total > scroll_offset) total - scroll_offset else 0;
+    const consumed: usize = if (total > scroll_offset_usize) total - scroll_offset_usize else 0;
     return @min(@as(usize, inner_h), consumed);
 }
 
@@ -2368,4 +2371,23 @@ test "emitDiffLines owns rendered content" {
     }
     try std.testing.expect(saw_delete);
     try std.testing.expect(saw_add);
+}
+
+test "renderableParts keeps streamed final parts together" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const parts = [_]prv.adapter.ContentPart{
+        .{ .thinking = .{ .text = " think " } },
+        .{ .text = " answer " },
+        .{ .tool_call = .{ .id = "call_1", .name = "bash", .arguments = "{}" } },
+    };
+
+    const rendered = App.renderableParts(alloc, &parts) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), rendered.len);
+    try std.testing.expectEqualStrings("think", rendered[0].thinking);
+    try std.testing.expectEqualStrings("answer", rendered[1].message);
+    try std.testing.expectEqualStrings("call_1", rendered[2].tool_call.call_id);
+    try std.testing.expectEqualStrings("bash", rendered[2].tool_call.tool_name);
 }
