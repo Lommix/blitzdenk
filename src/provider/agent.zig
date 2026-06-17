@@ -534,7 +534,8 @@ pub const Agent = struct {
         var rit = self.tool_call_runs.iterator();
         while (rit.next()) |en| en.value_ptr.*.cancel.store(true, .release);
 
-        if (self.swarm) |sw| sw.wakeAllPermissions();
+        // cleanup somewhere
+        // if (self.swarm) |sw| sw.wakeAllPermissions();
 
         var dit = self.tool_call_runs.iterator();
         while (dit.next()) |en| _ = en.value_ptr.*.fut.cancel(self.pool.io);

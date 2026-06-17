@@ -2046,17 +2046,15 @@ fn luaSetChildId(L: ?*c.lua_State) callconv(.c) c_int {
 /// Block on the perm event, then push (status_int, payload?) onto the Lua
 /// stack. payload is the chosen option string for .choice, the user message
 /// for .message, or nil otherwise. Returns 2 (status, payload).
-fn awaitPermAndPush(state: *c.lua_State, bridge: *CtxBridge, options: []const []const u8) c_int {
-    const ctx = bridge.tool_ctx;
-    const req = ctx.swarm.permission_requests.getPtr(bridge.tool_call.id) orelse {
+fn awaitPermAndPush(state: *c.lua_State, io: std.Io, req: *r.prv.Swarm.PermissionReq, options: []const []const u8) c_int {
+    req.event.wait(io) catch {
         return pushStatusNil(state, REQ_STATUS_DENIED);
     };
-    req.event.wait(ctx.io) catch {
-        return pushStatusNil(state, REQ_STATUS_DENIED);
-    };
-    if (ctx.isCanceled()) {
-        return pushStatusNil(state, REQ_STATUS_DENIED);
-    }
+
+    // do i need this?
+    // if (ctx.isCanceled()) {
+    //     return pushStatusNil(state, REQ_STATUS_DENIED);
+    // }
 
     switch (req.state) {
         .pending => return pushStatusNil(state, REQ_STATUS_DENIED),
@@ -2104,18 +2102,17 @@ fn luaAsk(L: ?*c.lua_State) callconv(.c) c_int {
         options.append(bridge.tool_ctx.alloc, readAnyValue([]const u8, state, -1).?) catch break;
     }
 
-    bridge.tool_ctx.swarm.requestPermission(bridge.tool_call.id, .{
+    var req = r.prv.Swarm.PermissionReq{
         .agent_id = bridge.tool_ctx.self_id,
         .payload = .{ .ask = .{
             .header = header,
             .question = question,
             .options = options.items,
         } },
-    }) catch {
-        return pushStatusNil(state, REQ_STATUS_DENIED);
     };
 
-    return awaitPermAndPush(state, bridge, options.items);
+    bridge.tool_ctx.swarm.requestPermission(&req);
+    return awaitPermAndPush(state, bridge.tool_ctx.io, &req, options.items);
 }
 
 fn luaApprove(L: ?*c.lua_State) callconv(.c) c_int {
@@ -2131,17 +2128,16 @@ fn luaApprove(L: ?*c.lua_State) callconv(.c) c_int {
     const tool_name = readAnyValue([]const u8, state, 2).?;
     const tool_arguments = readAnyValue([]const u8, state, 3).?;
 
-    bridge.tool_ctx.swarm.requestPermission(bridge.tool_call.id, .{
+    var req = r.prv.Swarm.PermissionReq{
         .agent_id = bridge.tool_ctx.self_id,
         .payload = .{ .call = .{
             .tool_name = tool_name,
             .tool_arguments = tool_arguments,
         } },
-    }) catch {
-        return pushStatusNil(state, REQ_STATUS_DENIED);
     };
 
-    return awaitPermAndPush(state, bridge, &.{});
+    bridge.tool_ctx.swarm.requestPermission(&req);
+    return awaitPermAndPush(state, bridge.tool_ctx.io, &req, &.{});
 }
 
 fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
@@ -2157,17 +2153,16 @@ fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
     const path = readAnyValue([]const u8, state, 2).?;
     const plan_text = readAnyValue([]const u8, state, 3).?;
 
-    bridge.tool_ctx.swarm.requestPermission(bridge.tool_call.id, .{
+    var req = r.prv.Swarm.PermissionReq{
         .agent_id = bridge.tool_ctx.self_id,
         .payload = .{ .plan = .{
             .path = path,
             .plan_text = plan_text,
         } },
-    }) catch {
-        return pushStatusNil(state, REQ_STATUS_DENIED);
     };
 
-    return awaitPermAndPush(state, bridge, &.{});
+    bridge.tool_ctx.swarm.requestPermission(&req);
+    return awaitPermAndPush(state, bridge.tool_ctx.io, &req, &.{});
 }
 
 fn luaPushNotification(L: ?*c.lua_State) callconv(.c) c_int {
@@ -2348,9 +2343,13 @@ fn luaQueuePushChatEntry(L: ?*c.lua_State) callconv(.c) c_int {
     };
 
     const text = readAnyArg([]const u8, state, "queue.push_chat_entry", 2) orelse return 0;
-    const parts = [_]app.ChatEntry.MessagePart{.{ .text = text }};
+
+    var parts = a.sessionAlloc().alloc(r.app.ChatPart, 1) catch return 0;
+    parts[0] = .{ .message = text };
+
     appQueueEnqueue(state, "queue.push_chat_entry", a, .{ .push_chat_entry = .{
-        .message = .{ .role = role, .parts = &parts },
+        .role = role,
+        .parts = parts,
     } });
     return 0;
 }

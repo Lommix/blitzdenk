@@ -780,13 +780,21 @@ pub const Paragraph = struct {
         self.lines.deinit(alloc);
     }
 
-    pub fn appendText(self: *Paragraph, alloc: std.mem.Allocator, text: []const u8) !void {
+    pub fn appendText(self: *Paragraph, alloc: std.mem.Allocator, text: []const u8, style: Style) !void {
         var it = std.mem.splitAny(u8, text, "\n");
         while (it.next()) |line| {
             var l = Line{};
-            try l.pushText(alloc, line, .{});
+            try l.pushText(alloc, line, style);
             try self.lines.append(alloc, l);
         }
+    }
+
+    pub fn appendLineSpan(self: *Paragraph, alloc: std.mem.Allocator, spans: []const Span) !void {
+        var line = Line{};
+        for (spans) |span| {
+            try line.pushSpan(alloc, span);
+        }
+        try self.lines.append(alloc, line);
     }
 
     fn borderSet(self: *const Paragraph) ?BorderSet {

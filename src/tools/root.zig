@@ -48,7 +48,7 @@ pub fn replaceAll(input: []const u8, needle: []const u8, replacement: []const u8
     return buffer[0..out_len];
 }
 
-pub fn truncateOutput(
+pub fn truncateOutputToOwned(
     alloc: std.mem.Allocator,
     output: []const u8,
     max_bytes: usize,
@@ -80,11 +80,14 @@ pub fn truncateOutput(
     if (end_byte >= output.len) return output;
 
     const slice = output[0..end_byte];
-    return std.fmt.allocPrint(
+
+    const out = std.fmt.allocPrint(
         alloc,
-        "{s}\n[output truncated: showing {d} of {d} bytes, {d} of {d} lines]",
+        "<result>\n{s}\n</result>\n..<stats>showing {d} of {d} bytes, {d} of {d} lines</stats>",
         .{ slice, end_byte, output.len, lines_collected, total_lines },
     ) catch slice;
+
+    return std.unicode.fmtUtf8(out).data;
 }
 
 fn countLines(output: []const u8) usize {

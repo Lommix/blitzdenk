@@ -63,12 +63,15 @@ pub const ToolContext = struct {
         level: Swarm.PermissionLevel,
         payload: Swarm.PermissionPayload,
     ) Swarm.PermissionState {
-        self.swarm.requestPermission(call_id, .{
+        var req = Swarm.PermissionReq{
             .agent_id = self.self_id,
             .level = level,
+            .call_id = call_id,
             .payload = payload,
-        }) catch return .denied;
-        const req = self.swarm.permission_requests.getPtr(call_id) orelse return .denied;
+        };
+
+        self.swarm.requestPermission(&req);
+
         req.event.wait(self.io) catch return .denied;
         if (self.isCanceled()) return .denied;
         return req.state;

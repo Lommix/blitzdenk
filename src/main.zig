@@ -395,15 +395,35 @@ pub fn run(
         // Drain new agent messages from broadcast into chat_entries
         // app.drainBroadcast();
         // Mirror in-progress streaming message so TUI shows tokens as they arrive.
-        app.syncStreamingPreview();
-        app.syncCompactionIndicator();
+        perm: {
+            if (app.active_permission != null) break :perm;
 
-        const pending_perm = app.firstPendingPermission();
+            const g = app.permission_queue.lock(io);
+            defer g.unlock();
+
+            if (g.ptr.items.len == 0) break :perm;
+
+            for (0..g.ptr.items.len) |_| {
+                const next = g.ptr.swapRemove(0);
+
+                // check permission level against flags
+                if (app.flags.skip_permissions and !app.swarm.exec.ssh_active) {
+                    next.state = .approved;
+                    next.event.set(app.io);
+                    continue;
+                }
+
+                if (app.swarm.getSlotState(next.agent_id) == .active) {
+                    app.active_permission = next;
+                    break :perm;
+                }
+            }
+        }
 
         // Drive input_mode from perm presence — single source of truth.
         switch (app.input_mode) {
-            .text => if (pending_perm != null) app.enterPermSelect(),
-            .perm_select, .perm_message => if (pending_perm == null) app.returnToText(),
+            .text => if (app.active_permission != null) app.enterPermSelect(),
+            .perm_select, .perm_message => if (app.active_permission == null) app.returnToText(),
             .passphrase => {},
         }
 
@@ -501,7 +521,7 @@ pub fn run(
                     if (app.keymap.parse(k)) |action| {
                         switch (action) {
                             .exit => {
-                                if (pending_perm == null and app.running) {
+                                if (app.active_permission == null and app.running) {
                                     try app.cmd_queue.append(io, .cancel);
                                 } else {
                                     break :main_loop;
@@ -562,8 +582,7 @@ pub fn run(
                                     app.appendBytes(k.textSlice());
                                 },
                                 .perm_select => |*ps| {
-                                    const pen = pending_perm orelse break;
-                                    const entry = app.swarm.permission_requests.getPtr(pen.call_id) orelse break;
+                                    const entry = app.active_permission orelse break;
 
                                     const max_sel: u8 = switch (entry.payload) {
                                         .ask => |a| @intCast(@min(a.options.len, tools.ask.MAX_OPTIONS)),
@@ -600,8 +619,7 @@ pub fn run(
                         .arrow_down => switch (app.input_mode) {
                             .text => if (!app.running) app.historyDown(),
                             .perm_select => |*ps| {
-                                const pen = pending_perm orelse break;
-                                const entry = app.swarm.permission_requests.getPtr(pen.call_id) orelse break;
+                                const entry = app.active_permission orelse break;
                                 const max_sel: u8 = switch (entry.payload) {
                                     .ask => |a| @intCast(@min(a.options.len, tools.ask.MAX_OPTIONS)),
                                     .plan => 3,
@@ -630,8 +648,7 @@ pub fn run(
                         },
                         .enter => switch (app.input_mode) {
                             .perm_message => |*pm| {
-                                const pen = pending_perm orelse break;
-                                const entry = app.swarm.permission_requests.getPtr(pen.call_id) orelse break;
+                                const entry = app.active_permission orelse break;
 
                                 const is_ask = entry.payload == .ask;
 
@@ -641,17 +658,15 @@ pub fn run(
                                 }
                                 const msg = pm.buf[0..pm.len];
                                 if (is_ask) {
-                                    app.resolvePermission(pen.call_id, .{ .message = msg });
+                                    app.resolveActivePermission(.{ .message = msg });
                                 } else {
-                                    app.denyAndPopPermission(pen.call_id, msg);
+                                    app.resolveActivePermission(.denied);
                                 }
                                 app.auto_scroll = true;
                                 app.scroll_offset = 0;
                             },
                             .perm_select => |*ps| {
-                                const pen = pending_perm orelse break;
-                                const entry = app.swarm.permission_requests.getPtr(pen.call_id) orelse break;
-
+                                const entry = app.active_permission orelse break;
                                 if (entry.payload == .ask) {
                                     const args = entry.payload.ask;
                                     const opts_len: u8 = @intCast(@min(args.options.len, tools.ask.MAX_OPTIONS));
@@ -661,94 +676,16 @@ pub fn run(
                                         break;
                                     }
 
-                                    app.resolvePermission(pen.call_id, .{ .choice = ps.selected });
+                                    app.resolveActivePermission(.{ .choice = ps.selected });
                                     app.auto_scroll = true;
                                     app.scroll_offset = 0;
                                     break;
                                 }
 
-                                // Plan approval: 4 options
-                                //   0 = approve & clear, 1 = approve & keep, 2 = no, 3 = enter message
-                                if (entry.payload == .plan) {
-                                    switch (ps.selected) {
-                                        0 => {
-
-                                            // Approve & clear — reset, spawn fresh exec agent.
-                                            // No need to resolve; reset() drops the perm map.
-                                            // plan_text and plan_entry must survive state.reset() below — stash in app arena.
-                                            const plan_text = app.appAlloc().dupe(u8, entry.payload.plan.plan_text) catch break;
-                                            const plan_entry_src: ChatEntry.PlanEntry = blk: {
-                                                for (0..app.chat_entries.items.len) |i| {
-                                                    const idx = app.chat_entries.items.len - i - 1;
-                                                    switch (app.chat_entries.items[idx]) {
-                                                        .plan => |pe| break :blk pe,
-                                                        else => continue,
-                                                    }
-                                                }
-                                                return error.NoPlanPreview;
-                                            };
-                                            const plan_entry = try util.deepClone(ChatEntry.PlanEntry, plan_entry_src, app.appAlloc());
-
-                                            app.reset();
-                                            app.mode = @enumFromInt(0);
-
-                                            var set = reg.ToolSet{};
-                                            context_factory.build_toolset(.main, &set) catch {};
-
-                                            const id = try app.swarm.newAgent(
-                                                .max,
-                                                null,
-                                                @intFromEnum(reg.AgentType.main),
-                                                @intFromEnum(app.mode),
-                                            );
-
-                                            const agent = app.swarm.getAgent(id).?;
-                                            try app.configureAgent(agent);
-
-                                            agent.max_iterations = std.math.maxInt(u32);
-                                            agent.max_allowed_tool_calls = std.math.maxInt(u32);
-                                            agent.permission_level = .write;
-
-                                            app.pushChatMessage(.user, plan_text);
-                                            const plan_entry_session = try util.deepClone(ChatEntry.PlanEntry, plan_entry, app.sessionAlloc());
-                                            try app.chat_entries.append(app.sessionAlloc(), .{ .plan = plan_entry_session });
-                                            app.main_agent_id = id;
-                                            app.running = true;
-                                            app.auto_scroll = true;
-                                            app.scroll_offset = 0;
-
-                                            app.swarm.runAgentWithMsg(id, &.{.{ .text = plan_text }}) catch break;
-                                        },
-                                        1 => {
-                                            // Approve & keep — same agent, switch mode, lift caps.
-                                            app.mode = @enumFromInt(0);
-
-                                            if (app.main_agent_id) |id| {
-                                                const agent = app.swarm.getAgent(id) orelse break;
-                                                agent.max_iterations = std.math.maxInt(u32);
-                                                agent.max_allowed_tool_calls = std.math.maxInt(u32);
-                                            }
-
-                                            app.resolvePermission(pen.call_id, .approved);
-                                            app.running = true;
-                                            app.auto_scroll = true;
-                                            app.scroll_offset = 0;
-                                        },
-                                        2 => {
-                                            app.denyAndPopPermission(pen.call_id, null);
-                                            app.auto_scroll = true;
-                                            app.scroll_offset = 0;
-                                        },
-                                        3 => app.enterPermMessage(),
-                                        else => {},
-                                    }
-                                    break;
-                                }
-
                                 // Generic 3-option (yes / no / enter message)
                                 switch (ps.selected) {
-                                    0 => app.resolvePermission(pen.call_id, .approved),
-                                    1 => app.denyAndPopPermission(pen.call_id, null),
+                                    0 => app.resolveActivePermission(.approved),
+                                    1 => app.resolveActivePermission(.denied),
                                     2 => {
                                         app.enterPermMessage();
                                         break;
@@ -781,7 +718,7 @@ pub fn run(
                                             } };
                                         }
 
-                                        const chat_msg = try ChatEntry.userMessageSimple(alloc, input);
+                                        const chat_msg = try ChatEntry.userMessageSimple(alloc, .user, input);
                                         try app.cmd_queue.append(io, .{ .queue_agent_message = .{
                                             .agent_id = agent_id,
                                             .parts = parts,
@@ -855,7 +792,7 @@ pub fn run(
 
                                 app.screenshot_buf = null;
 
-                                const chat_entry = try ChatEntry.userMessageSimple(app.sessionAlloc(), input);
+                                const chat_entry = try ChatEntry.userMessageSimple(app.sessionAlloc(), .user, input);
 
                                 if (app.main_agent_id) |id| {
                                     try app.chat_entries.append(alloc, chat_entry);

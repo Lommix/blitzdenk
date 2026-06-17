@@ -24,6 +24,7 @@ pub const PermissionPayload = union(enum) {
 
 pub const PermissionReq = struct {
     agent_id: AgentId,
+    call_id: ?[]const u8 = null,
     state: PermissionState = .pending,
     level: PermissionLevel = .minor,
     payload: PermissionPayload,
@@ -38,16 +39,17 @@ pub const PermissionState = union(enum) {
     message: []const u8,
 };
 
+///! the swarm vtable and hooks
 pub const SwarmContextV = struct {
     ptr: *anyopaque,
 
     //async
+    broadcast: *const fn (*anyopaque, BroadcastEntry) void,
     permission: *const fn (*anyopaque, *PermissionReq) void,
     cwd: *const fn (*anyopaque) []const u8,
     build_config: *const fn (*anyopaque, cfg_mod.EffortLevel) anyerror!r.adapter.Config,
 
     //sync
-    broadcast: *const fn (*anyopaque, BroadcastEntry) void,
     gen_system_reminders: *const fn (*anyopaque, agent: *Agent) void,
     pop_queued_message: *const fn (*anyopaque, agent: AgentId, alloc: std.mem.Allocator) ?[]const apt.ContentPart,
 
@@ -64,7 +66,6 @@ slots: [MAX_AGENTS]AgentSlot = [_]AgentSlot{.{}} ** MAX_AGENTS,
 pool: http.RequestPool,
 exec: r.exec.CmdPool,
 context: SwarmContextV,
-permission_requests: std.StringHashMapUnmanaged(PermissionReq) = .{},
 last_run_timestamp: ?i64 = null,
 token_stats: apt.TokenUsage = .{},
 
@@ -156,22 +157,16 @@ pub fn init(
     var pool: http.RequestPool = .{};
     try pool.init(alloc, io);
 
-    var self: Self = .{
+    return .{
         .arena = std.heap.ArenaAllocator.init(alloc),
         .pool = pool,
         .exec = r.exec.CmdPool.init(alloc, io, env),
         .context = context,
     };
-    // Pre-reserve so concurrent inserts from worker threads do not rehash
-    // and invalidate getPtr results held by the UI.
-    try self.permission_requests.ensureTotalCapacity(self.arena.allocator(), tc.MAX_TOOL_CALLS_PER_REQ * MAX_AGENTS);
-    return self;
 }
 
 pub fn reset(self: *Self) void {
     self.last_run_timestamp = null;
-    self.wakeAllPermissions();
-    self.permission_requests = .{};
     for (&self.slots) |*slot| {
         const s = slot.state.load(.acquire);
         if (s == .free or s == .reserved) continue;
@@ -181,7 +176,6 @@ pub fn reset(self: *Self) void {
         slot.* = .{};
     }
     _ = self.arena.reset(.retain_capacity);
-    self.permission_requests.ensureTotalCapacity(self.arena.allocator(), tc.MAX_TOOL_CALLS_PER_REQ * MAX_AGENTS) catch {};
 }
 
 pub fn deinit(self: *Self) void {
@@ -413,9 +407,6 @@ pub fn cancelAll(self: *Self) void {
             slot.* = .{};
         }
     }
-
-    self.wakeAllPermissions();
-    self.permission_requests.clearRetainingCapacity();
 }
 
 fn progress_time(self: *Self) f32 {
@@ -465,51 +456,6 @@ pub fn countActive(self: *const Self) u32 {
     return count;
 }
 
-pub const PermissionEntry = struct {
-    call_id: []const u8,
-    req: *PermissionReq,
-};
-
-pub fn nextPendingPermission(self: *Self) ?PermissionEntry {
-    var it = self.permission_requests.iterator();
-    while (it.next()) |en| {
-        if (en.value_ptr.state == .pending) return .{
-            .call_id = en.key_ptr.*,
-            .req = en.value_ptr,
-        };
-    }
-    return null;
-}
-
-pub fn requestPermission(self: *Self, call_id: []const u8, req: PermissionReq) !void {
-    // TODO: emit event_bus.permission_requested — needs event bus threaded through swarm
-    try self.permission_requests.put(self.arena.allocator(), call_id, req);
-}
-
-/// Set permission state and wake any worker blocked on the request's event.
-/// `.message` payloads are duped into the swarm arena so the worker can read
-/// them after the UI's input buffer is reused.
-pub fn resolvePermission(self: *Self, call_id: []const u8, state: PermissionState) void {
-    // TODO: emit event_bus.permission_resolved — needs event bus threaded through swarm
-    if (self.permission_requests.getPtr(call_id)) |req| {
-        req.state = switch (state) {
-            .message => |m| blk: {
-                const owned = self.arena.allocator().dupe(u8, m) catch break :blk .denied;
-                break :blk .{ .message = owned };
-            },
-            else => state,
-        };
-        req.event.set(self.pool.io);
-    }
-}
-
-/// Wake every pending permission's event. Used during reset/cancel so
-/// blocked workers observe their cancel flag and unwind.
-pub fn wakeAllPermissions(self: *Self) void {
-    var it = self.permission_requests.iterator();
-    while (it.next()) |en| en.value_ptr.event.set(self.pool.io);
-}
-
 pub fn getSlot(self: *Self, id: AgentId) ?*AgentSlot {
     if (id.index >= MAX_AGENTS) return null;
     const slot = &self.slots[id.index];
@@ -526,4 +472,9 @@ pub fn recordBroadcast(self: *Self, agent_id: AgentId, role: apt.Role, parts: []
         .role = role,
         .parts = parts,
     });
+}
+
+// stack allocated, breaks when agent is canceled/crash/etc
+pub fn requestPermission(self: *const Self, req: *PermissionReq) void {
+    self.context.permission(self.context.ptr, req);
 }

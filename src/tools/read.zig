@@ -88,7 +88,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
                 \\Stderr:
                 \\{s}
             , .{ res.stdout, res.stderr }) catch "failed to read command pipe";
-            return r.okResult(call, r.truncateOutput(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
+            return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
         }
         const slot = &ctx.swarm.exec.slots[@intFromEnum(m.handle)];
         const content = std.fmt.allocPrint(ctx.alloc,
@@ -100,7 +100,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
             \\Stderr:
             \\{s}
         , .{ slot.stdout.items, slot.stderr.items }) catch "failed to read command pipe";
-        return r.okResult(call, r.truncateOutput(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
+        return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
     }
 
     const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, args.path }) catch
@@ -166,5 +166,5 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     defer ctx.swarm.exec.alloc.free(read_res.stderr);
 
     const out = read_res.toOwned(ctx.alloc) catch return r.errResult(call, "oom");
-    return r.okResult(call, r.truncateOutput(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
+    return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
 }

@@ -29,7 +29,12 @@ pub const CommandQueue = struct {
     pub fn apply(self: *CommandQueue, io: std.Io, app: *App) !void {
         try self._m.lock(io);
         defer self._m.unlock(io);
-        for (self._data.items) |*cmd| try cmd.execute(app);
+
+        var i: u32 = 0;
+        while (i < self._data.items.len) : (i += 1) {
+            try self._data.items[i].execute(app);
+        }
+
         self._data = .empty;
         _ = self.arena.reset(.retain_capacity);
     }
@@ -106,9 +111,15 @@ pub const Command = union(enum) {
                 if (app.main_agent_id) |id| {
                     app.event_bus.emit(app, .{ .agent_cancelled = .{ .id = id } }) catch {};
                 }
+                app.cancelPermissions();
                 app.swarm.cancelAll();
                 app.dropStreamingPreview();
-                app.cleanupCancelledTurn();
+
+                if (app.streaming_entry) |*en| {
+                    en.free(app.sessionAlloc());
+                    app.streaming_entry = null;
+                }
+
                 app.running = false;
                 app.auto_scroll = true;
             },
