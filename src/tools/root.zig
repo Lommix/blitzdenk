@@ -12,9 +12,71 @@ pub const write = @import("write.zig");
 pub const parse = @import("htmlparser.zig");
 pub const reg = @import("../context_factory.zig");
 pub const patch = @import("patch.zig");
+pub const r = @import("../root.zig");
+pub const tui = r.tui;
 
 pub const MAX_DISPLAY_BYTES = 16 * 1024;
 pub const MAX_DISPLAY_LINES = 500;
+
+pub fn setToolStatusPrint(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall, comptime fmt: []const u8, args: anytype) void {
+    const alloc = ctx.alloc;
+    const txt = std.fmt.allocPrint(alloc, fmt, args) catch return;
+    const count = std.mem.count(u8, txt, "\n") + 1;
+    const spans = alloc.alloc(r.tui.Span, count) catch return;
+    const lines = alloc.alloc(r.app.ToolStatusLineInput, count) catch return;
+
+    var it = std.mem.splitScalar(u8, txt, '\n');
+    var i: usize = 0;
+    while (it.next()) |text| : (i += 1) {
+        spans[i] = .{ .content = text };
+        lines[i] = .{ .spans = spans[i .. i + 1] };
+    }
+    const app = ctx.swarm.context.cast(r.app.App);
+    app.setToolStatus(ctx.self_id, call.id, lines) catch return;
+}
+
+pub fn setToolStatusSpan(
+    ctx: r.prv.tool.ToolContext,
+    call: r.prv.adapter.ToolCall,
+    span: r.tui.Span,
+) !void {
+    try setToolStatusParagraph(ctx, call, &.{&.{span}});
+}
+
+pub fn setToolStatusSpans(
+    ctx: r.prv.tool.ToolContext,
+    call: r.prv.adapter.ToolCall,
+    spans: []const r.tui.Span,
+) !void {
+    try setToolStatusParagraph(ctx, call, &.{spans});
+}
+
+pub fn setToolStatusLine(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall, line: r.tui.Line) !void {
+    try setToolStatusLines(ctx, call, &.{line});
+}
+
+pub fn setToolStatusLines(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall, lines: []const r.tui.Line) !void {
+    const inputs = try ctx.alloc.alloc(r.app.ToolStatusLineInput, lines.len);
+    for (lines, 0..) |line, i| inputs[i] = .{ .spans = line.spans.items, .style = line.style };
+    const app = ctx.swarm.context.cast(r.app.App);
+    try app.setToolStatus(ctx.self_id, call.id, inputs);
+}
+
+pub fn setToolStatusParagraph(
+    ctx: r.prv.tool.ToolContext,
+    call: r.prv.adapter.ToolCall,
+    lines: []const []const r.tui.Span,
+) !void {
+    const inputs = try ctx.alloc.alloc(r.app.ToolStatusLineInput, lines.len);
+    for (lines, 0..) |spans, i| inputs[i] = .{ .spans = spans };
+    const app = ctx.swarm.context.cast(r.app.App);
+    try app.setToolStatus(ctx.self_id, call.id, inputs);
+}
+
+pub fn setToolChild(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall, child_id: r.prv.Swarm.AgentId) void {
+    const app = ctx.swarm.context.cast(r.app.App);
+    app.setToolChild(ctx.self_id, call.id, child_id) catch {};
+}
 
 pub fn errResult(call: prv.adapter.ToolCall, msg: []const u8) prv.adapter.ToolResult {
     return .{

@@ -37,7 +37,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\", \"content\": \"...\"}");
 
-    ctx.updateToolStatus(call, "write {s}", .{args.path});
+    r.setToolStatusPrint(ctx, call, "write {s}", .{args.path});
     if (args.path.len == 0) return r.errResult(call, "path is empty");
 
     const resolved = std.fs.path.resolve(alloc, &.{ ctx.cwd, args.path }) catch
@@ -52,7 +52,8 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         .approved => {},
         .denied => return r.errResult(call, "User declined write"),
         .message => |txt| {
-            const wrapped = std.fmt.allocPrint(ctx.alloc,
+            const wrapped = std.fmt.allocPrint(
+                ctx.alloc,
                 "User declined write and left feedback: {s}",
                 .{txt},
             ) catch txt;

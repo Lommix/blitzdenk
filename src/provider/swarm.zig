@@ -50,8 +50,8 @@ pub const SwarmContextV = struct {
     build_config: *const fn (*anyopaque, cfg_mod.EffortLevel) anyerror!r.adapter.Config,
 
     //sync
-    gen_system_reminders: *const fn (*anyopaque, agent: *Agent) void,
-    pop_queued_message: *const fn (*anyopaque, agent: AgentId, alloc: std.mem.Allocator) ?[]const apt.ContentPart,
+    gen_system_reminders: *const fn (*anyopaque, *Agent) void,
+    pop_queued_message: *const fn (*anyopaque, AgentId, std.mem.Allocator) ?[]const apt.ContentPart,
 
     pub fn cast(self: SwarmContextV, comptime T: type) *T {
         return @ptrCast(@alignCast(self.ptr));

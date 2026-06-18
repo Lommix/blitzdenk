@@ -227,6 +227,25 @@ pub const Notifications = struct {
 
 const Locked = r.prv.agent.Locked;
 
+const ToolStatusEntry = struct {
+    lines: std.ArrayList(r.tui.Line) = .empty,
+    child_id: ?prv.Swarm.AgentId = null,
+};
+
+pub const ToolStatusLineInput = struct {
+    spans: []const r.tui.Span,
+    style: r.tui.Style = .{},
+};
+
+const ToolStatusAgent = struct {
+    generation: u16 = 0,
+    entries: std.array_hash_map.String(ToolStatusEntry) = .empty,
+};
+
+const ToolStatusStore = struct {
+    agents: [prv.Swarm.MAX_AGENTS]ToolStatusAgent = [_]ToolStatusAgent{.{}} ** prv.Swarm.MAX_AGENTS,
+};
+
 pub const App = struct {
     /// Lives whole app run. Persistent state: history, keymap binds, cwd.
     arena_app: prv.ThreadSafeArena,
@@ -237,14 +256,13 @@ pub const App = struct {
     input_buffer: std.ArrayList(u8) = .empty,
     input_cursor: u32 = 0,
     input_scroll_offset: u16 = 0,
-
     // ---------------
     // async interface
     permission_queue: Locked(std.ArrayList(*r.prv.Swarm.PermissionReq)),
     broadcast_queue: Locked(std.ArrayList(r.prv.Swarm.BroadcastEntry)),
+    tool_status_entries: Locked(ToolStatusStore) = .{},
     //-----------------
     active_permission: ?*r.prv.Swarm.PermissionReq = null,
-
     swarm: *prv.Swarm = undefined,
     config: prv.config.BlitzdenkCfg = .{},
     main_agent_id: ?prv.Swarm.AgentId = null,
@@ -355,6 +373,57 @@ pub const App = struct {
         return self.arena_session.allocator();
     }
 
+    pub fn setToolStatus(
+        self: *App,
+        agent_id: prv.Swarm.AgentId,
+        call_id: []const u8,
+        lines: []const ToolStatusLineInput,
+    ) !void {
+        if (agent_id.index >= prv.Swarm.MAX_AGENTS) return error.InvalidAgent;
+        const g = self.tool_status_entries.lock(self.io);
+        defer g.unlock();
+
+        const alloc = self.sessionAlloc();
+        const agent = &g.ptr.agents[agent_id.index];
+        if (agent.generation != agent_id.generation) {
+            agent.* = .{ .generation = agent_id.generation };
+        }
+
+        const res = try agent.entries.getOrPut(alloc, call_id);
+        if (!res.found_existing) {
+            res.key_ptr.* = try alloc.dupe(u8, call_id);
+            res.value_ptr.* = .{};
+        } else {
+            for (res.value_ptr.lines.items) |*line| line.deinit(alloc);
+            res.value_ptr.lines.clearRetainingCapacity();
+        }
+
+        for (lines) |input| {
+            var line = r.tui.Line{ .style = input.style };
+            for (input.spans) |span| try line.pushSpan(alloc, span);
+            try res.value_ptr.lines.append(alloc, line);
+        }
+    }
+
+    pub fn setToolChild(self: *App, agent_id: prv.Swarm.AgentId, call_id: []const u8, child_id: prv.Swarm.AgentId) !void {
+        if (agent_id.index >= prv.Swarm.MAX_AGENTS or child_id.index >= prv.Swarm.MAX_AGENTS) return error.InvalidAgent;
+        const g = self.tool_status_entries.lock(self.io);
+        defer g.unlock();
+
+        const alloc = self.sessionAlloc();
+        const agent = &g.ptr.agents[agent_id.index];
+        if (agent.generation != agent_id.generation) {
+            agent.* = .{ .generation = agent_id.generation };
+        }
+
+        const res = try agent.entries.getOrPut(alloc, call_id);
+        if (!res.found_existing) {
+            res.key_ptr.* = try alloc.dupe(u8, call_id);
+            res.value_ptr.* = .{};
+        }
+        res.value_ptr.child_id = child_id;
+    }
+
     /// App-scoped allocator. Survives session resets.
     pub fn appAlloc(self: *App) std.mem.Allocator {
         return self.arena_app.allocator();
@@ -385,6 +454,11 @@ pub const App = struct {
         self.lua_vm.disableAllMcp();
         self.event_bus.emit(self, .session_reset) catch {};
         self.reloadMcpTools() catch {};
+
+        // cleanup
+        self.tool_status_entries = .{};
+        self.permission_queue.value.clearRetainingCapacity();
+        self.broadcast_queue.value.clearRetainingCapacity();
     }
 
     pub fn tick(self: *App) !void {
@@ -403,7 +477,7 @@ pub const App = struct {
                 }
 
                 const alloc = self.sessionAlloc();
-                if (renderableParts(alloc, en.parts)) |parts| {
+                if (renderableParts(alloc, en.agent_id, en.parts)) |parts| {
                     try self.chat_entries.append(alloc, .{
                         .role = en.role,
                         .parts = parts,
@@ -805,7 +879,7 @@ pub const App = struct {
     /// Convert an agent message's content parts into renderable ChatEntry
     /// message parts (trim + dupe text/thinking, drop everything else).
     /// Returns null if no renderable parts remain.
-    fn renderableParts(alloc: std.mem.Allocator, parts: []const prv.adapter.ContentPart) ?[]ChatPart {
+    fn renderableParts(alloc: std.mem.Allocator, agent_id: prv.Swarm.AgentId, parts: []const prv.adapter.ContentPart) ?[]ChatPart {
         var out: std.ArrayList(ChatPart) = .empty;
         for (parts) |part| {
             switch (part) {
@@ -825,6 +899,7 @@ pub const App = struct {
                     const call_id = alloc.dupe(u8, call.id) catch continue;
                     const tool_name = alloc.dupe(u8, call.name) catch continue;
                     out.append(alloc, .{ .tool_call = .{
+                        .agent_id = agent_id,
                         .call_id = call_id,
                         .tool_name = tool_name,
                     } }) catch continue;
@@ -851,7 +926,7 @@ pub const App = struct {
         };
         const msg = agent.chat.messages.items[msg_idx];
         const alloc = self.sessionAlloc();
-        const slice = renderableParts(alloc, msg.parts) orelse {
+        const slice = renderableParts(alloc, main_id, msg.parts) orelse {
             self.dropStreamingPreview();
             return;
         };
@@ -1085,6 +1160,7 @@ pub const ChatPart = union(enum) {
     };
 
     pub const ToolCallEntry = struct {
+        agent_id: prv.Swarm.AgentId,
         call_id: []const u8,
         tool_name: []const u8,
     };
@@ -1606,8 +1682,6 @@ fn buildChatEntryParagraph(
     _ = agent; // autofix
     // var buf: [255]u8 = undefined;
 
-    const main_agent = app.mainAgent() orelse return 0;
-
     var total: usize = 0;
     var header_para = r.tui.Paragraph{};
     var header_line = r.tui.Line{};
@@ -1633,7 +1707,6 @@ fn buildChatEntryParagraph(
     }
 
     // Header last so it renders on top (stack is bottom-up)
-
     var tool_call_list = std.ArrayList(ChatPart.ToolCallEntry).empty;
 
     for (0..entry.parts.len) |i| {
@@ -1646,8 +1719,6 @@ fn buildChatEntryParagraph(
                     const h = p.totalHeightLong(inner_w);
                     try out.append(arena, .{ .p = p, .h = h });
                     total += h;
-                } else if (!is_thinking) {
-                    try header_line.pushSpan(arena, .{ .content = "  had thought", .style = .{ .fg = app.theme.muted } });
                 }
             },
             .message => |text| {
@@ -1667,16 +1738,11 @@ fn buildChatEntryParagraph(
                 total += h;
             },
             .tool_call => |call| try tool_call_list.append(arena, call),
-            // const p = buildToolCallParagraph(arena, main_agent, app, call, inner_w);
-            // const h = p.totalHeightLong(inner_w);
-            // try out.append(arena, .{ .p = p, .h = h });
-            // total += h;
-            // },
         }
     }
 
     if (tool_call_list.items.len > 0) {
-        const para = try buildToolGroupParagraph(app, arena, main_agent, tool_call_list.items, inner_w);
+        const para = try buildToolGroupParagraph(app, arena, tool_call_list.items, inner_w);
         total += para.h;
         try out.append(arena, para);
     }
@@ -1691,7 +1757,6 @@ fn buildChatEntryParagraph(
 fn buildToolGroupParagraph(
     app: *App,
     arena: std.mem.Allocator,
-    agent: *r.prv.agent.Agent,
     calls: []const ChatPart.ToolCallEntry,
     inner_w: u16,
 ) !RenderParagraphItem {
@@ -1700,7 +1765,11 @@ fn buildToolGroupParagraph(
     p.style.bg = app.theme.bg;
     p.padding = .all(1);
 
+    const statuses = app.tool_status_entries.lock(app.io);
+    defer statuses.unlock();
+
     for (calls) |call| {
+        const agent = app.swarm.getAgent(call.agent_id) orelse continue;
         var line = r.tui.Line{};
 
         const result_opt: ?prv.adapter.ToolResult = findToolResult(agent, call.call_id) orelse agent.tool_call_done.get(call.call_id);
@@ -1714,71 +1783,58 @@ fn buildToolGroupParagraph(
             try line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = .white } });
         }
 
-        const status_opt = agent.tool_display_status.getPtr(call.call_id);
+        const status_agent = &statuses.ptr.agents[call.agent_id.index];
+        const status = if (status_agent.generation == call.agent_id.generation)
+            status_agent.entries.getPtr(call.call_id)
+        else
+            null;
 
-        if (status_opt) |status| {
-            try line.pushSpan(arena, .{ .content = "  " });
-            try line.pushSpan(arena, .{ .content = status.status_text.items, .style = .{ .modifier = .{ .bold = true } } });
+        try line.pushSpan(arena, .{ .content = "  " });
+        if (status) |entry| {
+            if (entry.lines.items.len > 0) {
+                line.style = entry.lines.items[0].style;
+                for (entry.lines.items[0].spans.items) |span| try line.pushSpan(arena, span);
+            } else {
+                try line.pushSpan(arena, .{ .content = call.tool_name });
+            }
 
-            child: {
-                const child_id = status.child_id orelse break :child;
-                const child_ag = app.swarm.getAgent(child_id) orelse break :child;
-
-                if (child_ag.flags.is_thinking) {
-                    try line.pushSpan(arena, .{ .content = "  thinking " });
-                    try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
-                }
-
-                if (child_ag.flags.is_calling) {
-                    try line.pushSpan(arena, .{ .content = "  calling " });
-                    try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
-                }
-
-                if (child_ag.flags.is_writing) {
-                    try line.pushSpan(arena, .{ .content = "  writing " });
-                    try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
+            if (entry.child_id) |child_id| {
+                if (app.swarm.getAgent(child_id)) |child| {
+                    if (child.flags.is_thinking) try line.pushSpan(arena, .{ .content = "  thinking", .style = .{ .fg = app.theme.muted } });
+                    if (child.flags.is_calling) try line.pushSpan(arena, .{ .content = "  calling", .style = .{ .fg = app.theme.muted } });
+                    if (child.flags.is_writing) try line.pushSpan(arena, .{ .content = "  writing", .style = .{ .fg = app.theme.muted } });
+                    if (child.flags.is_thinking or child.flags.is_calling or child.flags.is_writing) {
+                        try line.pushSpan(arena, .{ .content = " " });
+                        try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
+                    }
                 }
             }
         } else {
-            try line.pushSpan(arena, .{ .content = "  " });
             try line.pushSpan(arena, .{ .content = call.tool_name });
         }
-
         try p.lines.append(arena, line);
 
-        if (status_opt) |status| child: {
-
-            // log
-            const log_start = status.log.items.len -| 3;
-            for (status.log.items[log_start..]) |entry| {
-                var l = r.tui.Line{};
-
-                const glyph = r.tui.icon.box_t_right;
-
-                try l.pushSpan(arena, .{ .content = "  " });
-                try l.pushSpan(arena, .{ .content = glyph });
-                try l.pushSpan(arena, .{ .content = " " });
-                try l.pushSpan(arena, .{ .content = entry });
-
-                try p.lines.append(arena, l);
+        if (status) |entry| {
+            for (entry.lines.items[1..]) |status_line| {
+                var extra = r.tui.Line{ .style = status_line.style };
+                try extra.pushSpan(arena, .{ .content = "  " });
+                for (status_line.spans.items) |span| try extra.pushSpan(arena, span);
+                try p.lines.append(arena, extra);
             }
 
-            // sub agent log
-            const child_id = status.child_id orelse break :child;
-            const child_ag = app.swarm.getAgent(child_id) orelse break :child;
-            var it = child_ag.tool_display_status.iterator();
-            while (it.next()) |entry| {
-                const sub_agent_tool_status = entry.value_ptr.status_text.items;
-                var l = r.tui.Line{};
+            const child_id = entry.child_id orelse continue;
+            if (child_id.index >= prv.Swarm.MAX_AGENTS) continue;
+            const child_status = &statuses.ptr.agents[child_id.index];
+            if (child_status.generation != child_id.generation) continue;
 
-                const glyph = r.tui.icon.box_t_right;
-
-                try l.pushSpan(arena, .{ .content = "  " });
-                try l.pushSpan(arena, .{ .content = glyph });
-                try l.pushSpan(arena, .{ .content = " " });
-                try l.pushSpan(arena, .{ .content = sub_agent_tool_status });
-
-                try p.lines.append(arena, l);
+            var it = child_status.entries.iterator();
+            while (it.next()) |child_entry| {
+                for (child_entry.value_ptr.lines.items) |child_line| {
+                    var nested = r.tui.Line{ .style = child_line.style };
+                    try nested.pushSpan(arena, .{ .content = "  " ++ r.tui.icon.box_t_right ++ " " });
+                    for (child_line.spans.items) |span| try nested.pushSpan(arena, span);
+                    try p.lines.append(arena, nested);
+                }
             }
         }
     }
@@ -1870,88 +1926,6 @@ fn findToolResult(agent: *prv.agent.Agent, call_id: []const u8) ?prv.adapter.Too
         };
     }
     return null;
-}
-
-fn buildToolCallParagraph(
-    arena: std.mem.Allocator,
-    agent: *prv.agent.Agent,
-    app: *App,
-    call: ChatPart.ToolCallEntry,
-    inner_w: u16,
-) r.tui.Paragraph {
-    var p: r.tui.Paragraph = .{
-        .style = .{ .bg = .black },
-        .dynamic_border = false,
-        .border = .none,
-        .sides = .left_only,
-        .padding = .all(1),
-    };
-
-    const status = agent.tool_display_status.getPtr(call.call_id);
-    var line = r.tui.Line{};
-
-    const result_opt: ?prv.adapter.ToolResult = findToolResult(agent, call.call_id) orelse agent.tool_call_done.get(call.call_id);
-    if (result_opt) |result| {
-        if (result.is_error) {
-            line.pushSpan(arena, .{ .content = r.tui.icon.fail, .style = .{ .fg = .red, .modifier = .{ .bold = true } } }) catch {};
-        } else {
-            line.pushSpan(arena, .{ .content = r.tui.icon.ok, .style = .{ .fg = .green, .modifier = .{ .bold = true } } }) catch {};
-        }
-    } else {
-        line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = .white } }) catch {};
-    }
-
-    const status_text: []const u8 = if (status) |s| s.status_text.items else call.tool_name;
-    const txt = std.fmt.allocPrint(arena, " {s}", .{status_text}) catch status_text;
-    line.pushText(arena, txt, .{ .modifier = .{ .bold = true }, .fg = .cyan }) catch {};
-    p.lines.append(arena, line) catch {};
-
-    if (status) |s| {
-        // Connector icon is 2 chars, plus 1 padding each side = 4 chars overhead.
-        const log_max = inner_w - 4;
-
-        if (s.child_id) |child_id| blk: {
-            const child_ag = app.swarm.getAgent(child_id) orelse break :blk;
-            var it = child_ag.tool_display_status.iterator();
-            var i: usize = 0;
-            while (it.next()) |en| : (i += 1) {
-                var l = r.tui.Line{};
-
-                const display_log: []const u8 = if (log_max > 0 and en.value_ptr.status_text.items.len > log_max) cl: {
-                    const truncated = en.value_ptr.status_text.items[0 .. log_max - 4];
-                    const combined = std.fmt.allocPrint(arena, "{s}...", .{truncated}) catch en.value_ptr.status_text.items;
-                    break :cl combined;
-                } else en.value_ptr.status_text.items;
-
-                if (child_ag.tool_display_status.entries.len == i + 1)
-                    l.pushSpan(arena, .{ .content = r.tui.icon.box_bl ++ r.tui.icon.box_h }) catch {}
-                else
-                    l.pushSpan(arena, .{ .content = r.tui.icon.box_t_right ++ r.tui.icon.box_h }) catch {};
-
-                l.pushText(arena, display_log, .{ .fg = .white }) catch {};
-                p.lines.append(arena, l) catch {};
-            }
-        }
-
-        for (s.log.items, 0..) |log_slice, i| {
-            var l = r.tui.Line{};
-            if (s.log.items.len == i + 1)
-                l.pushSpan(arena, .{ .content = r.tui.icon.box_bl ++ r.tui.icon.box_h }) catch {}
-            else
-                l.pushSpan(arena, .{ .content = r.tui.icon.box_t_right ++ r.tui.icon.box_h }) catch {};
-
-            const display_log: []const u8 = if (log_max > 0 and log_slice.len > log_max) blk: {
-                const truncated = log_slice[0 .. log_max - 4];
-                const combined = std.fmt.allocPrint(arena, "{s}...", .{truncated}) catch log_slice;
-                break :blk combined;
-            } else log_slice;
-
-            l.pushText(arena, display_log, .{ .fg = .white }) catch {};
-            p.lines.append(arena, l) catch {};
-        }
-    }
-
-    return p;
 }
 
 fn buildPlanParagraph(arena: std.mem.Allocator, plan: ChatEntry.PlanEntry) r.tui.Paragraph {
@@ -2569,10 +2543,12 @@ test "renderableParts keeps streamed final parts together" {
         .{ .tool_call = .{ .id = "call_1", .name = "bash", .arguments = "{}" } },
     };
 
-    const rendered = App.renderableParts(alloc, &parts) orelse return error.TestUnexpectedResult;
+    const agent_id: prv.Swarm.AgentId = .{ .index = 3, .generation = 7 };
+    const rendered = App.renderableParts(alloc, agent_id, &parts) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 3), rendered.len);
     try std.testing.expectEqualStrings("think", rendered[0].thinking);
     try std.testing.expectEqualStrings("answer", rendered[1].message);
     try std.testing.expectEqualStrings("call_1", rendered[2].tool_call.call_id);
     try std.testing.expectEqualStrings("bash", rendered[2].tool_call.tool_name);
+    try std.testing.expectEqual(agent_id, rendered[2].tool_call.agent_id);
 }

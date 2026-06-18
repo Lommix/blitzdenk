@@ -86,7 +86,7 @@ pub const CancelBackgroundCommand = prv.tool.Tool{
 };
 
 fn run_cancel(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
-    ctx.updateToolStatus(call, "(Stopping Process)", .{});
+    r.setToolStatusPrint(ctx, call, "(Stopping Process)", .{});
 
     const Args = struct {
         path: []const u8,
@@ -98,7 +98,7 @@ fn run_cancel(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter
         return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\"}");
     };
 
-    ctx.updateToolStatus(call, "(Stopping Process) {s}", .{args.path});
+    r.setToolStatusPrint(ctx, call, "(Stopping Process) {s}", .{args.path});
 
     // Snapshot the handle to cancel under lock, then perform the cancel
     // (which may block) outside the lock.
@@ -158,7 +158,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     else
         args.command;
 
-    ctx.updateToolStatus(call, "{s}", .{cleaned_command_str[0..@min(cleaned_command_str.len, 248)]});
+    r.setToolStatusPrint(ctx, call, "{s}", .{cleaned_command_str[0..@min(cleaned_command_str.len, 248)]});
 
     const need_perm = switch (classifyCommand(args.command)) {
         .blocked => return r.errResult(call, "command is blocked for safety"),
@@ -214,7 +214,10 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         .argv = &.{ "/bin/sh", "-c", args.command },
     }, args.timout_ms) catch |err| switch (err) {
         error.Timeout => {
-            ctx.appendToolLog(call, "Timeout reached!");
+            r.setToolStatusParagraph(ctx, call, &.{
+                &.{.{ .content = cleaned_command_str[0..@min(cleaned_command_str.len, 248)] }},
+                &.{.{ .content = "Timeout reached!", .style = .{ .fg = .red } }},
+            }) catch {};
             return r.errResult(call,
                 \\!Command Timeout reached! Process killed.
             );

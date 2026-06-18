@@ -93,7 +93,7 @@ fn createTask(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
     const args = r.parseArgs(struct { subject: []const u8, description: []const u8 }, ctx.alloc, call) orelse
         return r.errResult(call, "invalid arguments: expected {\"description\": \"...\"}");
 
-    ctx.updateToolStatus(call, "new task {s}", .{args.subject});
+    r.setToolStatusPrint(ctx, call, "new task {s}", .{args.subject});
 
     const subject = ctx.alloc.dupe(u8, args.subject) catch
         return r.errResult(call, "out of memory");
@@ -143,7 +143,7 @@ fn getTask(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
         };
     };
 
-    ctx.updateToolStatus(call, "get task: {s}", .{snap.subject});
+    r.setToolStatusPrint(ctx, call, "get task: {s}", .{snap.subject});
 
     const msg = std.fmt.allocPrint(ctx.alloc, "Task {d}: [{s}] subject: {s}\n description: {s}", .{
         snap.id, snap.state.toString(), snap.subject, snap.description,
@@ -175,12 +175,28 @@ fn listTasks(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
 
     if (snap.len == 0) return r.okResult(call, "No tasks.");
 
-    ctx.updateToolStatus(call, "list tasks ..", .{});
-
-    for (snap) |task| {
-        const text = std.fmt.allocPrint(ctx.alloc, "{s} {s}", .{ task.state.icon(), task.subject }) catch "task";
-        ctx.appendToolLog(call, text);
+    const spans = ctx.alloc.alloc(r.tui.Span, 1 + snap.len * 2) catch
+        return r.errResult(call, "out of memory");
+    const lines = ctx.alloc.alloc([]const r.tui.Span, 1 + snap.len) catch
+        return r.errResult(call, "out of memory");
+    spans[0] = .{ .content = "list tasks" };
+    lines[0] = spans[0..1];
+    for (snap, 0..) |task, i| {
+        const start = 1 + i * 2;
+        spans[start] = .{
+            .content = task.state.icon(),
+            .style = .{ .fg = switch (task.state) {
+                .pending => .white,
+                .in_progress => .yellow,
+                .done => .green,
+            } },
+        };
+        spans[start + 1] = .{
+            .content = std.fmt.allocPrint(ctx.alloc, " {s}", .{task.subject}) catch task.subject,
+        };
+        lines[i + 1] = spans[start .. start + 2];
     }
+    r.setToolStatusParagraph(ctx, call, lines) catch {};
 
     var allocating = std.Io.Writer.Allocating.init(ctx.alloc);
     for (snap) |task| {
@@ -213,7 +229,7 @@ fn updateTaskState(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
         };
     };
 
-    ctx.updateToolStatus(call, "update task {s} {s}", .{ snap.state.icon(), snap.subject });
+    r.setToolStatusPrint(ctx, call, "update task {s} {s}", .{ snap.state.icon(), snap.subject });
 
     const msg = std.fmt.allocPrint(ctx.alloc, "Task {d} state updated to {s}", .{
         snap.id, new_state.toString(),

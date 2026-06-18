@@ -64,7 +64,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         args.path;
 
     if (bg_match) |m| {
-        ctx.updateToolStatus(call, "(Reading Process) {s}", .{rel_path});
+        r.setToolStatusPrint(ctx, call, "(Reading Process) {s}", .{rel_path});
         if (ctx.swarm.exec.poll(m.handle)) |res| {
             defer ctx.swarm.exec.release(m.handle);
             {
@@ -109,15 +109,15 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     const full_read = args.offset == null and args.limit == null;
 
     if (args.offset == null and args.limit == null) {
-        ctx.updateToolStatus(call, "read {s}", .{rel_path});
+        r.setToolStatusPrint(ctx, call, "read {s}", .{rel_path});
     } else if (args.limit) |l| {
         if (args.offset) |o| {
-            ctx.updateToolStatus(call, "read {s} offset: {d} limit: {d}", .{ rel_path, o, l });
+            r.setToolStatusPrint(ctx, call, "read {s} offset: {d} limit: {d}", .{ rel_path, o, l });
         } else {
-            ctx.updateToolStatus(call, "read {s} limit: {d}", .{ rel_path, l });
+            r.setToolStatusPrint(ctx, call, "read {s} limit: {d}", .{ rel_path, l });
         }
     } else if (args.offset) |o| {
-        ctx.updateToolStatus(call, "read {s} offset: {d}", .{ rel_path, o });
+        r.setToolStatusPrint(ctx, call, "read {s} offset: {d}", .{ rel_path, o });
     }
 
     // Stat for mtime first so we can short-circuit unchanged re-reads.

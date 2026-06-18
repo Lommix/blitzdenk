@@ -31,7 +31,7 @@ fn enter_ssh_mode(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
         return r.errResult(call, "no ssh target set; user must run :ssh user@host:/cwd first");
     }
 
-    ctx.updateToolStatus(call, "(Enter SSH Mode)", .{});
+    r.setToolStatusPrint(ctx, call, "(Enter SSH Mode)", .{});
 
     ctx.swarm.exec.setSshActive(true);
     return r.okResult(call, "ssh mode enabled");
@@ -39,6 +39,6 @@ fn enter_ssh_mode(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
 
 fn exit_ssh_mode(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
     ctx.swarm.exec.setSshActive(false);
-    ctx.updateToolStatus(call, "(Exit SSH Mode)", .{});
+    r.setToolStatusPrint(ctx, call, "(Exit SSH Mode)", .{});
     return r.okResult(call, "ssh mode disabled");
 }

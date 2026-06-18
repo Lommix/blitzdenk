@@ -39,7 +39,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     if (args.options.len == 0) return r.errResult(call, "options must contain at least one entry");
     if (args.options.len > MAX_OPTIONS) return r.errResult(call, "too many options (max 8)");
 
-    ctx.updateToolStatus(call, "question {s}", .{args.question});
+    r.setToolStatusPrint(ctx, call, "question {s}", .{args.question});
 
     const decision = ctx.requestPerm(call.id, .minor, .{ .ask = .{
         .header = args.header,

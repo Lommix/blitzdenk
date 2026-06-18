@@ -1967,7 +1967,6 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
 
     inline for (.{
         .{ "set_status", &luaSetStatus },
-        .{ "append_log", &luaAppendLog },
         .{ "ask", &luaAsk },
         .{ "approve", &luaApprove },
         .{ "plan", &luaPlan },
@@ -2013,21 +2012,7 @@ fn luaSetStatus(L: ?*c.lua_State) callconv(.c) c_int {
     const ptr = c.lua_tolstring(state, 2, &len);
     if (ptr == null) return 0;
 
-    bridge.tool_ctx.updateToolStatus(bridge.tool_call, "{s}", .{ptr[0..len]});
-    return 0;
-}
-
-fn luaAppendLog(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const bridge = getBridge(state) orelse return 0;
-
-    if (c.lua_type(state, 2) != c.LUA_TSTRING) return 0;
-
-    var len: usize = 0;
-    const ptr = c.lua_tolstring(state, 2, &len);
-    if (ptr == null) return 0;
-
-    bridge.tool_ctx.appendToolLog(bridge.tool_call, ptr[0..len]);
+    r.tools.setToolStatusPrint(bridge.tool_ctx, bridge.tool_call, "{s}", .{ptr[0..len]});
     return 0;
 }
 
@@ -2035,7 +2020,7 @@ fn luaSetChildId(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
     const bridge = getBridge(state) orelse return 0;
     const id = readAgentIdArg(state, "ctx.set_child_id", 2);
-    bridge.tool_ctx.setToolChild(bridge.tool_call, id);
+    r.tools.setToolChild(bridge.tool_ctx, bridge.tool_call, id);
     return 0;
 }
 

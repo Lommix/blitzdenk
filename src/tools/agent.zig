@@ -53,11 +53,6 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         return r.errResult(call, "Subagents are not allowed to spawn more subagents");
     }
 
-    const swarm = ctx.swarm;
-    _ = swarm; // autofix
-    const self_id = ctx.self_id;
-    _ = self_id; // autofix
-
     // todo: extend view lua
     // NOTE: in sync with regitry.zig AgentType
     const AgentType = enum {
@@ -110,20 +105,19 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         },
     }) catch return r.errResult(call, "command queue is full, inform user");
 
-    ctx.setToolChild(call, child_id);
+    r.setToolChild(ctx, call, child_id);
 
     switch (args.agent_type) {
         .general => {
-            ctx.updateToolStatus(call, "agent -> {s}", .{args.description});
+            r.setToolStatusPrint(ctx, call, "agent -> {s}", .{args.description});
         },
         .review => {
-            ctx.updateToolStatus(call, "review -> {s}", .{args.description});
+            r.setToolStatusPrint(ctx, call, "review -> {s}", .{args.description});
         },
         .explore => {
-            ctx.updateToolStatus(call, "explore -> {s}", .{args.description});
+            r.setToolStatusPrint(ctx, call, "explore -> {s}", .{args.description});
         },
     }
-
     {
         const g = ctx.agent().bg_agents.lock(ctx.io);
         defer g.unlock();
@@ -166,7 +160,7 @@ fn run_send_message_to_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCa
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid arguments");
 
-    ctx.updateToolStatus(call, "sending message to agent {d}", .{args.agent_id});
+    r.setToolStatusPrint(ctx, call, "sending message to agent {d}", .{args.agent_id});
     const agent_id = prv.Swarm.AgentId.unpack(args.agent_id);
 
     const app = ctx.swarm.context.cast(@import("../app.zig").App);
@@ -203,7 +197,7 @@ fn run_await_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.ad
 
     const child_id = prv.Swarm.AgentId.unpack(args.agent_id);
 
-    ctx.updateToolStatus(call, "waiting for agent {d}", .{args.agent_id});
+    r.setToolStatusPrint(ctx, call, "waiting for agent {d}", .{args.agent_id});
 
     const slot = ctx.swarm.getSlot(child_id) orelse
         return r.errResult(call, "agent slot not found");

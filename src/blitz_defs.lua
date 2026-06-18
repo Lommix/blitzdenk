@@ -15,10 +15,6 @@ local BlitzCtx = {}
 ---@param msg string
 function BlitzCtx:set_status(msg) end
 
----Append raw log line to current tool entry
----@param msg string
-function BlitzCtx:append_log(msg) end
-
 ---Attach a spawned child agent to the current tool call. The TUI uses this
 ---to render the child's status under the calling tool entry. Call once per
 ---spawn; calling again overwrites the previous association.

@@ -44,7 +44,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         replace_all: bool = false,
     };
 
-    ctx.updateToolStatus(call, "edit", .{});
+    r.setToolStatusPrint(ctx, call, "edit", .{});
 
     const args = (std.json.parseFromSlice(Args, alloc, call.arguments, .{ .ignore_unknown_fields = true }) catch {
         std.log.err("ARGs ERROR: {s}", .{call.arguments});
@@ -53,7 +53,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         );
     }).value;
 
-    ctx.updateToolStatus(call, "edit {s}", .{args.path});
+    r.setToolStatusPrint(ctx, call, "edit {s}", .{args.path});
 
     if (args.path.len == 0) return r.errResult(call, "path is empty");
     if (args.old_string.len == 0) return r.errResult(call, "oldText is empty");

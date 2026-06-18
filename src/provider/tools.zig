@@ -76,35 +76,6 @@ pub const ToolContext = struct {
         if (self.isCanceled()) return .denied;
         return req.state;
     }
-
-    pub fn setToolChild(self: ToolContext, call: apt.ToolCall, child_id: Swarm.AgentId) void {
-        const ag = self.agent();
-        ag.tool_display_mutex.lock(self.io) catch return;
-        defer ag.tool_display_mutex.unlock(self.io);
-
-        const en = ag.tool_display_status.getOrPut(self.alloc, call.id) catch return;
-        if (!en.found_existing) en.value_ptr.* = .{};
-        en.value_ptr.child_id = child_id;
-    }
-
-    pub fn updateToolStatus(self: ToolContext, call: apt.ToolCall, comptime fmt: []const u8, args: anytype) void {
-        const ag = self.agent();
-
-        ag.tool_display_mutex.lock(self.io) catch return;
-        defer ag.tool_display_mutex.unlock(self.io);
-
-        const en = ag.tool_display_status.getOrPut(self.alloc, call.id) catch return;
-        if (!en.found_existing) en.value_ptr.* = .{};
-        en.value_ptr.status_text.clearRetainingCapacity();
-        en.value_ptr.status_text.print(self.alloc, fmt, args) catch return;
-    }
-
-    pub fn appendToolLog(self: ToolContext, call: apt.ToolCall, entry: []const u8) void {
-        const ag = self.agent();
-        const en = ag.tool_display_status.getOrPut(self.alloc, call.id) catch return;
-        if (!en.found_existing) en.value_ptr.* = .{};
-        en.value_ptr.log.append(self.alloc, entry) catch return;
-    }
 };
 
 pub fn extractChildResult(swarm: *Swarm, child_id: Swarm.AgentId) []const u8 {

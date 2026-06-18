@@ -128,7 +128,7 @@ fn toolTrampoline(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.ada
     const binding = manager.findBinding(call.name) orelse return errResult(call, "MCP tool binding not found");
     if (binding.client_index >= manager.clients.items.len) return errResult(call, "MCP client missing");
 
-    ctx.updateToolStatus(call, "MCP {s}", .{binding.remote_name});
+    r.tools.setToolStatusPrint(ctx, call, "MCP {s}", .{binding.remote_name});
     const client = &manager.clients.items[binding.client_index];
     const content = client.callTool(binding.remote_name, call.arguments) catch |err| {
         const msg = std.fmt.allocPrint(ctx.alloc, "MCP tool call failed: {s}", .{@errorName(err)}) catch "MCP tool call failed";

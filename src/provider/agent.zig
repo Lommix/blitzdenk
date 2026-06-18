@@ -8,13 +8,6 @@ const compact = r.compact;
 
 const log = std.log.scoped(.agent);
 
-pub const ToolCallDisplay = struct {
-    // main status text
-    status_text: std.ArrayList(u8) = .empty,
-    log: std.ArrayList([]const u8) = .empty,
-    child_id: ?Swarm.AgentId = null,
-};
-
 pub const AgentPermissionLevel = enum {
     read,
     write,
@@ -246,8 +239,6 @@ pub const Agent = struct {
     tool_call_runs: std.StringHashMapUnmanaged(*tc.RunningTool) = .{},
     /// Settled tool results awaiting commit, keyed by call.id.
     tool_call_done: std.StringHashMapUnmanaged(apt.ToolResult) = .{},
-    tool_display_status: std.array_hash_map.String(ToolCallDisplay) = .empty,
-    tool_display_mutex: std.Io.Mutex = .init,
     max_allowed_tool_calls: u32 = 64,
     tool_call_count: u32 = 0,
     permission_level: AgentPermissionLevel = .read,
@@ -300,7 +291,6 @@ pub const Agent = struct {
         self.in_flight_usage = .{};
         self.tool_call_runs = .{};
         self.tool_call_done = .{};
-        self.tool_display_status = .empty;
         self.tool_call_count = 0;
         self.max_allowed_tool_calls = 64;
         self.loop_guard = .{};
