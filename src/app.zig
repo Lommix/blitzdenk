@@ -1789,7 +1789,7 @@ fn buildToolGroupParagraph(
             status_agent.entries.getPtr(call.call_id)
         else
             null;
-        try line.pushSpan(arena, .{ .content = "  " });
+        try line.pushSpan(arena, .{ .content = " " });
         if (status) |entry| {
             if (entry.lines.items.len > 0) {
                 line.style = entry.lines.items[0].style;
@@ -1828,13 +1828,17 @@ fn buildToolGroupParagraph(
             if (child_status.generation != child_id.generation) continue;
 
             var it = child_status.entries.iterator();
-            var count = child_status.entries.count();
+            const total = child_status.entries.count();
+            const skip = if (total > 3) total - 3 else 0;
+            var i: usize = 0;
 
-            while (it.next()) |child_entry| : (count -= 1) {
+            while (it.next()) |child_entry| {
+                i += 1;
+                if (i <= skip) continue;
                 for (child_entry.value_ptr.lines.items) |child_line| {
                     var nested = r.tui.Line{ .style = child_line.style };
 
-                    const glyph = if (count == 1) r.tui.icon.box_bl else r.tui.icon.box_t_right;
+                    const glyph = if (i == total) r.tui.icon.box_bl else r.tui.icon.box_t_right;
                     try nested.pushSpan(arena, .{ .content = " " ++ glyph ++ " " });
                     for (child_line.spans.items) |span| try nested.pushSpan(arena, span);
                     try p.lines.append(arena, nested);
