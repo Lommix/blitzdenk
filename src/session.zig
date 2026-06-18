@@ -1,7 +1,8 @@
 const std = @import("std");
+
+const r = @import("root.zig");
 const app = @import("app.zig");
 const prv = @import("provider");
-const reg = @import("registry.zig");
 const util = @import("util.zig");
 
 pub fn genSessionId(buf: []u8) !void {
@@ -45,7 +46,7 @@ pub fn loadSession(a: *app.App, w: *std.Io.Reader) !void {
     const id = try a.swarm.newAgent(
         .max,
         null,
-        @intFromEnum(reg.AgentType.general),
+        @intFromEnum(r.ContextFactory.AgentType.general),
         @intFromEnum(a.mode),
     );
 

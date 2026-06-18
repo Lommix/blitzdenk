@@ -1,6 +1,6 @@
 const std = @import("std");
 const prv = @import("provider");
-const reg = @import("registry.zig");
+const r = @import("root.zig");
 
 const log = std.log.scoped(.mcp);
 
@@ -12,12 +12,12 @@ pub const ServerConfig = struct {
     command: []const u8,
     args: []const []const u8 = &.{},
     tools_prefix: []const u8,
-    enabled_agents: reg.AgentType.Set,
+    enabled_agents: r.ContextFactory.AgentType.Set,
 };
 
 pub const RegisteredTool = struct {
     tool: prv.tool.Tool,
-    flags: reg.ToolFlags,
+    flags: r.ContextFactory.ToolFlags,
 };
 
 const ToolBinding = struct {
@@ -105,7 +105,7 @@ pub const Manager = struct {
                     },
                     .func = &toolTrampoline,
                 },
-                .flags = reg.ToolFlags{
+                .flags = r.ContextFactory.ToolFlags{
                     .allowed_agents = cfg.enabled_agents,
                     .include_with_overrides = true,
                 },

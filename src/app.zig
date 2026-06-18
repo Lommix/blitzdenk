@@ -253,8 +253,8 @@ pub const App = struct {
     scroll_offset: usize = 0,
     auto_scroll: bool = true,
     input_mode: InputMode = .text,
-    mode: r.reg.Mode = @enumFromInt(0),
-    context_factory: *r.reg.ContextFactory,
+    mode: r.ContextFactory.Mode = @enumFromInt(0),
+    context_factory: *r.ContextFactory,
     theme: Theme = .default,
     cwd: []const u8,
     remote_cwd: []const u8 = "/",
@@ -289,7 +289,7 @@ pub const App = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         lua_allocator: std.mem.Allocator,
-        agent_factory: *r.reg.ContextFactory,
+        agent_factory: *r.ContextFactory,
         cwd: []const u8,
     ) !App {
         var lua_vm = try r.lua.LuaVm.init(lua_allocator);
@@ -472,7 +472,7 @@ pub const App = struct {
             const state = slot.state.load(.acquire);
             if (state == .free or state == .reserved) continue;
 
-            var set = r.reg.ToolSet{};
+            var set = r.ContextFactory.ToolSet{};
             self.context_factory.build_toolset(@enumFromInt(slot.agent.type_idx), &set) catch continue;
             try slot.agent.setTools(set.slice());
         }

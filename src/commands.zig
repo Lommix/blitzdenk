@@ -66,7 +66,7 @@ pub const Command = union(enum) {
     // -------------------------------------------
 
     pub const AddToolArgs = struct {
-        agent_type: r.reg.AgentType,
+        agent_type: r.ContextFactory.AgentType,
         tool_name: []const u8,
     };
 
@@ -78,7 +78,7 @@ pub const Command = union(enum) {
         parent_id: ?r.prv.Swarm.AgentId = null,
         agent_id: r.prv.Swarm.AgentId,
         prompt: []const r.prv.adapter.ContentPart,
-        agent_type: u8 = @intFromEnum(r.reg.AgentType.general),
+        agent_type: u8 = @intFromEnum(r.ContextFactory.AgentType.general),
         tool_budget: u32 = 1024,
         effort: r.prv.config.EffortLevel = .min,
         fork: bool = false,
@@ -264,7 +264,7 @@ pub const Command = union(enum) {
                 app.context_factory.addAgentTool(arg.agent_type, arg.tool_name) catch return;
                 if (app.main_agent_id) |id| {
                     if (app.swarm.getAgent(id)) |agent| {
-                        var set = r.reg.ToolSet{};
+                        var set = r.ContextFactory.ToolSet{};
                         app.context_factory.build_toolset(@enumFromInt(agent.type_idx), &set) catch return;
                         try agent.setTools(set.slice());
                     }

@@ -10,7 +10,7 @@ pub const agent = @import("agent.zig");
 pub const edit = @import("edit.zig");
 pub const write = @import("write.zig");
 pub const parse = @import("htmlparser.zig");
-pub const reg = @import("../registry.zig");
+pub const reg = @import("../context_factory.zig");
 pub const patch = @import("patch.zig");
 
 pub const MAX_DISPLAY_BYTES = 16 * 1024;

@@ -295,7 +295,7 @@ pub const LuaMcpServerEntry = struct {
     args_len: usize = 0,
     tools_prefix: [128]u8 = undefined,
     tools_prefix_len: usize = 0,
-    enabled_agents: @import("registry.zig").AgentType.Set = .initEmpty(),
+    enabled_agents: r.ContextFactory.AgentType.Set = .initEmpty(),
 
     pub fn nameSlice(self: *const LuaMcpServerEntry) []const u8 {
         return self.name[0..self.name_len];
@@ -1364,7 +1364,7 @@ fn luaSetAgentTools(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "set_agent_tools: agent type out of range");
         return 0;
     }
-    const agent_type: @import("registry.zig").AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
+    const agent_type: r.ContextFactory.AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
 
     if (c.lua_type(state, 2) != c.LUA_TTABLE) {
         _ = c.luaL_error(state, "set_agent_tools: arg 2 (tools) must be a table of strings");
@@ -1378,7 +1378,7 @@ fn luaSetAgentTools(L: ?*c.lua_State) callconv(.c) c_int {
 
     const factory = a.context_factory;
 
-    var names_buf: [@import("registry.zig").ContextFactory.MAX_OVERRIDE_TOOLS][]const u8 = undefined;
+    var names_buf: [r.ContextFactory.MAX_OVERRIDE_TOOLS][]const u8 = undefined;
     var names_count: usize = 0;
 
     const len = c.lua_rawlen(state, 2);
@@ -1450,7 +1450,7 @@ fn luaSetPrompt(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "set_prompt: app not initialized");
         return 0;
     };
-    const agent_type = readEnumArg(state, @import("registry.zig").AgentType, "set_prompt", 1) orelse return 0;
+    const agent_type = readEnumArg(state, r.ContextFactory.AgentType, "set_prompt", 1) orelse return 0;
     const prompt = readPromptArg(state, "set_prompt", 2) orelse return 0;
     a.context_factory.setAgentPrompt(agent_type, prompt) catch {
         _ = c.luaL_error(state, "set_prompt: out of memory");
@@ -1465,7 +1465,7 @@ fn luaSetModePrompt(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "set_mode_prompt: app not initialized");
         return 0;
     };
-    const mode = readEnumArg(state, @import("registry.zig").Mode, "set_mode_prompt", 1) orelse return 0;
+    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt", 1) orelse return 0;
     const prompt = readPromptArg(state, "set_mode_prompt", 2) orelse return 0;
     a.context_factory.setModePrompt(mode, prompt) catch {
         _ = c.luaL_error(state, "set_mode_prompt: out of memory");
@@ -1480,7 +1480,7 @@ fn luaSetModePromptSparse(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "set_mode_prompt_sparse: app not initialized");
         return 0;
     };
-    const mode = readEnumArg(state, @import("registry.zig").Mode, "set_mode_prompt_sparse", 1) orelse return 0;
+    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt_sparse", 1) orelse return 0;
     const prompt = readPromptArg(state, "set_mode_prompt_sparse", 2) orelse return 0;
     a.context_factory.setSparseModePrompt(mode, prompt) catch {
         _ = c.luaL_error(state, "set_mode_prompt_sparse: out of memory");
@@ -1495,7 +1495,7 @@ fn luaSetModeName(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "set_mode_name: app not initialized");
         return 0;
     };
-    const mode = readEnumArg(state, @import("registry.zig").Mode, "set_mode_name", 1) orelse return 0;
+    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_name", 1) orelse return 0;
     const name = readPromptArg(state, "set_mode_name", 2) orelse return 0;
     a.context_factory.setModeName(mode, name) catch {
         _ = c.luaL_error(state, "set_mode_name: out of memory");
@@ -1568,7 +1568,7 @@ fn luaSetMode(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "set_mode: app not initialized");
         return 0;
     };
-    const mode = readEnumArg(state, @import("registry.zig").Mode, "set_mode", 1) orelse return 0;
+    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode", 1) orelse return 0;
     a.mode = mode;
 
     a.event_bus.emit(a, .{ .mode_changed = @intFromEnum(mode) }) catch |err| {
@@ -1698,8 +1698,8 @@ fn luaMcpEnable(L: ?*c.lua_State) callconv(.c) c_int {
     }
     const idx: usize = @intCast(raw_id - 1);
 
-    const agent_type: @import("registry.zig").AgentType = if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL)
-        readEnumArg(state, @import("registry.zig").AgentType, "mcp.enable", 2) orelse return 0
+    const agent_type: r.ContextFactory.AgentType = if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL)
+        readEnumArg(state, r.ContextFactory.AgentType, "mcp.enable", 2) orelse return 0
     else
         .general;
 
@@ -1739,7 +1739,7 @@ fn luaAddTool(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "add_tool: agent type out of range");
         return 0;
     }
-    const agent_type: r.reg.AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
+    const agent_type: r.ContextFactory.AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
 
     const tool_name = readAnyArg([]const u8, state, "add_tool", 2) orelse return 0;
 

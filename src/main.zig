@@ -9,7 +9,7 @@ const BlitzdenkCfg = r.prv.config.BlitzdenkCfg;
 const ChatEntry = r.app.ChatEntry;
 const prompts = r.prompts;
 const lua = r.lua;
-const reg = r.reg;
+const reg = r.ContextFactory;
 const keys = r.keys;
 const util = r.util;
 const session = r.session;
@@ -218,7 +218,7 @@ pub fn run(
     const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;
 
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
-    var context_factory = try reg.ContextFactory.init(arena, io, HOME);
+    var context_factory = try r.ContextFactory.init(arena, io, HOME);
 
     var term = try tui.Terminal.init(arena, io);
     errdefer term.deinit();

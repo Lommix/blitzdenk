@@ -161,7 +161,7 @@ fn inject_task_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.age
 }
 
 fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
-    const mode: r.reg.Mode = @enumFromInt(agent.mode_idx);
+    const mode: r.ContextFactory.Mode = @enumFromInt(agent.mode_idx);
     const reminder = if (agent.flags.force_full_reminder)
         app.context_factory.mode_prompts.get(mode)
     else
