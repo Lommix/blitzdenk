@@ -158,7 +158,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     else
         args.command;
 
-    ctx.updateToolStatus(call, "(Bash) {s}", .{cleaned_command_str[0..@min(cleaned_command_str.len, 248)]});
+    ctx.updateToolStatus(call, "{s}", .{cleaned_command_str[0..@min(cleaned_command_str.len, 248)]});
 
     const need_perm = switch (classifyCommand(args.command)) {
         .blocked => return r.errResult(call, "command is blocked for safety"),

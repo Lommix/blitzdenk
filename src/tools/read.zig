@@ -109,15 +109,15 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     const full_read = args.offset == null and args.limit == null;
 
     if (args.offset == null and args.limit == null) {
-        ctx.updateToolStatus(call, "(Read) {s}", .{rel_path});
+        ctx.updateToolStatus(call, "read {s}", .{rel_path});
     } else if (args.limit) |l| {
         if (args.offset) |o| {
-            ctx.updateToolStatus(call, "(Read) {s} from line {d} ({d} lines)", .{ rel_path, o, l });
+            ctx.updateToolStatus(call, "read {s} offset: {d} limit: {d}", .{ rel_path, o, l });
         } else {
-            ctx.updateToolStatus(call, "(Read) {s} ({d} lines)", .{ rel_path, l });
+            ctx.updateToolStatus(call, "read {s} limit: {d}", .{ rel_path, l });
         }
     } else if (args.offset) |o| {
-        ctx.updateToolStatus(call, "(Read) {s} from line {d}", .{ rel_path, o });
+        ctx.updateToolStatus(call, "read {s} offset: {d}", .{ rel_path, o });
     }
 
     // Stat for mtime first so we can short-circuit unchanged re-reads.

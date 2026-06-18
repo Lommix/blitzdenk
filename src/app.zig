@@ -889,7 +889,7 @@ pub const App = struct {
                 .diff_lines = lines.items,
             } };
 
-            const block_height = try buildEntryParagraph(arena, &stack, self.mainAgent(), self, .{
+            const block_height = try buildChatEntryParagraph(arena, &stack, self.mainAgent(), self, .{
                 .role = .agent,
                 .parts = parts,
             }, false, inner_w);
@@ -1594,7 +1594,7 @@ const RenderParagraphItem = struct { p: r.tui.Paragraph, h: usize };
 /// Build one r.tui.Paragraph per ChatEntry. Allocations live in `arena`; do not
 /// deinit the result. All paragraphs use `reverse = true` so the chat-area
 /// caller can stack them bottom-up.
-fn buildEntryParagraph(
+fn buildChatEntryParagraph(
     arena: std.mem.Allocator,
     out: *std.ArrayList(RenderParagraphItem),
     agent: ?*prv.agent.Agent,
@@ -1634,6 +1634,8 @@ fn buildEntryParagraph(
 
     // Header last so it renders on top (stack is bottom-up)
 
+    var tool_call_list = std.ArrayList(ChatPart.ToolCallEntry).empty;
+
     for (0..entry.parts.len) |i| {
         const part = entry.parts[entry.parts.len - i - 1];
         switch (part) {
@@ -1664,13 +1666,19 @@ fn buildEntryParagraph(
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
             },
-            .tool_call => |call| {
-                const p = buildToolCallParagraph(arena, main_agent, app, call, inner_w);
-                const h = p.totalHeightLong(inner_w);
-                try out.append(arena, .{ .p = p, .h = h });
-                total += h;
-            },
+            .tool_call => |call| try tool_call_list.append(arena, call),
+            // const p = buildToolCallParagraph(arena, main_agent, app, call, inner_w);
+            // const h = p.totalHeightLong(inner_w);
+            // try out.append(arena, .{ .p = p, .h = h });
+            // total += h;
+            // },
         }
+    }
+
+    if (tool_call_list.items.len > 0) {
+        const para = try buildToolGroupParagraph(app, arena, main_agent, tool_call_list.items, inner_w);
+        total += para.h;
+        try out.append(arena, para);
     }
 
     try header_para.lines.append(arena, header_line);
@@ -1678,6 +1686,49 @@ fn buildEntryParagraph(
     total += 1;
 
     return total;
+}
+
+fn buildToolGroupParagraph(
+    app: *App,
+    arena: std.mem.Allocator,
+    agent: *r.prv.agent.Agent,
+    calls: []const ChatPart.ToolCallEntry,
+    inner_w: u16,
+) !RenderParagraphItem {
+    var p = r.tui.Paragraph{};
+
+    p.style.bg = app.theme.bg;
+    p.padding = .all(1);
+
+    for (calls) |call| {
+        var line = r.tui.Line{};
+
+        const result_opt: ?prv.adapter.ToolResult = findToolResult(agent, call.call_id) orelse agent.tool_call_done.get(call.call_id);
+        if (result_opt) |result| {
+            if (result.is_error) {
+                try line.pushSpan(arena, .{ .content = r.tui.icon.fail, .style = .{ .fg = .red, .modifier = .{ .bold = true } } });
+            } else {
+                try line.pushSpan(arena, .{ .content = r.tui.icon.ok, .style = .{ .fg = .green, .modifier = .{ .bold = true } } });
+            }
+        } else {
+            try line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = .white } });
+        }
+
+        if (agent.tool_display_status.getPtr(call.call_id)) |status| {
+            try line.pushSpan(arena, .{ .content = "  " });
+            try line.pushSpan(arena, .{ .content = status.status_text.items, .style = .{ .modifier = .{ .bold = true } } });
+        } else {
+            try line.pushSpan(arena, .{ .content = "  " });
+            try line.pushSpan(arena, .{ .content = call.tool_name });
+        }
+
+        try p.lines.append(arena, line);
+    }
+
+    return .{
+        .h = p.totalHeightLong(inner_w),
+        .p = p,
+    };
 }
 
 fn buildCompactionIndicatorParagraph(arena: std.mem.Allocator, app: *App) r.tui.Paragraph {
@@ -2040,7 +2091,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
                 .diff_lines = lines.items,
             } };
 
-            const block_height = try buildEntryParagraph(alloc, &stack, maybe_agent, app, .{
+            const block_height = try buildChatEntryParagraph(alloc, &stack, maybe_agent, app, .{
                 .role = .agent,
                 .parts = parts,
             }, false, inner_w);
@@ -2050,7 +2101,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
 
     const is_thinking = if (maybe_agent) |ag| ag.flags.is_thinking else false;
     if (app.streaming_entry) |entry| {
-        const block_height = try buildEntryParagraph(alloc, &stack, maybe_agent, app, entry, is_thinking, inner_w);
+        const block_height = try buildChatEntryParagraph(alloc, &stack, maybe_agent, app, entry, is_thinking, inner_w);
         total += block_height;
     }
 
@@ -2060,7 +2111,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
 
         if (maybe_agent == null) continue;
 
-        const block_height = try buildEntryParagraph(alloc, &stack, maybe_agent, app, entry, false, inner_w);
+        const block_height = try buildChatEntryParagraph(alloc, &stack, maybe_agent, app, entry, false, inner_w);
         total += block_height;
     }
 

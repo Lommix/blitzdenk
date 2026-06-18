@@ -93,7 +93,7 @@ fn createTask(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
     const args = r.parseArgs(struct { subject: []const u8, description: []const u8 }, ctx.alloc, call) orelse
         return r.errResult(call, "invalid arguments: expected {\"description\": \"...\"}");
 
-    ctx.updateToolStatus(call, "(Create Task) {s}", .{args.subject});
+    ctx.updateToolStatus(call, "new task {s}", .{args.subject});
 
     const subject = ctx.alloc.dupe(u8, args.subject) catch
         return r.errResult(call, "out of memory");
@@ -143,7 +143,7 @@ fn getTask(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
         };
     };
 
-    ctx.updateToolStatus(call, "(Gets Task) {s}", .{snap.subject});
+    ctx.updateToolStatus(call, "get task: {s}", .{snap.subject});
 
     const msg = std.fmt.allocPrint(ctx.alloc, "Task {d}: [{s}] subject: {s}\n description: {s}", .{
         snap.id, snap.state.toString(), snap.subject, snap.description,
@@ -175,7 +175,7 @@ fn listTasks(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
 
     if (snap.len == 0) return r.okResult(call, "No tasks.");
 
-    ctx.updateToolStatus(call, "(Listing Tasks) ..", .{});
+    ctx.updateToolStatus(call, "list tasks ..", .{});
 
     for (snap) |task| {
         const text = std.fmt.allocPrint(ctx.alloc, "{s} {s}", .{ task.state.icon(), task.subject }) catch "task";
@@ -213,7 +213,7 @@ fn updateTaskState(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
         };
     };
 
-    ctx.updateToolStatus(call, "(Update Task) {s} {s}", .{ snap.state.icon(), snap.subject });
+    ctx.updateToolStatus(call, "update task {s} {s}", .{ snap.state.icon(), snap.subject });
 
     const msg = std.fmt.allocPrint(ctx.alloc, "Task {d} state updated to {s}", .{
         snap.id, new_state.toString(),

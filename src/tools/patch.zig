@@ -102,7 +102,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     }
 
     const alloc = ctx.alloc;
-    ctx.updateToolStatus(call, "(Patch)", .{});
+    ctx.updateToolStatus(call, "patch", .{});
 
     const args = (std.json.parseFromSlice(Args, alloc, call.arguments, .{
         .ignore_unknown_fields = true,
@@ -133,7 +133,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         const resolved = std.fs.path.resolve(alloc, &.{ ctx.cwd, cmd_path }) catch
             return r.errResult(call, "failed to resolve path");
 
-        ctx.updateToolStatus(call, "(Patch) {s}", .{cmd_path});
+        ctx.updateToolStatus(call, "patch {s}", .{cmd_path});
 
         // For updates, the file must have been read first (matches edit.zig policy).
         if (cmd == .file_update) {

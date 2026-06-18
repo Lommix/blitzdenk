@@ -166,7 +166,7 @@ fn run_send_message_to_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCa
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid arguments");
 
-    ctx.updateToolStatus(call, "(Sending Message) - to {d}", .{args.agent_id});
+    ctx.updateToolStatus(call, "sending message to agent {d}", .{args.agent_id});
     const agent_id = prv.Swarm.AgentId.unpack(args.agent_id);
 
     const app = ctx.swarm.context.cast(@import("../app.zig").App);
@@ -203,7 +203,7 @@ fn run_await_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.ad
 
     const child_id = prv.Swarm.AgentId.unpack(args.agent_id);
 
-    ctx.updateToolStatus(call, "(Awaiting Agent) - {d}", .{args.agent_id});
+    ctx.updateToolStatus(call, "waiting for agent {d}", .{args.agent_id});
 
     const slot = ctx.swarm.getSlot(child_id) orelse
         return r.errResult(call, "agent slot not found");

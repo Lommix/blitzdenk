@@ -37,7 +37,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\", \"content\": \"...\"}");
 
-    ctx.updateToolStatus(call, "(Write) {s}", .{args.path});
+    ctx.updateToolStatus(call, "write {s}", .{args.path});
     if (args.path.len == 0) return r.errResult(call, "path is empty");
 
     const resolved = std.fs.path.resolve(alloc, &.{ ctx.cwd, args.path }) catch
