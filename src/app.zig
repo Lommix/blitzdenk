@@ -1714,15 +1714,63 @@ fn buildToolGroupParagraph(
             try line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = .white } });
         }
 
-        if (agent.tool_display_status.getPtr(call.call_id)) |status| {
+        const status_opt = agent.tool_display_status.getPtr(call.call_id);
+
+        if (status_opt) |status| {
             try line.pushSpan(arena, .{ .content = "  " });
             try line.pushSpan(arena, .{ .content = status.status_text.items, .style = .{ .modifier = .{ .bold = true } } });
+
+            child: {
+                const child_id = status.child_id orelse break :child;
+                const child_ag = app.swarm.getAgent(child_id) orelse break :child;
+
+                if (child_ag.flags.is_thinking) {
+                    try line.pushSpan(arena, .{ .content = "  thinking " });
+                    try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count), .style = .{ .modifier = .{ .bold = true } } });
+                }
+            }
         } else {
             try line.pushSpan(arena, .{ .content = "  " });
             try line.pushSpan(arena, .{ .content = call.tool_name });
         }
 
         try p.lines.append(arena, line);
+
+        if (status_opt) |status| child: {
+
+            // log
+            const log_start = status.log.items.len -| 3;
+            for (status.log.items[log_start..]) |entry| {
+                var l = r.tui.Line{};
+
+                const glyph = r.tui.icon.box_t_right;
+
+                try l.pushSpan(arena, .{ .content = "  " });
+                try l.pushSpan(arena, .{ .content = glyph });
+                try l.pushSpan(arena, .{ .content = " " });
+                try l.pushSpan(arena, .{ .content = entry });
+
+                try p.lines.append(arena, l);
+            }
+
+            // sub agent log
+            const child_id = status.child_id orelse break :child;
+            const child_ag = app.swarm.getAgent(child_id) orelse break :child;
+            var it = child_ag.tool_display_status.iterator();
+            while (it.next()) |entry| {
+                const sub_agent_tool_status = entry.value_ptr.status_text.items;
+                var l = r.tui.Line{};
+
+                const glyph = r.tui.icon.box_t_right;
+
+                try l.pushSpan(arena, .{ .content = "  " });
+                try l.pushSpan(arena, .{ .content = glyph });
+                try l.pushSpan(arena, .{ .content = " " });
+                try l.pushSpan(arena, .{ .content = sub_agent_tool_status });
+
+                try p.lines.append(arena, l);
+            }
+        }
     }
 
     return .{

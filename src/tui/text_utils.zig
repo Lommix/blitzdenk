@@ -180,7 +180,7 @@ pub fn spinnerDots(frame_count: usize) []const u8 {
 }
 
 pub fn spinnerBar(frame_count: usize) []const u8 {
-    const frames = [_][]const u8{ "▁", "▂ ", "▃ ", "▄ ", "▅ ", "▆ ", "▇ ", "█ ", "▇ ", "▆ ", "▅ ", "▄ ", "▃ ", "▁" };
+    const frames = [_][]const u8{ "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃", "▁" };
     return frames[(frame_count / 6) % frames.len];
 }
 
