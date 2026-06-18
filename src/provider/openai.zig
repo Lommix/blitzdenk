@@ -492,6 +492,7 @@ pub const StreamState = struct {
     buf: std.ArrayList(u8) = .empty, // incoming byte buffer
     think_mode: ThinkMode = .outside,
     think_carry: std.ArrayList(u8) = .empty, // partial tag bytes held back
+    startup: bool = true, // only match OPEN tag at start of stream
     text_acc: std.ArrayList(u8) = .empty,
     thinking_acc: std.ArrayList(u8) = .empty,
     // novita: raw JSON of each reasoning_details segment, joined into an
@@ -791,33 +792,34 @@ pub const StreamState = struct {
         try work_buf.appendSlice(arena, content);
         self.think_carry.clearRetainingCapacity();
 
-        const OPEN = "<think>";
-        const CLOSE = "</think>";
+        const OPEN = " thinking";
+        const CLOSE = " response";
 
         var pos: usize = 0;
         const src = work_buf.items;
         while (pos < src.len) {
             if (self.think_mode == .outside) {
-                const rel = std.mem.indexOf(u8, src[pos..], OPEN);
-                if (rel) |off| {
-                    if (off > 0) {
-                        const seg = try arena.dupe(u8, src[pos .. pos + off]);
-                        try self.text_acc.appendSlice(arena, seg);
-                        try self.pending_text_thinking.append(arena, .{ .kind = .text, .data = seg });
+                if (self.startup) {
+                    const rel = std.mem.indexOf(u8, src[pos..], OPEN);
+                    if (rel) |off| {
+                        if (off == 0) {
+                            pos += OPEN.len;
+                            self.think_mode = .inside;
+                            self.startup = false;
+                            continue;
+                        }
                     }
-                    pos += off + OPEN.len;
-                    self.think_mode = .inside;
-                } else {
-                    const suffix_keep = partialTagSuffix(src[pos..], OPEN);
-                    const emit_end = src.len - suffix_keep;
-                    if (emit_end > pos) {
-                        const seg = try arena.dupe(u8, src[pos..emit_end]);
-                        try self.text_acc.appendSlice(arena, seg);
-                        try self.pending_text_thinking.append(arena, .{ .kind = .text, .data = seg });
-                    }
-                    if (suffix_keep > 0) try self.think_carry.appendSlice(arena, src[emit_end..]);
-                    pos = src.len;
+                    self.startup = false;
                 }
+                const suffix_keep = partialTagSuffix(src[pos..], OPEN);
+                const emit_end = src.len - suffix_keep;
+                if (emit_end > pos) {
+                    const seg = try arena.dupe(u8, src[pos..emit_end]);
+                    try self.text_acc.appendSlice(arena, seg);
+                    try self.pending_text_thinking.append(arena, .{ .kind = .text, .data = seg });
+                }
+                if (suffix_keep > 0) try self.think_carry.appendSlice(arena, src[emit_end..]);
+                pos = src.len;
             } else {
                 const rel = std.mem.indexOf(u8, src[pos..], CLOSE);
                 if (rel) |off| {
@@ -843,8 +845,7 @@ pub const StreamState = struct {
         }
         return null;
     }
-
-    fn partialTagSuffix(s: []const u8, tag: []const u8) usize {
+                    fn partialTagSuffix(s: []const u8, tag: []const u8) usize {
         // Largest k where s ends with tag[0..k]
         const max_k = @min(s.len, tag.len - 1);
         var k: usize = max_k;

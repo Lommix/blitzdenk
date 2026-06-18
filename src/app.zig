@@ -870,6 +870,61 @@ pub const App = struct {
             self.streaming_entry = null;
         }
     }
+
+    pub fn render_permission_preview(
+        self: *App,
+        arena: std.mem.Allocator,
+        stack: *std.ArrayList(RenderParagraphItem),
+        inner_w: u16,
+    ) !?RenderParagraphItem {
+        const perm = self.active_permission orelse return;
+
+        if (perm.payload == .diff) {
+            var lines = std.ArrayList(r.tui.DiffLine).empty;
+            emitDiffLines(&lines, perm.payload.diff, arena);
+
+            var parts = try arena.alloc(ChatPart, 1);
+            parts[0] = .{ .diff = .{
+                .path = perm.payload.diff.path,
+                .diff_lines = lines.items,
+            } };
+
+            const block_height = try buildEntryParagraph(arena, &stack, self.mainAgent(), self, .{
+                .role = .agent,
+                .parts = parts,
+            }, false, inner_w);
+
+            _ = block_height; // autofix
+        }
+
+        return null;
+    }
+
+    pub fn persist_permission_to_history(
+        self: *App,
+        perm: *const r.prv.Swarm.PermissionReq,
+    ) !void {
+        switch (perm.payload) {
+            .diff => |diff| {
+                const alloc = self.sessionAlloc();
+                var parts = try alloc.alloc(r.app.ChatPart, 1);
+
+                var lines = std.ArrayList(r.tui.DiffLine).empty;
+                r.app.emitDiffLines(&lines, diff, alloc);
+
+                parts[0] = .{ .diff = .{
+                    .path = diff.path,
+                    .diff_lines = try lines.toOwnedSlice(alloc),
+                } };
+
+                try self.chat_entries.append(alloc, .{
+                    .role = .agent,
+                    .parts = parts,
+                });
+            },
+            else => {},
+        }
+    }
 };
 
 fn pushDiffLine(out: *std.ArrayList(r.tui.DiffLine), alloc: std.mem.Allocator, line: r.tui.DiffLine) void {
@@ -881,7 +936,7 @@ fn pushDiffLine(out: *std.ArrayList(r.tui.DiffLine), alloc: std.mem.Allocator, l
     }) catch return;
 }
 
-fn emitDiffLines(out: *std.ArrayList(r.tui.DiffLine), snap: prv.Swarm.ToolDiff, alloc: std.mem.Allocator) void {
+pub fn emitDiffLines(out: *std.ArrayList(r.tui.DiffLine), snap: prv.Swarm.ToolDiff, alloc: std.mem.Allocator) void {
     if (snap.before) |before| {
         const old_lines = splitLinesAlloc(before, alloc) orelse return;
         const new_lines = splitLinesAlloc(snap.after, alloc) orelse return;
@@ -1971,6 +2026,27 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
 
     // build in reverse
     var i = app.chat_entries.items.len;
+
+    // TODO: Add propose preview
+    // preview diff
+    if (app.active_permission) |perm| {
+        if (perm.payload == .diff) {
+            var lines = std.ArrayList(r.tui.DiffLine).empty;
+            emitDiffLines(&lines, perm.payload.diff, alloc);
+
+            var parts = try alloc.alloc(ChatPart, 1);
+            parts[0] = .{ .diff = .{
+                .path = perm.payload.diff.path,
+                .diff_lines = lines.items,
+            } };
+
+            const block_height = try buildEntryParagraph(alloc, &stack, maybe_agent, app, .{
+                .role = .agent,
+                .parts = parts,
+            }, false, inner_w);
+            total += block_height;
+        }
+    }
 
     const is_thinking = if (maybe_agent) |ag| ag.flags.is_thinking else false;
     if (app.streaming_entry) |entry| {

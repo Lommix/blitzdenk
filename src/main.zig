@@ -231,7 +231,6 @@ pub fn run(
     _ = log; // autofix
     var swarm = try prv.Swarm.init(arena, io, .{
         .ptr = &app,
-        //TODO: impl & wire
         .broadcast = (struct {
             fn func(ptr: *anyopaque, en: prv.Swarm.BroadcastEntry) void {
                 const a: *App = @ptrCast(@alignCast(ptr));
@@ -244,42 +243,14 @@ pub fn run(
                 defer g.unlock();
 
                 g.ptr.appendBounded(en) catch return;
-
-                // var out: std.ArrayList(ChatEntry.MessagePart) = .empty;
-                // // use session alloc
-                // const alloc = a.sessionAlloc();
-                //
-                // for (en.parts) |part| {
-                //     switch (part) {
-                //         .tool_call => |call| {
-                //             a.chat_entries.append(alloc, .{ .tool_call = .{
-                //                 .call_id = alloc.dupe(u8, call.id) catch return,
-                //                 .tool_name = alloc.dupe(u8, call.name) catch return,
-                //             } }) catch |err| log.err("{any}", .{err});
-                //         },
-                //         .text => |msg| {
-                //             out.append(a.sessionAlloc(), .{
-                //                 .text = alloc.dupe(u8, msg) catch return,
-                //             }) catch |err| log.err("{any}", .{err});
-                //         },
-                //         else => {},
-                //     }
-                // }
-                //
-                // if (out.items.len == 0) return;
-                //
-                // a.chat_entries.append(alloc, .{ .message = .{
-                //     .role = en.role,
-                //     .parts = out.items,
-                // } }) catch |err| log.err("{any}", .{err});
             }
         }).func,
-        //TODO: impl & wire
         .permission = (struct {
             fn func(ptr: *anyopaque, en: *prv.Swarm.PermissionReq) void {
                 const a: *App = @ptrCast(@alignCast(ptr));
                 const g = a.permission_queue.lock(a.io);
                 defer g.unlock();
+
                 g.ptr.appendBounded(en) catch {
                     en.state = .denied;
                     en.event.set(a.io);
@@ -408,6 +379,7 @@ pub fn run(
 
                 // check permission level against flags
                 if (app.flags.skip_permissions and !app.swarm.exec.ssh_active) {
+                    try app.persist_permission_to_history(next);
                     next.state = .approved;
                     next.event.set(app.io);
                     continue;
@@ -684,7 +656,10 @@ pub fn run(
 
                                 // Generic 3-option (yes / no / enter message)
                                 switch (ps.selected) {
-                                    0 => app.resolveActivePermission(.approved),
+                                    0 => {
+                                        try app.persist_permission_to_history(entry);
+                                        app.resolveActivePermission(.approved);
+                                    },
                                     1 => app.resolveActivePermission(.denied),
                                     2 => {
                                         app.enterPermMessage();
