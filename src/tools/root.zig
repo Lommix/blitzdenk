@@ -18,10 +18,22 @@ pub const tui = r.tui;
 pub const MAX_DISPLAY_BYTES = 16 * 1024;
 pub const MAX_DISPLAY_LINES = 500;
 
+pub fn fmtSpan(ctx: *r.prv.tool.ToolContext, comptime fmt: []const u8, args: anytype, style: tui.Style) r.tui.Span {
+    const app: *r.app.App = @ptrCast(@alignCast(ctx.swarm.context.ptr));
+    return .{
+        .content = std.fmt.allocPrint(app.sessionAlloc(), fmt, args) catch "",
+        .style = style,
+    };
+}
+
 pub fn setToolStatusPrint(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall, comptime fmt: []const u8, args: anytype) void {
-    const alloc = ctx.alloc;
+    const app: *r.app.App = @ptrCast(@alignCast(ctx.swarm.context.ptr));
+    const alloc = app.sessionAlloc();
+
     const txt = std.fmt.allocPrint(alloc, fmt, args) catch return;
     const count = std.mem.count(u8, txt, "\n") + 1;
+
+    // TODO: this does not need to be allocated
     const spans = alloc.alloc(r.tui.Span, count) catch return;
     const lines = alloc.alloc(r.app.ToolStatusLineInput, count) catch return;
 
@@ -31,7 +43,6 @@ pub fn setToolStatusPrint(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolC
         spans[i] = .{ .content = text };
         lines[i] = .{ .spans = spans[i .. i + 1] };
     }
-    const app = ctx.swarm.context.cast(r.app.App);
     app.setToolStatus(ctx.self_id, call.id, lines) catch return;
 }
 

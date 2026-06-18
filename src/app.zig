@@ -373,6 +373,7 @@ pub const App = struct {
         return self.arena_session.allocator();
     }
 
+    // TODO: refactor
     pub fn setToolStatus(
         self: *App,
         agent_id: prv.Swarm.AgentId,
