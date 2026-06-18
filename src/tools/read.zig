@@ -108,17 +108,23 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     const full_read = args.offset == null and args.limit == null;
 
-    if (args.offset == null and args.limit == null) {
-        r.setToolStatusPrint(ctx, call, "read {s}", .{rel_path});
-    } else if (args.limit) |l| {
+    const app = ctx.swarm.context.cast(@import("../app.zig").App);
+    var read_info: []const u8 = rel_path;
+
+    if (args.limit) |l| {
         if (args.offset) |o| {
-            r.setToolStatusPrint(ctx, call, "read {s} offset: {d} limit: {d}", .{ rel_path, o, l });
+            read_info = std.fmt.allocPrint(app.sessionAlloc(), "{s} offset: {d} limit: {d}", .{ rel_path, o, l }) catch "";
         } else {
-            r.setToolStatusPrint(ctx, call, "read {s} limit: {d}", .{ rel_path, l });
+            read_info = std.fmt.allocPrint(app.sessionAlloc(), "{s} limit: {d}", .{ rel_path, l }) catch "";
         }
     } else if (args.offset) |o| {
-        r.setToolStatusPrint(ctx, call, "read {s} offset: {d}", .{ rel_path, o });
+        read_info = std.fmt.allocPrint(app.sessionAlloc(), "{s} offset: {d}", .{ rel_path, o }) catch "";
     }
+
+    r.setToolStatusSpans(ctx, call, &.{
+        .{ .content = "read ", .style = .{ .modifier = .{ .bold = true } } },
+        .{ .content = read_info, .style = .{ .fg = app.theme.muted } },
+    }) catch {};
 
     // Stat for mtime first so we can short-circuit unchanged re-reads.
     const stat_res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "stat", "-c", "%Y", resolved } }) catch
