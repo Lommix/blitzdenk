@@ -2,56 +2,52 @@
 const Self = @This();
 
 const std = @import("std");
-const prv = @import("provider");
-const tools = @import("tools/root.zig");
-const prompts = @import("prompts.zig");
-const cfg = prv.config;
-const tui = @import("tui/root.zig");
+const r = @import("root.zig");
 
 const CONFIG_DIR = @import("main.zig").DEFAULT_CONFIG_PATH;
 const CONTEXT_FILES = .{"AGENTS.md"};
 pub const MAX_OVERRIDE_TOOLS = 64;
 
 pub const default_tool_set = .{
-    .{ tools.write.WriteTool, ToolFlags.empty.agents(&.{.general}) },
-    .{ tools.edit.EditTool, ToolFlags.empty.agents(&.{.general}) },
-    .{ tools.bash.BashTool, ToolFlags.all },
-    .{ tools.bash.CancelBackgroundCommand, ToolFlags.all },
-    .{ tools.read.ReadTool, ToolFlags.all },
-    .{ tools.agent.AgentTool, ToolFlags.all },
-    .{ tools.agent.SendMessageToAgent, ToolFlags.all },
-    .{ tools.agent.AwaitAgent, ToolFlags.all },
-    .{ tools.agent.CancelAgent, ToolFlags.all },
-    .{ tools.tasks.ListTasksTool, ToolFlags.all },
-    .{ tools.tasks.UpdateTaskStateTool, ToolFlags.all },
-    .{ tools.tasks.CreateTaskTool, ToolFlags.all },
-    .{ tools.patch.PatchTool, ToolFlags.all },
-    .{ tools.ask.AskTool, ToolFlags.all },
-    .{ tools.ssh.EnterSshMode, ToolFlags.empty.agents(&.{.general}) },
-    .{ tools.ssh.ExitSshMode, ToolFlags.empty.agents(&.{.general}) },
+    .{ r.tools.write.WriteTool, ToolFlags.empty.agents(&.{.general}) },
+    .{ r.tools.edit.EditTool, ToolFlags.empty.agents(&.{.general}) },
+    .{ r.tools.bash.BashTool, ToolFlags.all },
+    .{ r.tools.bash.CancelBackgroundCommand, ToolFlags.all },
+    .{ r.tools.read.ReadTool, ToolFlags.all },
+    .{ r.tools.agent.AgentTool, ToolFlags.all },
+    .{ r.tools.agent.SendMessageToAgent, ToolFlags.all },
+    .{ r.tools.agent.AwaitAgent, ToolFlags.all },
+    .{ r.tools.agent.CancelAgent, ToolFlags.all },
+    .{ r.tools.tasks.ListTasksTool, ToolFlags.all },
+    .{ r.tools.tasks.UpdateTaskStateTool, ToolFlags.all },
+    .{ r.tools.tasks.CreateTaskTool, ToolFlags.all },
+    .{ r.tools.patch.PatchTool, ToolFlags.all },
+    .{ r.tools.ask.AskTool, ToolFlags.all },
+    .{ r.tools.ssh.EnterSshMode, ToolFlags.empty.agents(&.{.general}) },
+    .{ r.tools.ssh.ExitSshMode, ToolFlags.empty.agents(&.{.general}) },
 };
 
 pub const general_default_tool_set = .{
-    tools.write.WriteTool,
-    tools.edit.EditTool,
-    tools.bash.BashTool,
-    tools.bash.CancelBackgroundCommand,
-    tools.read.ReadTool,
-    tools.agent.AgentTool,
-    tools.agent.SendMessageToAgent,
-    tools.agent.AwaitAgent,
-    tools.agent.CancelAgent,
-    tools.tasks.ListTasksTool,
-    tools.tasks.UpdateTaskStateTool,
-    tools.tasks.CreateTaskTool,
-    tools.ask.AskTool,
+    r.tools.write.WriteTool,
+    r.tools.edit.EditTool,
+    r.tools.bash.BashTool,
+    r.tools.bash.CancelBackgroundCommand,
+    r.tools.read.ReadTool,
+    r.tools.agent.AgentTool,
+    r.tools.agent.SendMessageToAgent,
+    r.tools.agent.AwaitAgent,
+    r.tools.agent.CancelAgent,
+    r.tools.tasks.ListTasksTool,
+    r.tools.tasks.UpdateTaskStateTool,
+    r.tools.tasks.CreateTaskTool,
+    r.tools.ask.AskTool,
 };
 
 pub const readonly_no_sub_default_tool_set = .{
-    tools.bash.BashTool,
-    tools.bash.CancelBackgroundCommand,
-    tools.read.ReadTool,
-    tools.agent.SendMessageToAgent,
+    r.tools.bash.BashTool,
+    r.tools.bash.CancelBackgroundCommand,
+    r.tools.read.ReadTool,
+    r.tools.agent.SendMessageToAgent,
 };
 
 pub const Mode = enum(u6) {
@@ -90,15 +86,16 @@ pub const ToolFlags = struct {
 };
 
 pub const ToolSet = struct {
-    set: [64]prv.tool.Tool = undefined,
+    set: [64]r.prv.tool.Tool = undefined,
     len: u32 = 0,
 
-    pub fn slice(self: *const ToolSet) []const prv.tool.Tool {
+    pub fn slice(self: *const ToolSet) []const r.prv.tool.Tool {
         return self.set[0..self.len];
     }
 };
 
-const ToolEntry = struct { tool: prv.tool.Tool, flags: ToolFlags };
+const ToolEntry = struct { tool: r.prv.tool.Tool, flags: ToolFlags };
+
 pub const AgentOverride = struct {
     names: [MAX_OVERRIDE_TOOLS][255]u8 = undefined,
     name_lens: [MAX_OVERRIDE_TOOLS]u8 = @splat(0),
@@ -112,12 +109,14 @@ pub const AgentOverride = struct {
 // -------------------------------------------------------------------------------
 loaded_tools: std.ArrayList(ToolEntry) = .empty,
 agent_prompts: std.EnumArray(AgentType, []const u8),
-mode_colors: std.EnumArray(Mode, tui.Color),
+mode_colors: std.EnumArray(Mode, r.tui.Color),
 mode_names: std.EnumArray(Mode, []const u8),
 mode_prompts: std.EnumArray(Mode, []const u8),
 sparse_mode_prompts: std.EnumArray(Mode, []const u8),
 agent_overrides: std.EnumArray(AgentType, AgentOverride) = .initFill(.{}),
 custom_mode_counter: u32 = 2, // skip first 2 for interal modes
+
+agent_tool_sets: std.EnumMap(AgentType, ToolSet) = .{},
 
 // Arena holds prompt overrides set from lua. Reset on hot-reload so the
 // factory keeps using the embedded defaults until lua re-installs them.
@@ -135,15 +134,15 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !Self {
     }
 
     var agent_prompts = std.EnumArray(AgentType, []const u8).initFill("");
-    agent_prompts.set(.general, prompts.default_main_agent_prompt);
-    agent_prompts.set(.explore, prompts.explore_sub_agent_prompt);
-    agent_prompts.set(.review, prompts.review_sub_agent_prompt);
+    agent_prompts.set(.general, r.prompts.default_main_agent_prompt);
+    agent_prompts.set(.explore, r.prompts.explore_sub_agent_prompt);
+    agent_prompts.set(.review, r.prompts.review_sub_agent_prompt);
 
     const mode_prompts = std.EnumArray(Mode, []const u8).initFill("");
     const sparse_mode_prompts = std.EnumArray(Mode, []const u8).initFill("");
     var mode_names = std.EnumArray(Mode, []const u8).initFill("UNKNOWN");
     mode_names.set(.exec, "EXEC");
-    var mode_colors = std.EnumArray(Mode, tui.Color).initFill(.white);
+    var mode_colors = std.EnumArray(Mode, r.tui.Color).initFill(.white);
     mode_colors.set(.exec, .red);
 
     var home_dir = try std.Io.Dir.openDirAbsolute(io, home, .{});
@@ -198,7 +197,7 @@ pub fn addMode(self: *Self, name: []const u8, prompt: []const u8, sparse: []cons
     self.mode_names.set(idx, try alloc.dupe(u8, name));
     self.mode_prompts.set(idx, try alloc.dupe(u8, prompt));
     self.sparse_mode_prompts.set(idx, try alloc.dupe(u8, sparse));
-    const c = tui.Color.parseStrHex(color) catch tui.Color.white;
+    const c = r.tui.Color.parseStrHex(color) catch r.tui.Color.white;
     self.mode_colors.set(idx, c);
     return idx;
 }
@@ -256,12 +255,12 @@ pub fn resetPrompts(self: *Self) void {
     self.mode_prompts.set(.exec, "");
     self.sparse_mode_prompts.set(.exec, "");
 
-    self.agent_prompts.set(.general, prompts.default_main_agent_prompt);
-    self.agent_prompts.set(.explore, prompts.explore_sub_agent_prompt);
-    self.agent_prompts.set(.review, prompts.review_sub_agent_prompt);
+    self.agent_prompts.set(.general, r.prompts.default_main_agent_prompt);
+    self.agent_prompts.set(.explore, r.prompts.explore_sub_agent_prompt);
+    self.agent_prompts.set(.review, r.prompts.review_sub_agent_prompt);
 }
 
-pub fn add(self: *Self, alloc: std.mem.Allocator, tool: prv.tool.Tool, flags: ToolFlags) !void {
+pub fn add(self: *Self, alloc: std.mem.Allocator, tool: r.prv.tool.Tool, flags: ToolFlags) !void {
     try self.loaded_tools.append(alloc, .{ .tool = tool, .flags = flags });
 }
 
@@ -277,8 +276,8 @@ pub fn remove(self: *Self, tool_name: []const u8) void {
 
 pub fn configureAgent(
     self: *const Self,
-    agent: *prv.agent.Agent,
-    config: *const cfg.BlitzdenkCfg,
+    agent: *r.prv.agent.Agent,
+    config: *const r.prv.config.BlitzdenkCfg,
 ) !void {
     agent.reset();
     const alloc = agent.arena.allocator();
@@ -295,7 +294,7 @@ pub fn configureAgent(
     try agent.setSystemPrompt(prompt);
 }
 
-fn findLoaded(self: *const Self, name: []const u8) ?prv.tool.Tool {
+fn findLoaded(self: *const Self, name: []const u8) ?r.prv.tool.Tool {
     for (self.loaded_tools.items) |entry| {
         if (std.mem.eql(u8, entry.tool.def.name, name)) return entry.tool;
     }
@@ -307,7 +306,7 @@ const ToolIter = struct {
     agent_type: AgentType,
     i: u32 = 0,
     override_phase_done: bool = false,
-    pub fn next(self: *ToolIter) ?prv.tool.Tool {
+    pub fn next(self: *ToolIter) ?r.prv.tool.Tool {
         const override = self.factory.agent_overrides.getPtrConst(self.agent_type);
         if (override.active and !self.override_phase_done) {
             while (self.i < override.len) {
@@ -409,7 +408,7 @@ pub fn clearTools(self: *Self) void {
 pub fn build_prompt(
     self: *const Self,
     alloc: std.mem.Allocator,
-    config: *const cfg.BlitzdenkCfg,
+    config: *const r.prv.config.BlitzdenkCfg,
     agent_type: AgentType,
 ) ![]const u8 {
     var allocating = std.Io.Writer.Allocating.init(alloc);
