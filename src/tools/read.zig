@@ -109,7 +109,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     const full_read = args.offset == null and args.limit == null;
 
     if (args.offset == null and args.limit == null) {
-        ctx.updateToolStatus(call, "(Read) {s}", .{args.path});
+        ctx.updateToolStatus(call, "(Read) {s}", .{rel_path});
     } else if (args.limit) |l| {
         if (args.offset) |o| {
             ctx.updateToolStatus(call, "(Read) {s} from line {d} ({d} lines)", .{ rel_path, o, l });
