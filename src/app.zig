@@ -1726,7 +1726,17 @@ fn buildToolGroupParagraph(
 
                 if (child_ag.flags.is_thinking) {
                     try line.pushSpan(arena, .{ .content = "  thinking " });
-                    try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count), .style = .{ .modifier = .{ .bold = true } } });
+                    try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
+                }
+
+                if (child_ag.flags.is_calling) {
+                    try line.pushSpan(arena, .{ .content = "  calling " });
+                    try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
+                }
+
+                if (child_ag.flags.is_writing) {
+                    try line.pushSpan(arena, .{ .content = "  writing " });
+                    try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
                 }
             }
         } else {

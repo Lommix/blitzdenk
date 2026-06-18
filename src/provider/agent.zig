@@ -256,6 +256,8 @@ pub const Agent = struct {
         is_fork: bool = false,
         turn_has_reminder: bool = false,
         is_thinking: bool = false,
+        is_writing: bool = false,
+        is_calling: bool = false,
     } = .{},
     loop_guard: LoopGuard = .{},
 
@@ -330,6 +332,9 @@ pub const Agent = struct {
     }
 
     pub fn run(self: *Agent) void {
+        self.flags.is_thinking = false;
+        self.flags.is_writing = false;
+        self.flags.is_calling = false;
         self.state = .sending_request;
         self.iteration = 0;
         self.retry_count = 0;
@@ -465,6 +470,9 @@ pub const Agent = struct {
                     }
                     self.stream = null;
                     if (self.retry_count < MAX_RETRIES) {
+                        self.flags.is_thinking = false;
+                        self.flags.is_writing = false;
+                        self.flags.is_calling = false;
                         self.retry_count += 1;
                         self.last_error = err;
                         self.state = .retry_timeout;
@@ -479,6 +487,7 @@ pub const Agent = struct {
             .executing_tools => {
                 const all_settled = self.tickToolCalls(ctx) catch |err| return self.fail(err);
                 if (all_settled) {
+                    self.flags.is_calling = false;
                     const should_exit = self.commitSettledResults(ctx) catch |err| return self.fail(err);
                     self.flags.turn_has_reminder = false;
 
@@ -512,6 +521,9 @@ pub const Agent = struct {
     }
 
     fn fail(self: *Agent, err: ?anyerror) TickResult {
+        self.flags.is_thinking = false;
+        self.flags.is_writing = false;
+        self.flags.is_calling = false;
         self.last_error = err;
         self.state = .failed;
         return .failed;
@@ -549,6 +561,9 @@ pub const Agent = struct {
 
         self.in_flight_usage = .{};
         self.compaction.resetInFlight();
+        self.flags.is_thinking = false;
+        self.flags.is_writing = false;
+        self.flags.is_calling = false;
         self.state = .complete;
     }
 
@@ -581,6 +596,8 @@ pub const Agent = struct {
         _ = try self.chat.beginStreamingMessage(arena, .agent);
         self.stream = apt.openStream(self.pool, handle, arena, std.meta.activeTag(self.config.provider));
         self.flags.is_thinking = false;
+        self.flags.is_writing = false;
+        self.flags.is_calling = false;
         self.in_flight_usage = .{};
         self.approx_output_bytes = 0;
         self.state = .streaming_response;
@@ -617,14 +634,21 @@ pub const Agent = struct {
                     self.approx_output_bytes += t.len;
                     self.in_flight_usage.output_tokens = self.approx_output_bytes / 3;
                     self.flags.is_thinking = false;
+                    self.flags.is_writing = true;
+                    self.flags.is_calling = false;
                 },
                 .thinking_chunk => |t| {
                     try self.chat.appendThinkingChunk(arena, msg_idx, t);
                     self.approx_output_bytes += t.len;
                     self.in_flight_usage.output_tokens = self.approx_output_bytes / 3;
                     self.flags.is_thinking = true;
+                    self.flags.is_writing = false;
+                    self.flags.is_calling = false;
                 },
                 .tool_call_start, .tool_input_delta => {
+                    self.flags.is_thinking = false;
+                    self.flags.is_writing = false;
+                    self.flags.is_calling = true;
                     // Nothing to render incrementally — final parts come from finalize.
                 },
                 .usage => |u| {
@@ -643,6 +667,7 @@ pub const Agent = struct {
 
     fn finishStream(self: *Agent, _: Swarm.SwarmContextV) !TickResult {
         self.flags.is_thinking = false;
+        self.flags.is_writing = false;
         const arena = self.arena.allocator();
         if (self.stream == null) return error.NoStream;
         const stream = &self.stream.?;
@@ -682,10 +707,12 @@ pub const Agent = struct {
         }
 
         if (has_tool_calls) {
+            self.flags.is_calling = true;
             self.state = .executing_tools;
             return .pending;
         }
 
+        self.flags.is_calling = false;
         self.state = .complete;
         return .complete;
     }
