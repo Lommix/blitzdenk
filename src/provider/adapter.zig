@@ -107,7 +107,6 @@ pub const OpenAiConfig = struct {
     temperature: ?f32 = null,
     max_tokens: ?u32 = null,
     max_completion_tokens: ?u32 = null,
-    effort: ?[]const u8 = null,
     enable_thinking: ?bool = null, // novita extension; false silences kimi/minimax
     top_p: ?f32 = null,
     frequency_penalty: ?f32 = null,
@@ -118,12 +117,13 @@ pub const OpenAiConfig = struct {
 pub const AnthropicConfig = struct {
     max_tokens: u32 = 8192 * 2,
     thinking: ?Thinking = null,
-    effort: ?[]const u8 = null,
     temperature: ?f32 = null,
     top_p: ?f32 = null,
     top_k: ?u32 = null,
     stop: ?[]const []const u8 = null,
 };
+
+pub const ReasoningEffort = enum { none, low, high, xhigh, max };
 
 pub const ProviderConfig = union(Provider) {
     ollama: OllamaConfig,
@@ -135,6 +135,7 @@ pub const Config = struct {
     api_key: []const u8,
     model: []const u8,
     base_url: []const u8,
+    reasoning_effort: ?ReasoningEffort = null,
     provider: ProviderConfig,
 };
 

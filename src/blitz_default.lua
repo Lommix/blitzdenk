@@ -37,7 +37,7 @@ local novita = blitz.add_provider({
 	type = "openai",
 	url = "https://api.novita.ai/openai/v1",
 	key_envar = "NOVITA_API_KEY", -- the ENVAR string, holding the api key, directly using a api key does not work!
-	effort = "medium",
+	effort = "high",
 	temperature = 0.7,
 })
 

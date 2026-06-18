@@ -5,16 +5,16 @@ const prompts = @import("../prompts.zig");
 
 pub const AgentTool = prv.tool.Tool{
     .def = .{
-        .name = "task",
+        .name = "agent",
         .description =
         \\Launch a new agent to handle complex, multistep tasks autonomously.
         \\
-        \\When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
+        \\When using the Agent tool, you must specify a subagent_type parameter to select which agent type to use.
         \\
-        \\When NOT to use the Task tool:
-        \\- If you want to read a specific file path, use the Read or Glob tool instead of the Task tool, to find the match more quickly
+        \\When NOT to use the Agent tool:
+        \\- If you want to read a specific file path, use the Read or Glob tool instead of the Agent tool, to find the match more quickly
         \\- If you are searching for a specific class definition like "class Foo", use the Grep tool instead, to find the match more quickly
-        \\- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly
+        \\- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Agent tool, to find the match more quickly
         \\- If no available agent is a good fit for the task, use other tools directly
         \\
         \\

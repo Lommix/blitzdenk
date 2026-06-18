@@ -2,8 +2,12 @@ const std = @import("std");
 const adapter = @import("adapter.zig");
 
 pub const MAX_PROVIDERS = 16;
-
 pub const ProviderHandle = enum(u32) { _ };
+pub const ReasoningEffort = adapter.ReasoningEffort;
+
+pub fn parseReasoningEffort(value: []const u8) ?ReasoningEffort {
+    return std.meta.stringToEnum(ReasoningEffort, value);
+}
 
 pub const Provider = struct {
     url: [512]u8 = undefined,
@@ -13,8 +17,7 @@ pub const Provider = struct {
     provider_config: adapter.ProviderConfig = .{ .openai = .{} },
     thinking_type_buf: [16]u8 = undefined,
     thinking_type_len: usize = 0,
-    reasoning_effort_buf: [16]u8 = undefined,
-    reasoning_effort_len: usize = 0,
+    reasoning_effort: ?ReasoningEffort = null,
     active: bool = false,
 
     pub fn getUrl(self: *const Provider) []const u8 {
@@ -32,19 +35,8 @@ pub const Provider = struct {
         return true;
     }
 
-    pub fn setReasoningEffort(self: *Provider, s: []const u8) bool {
-        if (s.len > self.reasoning_effort_buf.len) return false;
-        @memcpy(self.reasoning_effort_buf[0..s.len], s);
-        self.reasoning_effort_len = s.len;
-        return true;
-    }
-
     pub fn getThinkingType(self: *const Provider) []const u8 {
         return self.thinking_type_buf[0..self.thinking_type_len];
-    }
-
-    pub fn getReasoningEffort(self: *const Provider) []const u8 {
-        return self.reasoning_effort_buf[0..self.reasoning_effort_len];
     }
 };
 
@@ -102,7 +94,7 @@ pub const BlitzdenkCfg = struct {
     skill_count: u32 = 0,
 
     /// Reserve the next provider slot. Caller fills url/key_envar/provider_config
-    /// (including inline buffers for thinking.type / reasoning.effort) then calls
+    /// (including the inline buffer for thinking.type) then calls
     /// commitProvider to activate it. Returns null if the slot cap is reached or
     /// url/key_envar exceed their buffers.
     pub fn reserveProvider(
@@ -160,6 +152,7 @@ pub const BlitzdenkCfg = struct {
             .api_key = key,
             .model = entry.getName(),
             .base_url = prov.getUrl(),
+            .reasoning_effort = prov.reasoning_effort,
             .provider = prov.provider_config,
         };
     }
@@ -228,3 +221,8 @@ pub const BlitzdenkCfg = struct {
         self.skill_count = 0;
     }
 };
+
+test "parse reasoning effort" {
+    try std.testing.expectEqual(.xhigh, parseReasoningEffort("xhigh"));
+    try std.testing.expectEqual(null, parseReasoningEffort("medium"));
+}

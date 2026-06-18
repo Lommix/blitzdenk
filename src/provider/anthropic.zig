@@ -319,7 +319,7 @@ pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config:
         .messages = merged.items,
         .tools = tool_defs,
         .thinking = ac.thinking,
-        .output_config = if (ac.effort) |e| AntOutputConfig{ .effort = e } else null,
+        .output_config = if (config.reasoning_effort) |e| AntOutputConfig{ .effort = @tagName(e) } else null,
         .temperature = ac.temperature,
         .top_p = ac.top_p,
         .top_k = ac.top_k,

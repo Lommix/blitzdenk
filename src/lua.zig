@@ -1005,7 +1005,22 @@ fn readThinking(state: *c.lua_State, sub_idx: c_int, slot: *prv.config.Provider)
     };
 }
 
-fn readOpenAiConfig(state: *c.lua_State, table_idx: c_int, slot: *prv.config.Provider) prv.adapter.OpenAiConfig {
+fn readReasoningEffort(state: *c.lua_State, table_idx: c_int) ?prv.config.ReasoningEffort {
+    _ = c.lua_getfield(state, table_idx, "effort");
+    defer c.lua_pop(state, 1);
+    if (c.lua_isnil(state, -1)) return null;
+
+    const value = readAnyValue([]const u8, state, -1) orelse {
+        _ = c.luaL_error(state, "add_provider: effort must be a string");
+        return null;
+    };
+    return prv.config.parseReasoningEffort(value) orelse {
+        _ = c.luaL_error(state, "add_provider: unknown effort (expected none/low/high/xhigh/max)");
+        return null;
+    };
+}
+
+fn readOpenAiConfig(state: *c.lua_State, table_idx: c_int) prv.adapter.OpenAiConfig {
     var cfg: prv.adapter.OpenAiConfig = .{};
     cfg.temperature = getOptionalF32(state, table_idx, "temperature");
     cfg.max_tokens = getOptionalU32(state, table_idx, "max_tokens");
@@ -1014,17 +1029,6 @@ fn readOpenAiConfig(state: *c.lua_State, table_idx: c_int, slot: *prv.config.Pro
     cfg.frequency_penalty = getOptionalF32(state, table_idx, "frequency_penalty");
     cfg.presence_penalty = getOptionalF32(state, table_idx, "presence_penalty");
     cfg.enable_thinking = getOptionalBool(state, table_idx, "enable_thinking");
-
-    _ = c.lua_getfield(state, table_idx, "effort");
-    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
-        var elen: usize = 0;
-        const eptr = c.lua_tolstring(state, -1, &elen);
-        if (!slot.setReasoningEffort(eptr[0..elen])) {
-            _ = c.luaL_error(state, "add_provider: effort too long");
-        }
-        cfg.effort = slot.getReasoningEffort();
-    }
-    c.lua_pop(state, 1);
 
     return cfg;
 }
@@ -1039,17 +1043,6 @@ fn readAnthropicConfig(state: *c.lua_State, table_idx: c_int, slot: *prv.config.
     _ = c.lua_getfield(state, table_idx, "thinking");
     if (c.lua_type(state, -1) == c.LUA_TTABLE) {
         cfg.thinking = readThinking(state, c.lua_gettop(state), slot);
-    }
-    c.lua_pop(state, 1);
-
-    _ = c.lua_getfield(state, table_idx, "effort");
-    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
-        var elen: usize = 0;
-        const eptr = c.lua_tolstring(state, -1, &elen);
-        if (!slot.setReasoningEffort(eptr[0..elen])) {
-            _ = c.luaL_error(state, "add_provider: effort too long");
-        }
-        cfg.effort = slot.getReasoningEffort();
     }
     c.lua_pop(state, 1);
 
@@ -1093,8 +1086,9 @@ fn luaAddProvider(L: ?*c.lua_State) callconv(.c) c_int {
     };
     c.lua_pop(state, 2);
 
+    slot.reasoning_effort = readReasoningEffort(state, 1);
     slot.provider_config = switch (ptype) {
-        .openai => .{ .openai = readOpenAiConfig(state, 1, slot) },
+        .openai => .{ .openai = readOpenAiConfig(state, 1) },
         .anthropic => .{ .anthropic = readAnthropicConfig(state, 1, slot) },
         .ollama => .{ .ollama = readOllamaConfig(state, 1, slot) },
     };
