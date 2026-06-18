@@ -7,6 +7,10 @@ pub const Config = adapter.Config;
 
 // -- Anthropic request types --
 
+const AntOutputConfig = struct {
+    effort: []const u8,
+};
+
 const AntImageSource = struct {
     type: []const u8 = "base64",
     media_type: []const u8,
@@ -63,6 +67,7 @@ const AntRequest = struct {
     messages: []const AntMessage,
     tools: ?[]const AntToolDef = null,
     thinking: ?adapter.Thinking = null,
+    output_config: ?AntOutputConfig = null,
     temperature: ?f32 = null,
     top_p: ?f32 = null,
     top_k: ?u32 = null,
@@ -314,6 +319,7 @@ pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config:
         .messages = merged.items,
         .tools = tool_defs,
         .thinking = ac.thinking,
+        .output_config = if (ac.effort) |e| AntOutputConfig{ .effort = e } else null,
         .temperature = ac.temperature,
         .top_p = ac.top_p,
         .top_k = ac.top_k,

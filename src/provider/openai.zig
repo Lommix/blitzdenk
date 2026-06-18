@@ -303,7 +303,7 @@ pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config:
             .temperature = oc.temperature,
             .max_tokens = oc.max_tokens,
             .max_completion_tokens = oc.max_completion_tokens,
-            .reasoning_effort = if (oc.reasoning) |r| r.effort else null,
+            .reasoning_effort = oc.effort,
             .enable_thinking = oc.enable_thinking,
             .top_p = oc.top_p,
             .frequency_penalty = oc.frequency_penalty,

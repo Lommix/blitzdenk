@@ -120,8 +120,7 @@ blitz = {}
 ---@field type string "enabled" or "adaptive"
 ---@field budget_tokens? integer
 
----@class BlitzReasoning
----@field effort string "none", "minimal", "low", "medium", "high", "xhigh"
+
 
 ---@class BlitzProviderDef
 ---@field type string Provider type: "openai", "anthropic", or "ollama" (required)
@@ -135,7 +134,7 @@ blitz = {}
 ---@field frequency_penalty? number Only for openai
 ---@field presence_penalty? number Only for openai
 ---@field thinking? BlitzThinking Only for anthropic/openai
----@field reasoning? BlitzReasoning Only for openai
+---@field effort? string "none" | "low" | "medium" | "high" | "xhigh" | "max" reasoning_effort (openai) / output_config.effort (anthropic)
 ---Note: `stop` sequences are not exposed through Lua.
 
 ---@class BlitzMcpServerDef

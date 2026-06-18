@@ -41,10 +41,6 @@ pub const TokenUsage = struct {
     }
 };
 
-pub const Reasoning = struct {
-    effort: []const u8, // "low", "medium", "high"
-};
-
 pub const Thinking = struct {
     type: []const u8, // "enabled", "disabled", "adaptive"
     budget_tokens: ?u32 = null, // required when type="enabled", min 1024
@@ -111,7 +107,7 @@ pub const OpenAiConfig = struct {
     temperature: ?f32 = null,
     max_tokens: ?u32 = null,
     max_completion_tokens: ?u32 = null,
-    reasoning: ?Reasoning = null,
+    effort: ?[]const u8 = null,
     enable_thinking: ?bool = null, // novita extension; false silences kimi/minimax
     top_p: ?f32 = null,
     frequency_penalty: ?f32 = null,
@@ -122,6 +118,7 @@ pub const OpenAiConfig = struct {
 pub const AnthropicConfig = struct {
     max_tokens: u32 = 8192 * 2,
     thinking: ?Thinking = null,
+    effort: ?[]const u8 = null,
     temperature: ?f32 = null,
     top_p: ?f32 = null,
     top_k: ?u32 = null,
