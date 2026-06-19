@@ -189,10 +189,20 @@ pub const LoopGuard = struct {
 };
 
 const loop_guard_rethink_warning =
-    "<system_warning>Loop guard: You have called the same tool with identical arguments 3 times. Pause and rethink the approach before repeating it. Consider a different tool, different arguments, or reporting the current findings.</system_warning>";
+    \\<system-warning>
+    \\Loop guard: You have called the same tool with identical arguments 3 times.
+    \\Pause and rethink the approach before repeating it.
+    \\ Consider a different tool, different arguments, or reporting the current findings.
+    \\</system-warning>;
+;
 
 const loop_guard_force_rethink_warning =
-    "<system_warning>Looping error: You have called the same tool with identical arguments 6 times. The tool call was not run. Stop repeating this call, identify why it is not making progress, choose a different approach, or report the blocker/current findings to the user.</system_warning>";
+    \\<system-warning>
+    \\Looping error: You have called the same tool with identical arguments 6 times.
+    \\The tool call was not run. Stop repeating this call, identify why it is not making progress, choose a different approach, or report the blocker/current findings to the user.
+    \\</system-warning>
+    \\
+;
 
 // Fat and juicy
 pub const Agent = struct {

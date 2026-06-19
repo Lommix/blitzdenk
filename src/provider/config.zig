@@ -201,14 +201,6 @@ pub const BlitzdenkCfg = struct {
         return true;
     }
 
-    pub fn getDocs(self: *const BlitzdenkCfg) []const PathEntry {
-        return self.doc_entries[0..self.doc_count];
-    }
-
-    pub fn getSkills(self: *const BlitzdenkCfg) []const PathEntry {
-        return self.skill_entries[0..self.skill_count];
-    }
-
     pub fn resetProviders(self: *BlitzdenkCfg) void {
         self.providers = @splat(.{});
         self.provider_count = 0;

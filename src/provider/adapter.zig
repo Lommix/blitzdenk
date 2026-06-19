@@ -56,53 +56,6 @@ pub const OllamaConfig = struct {
     stop: ?[]const []const u8 = null,
 };
 
-pub const Model = struct {
-    name: []const u8,
-    //additional info?
-};
-
-pub fn getModels(cfg: *const Config, allocator: std.mem.Allocator, pool: *http.RequestPool, io: std.Io) ![]Model {
-    const ModelEntry = struct {
-        id: []const u8,
-    };
-
-    const ModelResponse = struct {
-        data: ?[]const ModelEntry = null,
-    };
-
-    const url = try std.fmt.allocPrint(allocator, "{s}/models", .{cfg.base_url});
-    defer allocator.free(url);
-
-    const auth_value = try std.fmt.allocPrint(allocator, "Bearer {s}", .{cfg.api_key});
-    defer allocator.free(auth_value);
-
-    const handle = try pool.fetch(url, .GET, null, &.{
-        .{ .name = "Authorization", .value = auth_value },
-    }, 10_000);
-    defer pool.release(handle);
-
-    while (!pool.isDone(handle)) {
-        try io.sleep(.fromMilliseconds(50), .awake);
-    }
-
-    const body = try pool.collectBody(handle, allocator);
-    defer allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(ModelResponse, allocator, body, .{
-        .ignore_unknown_fields = true,
-        .allocate = .alloc_always,
-    });
-    defer parsed.deinit();
-
-    const entries = parsed.value.data orelse return &.{};
-    const models = try allocator.alloc(Model, entries.len);
-    for (entries, 0..) |entry, i| {
-        models[i] = .{ .name = try allocator.dupe(u8, entry.id) };
-    }
-
-    return models;
-}
-
 pub const OpenAiConfig = struct {
     temperature: ?f32 = null,
     max_tokens: ?u32 = null,
@@ -195,28 +148,6 @@ pub const Role = enum { system, user, agent };
 pub const Message = struct {
     role: Role,
     parts: []ContentPart,
-
-    pub fn fmt(self: @This(), w: *std.Io.Writer) !void {
-        for (self.parts) |part| {
-            switch (part) {
-                .text => |txt| {
-                    try w.print("[TEXT] {s}: {s}\n", .{ @tagName(self.role), txt });
-                },
-                .thinking => |th| {
-                    try w.print("[THINK] {s}\n", .{th.text[0..@min(60, th.text.len)]});
-                },
-                .image => |img| {
-                    try w.print("[IMG] {s} ({d} bytes)\n", .{ img.media_type, img.data.len });
-                },
-                .tool_call => |call| {
-                    try w.print("[CALL] {s} with `{s}`\n", .{ call.name, call.arguments[0..@min(30, call.arguments.len)] });
-                },
-                .tool_result => |res| {
-                    try w.print("[RES] {s}\n", .{res.content[0..@min(40, res.content.len)]});
-                },
-            }
-        }
-    }
 
     pub fn clone(self: *const Message, gpa: std.mem.Allocator) !Message {
         var msg: Message = undefined;
@@ -311,11 +242,6 @@ pub const Chat = struct {
     // shallow copy allowed
     tools: std.ArrayList(ToolDef) = .empty,
 
-    pub fn reset(self: *Chat) void {
-        self.messages = .empty;
-        self.tools = .empty;
-    }
-
     pub fn clone(self: *const Chat, gpa: std.mem.Allocator) !Chat {
         var chat: Chat = .{
             .tools = try self.tools.clone(gpa),
@@ -334,17 +260,6 @@ pub const Chat = struct {
         try self.messages.append(alloc, .{
             .role = role,
             .parts = duped,
-        });
-    }
-
-    pub fn addToolCalls(self: *Chat, alloc: Allocator, calls: []const ToolCall) !void {
-        const parts = try alloc.alloc(ContentPart, calls.len);
-        for (calls, 0..) |call, i| {
-            parts[i] = .{ .tool_call = call };
-        }
-        try self.messages.append(alloc, .{
-            .role = .agent,
-            .parts = parts,
         });
     }
 
@@ -369,23 +284,6 @@ pub const Chat = struct {
         return self.messages.items[self.messages.items.len - 1];
     }
 
-    pub fn countUserMessage(self: *const Chat) u32 {
-        var c: u32 = 0;
-        blk: for (self.messages.items) |*msg| {
-            if (msg.role != .user) continue;
-            for (msg.parts) |p| {
-                if (p == .text) {
-                    c += 1;
-                    continue :blk;
-                }
-            }
-        }
-        return c;
-    }
-
-    /// Append an empty message to hold a streaming response. Returns the
-    /// index for subsequent append* calls. Parts start as an empty slice
-    /// and grow via appendTextChunk / appendThinkingChunk.
     pub fn beginStreamingMessage(self: *Chat, alloc: Allocator, role: Role) !usize {
         try self.messages.append(alloc, .{ .role = role, .parts = &.{} });
         return self.messages.items.len - 1;
