@@ -46,7 +46,7 @@ pub const SwarmContextV = struct {
     broadcast: *const fn (*anyopaque, BroadcastEntry) void,
     permission: *const fn (*anyopaque, *PermissionReq) void,
     cwd: *const fn (*anyopaque) []const u8,
-    build_config: *const fn (*anyopaque) anyerror!r.adapter.Config,
+    build_config: *const fn (*anyopaque, u8) anyerror!r.adapter.Config,
 
     //sync
     gen_system_reminders: *const fn (*anyopaque, *Agent) void,
@@ -290,7 +290,7 @@ pub fn newAgent(
     const slot = &self.slots[id.index];
     slot.parent_id = parent_id;
 
-    const config = try self.context.build_config(self.context.ptr);
+    const config = try self.context.build_config(self.context.ptr, agent_type_idx);
     slot.agent = Agent.new(
         config,
         &self.pool,
@@ -323,7 +323,7 @@ pub fn newAgentInSlot(
     const slot = &self.slots[idx.index];
     if (slot.generation != idx.generation) return error.AgentSlotGenerationMissmatch;
 
-    const config = try self.context.build_config(self.context.ptr);
+    const config = try self.context.build_config(self.context.ptr, agent_type_idx);
     slot.agent = Agent.new(
         config,
         &self.pool,

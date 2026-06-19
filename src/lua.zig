@@ -744,6 +744,7 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "exit_loop", &luaBlitzExitLoop },
         .{ "add_provider", &luaAddProvider },
         .{ "set_model", &luaSetModel },
+        .{ "set_model_agent", &luaSetModelAgent },
         .{ "add_doc", &luaAddDoc },
         .{ "token_usage", &luaTokenUsage },
         .{ "context_percent", &luaContextPercent },
@@ -1029,7 +1030,7 @@ fn readReasoningEffort(state: *c.lua_State, table_idx: c_int) ?prv.config.Reason
         return null;
     };
     return prv.config.parseReasoningEffort(value) orelse {
-        _ = c.luaL_error(state, "add_provider: unknown effort (expected none/low/high/xhigh/max)");
+        _ = c.luaL_error(state, "add_provider: unknown effort (expected none/low/medium/high/xhigh/max)");
         return null;
     };
 }
@@ -1110,6 +1111,50 @@ fn luaAddProvider(L: ?*c.lua_State) callconv(.c) c_int {
     const handle = cfg.commitProvider();
     c.lua_pushinteger(state, @intCast(@intFromEnum(handle)));
     return 1;
+}
+
+fn luaSetModelAgent(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "app not initialized");
+        return 0;
+    };
+
+    const func_name = "set_model_agent";
+
+    const agent_type_idx = readAnyArg(r.ContextFactory.AgentType, state, func_name, 1) orelse {
+        _ = c.luaL_error(state, "model must be string");
+        return 0;
+    };
+
+    const model = readAnyArg([]const u8, state, func_name, 2) orelse {
+        _ = c.luaL_error(state, "model must be string");
+        return 0;
+    };
+    const effort_str = readAnyArg([]const u8, state, func_name, 3) orelse {
+        _ = c.luaL_error(state, "effort must be string");
+        return 0;
+    };
+
+    const effort = r.prv.config.parseReasoningEffort(effort_str) orelse {
+        _ = c.luaL_error(state, "unknown effort (expected none/low/medium/high/xhigh/max) ");
+        return 0;
+    };
+
+    const provider = readAnyArg(r.prv.config.ProviderHandle, state, func_name, 4) orelse {
+        _ = c.luaL_error(state, "provider handles are int!");
+        return 0;
+    };
+
+    a.context_factory.agent_model_cfg.put(agent_type_idx, .{
+        .name = model,
+        .provider = provider,
+        .agent_tool = true,
+        .effort = effort,
+    });
+
+    return 0;
 }
 
 fn luaSetModel(L: ?*c.lua_State) callconv(.c) c_int {
@@ -2228,6 +2273,7 @@ fn pushAgentId(L: *c.lua_State, id: prv.provider.Swarm.AgentId) void {
 }
 
 /// Read AgentId from table at `idx`. Reports a Lua error on shape mismatch.
+/// TODO: crash!
 fn readAgentIdArg(state: *c.lua_State, comptime fname: []const u8, idx: c_int) prv.provider.Swarm.AgentId {
     if (c.lua_type(state, idx) != c.LUA_TTABLE) {
         _ = c.luaL_error(state, fname ++ ": agent_id must be a table {index, generation}");

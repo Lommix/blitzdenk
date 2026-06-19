@@ -106,17 +106,28 @@ pub const AgentOverride = struct {
         return self.names[i][0..self.name_lens[i]];
     }
 };
+
+pub const AgentModelConfig = struct {
+    name: []const u8,
+    effort: r.prv.config.ReasoningEffort = .medium,
+    provider: r.prv.config.ProviderHandle,
+    agent_tool: bool = true,
+};
+
 // -------------------------------------------------------------------------------
 loaded_tools: std.ArrayList(ToolEntry) = .empty,
 agent_prompts: std.EnumArray(AgentType, []const u8),
+
+// modes
 mode_colors: std.EnumArray(Mode, r.tui.Color),
 mode_names: std.EnumArray(Mode, []const u8),
 mode_prompts: std.EnumArray(Mode, []const u8),
-sparse_mode_prompts: std.EnumArray(Mode, []const u8),
-agent_overrides: std.EnumArray(AgentType, AgentOverride) = .initFill(.{}),
-custom_mode_counter: u32 = 2, // skip first 2 for interal modes
+mode_prompts_sparse: std.EnumArray(Mode, []const u8),
+mode_counter: u32 = 2, // skip first 2 for interal modes
 
-agent_tool_sets: std.EnumMap(AgentType, ToolSet) = .{},
+// agent
+agent_tool_cfg: std.EnumArray(AgentType, AgentOverride) = .initFill(.{}),
+agent_model_cfg: std.EnumMap(AgentType, AgentModelConfig) = .{},
 
 // Arena holds prompt overrides set from lua. Reset on hot-reload so the
 // factory keeps using the embedded defaults until lua re-installs them.
@@ -162,12 +173,42 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !Self {
         .mode_prompts = mode_prompts,
         .mode_colors = mode_colors,
         .mode_names = mode_names,
-        .sparse_mode_prompts = sparse_mode_prompts,
+        .mode_prompts_sparse = sparse_mode_prompts,
         .prompt_arena = std.heap.ArenaAllocator.init(alloc),
         .io = io,
         .skill_dir = skill_dir,
         .config_dir = config_dir,
     };
+}
+
+pub fn buildAgentApiConfig(
+    self: *Self,
+    agent_type: AgentType,
+    cfg: *r.prv.config.BlitzdenkCfg,
+    env: *const std.process.Environ.Map,
+) ?r.prv.adapter.Config {
+    if (self.agent_model_cfg.get(agent_type)) |ag_cfg| {
+        const provider_idx = @intFromEnum(ag_cfg.provider);
+        if (provider_idx >= cfg.provider_count) return null;
+
+        const provider = &cfg.providers[provider_idx];
+        if (!provider.active) return null;
+
+        const key = if (provider.key_len > 0)
+            env.get(provider.getKeyEnvar()) orelse return null
+        else
+            "";
+
+        return r.prv.adapter.Config{
+            .api_key = key,
+            .base_url = provider.getUrl(),
+            .model = ag_cfg.name,
+            .provider = provider.provider_config,
+            .reasoning_effort = ag_cfg.effort,
+        };
+    }
+
+    return cfg.buildConfig(env);
 }
 
 pub fn setAgentPrompt(self: *Self, agent_type: AgentType, prompt: []const u8) !void {
@@ -187,16 +228,16 @@ pub fn setModeName(self: *Self, mode: Mode, name: []const u8) !void {
 
 pub fn setSparseModePrompt(self: *Self, mode: Mode, prompt: []const u8) !void {
     const dup = try self.prompt_arena.allocator().dupe(u8, prompt);
-    self.sparse_mode_prompts.set(mode, dup);
+    self.mode_prompts_sparse.set(mode, dup);
 }
 
 pub fn addMode(self: *Self, name: []const u8, prompt: []const u8, sparse: []const u8, color: []const u8) !Mode {
-    defer self.custom_mode_counter += 1;
-    const idx: Mode = @enumFromInt(self.custom_mode_counter);
+    defer self.mode_counter += 1;
+    const idx: Mode = @enumFromInt(self.mode_counter);
     const alloc = self.prompt_arena.allocator();
     self.mode_names.set(idx, try alloc.dupe(u8, name));
     self.mode_prompts.set(idx, try alloc.dupe(u8, prompt));
-    self.sparse_mode_prompts.set(idx, try alloc.dupe(u8, sparse));
+    self.mode_prompts_sparse.set(idx, try alloc.dupe(u8, sparse));
     const c = r.tui.Color.parseStrHex(color) catch r.tui.Color.white;
     self.mode_colors.set(idx, c);
     return idx;
@@ -244,16 +285,16 @@ pub const SkillIter = struct {
 /// Restore embedded defaults and free any lua-installed prompt overrides.
 pub fn resetPrompts(self: *Self) void {
     _ = self.prompt_arena.reset(.retain_capacity);
-    self.custom_mode_counter = 2;
+    self.mode_counter = 2;
     self.agent_prompts = .initFill("NOT PROMPT, REPORT TO THE USER");
     self.mode_names = .initFill("UNKNOWN");
     self.mode_colors = .initFill(.white);
     self.mode_prompts = .initFill("");
-    self.sparse_mode_prompts = .initFill("");
+    self.mode_prompts_sparse = .initFill("");
     self.mode_names.set(.exec, "EXEC");
     self.mode_colors.set(.exec, .red);
     self.mode_prompts.set(.exec, "");
-    self.sparse_mode_prompts.set(.exec, "");
+    self.mode_prompts_sparse.set(.exec, "");
 
     self.agent_prompts.set(.general, r.prompts.default_main_agent_prompt);
     self.agent_prompts.set(.explore, r.prompts.explore_sub_agent_prompt);
@@ -307,7 +348,7 @@ const ToolIter = struct {
     i: u32 = 0,
     override_phase_done: bool = false,
     pub fn next(self: *ToolIter) ?r.prv.tool.Tool {
-        const override = self.factory.agent_overrides.getPtrConst(self.agent_type);
+        const override = self.factory.agent_tool_cfg.getPtrConst(self.agent_type);
         if (override.active and !self.override_phase_done) {
             while (self.i < override.len) {
                 const idx = self.i;
@@ -361,7 +402,7 @@ pub fn build_toolset(self: *Self, agent_type: AgentType, out: *ToolSet) !void {
 }
 
 pub fn setAgentTools(self: *Self, agent_type: AgentType, names: []const []const u8) !void {
-    var ov = self.agent_overrides.getPtr(agent_type);
+    var ov = self.agent_tool_cfg.getPtr(agent_type);
     if (names.len > MAX_OVERRIDE_TOOLS) return error.TooManyTools;
     ov.len = 0;
     for (names) |name| {
@@ -374,7 +415,7 @@ pub fn setAgentTools(self: *Self, agent_type: AgentType, names: []const []const 
 }
 
 pub fn addAgentTool(self: *Self, agent_type: AgentType, name: []const u8) !void {
-    var ov = self.agent_overrides.getPtr(agent_type);
+    var ov = self.agent_tool_cfg.getPtr(agent_type);
     if (ov.len >= MAX_OVERRIDE_TOOLS) return error.TooManyTools;
     if (name.len > 128) return error.NameTooLong;
 
@@ -393,12 +434,12 @@ pub fn addAgentTool(self: *Self, agent_type: AgentType, name: []const u8) !void 
 }
 
 pub fn clearAgentTools(self: *Self, agent_type: AgentType) void {
-    const ov = self.agent_overrides.getPtr(agent_type);
+    const ov = self.agent_tool_cfg.getPtr(agent_type);
     ov.* = .{};
 }
 
 pub fn clearAllAgentTools(self: *Self) void {
-    self.agent_overrides = .initFill(.{});
+    self.agent_tool_cfg = .initFill(.{});
 }
 
 pub fn clearTools(self: *Self) void {

@@ -258,10 +258,13 @@ pub fn run(
             }
         }).func,
         .build_config = (struct {
-            fn func(ptr: *anyopaque) anyerror!r.prv.adapter.Config {
+            fn func(ptr: *anyopaque, agent_type_idx: u8) anyerror!r.prv.adapter.Config {
                 const a: *App = @ptrCast(@alignCast(ptr));
-                const config = a.config.buildConfig(a.swarm.exec.env) orelse return error.FailedToBuildAgent;
-                return config;
+                return a.context_factory.buildAgentApiConfig(
+                    @enumFromInt(agent_type_idx),
+                    &a.config,
+                    a.swarm.exec.env,
+                ) orelse return error.FailedToBuildAgent;
             }
         }).func,
         .cwd = (struct {

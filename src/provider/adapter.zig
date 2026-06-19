@@ -76,7 +76,7 @@ pub const AnthropicConfig = struct {
     stop: ?[]const []const u8 = null,
 };
 
-pub const ReasoningEffort = enum { none, low, high, xhigh, max };
+pub const ReasoningEffort = enum { none, low, medium, high, xhigh, max };
 
 pub const ProviderConfig = union(Provider) {
     ollama: OllamaConfig,

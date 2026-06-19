@@ -165,7 +165,7 @@ fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.age
     const reminder = if (agent.flags.force_full_reminder)
         app.context_factory.mode_prompts.get(mode)
     else
-        app.context_factory.sparse_mode_prompts.get(mode);
+        app.context_factory.mode_prompts_sparse.get(mode);
     agent.flags.force_full_reminder = false;
 
     _ = try w.write(reminder);

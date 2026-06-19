@@ -116,8 +116,6 @@ blitz = {}
 ---@field type string "enabled" or "adaptive"
 ---@field budget_tokens? integer
 
-
-
 ---@class BlitzProviderDef
 ---@field type string Provider type: "openai", "anthropic", or "ollama" (required)
 ---@field url string Provider API base URL (required)
@@ -149,6 +147,13 @@ function blitz.add_provider(def) end
 ---@param model string Model name/identifier
 ---@param handle integer Provider handle from blitz.add_provider
 function blitz.set_model(model, handle) end
+
+---Set the model config for specific agent
+---@param agent_type integer the agent type id
+---@param model string Model name/identifier
+---@param effort string "none" | "low" | "medium" | "high" | "xhigh" | "max" Provider reasoning effort
+---@param handle integer Provider handle from blitz.add_provider
+function blitz.set_model_agent(agent_type, model, effort, handle) end
 
 ---Register a documentation source
 ---@param name string Display name
