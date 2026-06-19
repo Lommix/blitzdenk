@@ -379,9 +379,10 @@ pub fn run(
 
             for (0..g.ptr.items.len) |_| {
                 const next = g.ptr.swapRemove(0);
+                const is_ask = next.payload == .ask;
 
                 // check permission level against flags
-                if (app.flags.skip_permissions and !app.swarm.exec.ssh_active) {
+                if (app.flags.skip_permissions and !app.swarm.exec.ssh_active and !is_ask) {
                     try app.persist_permission_to_history(next);
                     next.state = .approved;
                     next.event.set(app.io);
