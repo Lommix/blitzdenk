@@ -158,7 +158,12 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     else
         args.command;
 
-    r.setToolStatusPrint(ctx, call, "{s}", .{cleaned_command_str[0..@min(cleaned_command_str.len, 248)]});
+
+    const LIMIT = 100;
+    const trunc = cleaned_command_str[0..@min(cleaned_command_str.len, LIMIT)];
+    const dots = if (cleaned_command_str.len > LIMIT) ".." else "";
+
+    r.setToolStatusPrint(ctx, call, "{s}{s}", .{trunc, dots});
 
     const need_perm = switch (classifyCommand(args.command)) {
         .blocked => return r.errResult(call, "command is blocked for safety"),

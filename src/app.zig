@@ -40,9 +40,7 @@ const HEADER_INFO =
     \\├[CWD]: {cwd}
     \\│
     \\├[{INFO}
-    \\├[Max: {MODEL_MAX}
-    \\├[Mid: {MODEL_MID}
-    \\└[Min: {MODEL_MIN}
+    \\└[Model: {MODEL}
 ;
 
 pub const PermisionLevel = enum {
@@ -373,6 +371,7 @@ pub const App = struct {
         return self.arena_session.allocator();
     }
 
+    // TODO: refactor
     pub fn setToolStatus(
         self: *App,
         agent_id: prv.Swarm.AgentId,
@@ -1386,7 +1385,7 @@ fn renderCommandPalette(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, b
 
     const input = app.inputSlice();
     const rows = commandCompletions(app, input, app.input_cursor);
-    const border_color = app.context_factory.mode_colors.get(app.mode);
+    const border_color = app.context_factory.getMode(app.mode).color;
     _ = border_color; // autofix
 
     const palette_w: u16 = @min(@as(u16, 72), area.width -| 4);
@@ -1408,7 +1407,7 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
     const border_color = if (app.running)
         app.theme.muted
     else
-        app.context_factory.mode_colors.get(app.mode);
+        app.context_factory.getMode(app.mode).color;
 
     var para = r.tui.Paragraph{
         .border = .none,
@@ -1478,7 +1477,7 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
     }
     para.scroll_offset = app.input_scroll_offset;
 
-    const mode_name = app.context_factory.mode_names.get(app.mode);
+    const mode_name = app.context_factory.getMode(app.mode).name;
     const title = try std.fmt.allocPrint(arena, "┤{s}├", .{mode_name});
     const block = r.tui.Block{
         .title = title,
@@ -1637,7 +1636,7 @@ fn renderCenteredStatusText(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer, sta
     const width = @min(statusTextWidth(status), area.width);
     const offset = @divTrunc(area.width -| width, 2);
     buf.setStringMax(area.x + offset, area.y, status, .{
-        .fg = app.context_factory.mode_colors.get(app.mode),
+        .fg = app.context_factory.getMode(app.mode).color,
     }, area.width -| offset);
 }
 
@@ -1788,8 +1787,7 @@ fn buildToolGroupParagraph(
             status_agent.entries.getPtr(call.call_id)
         else
             null;
-
-        try line.pushSpan(arena, .{ .content = "  " });
+        try line.pushSpan(arena, .{ .content = " " });
         if (status) |entry| {
             if (entry.lines.items.len > 0) {
                 line.style = entry.lines.items[0].style;
@@ -1828,10 +1826,18 @@ fn buildToolGroupParagraph(
             if (child_status.generation != child_id.generation) continue;
 
             var it = child_status.entries.iterator();
+            const total = child_status.entries.count();
+            const skip = if (total > 3) total - 3 else 0;
+            var i: usize = 0;
+
             while (it.next()) |child_entry| {
+                i += 1;
+                if (i <= skip) continue;
                 for (child_entry.value_ptr.lines.items) |child_line| {
                     var nested = r.tui.Line{ .style = child_line.style };
-                    try nested.pushSpan(arena, .{ .content = "  " ++ r.tui.icon.box_t_right ++ " " });
+
+                    const glyph = if (i == total) r.tui.icon.box_bl else r.tui.icon.box_t_right;
+                    try nested.pushSpan(arena, .{ .content = " " ++ glyph ++ " " });
                     for (child_line.spans.items) |span| try nested.pushSpan(arena, span);
                     try p.lines.append(arena, nested);
                 }
@@ -2270,22 +2276,19 @@ fn renderWelcome(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     line_iter = std.mem.splitAny(u8, HEADER_INFO, "\n");
 
     var status_buf: [128]u8 = undefined;
-    const status = std.fmt.bufPrint(&status_buf, "Loaded {d} Provider {d} Docs {d} Skills", .{
+    const status = std.fmt.bufPrint(&status_buf, "Loaded {d} Provider {d} Docs", .{
         app.config.provider_count,
         app.config.doc_count,
-        app.config.skill_count,
     }) catch "error loading status";
 
     var buf_a: [255]u8 = undefined;
     var buf_b: [255]u8 = undefined;
     while (line_iter.next()) |line| : (c.y += 1) {
-        const l1 = str_replace(&buf_a, "{MODEL_MAX}", app.config.model_max.getName(), line);
-        const l2 = str_replace(&buf_b, "{MODEL_MID}", app.config.model_mid.getName(), l1);
-        const l3 = str_replace(&buf_a, "{MODEL_MIN}", app.config.model_min.getName(), l2);
-        const l4 = str_replace(&buf_b, "{INFO}", status, l3);
-        const l5 = str_replace(&buf_a, "{cwd}", app.cwd, l4);
+        const l1 = str_replace(&buf_b, "{MODEL}", app.config.default_model.getName(), line);
+        const l2 = str_replace(&buf_a, "{INFO}", status, l1);
+        const l3 = str_replace(&buf_b, "{cwd}", app.cwd, l2);
 
-        buf.setString(c.x, c.y, l5, .{ .fg = Theme.default.muted });
+        buf.setString(c.x, c.y, l3, .{ .fg = Theme.default.muted });
     }
 }
 

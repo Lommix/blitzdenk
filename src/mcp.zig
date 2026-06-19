@@ -107,7 +107,7 @@ pub const Manager = struct {
                 },
                 .flags = r.ContextFactory.ToolFlags{
                     .allowed_agents = cfg.enabled_agents,
-                    .include_with_overrides = true,
+                    .add_to_agents = true,
                 },
             });
         }

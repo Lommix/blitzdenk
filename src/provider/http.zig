@@ -6,10 +6,10 @@ pub fn nowMs(io: std.Io) i64 {
 }
 
 pub const RequestPool = struct {
-    pub const MAX_SLOTS = 64;
-    pub const BODY_BUF_SIZE = 64 * 1024;
+    const MAX_SLOTS = 64;
+    const BODY_BUF_SIZE = 64 * 1024;
 
-    pub const Slot = struct {
+    const Slot = struct {
         in_use: std.atomic.Value(bool) = .init(false),
         done: std.atomic.Value(bool) = .init(false),
         headers_ready: std.atomic.Value(bool) = .init(false),
@@ -197,14 +197,6 @@ pub const RequestPool = struct {
                 error.Canceled => return error.Canceled,
             };
         }
-    }
-
-    pub fn countPending(self: *const RequestPool) u32 {
-        var count: u32 = 0;
-        for (&self.slots) |*slot| {
-            if (slot.in_use.load(.acquire) and !slot.done.load(.acquire)) count += 1;
-        }
-        return count;
     }
 
     /// True once response headers have arrived (status readable) OR the

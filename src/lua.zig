@@ -53,6 +53,15 @@ const LuaToolEntry = struct {
     }
 };
 
+const LuaAgentEntry = struct {
+    name: []const u8 = "",
+    description: []const u8 = "",
+    prompt: []const u8 = "",
+    in_agent_tool: bool = true,
+    model: []const u8 = "",
+    effort: []const u8 = "",
+};
+
 const LuaBindEntry = struct {
     key: tui.Key = .{ .code = .{ .char = 0 } },
     func_ref: c_int = c.LUA_NOREF,
@@ -89,8 +98,21 @@ fn pushAny(L: *c.lua_State, value: anytype) void {
         .pointer => |ptr| {
             if (ptr.size == .slice and ptr.child == u8) {
                 _ = c.lua_pushlstring(L, value.ptr, value.len);
+            } else if (ptr.size == .slice) {
+                c.lua_createtable(L, @intCast(value.len), 0);
+                for (value, 0..) |item, i| {
+                    pushAny(L, item);
+                    c.lua_rawseti(L, -2, @intCast(i + 1));
+                }
             } else {
                 @compileError("pushAny: unsupported pointer type " ++ @typeName(T));
+            }
+        },
+        .array => {
+            c.lua_createtable(L, @intCast(value.len), 0);
+            for (value, 0..) |item, i| {
+                pushAny(L, item);
+                c.lua_rawseti(L, -2, @intCast(i + 1));
             }
         },
         .@"struct" => |str| {
@@ -149,12 +171,30 @@ fn pushStatusNil(L: *c.lua_State, status: c_int) c_int {
 }
 
 fn readAnyValue(comptime T: type, state: *c.lua_State, idx: c_int) ?T {
+    return readAnyValueAlloc(T, state, idx, null);
+}
+
+fn readAnyValueAlloc(comptime T: type, state: *c.lua_State, idx: c_int, allocator: ?Allocator) ?T {
     switch (@typeInfo(T)) {
-        .pointer => |ptr| if (ptr.size == .slice and ptr.child == u8) {
-            if (c.lua_type(state, idx) != c.LUA_TSTRING) return null;
-            var len: usize = 0;
-            const sptr = c.lua_tolstring(state, idx, &len) orelse return null;
-            return sptr[0..len];
+        .pointer => |ptr| {
+            if (ptr.size != .slice) @compileError("readAnyValue: unsupported pointer type " ++ @typeName(T));
+            if (ptr.child == u8) {
+                if (c.lua_type(state, idx) != c.LUA_TSTRING) return null;
+                var len: usize = 0;
+                const sptr = c.lua_tolstring(state, idx, &len) orelse return null;
+                return sptr[0..len];
+            }
+            if (c.lua_type(state, idx) != c.LUA_TTABLE) return null;
+            const alloc = allocator orelse return null;
+            const abs = luaAbsIndex(state, idx);
+            const len = c.lua_rawlen(state, abs);
+            const result = alloc.alloc(ptr.child, len) catch return null;
+            for (result, 0..) |*item, i| {
+                _ = c.lua_rawgeti(state, abs, @intCast(i + 1));
+                defer c.lua_pop(state, 1);
+                item.* = readAnyValueAlloc(ptr.child, state, -1, allocator) orelse return null;
+            }
+            return result;
         },
         .int, .comptime_int => {
             if (c.lua_type(state, idx) != c.LUA_TNUMBER) return null;
@@ -180,11 +220,23 @@ fn readAnyValue(comptime T: type, state: *c.lua_State, idx: c_int) ?T {
             if (n < 0 or n > std.math.maxInt(tag_type)) return null;
             return @enumFromInt(@as(tag_type, @intCast(n)));
         },
+        .array => |arr| {
+            if (c.lua_type(state, idx) != c.LUA_TTABLE) return null;
+            const abs = luaAbsIndex(state, idx);
+            if (c.lua_rawlen(state, abs) != arr.len) return null;
+            var result: T = undefined;
+            for (&result, 0..) |*item, i| {
+                _ = c.lua_rawgeti(state, abs, @intCast(i + 1));
+                defer c.lua_pop(state, 1);
+                item.* = readAnyValueAlloc(arr.child, state, -1, allocator) orelse return null;
+            }
+            return result;
+        },
         .@"struct" => |str| {
             if (c.lua_type(state, idx) != c.LUA_TTABLE) return null;
             var result: T = .{};
             inline for (str.fields) |field| {
-                if (readAnyField(field.type, state, idx, field.name)) |val| {
+                if (readAnyFieldAlloc(field.type, state, idx, field.name, allocator)) |val| {
                     @field(result, field.name) = val;
                 }
             }
@@ -195,10 +247,14 @@ fn readAnyValue(comptime T: type, state: *c.lua_State, idx: c_int) ?T {
 }
 
 fn readAnyField(comptime T: type, state: *c.lua_State, table_idx: c_int, comptime field: []const u8) ?T {
+    return readAnyFieldAlloc(T, state, table_idx, field, null);
+}
+
+fn readAnyFieldAlloc(comptime T: type, state: *c.lua_State, table_idx: c_int, comptime field: []const u8, allocator: ?Allocator) ?T {
     const abs = luaAbsIndex(state, table_idx);
     _ = c.lua_getfield(state, abs, fieldName(field));
     defer c.lua_pop(state, 1);
-    return readAnyValue(T, state, -1);
+    return readAnyValueAlloc(T, state, -1, allocator);
 }
 
 fn getStringField(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8, dest: []u8) ?usize {
@@ -729,7 +785,9 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "err", &luaBlitzErr },
         .{ "exit_loop", &luaBlitzExitLoop },
         .{ "add_provider", &luaAddProvider },
+        .{ "add_agent", &luaAddAgent },
         .{ "set_model", &luaSetModel },
+        .{ "set_model_agent", &luaSetModelAgent },
         .{ "add_doc", &luaAddDoc },
         .{ "token_usage", &luaTokenUsage },
         .{ "context_percent", &luaContextPercent },
@@ -758,9 +816,9 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "RET_FAILED", RET_FAILED },
         .{ "RET_OK", RET_OK },
         .{ "RET_ERR", RET_ERR },
-        .{ "AGENT_MAIN", 0 },
-        .{ "AGENT_SUB", 1 },
-        .{ "AGENT_PLAN", 2 },
+        .{ "AGENT_GENERAL", 0 },
+        .{ "AGENT_EXPLORE", 1 },
+        .{ "AGENT_REVIEW", 2 },
         .{ "MODE_EXEC", 0 },
         .{ "REQ_STATUS_PENDING", REQ_STATUS_PENDING },
         .{ "REQ_STATUS_APPROVED", REQ_STATUS_APPROVED },
@@ -1015,7 +1073,7 @@ fn readReasoningEffort(state: *c.lua_State, table_idx: c_int) ?prv.config.Reason
         return null;
     };
     return prv.config.parseReasoningEffort(value) orelse {
-        _ = c.luaL_error(state, "add_provider: unknown effort (expected none/low/high/xhigh/max)");
+        _ = c.luaL_error(state, "add_provider: unknown effort (expected none/low/medium/high/xhigh/max)");
         return null;
     };
 }
@@ -1098,6 +1156,108 @@ fn luaAddProvider(L: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
+fn luaSetModelAgent(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "app not initialized");
+        return 0;
+    };
+
+    const func_name = "set_model_agent";
+
+    const agent_type_idx = readAnyArg(r.ContextFactory.AgentType, state, func_name, 1) orelse {
+        _ = c.luaL_error(state, "model must be string");
+        return 0;
+    };
+
+    const model = readAnyArg([]const u8, state, func_name, 2) orelse {
+        _ = c.luaL_error(state, "model must be string");
+        return 0;
+    };
+    const effort_str = readAnyArg([]const u8, state, func_name, 3) orelse {
+        _ = c.luaL_error(state, "effort must be string");
+        return 0;
+    };
+
+    const effort = r.prv.config.parseReasoningEffort(effort_str) orelse {
+        _ = c.luaL_error(state, "unknown effort (expected none/low/medium/high/xhigh/max) ");
+        return 0;
+    };
+
+    const provider = readAnyArg(r.prv.config.ProviderHandle, state, func_name, 4) orelse {
+        _ = c.luaL_error(state, "provider handles are int!");
+        return 0;
+    };
+
+    a.context_factory.setAgentModel(agent_type_idx, model, effort, provider) catch {
+        _ = c.luaL_error(state, "set_model_agent: unknown agent or out of memory");
+        return 0;
+    };
+
+    return 0;
+}
+
+fn luaAddAgent(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "add_agent: app not initialized");
+        return 0;
+    };
+
+    const vm = getVmFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "add_agent: vm not initialized");
+        return 0;
+    };
+    const def = readAnyValueAlloc(LuaAgentEntry, state, 1, vm.luaArena()) orelse {
+        _ = c.luaL_error(state, "add_agent: expected an agent definition table");
+        return 0;
+    };
+
+    if (def.name.len == 0 or def.description.len == 0 or def.prompt.len == 0 or def.model.len == 0 or def.effort.len == 0) {
+        _ = c.luaL_error(state, "add_agent: name, description, prompt, model, and effort are required");
+        return 0;
+    }
+
+    const effort = r.prv.config.parseReasoningEffort(def.effort) orelse {
+        _ = c.luaL_error(state, "add_agent: unknown effort (expected none/low/medium/high/xhigh/max)");
+        return 0;
+    };
+    const tools = readAnyFieldAlloc([]const []const u8, state, 1, "tools", vm.luaArena()) orelse {
+        _ = c.luaL_error(state, "add_agent: tools must be an array of names");
+        return 0;
+    };
+    const provider = readAnyField(r.prv.config.ProviderHandle, state, 1, "provider") orelse {
+        _ = c.luaL_error(state, "add_agent: provider handle is required");
+        return 0;
+    };
+    const provider_idx = @intFromEnum(provider);
+    if (provider_idx >= a.config.provider_count or !a.config.providers[provider_idx].active) {
+        _ = c.luaL_error(state, "add_agent: invalid provider handle");
+        return 0;
+    }
+
+    const agent_type = a.context_factory.addAgent(.{
+        .name = def.name,
+        .description = def.description,
+        .prompt = def.prompt,
+        .in_agent_tool = def.in_agent_tool,
+        .tools = tools,
+        .model = .{
+            .name = def.model,
+            .effort = effort,
+            .provider = provider,
+        },
+    }) catch {
+        _ = c.luaL_error(state, "add_agent: too many agents, invalid tools, or out of memory");
+        return 0;
+    };
+
+    pushAny(state, agent_type);
+    return 1;
+}
+
 fn luaSetModel(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
 
@@ -1106,23 +1266,10 @@ fn luaSetModel(L: ?*c.lua_State) callconv(.c) c_int {
         return 0;
     };
 
-    const effort_str = readAnyArg([]const u8, state, "set_model", 1) orelse return 0;
+    const model = readAnyArg([]const u8, state, "set_model", 1) orelse return 0;
+    const handle: prv.config.ProviderHandle = @enumFromInt(readAnyArg(u32, state, "set_model", 2) orelse return 0);
 
-    const effort: prv.config.EffortLevel = if (std.mem.eql(u8, effort_str, "max"))
-        .max
-    else if (std.mem.eql(u8, effort_str, "mid"))
-        .mid
-    else if (std.mem.eql(u8, effort_str, "min"))
-        .min
-    else {
-        _ = c.luaL_error(state, "set_model: unknown effort (expected max/mid/min)");
-        return 0;
-    };
-
-    const model = readAnyArg([]const u8, state, "set_model", 2) orelse return 0;
-    const handle: prv.config.ProviderHandle = @enumFromInt(readAnyArg(u32, state, "set_model", 3) orelse return 0);
-
-    if (!cfg.setModel(effort, model, handle)) {
+    if (!cfg.setModel(model, handle)) {
         _ = c.luaL_error(state, "set_model: invalid provider handle or model name too long");
         return 0;
     }
@@ -1374,7 +1521,7 @@ fn luaSetAgentTools(L: ?*c.lua_State) callconv(.c) c_int {
 
     const factory = a.context_factory;
 
-    var names_buf: [r.ContextFactory.MAX_OVERRIDE_TOOLS][]const u8 = undefined;
+    var names_buf: [r.ContextFactory.MAX_AGENT_TOOLS][]const u8 = undefined;
     var names_count: usize = 0;
 
     const len = c.lua_rawlen(state, 2);
@@ -1397,7 +1544,7 @@ fn luaSetAgentTools(L: ?*c.lua_State) callconv(.c) c_int {
     }
 
     factory.setAgentTools(agent_type, names_buf[0..names_count]) catch {
-        _ = c.luaL_error(state, "set_agent_tools: failed to apply override");
+        _ = c.luaL_error(state, "set_agent_tools: failed to set tools");
         return 0;
     };
     return 0;
@@ -1449,7 +1596,7 @@ fn luaSetPrompt(L: ?*c.lua_State) callconv(.c) c_int {
     const agent_type = readEnumArg(state, r.ContextFactory.AgentType, "set_prompt", 1) orelse return 0;
     const prompt = readPromptArg(state, "set_prompt", 2) orelse return 0;
     a.context_factory.setAgentPrompt(agent_type, prompt) catch {
-        _ = c.luaL_error(state, "set_prompt: out of memory");
+        _ = c.luaL_error(state, "set_prompt: unknown agent or out of memory");
         return 0;
     };
     return 0;
@@ -1464,7 +1611,7 @@ fn luaSetModePrompt(L: ?*c.lua_State) callconv(.c) c_int {
     const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt", 1) orelse return 0;
     const prompt = readPromptArg(state, "set_mode_prompt", 2) orelse return 0;
     a.context_factory.setModePrompt(mode, prompt) catch {
-        _ = c.luaL_error(state, "set_mode_prompt: out of memory");
+        _ = c.luaL_error(state, "set_mode_prompt: unknown mode or out of memory");
         return 0;
     };
     return 0;
@@ -1479,7 +1626,7 @@ fn luaSetModePromptSparse(L: ?*c.lua_State) callconv(.c) c_int {
     const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt_sparse", 1) orelse return 0;
     const prompt = readPromptArg(state, "set_mode_prompt_sparse", 2) orelse return 0;
     a.context_factory.setSparseModePrompt(mode, prompt) catch {
-        _ = c.luaL_error(state, "set_mode_prompt_sparse: out of memory");
+        _ = c.luaL_error(state, "set_mode_prompt_sparse: unknown mode or out of memory");
         return 0;
     };
     return 0;
@@ -1494,7 +1641,7 @@ fn luaSetModeName(L: ?*c.lua_State) callconv(.c) c_int {
     const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_name", 1) orelse return 0;
     const name = readPromptArg(state, "set_mode_name", 2) orelse return 0;
     a.context_factory.setModeName(mode, name) catch {
-        _ = c.luaL_error(state, "set_mode_name: out of memory");
+        _ = c.luaL_error(state, "set_mode_name: unknown mode or out of memory");
         return 0;
     };
     a.dirty = true;
@@ -1520,7 +1667,7 @@ fn luaAddMode(L: ?*c.lua_State) callconv(.c) c_int {
         sparse,
         color,
     ) catch {
-        _ = c.luaL_error(state, "add_mode: out of memory");
+        _ = c.luaL_error(state, "add_mode: too many modes or out of memory");
         return 0;
     };
 
@@ -2227,6 +2374,7 @@ fn pushAgentId(L: *c.lua_State, id: prv.provider.Swarm.AgentId) void {
 }
 
 /// Read AgentId from table at `idx`. Reports a Lua error on shape mismatch.
+/// TODO: crash!
 fn readAgentIdArg(state: *c.lua_State, comptime fname: []const u8, idx: c_int) prv.provider.Swarm.AgentId {
     if (c.lua_type(state, idx) != c.LUA_TTABLE) {
         _ = c.luaL_error(state, fname ++ ": agent_id must be a table {index, generation}");
@@ -2398,27 +2546,6 @@ fn luaQueueSpawnAgent(L: ?*c.lua_State) callconv(.c) c_int {
     }
 
     if (getOptionalU32(state, 1, "tool_budget")) |b| args.tool_budget = b;
-
-    _ = c.lua_getfield(state, 1, "effort");
-    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
-        var elen: usize = 0;
-        const eptr = c.lua_tolstring(state, -1, &elen);
-        const e = eptr[0..elen];
-        args.effort = if (std.mem.eql(u8, e, "max"))
-            .max
-        else if (std.mem.eql(u8, e, "mid"))
-            .mid
-        else if (std.mem.eql(u8, e, "min"))
-            .min
-        else {
-            _ = c.luaL_error(state, "queue.spawn_agent: effort must be 'max'|'mid'|'min'");
-            return 0;
-        };
-    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
-        _ = c.luaL_error(state, "queue.spawn_agent: effort must be a string");
-        return 0;
-    }
-    c.lua_pop(state, 1);
 
     if (getOptionalBool(state, 1, "fork")) |f| args.fork = f;
 
@@ -2793,4 +2920,22 @@ fn pushJsonValueRecursive(L: *c.lua_State, val: std.json.Value) void {
         },
         .number_string => |s| _ = c.lua_pushlstring(L, s.ptr, s.len),
     }
+}
+
+test "pushAny and readAnyValue handle arrays and slices" {
+    const state = c.luaL_newstate() orelse return error.LuaInitFailed;
+    defer c.lua_close(state);
+
+    const values = [_][]const u8{ "ask", "read" };
+    pushAny(state, values);
+
+    const fixed = readAnyValue([2][]const u8, state, -1).?;
+    try std.testing.expectEqualStrings("ask", fixed[0]);
+    try std.testing.expectEqualStrings("read", fixed[1]);
+
+    const slice = readAnyValueAlloc([]const []const u8, state, -1, std.testing.allocator).?;
+    defer std.testing.allocator.free(slice);
+    try std.testing.expectEqual(@as(usize, 2), slice.len);
+    try std.testing.expectEqualStrings("ask", slice[0]);
+    try std.testing.expectEqualStrings("read", slice[1]);
 }

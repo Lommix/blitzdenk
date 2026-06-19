@@ -73,12 +73,12 @@ function BlitzCtx:ask(header, question, options) end
 ---@field status_bar_render? fun(): string Custom statusbar renderer. Called only when the Lua VM is free; the UI reuses the last returned string while Lua is busy.
 ---@field json BlitzJson JSON encode/decode helpers.
 ---@field html_to_markdown fun(html: string): string Convert HTML to markdown using the built-in parser.
----@field AGENT_MAIN integer Main agent type id
----@field AGENT_SUB integer Sub agent type id
----@field AGENT_PLAN integer Plan agent type id
+---@field AGENT_GENERAL integer Main agent type id
+---@field AGENT_EXPLORE integer Explorer sub-agent type id
+---@field AGENT_REVIEW integer Review sub-agent type id
 ---@field MODE_EXEC integer Exec mode id
 ---@field TOOL_BASH string Built-in tool name
----@field TOOL_CANCEL_AGENT string Built-in tool name
+---@field TOOL_CANCEL_BACKGROUND string Built-in tool name
 ---@field TOOL_READ string Built-in tool name
 ---@field TOOL_WRITE string Built-in tool name
 ---@field TOOL_EDIT string Built-in tool name
@@ -116,8 +116,6 @@ blitz = {}
 ---@field type string "enabled" or "adaptive"
 ---@field budget_tokens? integer
 
-
-
 ---@class BlitzProviderDef
 ---@field type string Provider type: "openai", "anthropic", or "ollama" (required)
 ---@field url string Provider API base URL (required)
@@ -140,16 +138,37 @@ blitz = {}
 ---@field args? string[] Command arguments
 ---@field tools_prefix? string Prefix for imported tool names (default: "mcp_<name>_")
 
+---@class BlitzAgentDef
+---@field name string Unique agent type name
+---@field description string Description shown to agents choosing a specialist
+---@field prompt string System prompt
+---@field in_agent_tool? boolean Include in the built-in agent tool (default true)
+---@field tools string[] Tool names available to this agent
+---@field model string Model name/identifier
+---@field provider integer Provider handle from blitz.add_provider
+---@field effort string "none" | "low" | "medium" | "high" | "xhigh" | "max"
+
 ---Register a provider.
 ---@param def BlitzProviderDef
 ---@return integer handle Provider handle for use with blitz.set_model
 function blitz.add_provider(def) end
 
----Bind a model to an effort level
----@param effort string Effort level: "max", "mid", or "min"
+---Register a complete agent configuration.
+---@param def BlitzAgentDef
+---@return integer agent_type Agent type id
+function blitz.add_agent(def) end
+
+---Set the default model
 ---@param model string Model name/identifier
 ---@param handle integer Provider handle from blitz.add_provider
-function blitz.set_model(effort, model, handle) end
+function blitz.set_model(model, handle) end
+
+---Set the model config for specific agent
+---@param agent_type integer the agent type id
+---@param model string Model name/identifier
+---@param effort string "none" | "low" | "medium" | "high" | "xhigh" | "max" Provider reasoning effort
+---@param handle integer Provider handle from blitz.add_provider
+function blitz.set_model_agent(agent_type, model, effort, handle) end
 
 ---Register a documentation source
 ---@param name string Display name
@@ -187,12 +206,12 @@ function blitz.register_tool(def) end
 ---Override the tool set for a given agent type. Replaces defaults entirely.
 ---Names must match built-in tool names (see blitz.TOOL_*) or names of tools
 ---registered via blitz.register_tool. Unknown names are silently skipped.
----@param agent_type integer One of blitz.AGENT_MAIN | blitz.AGENT_SUB | blitz.AGENT_PLAN
+---@param agent_type integer One of blitz.AGENT_GENERAL | blitz.AGENT_EXPLORE | blitz.AGENT_REVIEW
 ---@param tool_names string[] List of tool names this agent should have
 function blitz.set_agent_tools(agent_type, tool_names) end
 
 ---Add a single tool from the tool pool to an agent type's tool set.
----@param agent_type integer One of blitz.AGENT_MAIN | blitz.AGENT_SUB | blitz.AGENT_PLAN
+---@param agent_type integer One of blitz.AGENT_GENERAL | blitz.AGENT_EXPLORE | blitz.AGENT_REVIEW
 ---@param tool_name string Tool name to add from the pool
 function blitz.add_tool(agent_type, tool_name) end
 
@@ -201,7 +220,7 @@ function blitz.add_tool(agent_type, tool_name) end
 function blitz.push_notification(message) end
 
 ---Override the system prompt for a given agent type.
----@param agent_type integer One of blitz.AGENT_MAIN | blitz.AGENT_SUB | blitz.AGENT_PLAN
+---@param agent_type integer One of blitz.AGENT_GENERAL | blitz.AGENT_EXPLORE | blitz.AGENT_REVIEW
 ---@param prompt string Full prompt text
 function blitz.set_prompt(agent_type, prompt) end
 
@@ -272,9 +291,8 @@ function blitz.add_listener(Event, func) end
 ---@class BlitzSpawnArgs
 ---@field parent_id? BlitzAgentId Parent agent (required when fork=true)
 ---@field prompt string Initial user prompt (wrapped as a single text content part)
----@field agent_type? integer One of blitz.AGENT_* (default AGENT_MAIN)
+---@field agent_type? integer One of blitz.AGENT_* (default AGENT_GENERAL)
 ---@field tool_budget? integer Max tool calls (default 64)
----@field effort? string "max" | "mid" | "min" (default "min")
 ---@field fork? boolean Fork the parent slot instead of spawning fresh (default false)
 ---@field level? string Permission level "read" | "write" (default "read")
 
@@ -390,9 +408,9 @@ local BlitzMcp = {}
 ---@return integer mcp_id
 function BlitzMcp.add(def) end
 
----Enable an MCP server for an agent type. Defaults to blitz.AGENT_MAIN.
+---Enable an MCP server for an agent type. Defaults to blitz.AGENT_GENERAL.
 ---@param mcp_id integer
----@param agent_type? integer One of blitz.AGENT_MAIN | blitz.AGENT_SUB
+---@param agent_type? integer One of blitz.AGENT_GENERAL | blitz.AGENT_EXPLORE
 function BlitzMcp.enable(mcp_id, agent_type) end
 
 ---@type BlitzMcp

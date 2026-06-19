@@ -44,7 +44,6 @@ pub fn loadSession(a: *app.App, w: *std.Io.Reader) !void {
 
     // Create new agent to hold restored chat
     const id = try a.swarm.newAgent(
-        .max,
         null,
         @intFromEnum(r.ContextFactory.AgentType.general),
         @intFromEnum(a.mode),

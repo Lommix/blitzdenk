@@ -42,18 +42,13 @@ local novita = blitz.add_provider({
 })
 
 -----------------------------------------------------------------------------
--- Setup default models
+-- Setup default model
 local model = "deepseek/deepseek-v4-flash"
-blitz.set_model("max", model, novita)
-blitz.set_model("mid", model, novita)
-blitz.set_model("min", model, novita)
+blitz.set_model(model, novita)
 -----------------------------------------------------------------------------
 --- smart mode
 blitz.bind("<C-u>", function()
-	local m = "deepseek/deepseek-v4-pro"
-	blitz.set_model("max", m, novita)
-	blitz.set_model("mid", m, novita)
-	blitz.set_model("min", m, novita)
+	blitz.set_model("deepseek/deepseek-v4-pro", novita)
 end)
 
 -- Add custom bindings, using vim style keybind strings
@@ -66,10 +61,7 @@ end)
 
 -- example: switch to local ai mode
 blitz.bind("<C-l>", function()
-	local qwen = "Qwen3.6-35B-A3B"
-	blitz.set_model("max", qwen, llamacpp)
-	blitz.set_model("mid", qwen, llamacpp)
-	blitz.set_model("min", qwen, llamacpp)
+	blitz.set_model("Qwen3.6-35B-A3B", llamacpp)
 end)
 
 -- Add custom commands, args is the remaining input string
@@ -77,7 +69,6 @@ blitz.add_command(":greet", function(args)
 	blitz.queue.reset_session()
 	blitz.queue.spawn_agent({
 		prompt = "Your job is the to greet " .. args,
-		effort = "min",
 	})
 end)
 
@@ -109,7 +100,7 @@ blitz.add_command(":browser", function()
 		return
 	end
 	blitz.queue.push_chat_entry("system", "playwright enabled")
-	blitz.mcp.enable(playmcp, blitz.AGENT_MAIN)
+	blitz.mcp.enable(playmcp, blitz.AGENT_GENERAL)
 	is_active = true
 end)
 ]]
@@ -120,7 +111,7 @@ blitz.set_compact_edge(128000)
 
 -- Per-agent tool overrides (full replace). Omit a call to keep defaults.
 -- You need to overwrite this, if you want to add your custom tools
-blitz.set_agent_tools(blitz.AGENT_MAIN, {
+blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.TOOL_BASH,
 	blitz.TOOL_CANCEL_AGENT,
 	blitz.TOOL_AWAIT_AGENT,

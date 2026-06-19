@@ -258,10 +258,13 @@ pub fn run(
             }
         }).func,
         .build_config = (struct {
-            fn func(ptr: *anyopaque, effort: r.prv.config.EffortLevel) anyerror!r.prv.adapter.Config {
+            fn func(ptr: *anyopaque, agent_type_idx: u8) anyerror!r.prv.adapter.Config {
                 const a: *App = @ptrCast(@alignCast(ptr));
-                const config = a.config.buildConfig(effort, a.swarm.exec.env) orelse return error.FailedToBuildAgent;
-                return config;
+                return a.context_factory.buildAgentApiConfig(
+                    @enumFromInt(agent_type_idx),
+                    &a.config,
+                    a.swarm.exec.env,
+                ) orelse return error.FailedToBuildAgent;
             }
         }).func,
         .cwd = (struct {
@@ -425,8 +428,7 @@ pub fn run(
                     lua_reload_failed = true;
                     std.log.scoped(.lua).err("hot-reload: failed to reset lua vm ({any})", .{err});
                 };
-                context_factory.clearAllAgentTools();
-                context_factory.resetPrompts();
+                context_factory.resetDefs();
                 if (config_lua) |info| {
                     const inject = std.fmt.allocPrint(arena, "package.path = \"{s}?.lua;\" .. package.path", .{info.dir_path}) catch null;
                     if (inject) |code| app.lua_vm.exec(code) catch |err| {
@@ -449,8 +451,8 @@ pub fn run(
                 app.dirty = true;
 
                 context_factory.clearTools();
-                inline for (reg.default_tool_set) |entry| {
-                    try context_factory.add(arena, entry[0], entry[1]);
+                inline for (reg.general_default_tool_set) |tool| {
+                    try context_factory.add(arena, tool, .all);
                 }
                 lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
                     std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
@@ -777,7 +779,6 @@ pub fn run(
                                     try app.cmd_queue.append(io, .{
                                         .spawn_agent = .{
                                             .agent_id = id,
-                                            .effort = .max,
                                             .agent_type = @intFromEnum(reg.AgentType.general),
                                             .prompt = parts,
                                             .tool_budget = 1024,
