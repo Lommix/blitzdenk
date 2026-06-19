@@ -1,7 +1,6 @@
 const std = @import("std");
 const r = @import("root.zig");
 const apt = r.adapter;
-const cfg_mod = r.config;
 const Agent = r.agent.Agent;
 const tc = r.tool;
 const http = r.http;
@@ -47,7 +46,7 @@ pub const SwarmContextV = struct {
     broadcast: *const fn (*anyopaque, BroadcastEntry) void,
     permission: *const fn (*anyopaque, *PermissionReq) void,
     cwd: *const fn (*anyopaque) []const u8,
-    build_config: *const fn (*anyopaque, cfg_mod.EffortLevel) anyerror!r.adapter.Config,
+    build_config: *const fn (*anyopaque) anyerror!r.adapter.Config,
 
     //sync
     gen_system_reminders: *const fn (*anyopaque, *Agent) void,
@@ -281,7 +280,6 @@ pub fn forkAgentInSlot(
 
 pub fn newAgent(
     self: *Self,
-    effort: cfg_mod.EffortLevel,
     parent_id: ?AgentId,
     agent_type_idx: u8,
     mode_type_idx: u8,
@@ -292,7 +290,7 @@ pub fn newAgent(
     const slot = &self.slots[id.index];
     slot.parent_id = parent_id;
 
-    const config = try self.context.build_config(self.context.ptr, effort);
+    const config = try self.context.build_config(self.context.ptr);
     slot.agent = Agent.new(
         config,
         &self.pool,
@@ -318,7 +316,6 @@ pub fn newAgent(
 pub fn newAgentInSlot(
     self: *Self,
     idx: AgentId,
-    effort: cfg_mod.EffortLevel,
     parent_id: ?AgentId,
     agent_type_idx: u8,
     mode_type_idx: u8,
@@ -326,7 +323,7 @@ pub fn newAgentInSlot(
     const slot = &self.slots[idx.index];
     if (slot.generation != idx.generation) return error.AgentSlotGenerationMissmatch;
 
-    const config = try self.context.build_config(self.context.ptr, effort);
+    const config = try self.context.build_config(self.context.ptr);
     slot.agent = Agent.new(
         config,
         &self.pool,

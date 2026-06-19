@@ -80,7 +80,6 @@ pub const Command = union(enum) {
         prompt: []const r.prv.adapter.ContentPart,
         agent_type: u8 = @intFromEnum(r.ContextFactory.AgentType.general),
         tool_budget: u32 = 1024,
-        effort: r.prv.config.EffortLevel = .min,
         fork: bool = false,
         level: r.prv.agent.AgentPermissionLevel = .read,
         chat_entry: ?ChatEntry = null,
@@ -183,7 +182,6 @@ pub const Command = union(enum) {
                 } else {
                     try app.swarm.newAgentInSlot(
                         arg.agent_id,
-                        .max,
                         arg.parent_id,
                         arg.agent_type,
                         @intFromEnum(app.mode),

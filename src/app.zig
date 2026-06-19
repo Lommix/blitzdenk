@@ -40,9 +40,7 @@ const HEADER_INFO =
     \\├[CWD]: {cwd}
     \\│
     \\├[{INFO}
-    \\├[Max: {MODEL_MAX}
-    \\├[Mid: {MODEL_MID}
-    \\└[Min: {MODEL_MIN}
+    \\└[Model: {MODEL}
 ;
 
 pub const PermisionLevel = enum {
@@ -2278,22 +2276,19 @@ fn renderWelcome(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     line_iter = std.mem.splitAny(u8, HEADER_INFO, "\n");
 
     var status_buf: [128]u8 = undefined;
-    const status = std.fmt.bufPrint(&status_buf, "Loaded {d} Provider {d} Docs {d} Skills", .{
+    const status = std.fmt.bufPrint(&status_buf, "Loaded {d} Provider {d} Docs", .{
         app.config.provider_count,
         app.config.doc_count,
-        app.config.skill_count,
     }) catch "error loading status";
 
     var buf_a: [255]u8 = undefined;
     var buf_b: [255]u8 = undefined;
     while (line_iter.next()) |line| : (c.y += 1) {
-        const l1 = str_replace(&buf_a, "{MODEL_MAX}", app.config.model_max.getName(), line);
-        const l2 = str_replace(&buf_b, "{MODEL_MID}", app.config.model_mid.getName(), l1);
-        const l3 = str_replace(&buf_a, "{MODEL_MIN}", app.config.model_min.getName(), l2);
-        const l4 = str_replace(&buf_b, "{INFO}", status, l3);
-        const l5 = str_replace(&buf_a, "{cwd}", app.cwd, l4);
+        const l1 = str_replace(&buf_b, "{MODEL}", app.config.default_model.getName(), line);
+        const l2 = str_replace(&buf_a, "{INFO}", status, l1);
+        const l3 = str_replace(&buf_b, "{cwd}", app.cwd, l2);
 
-        buf.setString(c.x, c.y, l5, .{ .fg = Theme.default.muted });
+        buf.setString(c.x, c.y, l3, .{ .fg = Theme.default.muted });
     }
 }
 

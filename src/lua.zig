@@ -1120,23 +1120,10 @@ fn luaSetModel(L: ?*c.lua_State) callconv(.c) c_int {
         return 0;
     };
 
-    const effort_str = readAnyArg([]const u8, state, "set_model", 1) orelse return 0;
+    const model = readAnyArg([]const u8, state, "set_model", 1) orelse return 0;
+    const handle: prv.config.ProviderHandle = @enumFromInt(readAnyArg(u32, state, "set_model", 2) orelse return 0);
 
-    const effort: prv.config.EffortLevel = if (std.mem.eql(u8, effort_str, "max"))
-        .max
-    else if (std.mem.eql(u8, effort_str, "mid"))
-        .mid
-    else if (std.mem.eql(u8, effort_str, "min"))
-        .min
-    else {
-        _ = c.luaL_error(state, "set_model: unknown effort (expected max/mid/min)");
-        return 0;
-    };
-
-    const model = readAnyArg([]const u8, state, "set_model", 2) orelse return 0;
-    const handle: prv.config.ProviderHandle = @enumFromInt(readAnyArg(u32, state, "set_model", 3) orelse return 0);
-
-    if (!cfg.setModel(effort, model, handle)) {
+    if (!cfg.setModel(model, handle)) {
         _ = c.luaL_error(state, "set_model: invalid provider handle or model name too long");
         return 0;
     }
@@ -2412,27 +2399,6 @@ fn luaQueueSpawnAgent(L: ?*c.lua_State) callconv(.c) c_int {
     }
 
     if (getOptionalU32(state, 1, "tool_budget")) |b| args.tool_budget = b;
-
-    _ = c.lua_getfield(state, 1, "effort");
-    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
-        var elen: usize = 0;
-        const eptr = c.lua_tolstring(state, -1, &elen);
-        const e = eptr[0..elen];
-        args.effort = if (std.mem.eql(u8, e, "max"))
-            .max
-        else if (std.mem.eql(u8, e, "mid"))
-            .mid
-        else if (std.mem.eql(u8, e, "min"))
-            .min
-        else {
-            _ = c.luaL_error(state, "queue.spawn_agent: effort must be 'max'|'mid'|'min'");
-            return 0;
-        };
-    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
-        _ = c.luaL_error(state, "queue.spawn_agent: effort must be a string");
-        return 0;
-    }
-    c.lua_pop(state, 1);
 
     if (getOptionalBool(state, 1, "fork")) |f| args.fork = f;
 

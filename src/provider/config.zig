@@ -51,14 +51,7 @@ pub const ModelEntry = struct {
     }
 };
 
-pub const EffortLevel = enum {
-    max,
-    mid,
-    min,
-};
-
 pub const MAX_DOCS = 32;
-pub const MAX_SKILLS = 32;
 
 pub const PathEntry = struct {
     name: [128]u8 = undefined,
@@ -84,14 +77,10 @@ pub const BlitzdenkCfg = struct {
     providers: [MAX_PROVIDERS]Provider = @splat(.{}),
     provider_count: u32 = 0,
 
-    model_min: ModelEntry = .{},
-    model_mid: ModelEntry = .{},
-    model_max: ModelEntry = .{},
+    default_model: ModelEntry = .{},
 
     doc_entries: [MAX_DOCS]PathEntry = @splat(.{}),
     doc_count: u32 = 0,
-    skill_entries: [MAX_SKILLS]PathEntry = @splat(.{}),
-    skill_count: u32 = 0,
 
     /// Reserve the next provider slot. Caller fills url/key_envar/provider_config
     /// (including the inline buffer for thinking.type) then calls
@@ -121,12 +110,12 @@ pub const BlitzdenkCfg = struct {
         return handle;
     }
 
-    pub fn setModel(self: *BlitzdenkCfg, effort: EffortLevel, name: []const u8, handle: ProviderHandle) bool {
+    pub fn setModel(self: *BlitzdenkCfg, name: []const u8, handle: ProviderHandle) bool {
         const idx = @intFromEnum(handle);
         if (idx >= self.provider_count or !self.providers[idx].active) return false;
         if (name.len > 256) return false;
 
-        const entry = self.getModelEntryMut(effort);
+        const entry = &self.default_model;
         @memcpy(entry.name[0..name.len], name);
         entry.name_len = name.len;
         entry.provider = handle;
@@ -134,8 +123,8 @@ pub const BlitzdenkCfg = struct {
         return true;
     }
 
-    pub fn buildConfig(self: *const BlitzdenkCfg, effort: EffortLevel, env: *const std.process.Environ.Map) ?adapter.Config {
-        const entry = self.getModelEntry(effort);
+    pub fn buildConfig(self: *const BlitzdenkCfg, env: *const std.process.Environ.Map) ?adapter.Config {
+        const entry = &self.default_model;
         if (!entry.bound) return null;
 
         const idx = @intFromEnum(entry.provider);
@@ -157,22 +146,6 @@ pub const BlitzdenkCfg = struct {
         };
     }
 
-    pub fn getModelEntry(self: *const BlitzdenkCfg, effort: EffortLevel) *const ModelEntry {
-        return switch (effort) {
-            .max => &self.model_max,
-            .mid => &self.model_mid,
-            .min => &self.model_min,
-        };
-    }
-
-    fn getModelEntryMut(self: *BlitzdenkCfg, effort: EffortLevel) *ModelEntry {
-        return switch (effort) {
-            .max => &self.model_max,
-            .mid => &self.model_mid,
-            .min => &self.model_min,
-        };
-    }
-
     pub fn addDoc(self: *BlitzdenkCfg, name: []const u8, desc: []const u8, location: []const u8) bool {
         if (self.doc_count >= MAX_DOCS) return false;
         if (name.len > 128 or desc.len > 256 or location.len > 512) return false;
@@ -187,30 +160,13 @@ pub const BlitzdenkCfg = struct {
         return true;
     }
 
-    pub fn addSkill(self: *BlitzdenkCfg, name: []const u8, desc: []const u8, location: []const u8) bool {
-        if (self.skill_count >= MAX_SKILLS) return false;
-        if (name.len > 128 or desc.len > 256 or location.len > 512) return false;
-        var slot = &self.skill_entries[self.skill_count];
-        @memcpy(slot.name[0..name.len], name);
-        slot.name_len = name.len;
-        @memcpy(slot.description[0..desc.len], desc);
-        slot.desc_len = desc.len;
-        @memcpy(slot.location[0..location.len], location);
-        slot.loc_len = location.len;
-        self.skill_count += 1;
-        return true;
-    }
 
     pub fn resetProviders(self: *BlitzdenkCfg) void {
         self.providers = @splat(.{});
         self.provider_count = 0;
-        self.model_min = .{};
-        self.model_mid = .{};
-        self.model_max = .{};
+        self.default_model = .{};
         self.doc_entries = @splat(.{});
         self.doc_count = 0;
-        self.skill_entries = @splat(.{});
-        self.skill_count = 0;
     }
 };
 

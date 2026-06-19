@@ -145,11 +145,10 @@ blitz = {}
 ---@return integer handle Provider handle for use with blitz.set_model
 function blitz.add_provider(def) end
 
----Bind a model to an effort level
----@param effort string Effort level: "max", "mid", or "min"
+---Set the default model
 ---@param model string Model name/identifier
 ---@param handle integer Provider handle from blitz.add_provider
-function blitz.set_model(effort, model, handle) end
+function blitz.set_model(model, handle) end
 
 ---Register a documentation source
 ---@param name string Display name
@@ -274,7 +273,6 @@ function blitz.add_listener(Event, func) end
 ---@field prompt string Initial user prompt (wrapped as a single text content part)
 ---@field agent_type? integer One of blitz.AGENT_* (default AGENT_MAIN)
 ---@field tool_budget? integer Max tool calls (default 64)
----@field effort? string "max" | "mid" | "min" (default "min")
 ---@field fork? boolean Fork the parent slot instead of spawning fresh (default false)
 ---@field level? string Permission level "read" | "write" (default "read")
 

@@ -87,11 +87,6 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     const parts = ctx.alloc.alloc(prv.adapter.ContentPart, 1) catch
         return r.errResult(call, "oom");
 
-    const effort: prv.config.EffortLevel = switch (args.agent_type) {
-        .explore => .mid,
-        else => .max,
-    };
-
     parts[0] = .{ .text = prompt };
     const app = ctx.swarm.context.cast(@import("../app.zig").App);
     app.cmd_queue.append(ctx.io, .{
@@ -100,7 +95,6 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
             .parent_id = ctx.self_id,
             .agent_type = @intFromEnum(args.agent_type),
             .prompt = parts,
-            .effort = effort,
             .level = .read, // TODO: read from type in registry or something
         },
     }) catch return r.errResult(call, "command queue is full, inform user");

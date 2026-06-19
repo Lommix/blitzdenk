@@ -258,9 +258,9 @@ pub fn run(
             }
         }).func,
         .build_config = (struct {
-            fn func(ptr: *anyopaque, effort: r.prv.config.EffortLevel) anyerror!r.prv.adapter.Config {
+            fn func(ptr: *anyopaque) anyerror!r.prv.adapter.Config {
                 const a: *App = @ptrCast(@alignCast(ptr));
-                const config = a.config.buildConfig(effort, a.swarm.exec.env) orelse return error.FailedToBuildAgent;
+                const config = a.config.buildConfig(a.swarm.exec.env) orelse return error.FailedToBuildAgent;
                 return config;
             }
         }).func,
@@ -777,7 +777,6 @@ pub fn run(
                                     try app.cmd_queue.append(io, .{
                                         .spawn_agent = .{
                                             .agent_id = id,
-                                            .effort = .max,
                                             .agent_type = @intFromEnum(reg.AgentType.general),
                                             .prompt = parts,
                                             .tool_budget = 1024,
