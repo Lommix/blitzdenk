@@ -78,7 +78,7 @@ function BlitzCtx:ask(header, question, options) end
 ---@field AGENT_PLAN integer Plan agent type id
 ---@field MODE_EXEC integer Exec mode id
 ---@field TOOL_BASH string Built-in tool name
----@field TOOL_CANCEL_AGENT string Built-in tool name
+---@field TOOL_CANCEL_BACKGROUND string Built-in tool name
 ---@field TOOL_READ string Built-in tool name
 ---@field TOOL_WRITE string Built-in tool name
 ---@field TOOL_EDIT string Built-in tool name
