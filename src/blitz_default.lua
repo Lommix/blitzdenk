@@ -100,7 +100,7 @@ blitz.add_command(":browser", function()
 		return
 	end
 	blitz.queue.push_chat_entry("system", "playwright enabled")
-	blitz.mcp.enable(playmcp, blitz.AGENT_MAIN)
+	blitz.mcp.enable(playmcp, blitz.AGENT_GENERAL)
 	is_active = true
 end)
 ]]
@@ -111,7 +111,7 @@ blitz.set_compact_edge(128000)
 
 -- Per-agent tool overrides (full replace). Omit a call to keep defaults.
 -- You need to overwrite this, if you want to add your custom tools
-blitz.set_agent_tools(blitz.AGENT_MAIN, {
+blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.TOOL_BASH,
 	blitz.TOOL_CANCEL_AGENT,
 	blitz.TOOL_AWAIT_AGENT,
