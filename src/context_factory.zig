@@ -104,6 +104,15 @@ pub const AgentModelConfig = struct {
     provider: r.prv.config.ProviderHandle,
 };
 
+pub const NewAgentDef = struct {
+    name: []const u8,
+    description: []const u8,
+    prompt: []const u8,
+    in_agent_tool: bool = true,
+    tools: []const []const u8 = &.{},
+    model: ?AgentModelConfig = null,
+};
+
 pub const AgentMeta = struct {
     name: []const u8 = "",
     description: []const u8 = "",
@@ -113,6 +122,7 @@ pub const AgentMeta = struct {
 loaded_tools: std.ArrayList(ToolEntry) = .empty,
 
 mode_counter: u32 = 2, // skip first 2 for interal modes
+agent_counter: u32 = 3,
 
 agents: std.EnumArray(AgentType, ?AgentDef) = .initFill(null),
 modes: std.EnumArray(Mode, ?ModeDef) = .initFill(null),
@@ -199,6 +209,39 @@ pub fn setAgentModel(self: *Self, agent_type: AgentType, model: []const u8, effo
         .effort = effort,
         .provider = provider,
     };
+}
+
+pub fn addAgent(self: *Self, def: NewAgentDef) !AgentType {
+    if (self.agent_counter > std.math.maxInt(u6)) return error.TooManyAgents;
+    if (self.findAgentType(def.name) != null) return error.DuplicateAgentName;
+    if (def.tools.len > MAX_AGENT_TOOLS) return error.TooManyTools;
+    for (def.tools) |name| if (name.len > 128) return error.NameTooLong;
+
+    const idx: AgentType = @enumFromInt(self.agent_counter);
+    const alloc = self.prompt_arena.allocator();
+    self.agents.set(idx, .{
+        .name = try alloc.dupe(u8, def.name),
+        .description = try alloc.dupe(u8, def.description),
+        .prompt = try alloc.dupe(u8, def.prompt),
+        .in_agent_tool = def.in_agent_tool,
+        .model = if (def.model) |model| .{
+            .name = try alloc.dupe(u8, model.name),
+            .effort = model.effort,
+            .provider = model.provider,
+        } else null,
+    });
+    try self.setAgentTools(idx, def.tools);
+    self.agent_counter += 1;
+    return idx;
+}
+
+pub fn findAgentType(self: *const Self, name: []const u8) ?AgentType {
+    for (0..self.agent_counter) |i| {
+        const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));
+        const def = self.getAgent(agent_type) orelse continue;
+        if (std.mem.eql(u8, def.name, name)) return agent_type;
+    }
+    return null;
 }
 
 pub fn setModePrompt(self: *Self, mode: Mode, prompt: []const u8) !void {
@@ -291,6 +334,7 @@ pub const SkillIter = struct {
 pub fn resetDefs(self: *Self) void {
     _ = self.prompt_arena.reset(.retain_capacity);
     self.mode_counter = 2;
+    self.agent_counter = 3;
     self.agents = .initFill(null);
     self.modes = .initFill(null);
 

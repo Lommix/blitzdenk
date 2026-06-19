@@ -138,10 +138,25 @@ blitz = {}
 ---@field args? string[] Command arguments
 ---@field tools_prefix? string Prefix for imported tool names (default: "mcp_<name>_")
 
+---@class BlitzAgentDef
+---@field name string Unique agent type name
+---@field description string Description shown to agents choosing a specialist
+---@field prompt string System prompt
+---@field in_agent_tool? boolean Include in the built-in agent tool (default true)
+---@field tools string[] Tool names available to this agent
+---@field model string Model name/identifier
+---@field provider integer Provider handle from blitz.add_provider
+---@field effort string "none" | "low" | "medium" | "high" | "xhigh" | "max"
+
 ---Register a provider.
 ---@param def BlitzProviderDef
 ---@return integer handle Provider handle for use with blitz.set_model
 function blitz.add_provider(def) end
+
+---Register a complete agent configuration.
+---@param def BlitzAgentDef
+---@return integer agent_type Agent type id
+function blitz.add_agent(def) end
 
 ---Set the default model
 ---@param model string Model name/identifier

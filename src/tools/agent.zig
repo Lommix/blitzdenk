@@ -91,18 +91,10 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         return r.errResult(call, "Subagents are not allowed to spawn more subagents");
     }
 
-    // todo: extend view lua
-    // NOTE: in sync with regitry.zig AgentType
-    const AgentType = enum {
-        general,
-        explore,
-        review,
-    };
-
     const Args = struct {
         description: []const u8,
         prompt: []const u8,
-        agent_type: AgentType,
+        agent_type: []const u8,
     };
 
     const parsed = std.json.parseFromSlice(
@@ -112,6 +104,9 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         .{ .ignore_unknown_fields = true },
     ) catch return r.errResult(call, "invalid arguments");
     const args = parsed.value;
+    const app = ctx.swarm.context.cast(@import("../app.zig").App);
+    const agent_type = app.context_factory.findAgentType(args.agent_type) orelse
+        return r.errResult(call, "unknown agent type");
 
     const child_id = ctx.swarm.reserveFreeSlot() orelse
         return r.errResult(call, "No agent slots left");
@@ -126,12 +121,11 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         return r.errResult(call, "oom");
 
     parts[0] = .{ .text = prompt };
-    const app = ctx.swarm.context.cast(@import("../app.zig").App);
     app.cmd_queue.append(ctx.io, .{
         .spawn_agent = .{
             .agent_id = child_id,
             .parent_id = ctx.self_id,
-            .agent_type = @intFromEnum(args.agent_type),
+            .agent_type = @intFromEnum(agent_type),
             .prompt = parts,
             .level = .read, // TODO: read from type in registry or something
         },
@@ -139,17 +133,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     r.setToolChild(ctx, call, child_id);
 
-    switch (args.agent_type) {
-        .general => {
-            r.setToolStatusPrint(ctx, call, "agent -> {s}", .{args.description});
-        },
-        .review => {
-            r.setToolStatusPrint(ctx, call, "review -> {s}", .{args.description});
-        },
-        .explore => {
-            r.setToolStatusPrint(ctx, call, "explore -> {s}", .{args.description});
-        },
-    }
+    r.setToolStatusPrint(ctx, call, "{s} -> {s}", .{ args.agent_type, args.description });
     {
         const g = ctx.agent().bg_agents.lock(ctx.io);
         defer g.unlock();
