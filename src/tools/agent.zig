@@ -34,7 +34,7 @@ pub const AgentTool = prv.tool.Tool{
         \\  "properties": {
         \\      "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
         \\      "prompt": {"type": "string", "description": "The task for the agent to perform"},
-        \\      "agent_type": {"type": "string", "enum": ["general", "explore", "review"], "description": "The type of specialized agent to use for this task"}
+        \\      "agent_type": {"type": "string", "enum": {AGENT_LIST}, "description": "The type of specialized agent to use for this task"}
         \\  },
         \\  "required": ["description","prompt","agent_type"]
         \\}
@@ -42,6 +42,44 @@ pub const AgentTool = prv.tool.Tool{
     },
     .func = &run,
 };
+
+const ctxf = @import("../context_factory.zig");
+
+// TODO: redesign overwrite tool def api
+pub fn dynamic_def(alloc: std.mem.Allocator, agent_defs: []const ctxf.AgentMeta) !struct { desc: []const u8, schema: []const u8 } {
+    var w = std.Io.Writer.Allocating.init(alloc);
+    try w.writer.print("{s}\n\nAvailable agent types:\n", .{AgentTool.def.description});
+
+    var count: u32 = 1;
+    for (agent_defs) |def| {
+        try w.writer.print("{d}. name: {s}\ndescription: {s}\n\n", .{ count, def.name, def.description });
+        count += 1;
+    }
+
+    try w.writer.flush();
+    const final_description = try w.toOwnedSlice();
+
+    try w.writer.writeAll("[");
+    for (agent_defs, 0..) |def, i| {
+        if (i != 0) try w.writer.print(",", .{});
+        try w.writer.print("\"{s}\"", .{def.name});
+    }
+    try w.writer.writeAll("]");
+    try w.writer.flush();
+
+    const schema = try std.mem.replaceOwned(
+        u8,
+        alloc,
+        AgentTool.def.parameters_schema,
+        "{AGENT_LIST}",
+        try w.toOwnedSlice(),
+    );
+
+    return .{
+        .desc = final_description,
+        .schema = schema,
+    };
+}
 
 // TODO: subagents types
 // - general

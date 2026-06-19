@@ -114,20 +114,26 @@ pub const AgentModelConfig = struct {
     agent_tool: bool = true,
 };
 
+pub const AgentMeta = struct {
+    name: []const u8 = "",
+    description: []const u8 = "",
+};
+
 // -------------------------------------------------------------------------------
 loaded_tools: std.ArrayList(ToolEntry) = .empty,
-agent_prompts: std.EnumArray(AgentType, []const u8),
 
 // modes
-mode_colors: std.EnumArray(Mode, r.tui.Color),
-mode_names: std.EnumArray(Mode, []const u8),
-mode_prompts: std.EnumArray(Mode, []const u8),
-mode_prompts_sparse: std.EnumArray(Mode, []const u8),
+mode_colors: std.EnumArray(Mode, r.tui.Color) = .initFill(.white),
+mode_names: std.EnumArray(Mode, []const u8) = .initFill(""),
+mode_prompts: std.EnumArray(Mode, []const u8) = .initFill(""),
+mode_prompts_sparse: std.EnumArray(Mode, []const u8) = .initFill(""),
 mode_counter: u32 = 2, // skip first 2 for interal modes
 
-// agent
+// agents
+agent_prompts: std.EnumArray(AgentType, []const u8) = .initFill(""),
 agent_tool_cfg: std.EnumArray(AgentType, AgentOverride) = .initFill(.{}),
 agent_model_cfg: std.EnumMap(AgentType, AgentModelConfig) = .{},
+agent_meta: std.EnumMap(AgentType, AgentMeta) = .{},
 
 // Arena holds prompt overrides set from lua. Reset on hot-reload so the
 // factory keeps using the embedded defaults until lua re-installs them.
@@ -144,17 +150,17 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !Self {
         try list.append(alloc, .{ .tool = entry[0], .flags = entry[1] });
     }
 
-    var agent_prompts = std.EnumArray(AgentType, []const u8).initFill("");
-    agent_prompts.set(.general, r.prompts.default_main_agent_prompt);
-    agent_prompts.set(.explore, r.prompts.explore_sub_agent_prompt);
-    agent_prompts.set(.review, r.prompts.review_sub_agent_prompt);
+    // var agent_prompts = std.EnumArray(AgentType, []const u8).initFill("");
+    // agent_prompts.set(.general, r.prompts.default_main_agent_prompt);
+    // agent_prompts.set(.explore, r.prompts.explore_sub_agent_prompt);
+    // agent_prompts.set(.review, r.prompts.review_sub_agent_prompt);
 
-    const mode_prompts = std.EnumArray(Mode, []const u8).initFill("");
-    const sparse_mode_prompts = std.EnumArray(Mode, []const u8).initFill("");
-    var mode_names = std.EnumArray(Mode, []const u8).initFill("UNKNOWN");
-    mode_names.set(.exec, "EXEC");
-    var mode_colors = std.EnumArray(Mode, r.tui.Color).initFill(.white);
-    mode_colors.set(.exec, .red);
+    // const mode_prompts = std.EnumArray(Mode, []const u8).initFill("");
+    // const sparse_mode_prompts = std.EnumArray(Mode, []const u8).initFill("");
+    // var mode_names = std.EnumArray(Mode, []const u8).initFill("UNKNOWN");
+    // mode_names.set(.exec, "EXEC");
+    // var mode_colors = std.EnumArray(Mode, r.tui.Color).initFill(.white);
+    // mode_colors.set(.exec, .red);
 
     var home_dir = try std.Io.Dir.openDirAbsolute(io, home, .{});
     const skill_dir: ?std.Io.Dir = home_dir.openDir(io, CONFIG_DIR ++ "skills/", .{ .iterate = true }) catch |err| switch (err) {
@@ -167,18 +173,16 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !Self {
         else => return err,
     };
 
-    return Self{
+    var self = Self{
         .loaded_tools = list,
-        .agent_prompts = agent_prompts,
-        .mode_prompts = mode_prompts,
-        .mode_colors = mode_colors,
-        .mode_names = mode_names,
-        .mode_prompts_sparse = sparse_mode_prompts,
         .prompt_arena = std.heap.ArenaAllocator.init(alloc),
         .io = io,
         .skill_dir = skill_dir,
         .config_dir = config_dir,
     };
+
+    self.resetPrompts();
+    return self;
 }
 
 pub fn buildAgentApiConfig(
@@ -299,6 +303,11 @@ pub fn resetPrompts(self: *Self) void {
     self.agent_prompts.set(.general, r.prompts.default_main_agent_prompt);
     self.agent_prompts.set(.explore, r.prompts.explore_sub_agent_prompt);
     self.agent_prompts.set(.review, r.prompts.review_sub_agent_prompt);
+
+    self.agent_meta = .{};
+    self.agent_meta.put(.general, .{ .name = @tagName(AgentType.general), .description = "General purpose agent" });
+    self.agent_meta.put(.explore, .{ .name = @tagName(AgentType.explore), .description = "Explore and web seach specialist" });
+    self.agent_meta.put(.review, .{ .name = @tagName(AgentType.review), .description = "Review and audit specialist" });
 }
 
 pub fn add(self: *Self, alloc: std.mem.Allocator, tool: r.prv.tool.Tool, flags: ToolFlags) !void {
@@ -328,6 +337,29 @@ pub fn configureAgent(
     var it = self.iter(@enumFromInt(agent.type_idx));
     while (it.next()) |tool| {
         try agent.tools.append(alloc, tool);
+
+        // special agent tool overwrite
+        if (std.mem.eql(u8, tool.def.name, r.tools.agent.AgentTool.def.name)) {
+            var buf: [32]AgentMeta = undefined;
+            var out = std.ArrayList(AgentMeta).initBuffer(&buf);
+
+            var bit_it = self.agent_meta.bits.iterator(.{});
+            while (bit_it.next()) |bit| {
+                out.appendBounded(self.agent_meta.values[bit]) catch continue;
+            }
+
+            const def = try r.tools.agent.dynamic_def(alloc, out.items);
+
+            try agent.chat.addTool(alloc, .{
+                .name = tool.def.name,
+                .description = def.desc,
+                .parameters_schema = def.schema,
+            });
+
+            continue;
+        }
+
+
         try agent.chat.addTool(alloc, tool.def);
     }
 
