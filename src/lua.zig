@@ -53,6 +53,20 @@ const LuaToolEntry = struct {
     }
 };
 
+const LuaModelEntry = struct {
+    name: []const u8,
+    effort: r.prv.config.ReasoningEffort,
+    provider: r.prv.config.ProviderHandle,
+};
+
+const LuaAgentEntry = struct {
+    name: []const u8,
+    prompt: []const u8,
+    tools: [][]const u8,
+    model: LuaModelEntry,
+    in_agent_tool: bool = true,
+};
+
 const LuaBindEntry = struct {
     key: tui.Key = .{ .code = .{ .char = 0 } },
     func_ref: c_int = c.LUA_NOREF,

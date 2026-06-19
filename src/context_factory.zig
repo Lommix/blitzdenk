@@ -290,7 +290,7 @@ pub fn configureAgent(
         try agent.chat.addTool(alloc, tool.def);
     }
 
-    const prompt = try self.build_prompt(alloc, config, @enumFromInt(agent.type_idx));
+    const prompt = try self.build_system_prompt(alloc, config, @enumFromInt(agent.type_idx));
     try agent.setSystemPrompt(prompt);
 }
 
@@ -405,7 +405,7 @@ pub fn clearTools(self: *Self) void {
     self.loaded_tools.clearRetainingCapacity();
 }
 
-pub fn build_prompt(
+pub fn build_system_prompt(
     self: *const Self,
     alloc: std.mem.Allocator,
     config: *const r.prv.config.BlitzdenkCfg,
