@@ -1385,7 +1385,7 @@ fn renderCommandPalette(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, b
 
     const input = app.inputSlice();
     const rows = commandCompletions(app, input, app.input_cursor);
-    const border_color = app.context_factory.mode_colors.get(app.mode);
+    const border_color = app.context_factory.getMode(app.mode).color;
     _ = border_color; // autofix
 
     const palette_w: u16 = @min(@as(u16, 72), area.width -| 4);
@@ -1407,7 +1407,7 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
     const border_color = if (app.running)
         app.theme.muted
     else
-        app.context_factory.mode_colors.get(app.mode);
+        app.context_factory.getMode(app.mode).color;
 
     var para = r.tui.Paragraph{
         .border = .none,
@@ -1477,7 +1477,7 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
     }
     para.scroll_offset = app.input_scroll_offset;
 
-    const mode_name = app.context_factory.mode_names.get(app.mode);
+    const mode_name = app.context_factory.getMode(app.mode).name;
     const title = try std.fmt.allocPrint(arena, "┤{s}├", .{mode_name});
     const block = r.tui.Block{
         .title = title,
@@ -1636,7 +1636,7 @@ fn renderCenteredStatusText(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer, sta
     const width = @min(statusTextWidth(status), area.width);
     const offset = @divTrunc(area.width -| width, 2);
     buf.setStringMax(area.x + offset, area.y, status, .{
-        .fg = app.context_factory.mode_colors.get(app.mode),
+        .fg = app.context_factory.getMode(app.mode).color,
     }, area.width -| offset);
 }
 

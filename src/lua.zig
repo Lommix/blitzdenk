@@ -1147,12 +1147,10 @@ fn luaSetModelAgent(L: ?*c.lua_State) callconv(.c) c_int {
         return 0;
     };
 
-    a.context_factory.agent_model_cfg.put(agent_type_idx, .{
-        .name = model,
-        .provider = provider,
-        .agent_tool = true,
-        .effort = effort,
-    });
+    a.context_factory.setAgentModel(agent_type_idx, model, effort, provider) catch {
+        _ = c.luaL_error(state, "set_model_agent: unknown agent or out of memory");
+        return 0;
+    };
 
     return 0;
 }
@@ -1420,7 +1418,7 @@ fn luaSetAgentTools(L: ?*c.lua_State) callconv(.c) c_int {
 
     const factory = a.context_factory;
 
-    var names_buf: [r.ContextFactory.MAX_OVERRIDE_TOOLS][]const u8 = undefined;
+    var names_buf: [r.ContextFactory.MAX_AGENT_TOOLS][]const u8 = undefined;
     var names_count: usize = 0;
 
     const len = c.lua_rawlen(state, 2);
@@ -1443,7 +1441,7 @@ fn luaSetAgentTools(L: ?*c.lua_State) callconv(.c) c_int {
     }
 
     factory.setAgentTools(agent_type, names_buf[0..names_count]) catch {
-        _ = c.luaL_error(state, "set_agent_tools: failed to apply override");
+        _ = c.luaL_error(state, "set_agent_tools: failed to set tools");
         return 0;
     };
     return 0;
@@ -1495,7 +1493,7 @@ fn luaSetPrompt(L: ?*c.lua_State) callconv(.c) c_int {
     const agent_type = readEnumArg(state, r.ContextFactory.AgentType, "set_prompt", 1) orelse return 0;
     const prompt = readPromptArg(state, "set_prompt", 2) orelse return 0;
     a.context_factory.setAgentPrompt(agent_type, prompt) catch {
-        _ = c.luaL_error(state, "set_prompt: out of memory");
+        _ = c.luaL_error(state, "set_prompt: unknown agent or out of memory");
         return 0;
     };
     return 0;
@@ -1510,7 +1508,7 @@ fn luaSetModePrompt(L: ?*c.lua_State) callconv(.c) c_int {
     const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt", 1) orelse return 0;
     const prompt = readPromptArg(state, "set_mode_prompt", 2) orelse return 0;
     a.context_factory.setModePrompt(mode, prompt) catch {
-        _ = c.luaL_error(state, "set_mode_prompt: out of memory");
+        _ = c.luaL_error(state, "set_mode_prompt: unknown mode or out of memory");
         return 0;
     };
     return 0;
@@ -1525,7 +1523,7 @@ fn luaSetModePromptSparse(L: ?*c.lua_State) callconv(.c) c_int {
     const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt_sparse", 1) orelse return 0;
     const prompt = readPromptArg(state, "set_mode_prompt_sparse", 2) orelse return 0;
     a.context_factory.setSparseModePrompt(mode, prompt) catch {
-        _ = c.luaL_error(state, "set_mode_prompt_sparse: out of memory");
+        _ = c.luaL_error(state, "set_mode_prompt_sparse: unknown mode or out of memory");
         return 0;
     };
     return 0;
@@ -1540,7 +1538,7 @@ fn luaSetModeName(L: ?*c.lua_State) callconv(.c) c_int {
     const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_name", 1) orelse return 0;
     const name = readPromptArg(state, "set_mode_name", 2) orelse return 0;
     a.context_factory.setModeName(mode, name) catch {
-        _ = c.luaL_error(state, "set_mode_name: out of memory");
+        _ = c.luaL_error(state, "set_mode_name: unknown mode or out of memory");
         return 0;
     };
     a.dirty = true;
@@ -1566,7 +1564,7 @@ fn luaAddMode(L: ?*c.lua_State) callconv(.c) c_int {
         sparse,
         color,
     ) catch {
-        _ = c.luaL_error(state, "add_mode: out of memory");
+        _ = c.luaL_error(state, "add_mode: too many modes or out of memory");
         return 0;
     };
 

@@ -162,10 +162,11 @@ fn inject_task_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.age
 
 fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
     const mode: r.ContextFactory.Mode = @enumFromInt(agent.mode_idx);
+    const def = app.context_factory.getMode(mode);
     const reminder = if (agent.flags.force_full_reminder)
-        app.context_factory.mode_prompts.get(mode)
+        def.prompt
     else
-        app.context_factory.mode_prompts_sparse.get(mode);
+        def.sparse;
     agent.flags.force_full_reminder = false;
 
     _ = try w.write(reminder);
