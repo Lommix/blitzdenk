@@ -227,9 +227,13 @@ pub fn run(
     var app = try App.init(arena, io, gpa, &context_factory, cwd);
     defer app.deinit();
 
-    const log = std.log.scoped(.bridge);
-    _ = log; // autofix
-    var swarm = try prv.Swarm.init(arena, io, .{
+    const swarm = try gpa.create(prv.Swarm);
+    errdefer {
+        swarm.deinit();
+        gpa.destroy(swarm);
+    }
+
+    try swarm.init(arena, io, .{
         .ptr = &app,
         .broadcast = (struct {
             fn func(ptr: *anyopaque, en: prv.Swarm.BroadcastEntry) void {
@@ -277,8 +281,11 @@ pub fn run(
         .pop_queued_message = &App.popQueuedMessageOpaque,
     }, env);
 
-    defer swarm.deinit();
-    app.swarm = &swarm;
+    defer {
+        swarm.deinit();
+        gpa.destroy(swarm);
+    }
+    app.swarm = swarm;
 
     // Lua VM holds an opaque pointer to App + a getter for the mutable cfg
     // (swarm.cfg is *const, so a sibling accessor unwraps the const).

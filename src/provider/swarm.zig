@@ -148,20 +148,19 @@ pub const PlanApprovalPayload = struct {
 };
 
 pub fn init(
+    self: *Self,
     alloc: std.mem.Allocator,
     io: std.Io,
     context: SwarmContextV,
     env: *const std.process.Environ.Map,
-) !Self {
-    var pool: http.RequestPool = .{};
-    try pool.init(alloc, io);
-
-    return .{
+) !void {
+    self.* = .{
         .arena = std.heap.ArenaAllocator.init(alloc),
-        .pool = pool,
+        .pool = .{},
         .exec = r.exec.CmdPool.init(alloc, io, env),
         .context = context,
     };
+    try self.pool.init(alloc, io);
 }
 
 pub fn reset(self: *Self) void {
