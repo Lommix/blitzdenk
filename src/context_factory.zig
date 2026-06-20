@@ -359,7 +359,14 @@ pub fn resetDefs(self: *Self) void {
     });
     self.agents.set(.explore, .{
         .name = @tagName(AgentType.explore),
-        .description = "Explore and web search specialist",
+        .description =
+        \\Search specialist for code, documentation and web
+        \\When to use:
+        \\- Any questions against documentation
+        \\- Explore how certain parts of code work
+        \\- Doing research on the web
+        \\
+        ,
         .prompt = r.prompts.explore_sub_agent_prompt,
         .tools = .from(&.{
             r.tools.bash.BashTool.def.name,

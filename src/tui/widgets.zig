@@ -205,11 +205,25 @@ pub const Line = struct {
     spans: std.ArrayList(Span) = .empty,
     style: Style = .{},
 
+    pub fn new(alloc: std.mem.Allocator, comptime txt: []const u8, args: anytype, style: Style) !Line {
+        var l = Line{};
+        try l.pushSpan(alloc, .{ .content = try std.fmt.allocPrint(alloc, txt, args), .style = style });
+        return l;
+    }
+
     pub fn deinit(self: *Line, alloc: std.mem.Allocator) void {
         for (self.spans.items) |span| {
             if (span.owned) alloc.free(span.content);
         }
         self.spans.deinit(alloc);
+    }
+    /// Appends a span. Span's `content` must outlive the Line (not copied).
+    pub fn pushSpanPrint(self: *Line, alloc: std.mem.Allocator, comptime txt: []const u8, args: anytype, style: Style) !void {
+        try self.spans.append(alloc, .{
+            .content = try std.fmt.allocPrint(alloc, txt, args),
+            .style = style,
+            .owned = true,
+        });
     }
 
     /// Appends a span. Span's `content` must outlive the Line (not copied).

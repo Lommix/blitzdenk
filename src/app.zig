@@ -17,32 +17,6 @@ const builtin_command_completions: []const []const u8 = &.{
     ":cd /path/to/new/cwd",
 };
 
-const HEADER_ART =
-    \\██████╗ ██╗     ██╗████████╗███████╗██████╗ ███████╗███╗   ██╗██╗  ██╗
-    \\██╔══██╗██║     ██║╚══██╔══╝╚══███╔╝██╔══██╗██╔════╝████╗  ██║██║ ██╔╝
-    \\██████╔╝██║     ██║   ██║     ███╔╝ ██║  ██║█████╗  ██╔██╗ ██║█████╔╝
-    \\██╔══██╗██║     ██║   ██║    ███╔╝  ██║  ██║██╔══╝  ██║╚██╗██║██╔═██╗
-    \\██████╔╝███████╗██║   ██║   ███████╗██████╔╝███████╗██║ ╚████║██║  ██╗
-    \\╚═════╝ ╚══════╝╚═╝   ╚═╝   ╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝
-;
-const HEADER_INFO =
-    \\├[github.com/lommix/blitzdenk ............................... v0.1337
-    \\├[cfg: $HOME/.config/blitzdenk/blitz.lua
-    \\│
-    \\├[c+g] Toggle permissions
-    \\├[ecs] Cancel
-    \\├[c+n] Clear session
-    \\├[c+c] Quit
-    \\│
-    \\├[Start SSH ----------------- :ssh user@host:/path/to/cwd
-    \\├[Change CWD ---------------- :cd /path/to/new/cwd
-    \\│
-    \\├[CWD]: {cwd}
-    \\│
-    \\├[{INFO}
-    \\└[Model: {MODEL}
-;
-
 pub const PermisionLevel = enum {
     read_only,
     write_safe,
@@ -679,7 +653,9 @@ pub const App = struct {
 
         var used_chat_lines: usize = 0;
         if (app.chat_entries.items.len == 0 and !app.isMainAgentCompacting()) {
-            renderWelcome(app, _chat_status_area, buf);
+            var welcome_p = r.tui.Paragraph{};
+            r.dash.build_info(app, &welcome_p.lines) catch {};
+            welcome_p.renderSimple(frame_alloc, _chat_status_area.center(70, 20), buf);
         } else {
             const chat_cap: u16 = _chat_status_area.height -| main_status_height;
             const _chat_area: r.tui.Rect = .{
@@ -2257,53 +2233,6 @@ fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: 
     l.pushText(alloc, line, .{ .fg = .cyan }) catch {};
     para.lines.append(alloc, l) catch {};
     para.render(alloc, area, area, buf);
-}
-
-fn renderWelcome(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    var c = area.center(70, 10);
-    var line_iter = std.mem.splitAny(u8, HEADER_ART, "\n");
-    while (line_iter.next()) |line| : (c.y += 1) {
-        var col: u16 = 0;
-        var i: usize = 0;
-        while (i < line.len) {
-            const len = std.unicode.utf8ByteSequenceLength(line[i]) catch break;
-            if (i + len > line.len) break;
-            const cp = std.unicode.utf8Decode(line[i..][0..len]) catch break;
-            i += len;
-            if (cp < 0x20 or cp == 0x7F) continue;
-
-            const wave_pos = (app.frame_count / 2) % 85;
-            const dx = if (col >= wave_pos) col - wave_pos else wave_pos - col;
-            const t: u16 = @intCast(@min(dx, 10));
-            const blend: u8 = if (t >= 10) 0 else @intCast((10 - t) * 25);
-            const fg = r.tui.Color{ .rgb = .{
-                .r = blend,
-                .g = 200 +| blend / 5,
-                .b = 200 +| blend / 5,
-            } };
-
-            buf.set(c.x +| col, c.y, .{ .char = cp, .style = .{ .fg = fg } });
-            col +|= 1;
-        }
-    }
-
-    line_iter = std.mem.splitAny(u8, HEADER_INFO, "\n");
-
-    var status_buf: [128]u8 = undefined;
-    const status = std.fmt.bufPrint(&status_buf, "Loaded {d} Provider {d} Docs", .{
-        app.config.provider_count,
-        app.config.doc_count,
-    }) catch "error loading status";
-
-    var buf_a: [255]u8 = undefined;
-    var buf_b: [255]u8 = undefined;
-    while (line_iter.next()) |line| : (c.y += 1) {
-        const l1 = str_replace(&buf_b, "{MODEL}", app.config.default_model.getName(), line);
-        const l2 = str_replace(&buf_a, "{INFO}", status, l1);
-        const l3 = str_replace(&buf_b, "{cwd}", app.cwd, l2);
-
-        buf.setString(c.x, c.y, l3, .{ .fg = Theme.default.muted });
-    }
 }
 
 fn str_replace(buf: []u8, from: []const u8, to: []const u8, input: []const u8) []u8 {
