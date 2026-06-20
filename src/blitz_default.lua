@@ -45,6 +45,11 @@ local novita = blitz.add_provider({
 -- Setup default model
 local model = "deepseek/deepseek-v4-flash"
 blitz.set_model(model, novita)
+
+-- set specific agent models
+blitz.set_model_agent(blitz.AGENT_GENERAL, model, "max", novita)
+blitz.set_model_agent(blitz.AGENT_EXPLORE, model, "low", novita)
+
 -----------------------------------------------------------------------------
 --- smart mode
 blitz.bind("<C-u>", function()
@@ -61,7 +66,10 @@ end)
 
 -- example: switch to local ai mode
 blitz.bind("<C-l>", function()
-	blitz.set_model("Qwen3.6-35B-A3B", llamacpp)
+	local localm = "Qwen3.6-35B-A3B"
+	blitz.set_model(localm, llamacpp)
+	blitz.set_model_agent(blitz.AGENT_GENERAL, localm, "max", novita)
+	blitz.set_model_agent(blitz.AGENT_EXPLORE, localm, "low", novita)
 end)
 
 -- Add custom commands, args is the remaining input string
