@@ -216,6 +216,8 @@ pub const Agent = struct {
     /// Cap on deltas consumed per tick so the TUI gets a frame even under
     /// high-throughput streams.
     arena: r.ThreadSafeArena,
+    stream_arena: r.ThreadSafeArena,
+    stream_allocator: std.mem.Allocator,
     chat: apt.Chat = .{},
     pool: *http.RequestPool,
     config: apt.Config,
@@ -266,6 +268,7 @@ pub const Agent = struct {
         config: apt.Config,
         pool: *http.RequestPool,
         gpa: std.mem.Allocator,
+        stream_allocator: std.mem.Allocator,
         agent_type_idx: u8,
         mode_type_idx: u8,
     ) Agent {
@@ -274,6 +277,8 @@ pub const Agent = struct {
 
         return Agent{
             .arena = r.ThreadSafeArena.init(gpa, pool.io),
+            .stream_arena = r.ThreadSafeArena.init(stream_allocator, pool.io),
+            .stream_allocator = stream_allocator,
             .pool = pool,
             .config = config,
             .session_id = std.fmt.bytesToHex(sid_bytes, .lower),
@@ -322,7 +327,9 @@ pub const Agent = struct {
         try self.chat.setSystemPrompt(self.arena.allocator(), prompt);
     }
 
-    pub fn deinit(self: *const Agent) void {
+    pub fn deinit(self: *Agent) void {
+        self.dropStream();
+        self.stream_arena.deinit();
         self.arena.deinit();
     }
 
@@ -468,7 +475,7 @@ pub const Agent = struct {
                         self.pool.cancel(h);
                         self.pending_handle = null;
                     }
-                    self.stream = null;
+                    self.dropStream();
                     if (self.retry_count < MAX_RETRIES) {
                         self.flags.is_thinking = false;
                         self.flags.is_writing = false;
@@ -538,7 +545,7 @@ pub const Agent = struct {
             self.pool.cancel(h);
             self.compaction.resetInFlight();
         }
-        self.stream = null;
+        self.dropStream();
 
         // Mark all running tools as canceled, wake any pending permission
         // events so their workers observe the cancel flag and unwind, then
@@ -554,10 +561,6 @@ pub const Agent = struct {
         self.tool_call_runs.clearRetainingCapacity();
         self.tool_call_done.clearRetainingCapacity();
         self.loop_guard.warnings.clearRetainingCapacity();
-
-        if (self.state == .streaming_response and self.chat.messages.items.len > 0) {
-            _ = self.chat.messages.pop();
-        }
 
         self.in_flight_usage = .{};
         self.compaction.resetInFlight();
@@ -594,7 +597,8 @@ pub const Agent = struct {
 
         const arena = self.arena.allocator();
         _ = try self.chat.beginStreamingMessage(arena, .agent);
-        self.stream = apt.openStream(self.pool, handle, arena, std.meta.activeTag(self.config.provider));
+        _ = self.stream_arena.reset(.free_all);
+        self.stream = apt.openStream(self.pool, handle, self.stream_arena.allocator(), std.meta.activeTag(self.config.provider));
         self.flags.is_thinking = false;
         self.flags.is_writing = false;
         self.flags.is_calling = false;
@@ -612,7 +616,7 @@ pub const Agent = struct {
     }
 
     fn pumpStream(self: *Agent, ctx: Swarm.SwarmContextV) !TickResult {
-        const arena = self.arena.allocator();
+        const arena = self.stream_allocator;
         if (self.stream == null) return error.NoStream;
         const stream = &self.stream.?;
         const msg_idx = self.chat.messages.items.len - 1;
@@ -673,9 +677,9 @@ pub const Agent = struct {
         const stream = &self.stream.?;
         const msg_idx = self.chat.messages.items.len - 1;
 
-        const result = try stream.finalize();
-        const final_parts = try filterEmptyTextParts(arena, result.message.parts);
-        try self.chat.finalizeStreamingMessage(arena, msg_idx, final_parts);
+        const result = try stream.finalize(arena);
+        const final_parts = filterEmptyTextParts(result.message.parts);
+        self.chat.finalizeStreamingMessage(self.stream_allocator, msg_idx, final_parts);
 
         if (self.swarm) |swarm| {
             // Prefer finalize's authoritative usage; fall back to last in-flight
@@ -689,6 +693,7 @@ pub const Agent = struct {
         }
         self.in_flight_usage = .{};
         self.stream = null;
+        _ = self.stream_arena.reset(.free_all);
 
         if (self.pending_handle) |h| {
             self.pool.cancel(h);
@@ -717,31 +722,30 @@ pub const Agent = struct {
         return .complete;
     }
 
-    fn filterEmptyTextParts(alloc: std.mem.Allocator, parts: []const apt.ContentPart) ![]const apt.ContentPart {
-        var kept: usize = 0;
-        for (parts) |part| {
-            kept += switch (part) {
-                .text => |text| @intFromBool(std.mem.trim(u8, text, " \t\r\n").len > 0),
-                else => 1,
-            };
+    fn dropStream(self: *Agent) void {
+        self.stream = null;
+        if (self.state == .streaming_response and self.chat.messages.items.len > 0) {
+            var msg = self.chat.messages.pop().?;
+            msg.freeParts(self.stream_allocator);
         }
-        if (kept == parts.len) return parts;
+        _ = self.stream_arena.reset(.free_all);
+    }
 
-        const out = try alloc.alloc(apt.ContentPart, kept);
-        var i: usize = 0;
+    fn filterEmptyTextParts(parts: []apt.ContentPart) []apt.ContentPart {
+        var kept: usize = 0;
         for (parts) |part| {
             switch (part) {
                 .text => |text| if (std.mem.trim(u8, text, " \t\r\n").len > 0) {
-                    out[i] = part;
-                    i += 1;
+                    parts[kept] = part;
+                    kept += 1;
                 },
                 else => {
-                    out[i] = part;
-                    i += 1;
+                    parts[kept] = part;
+                    kept += 1;
                 },
             }
         }
-        return out;
+        return parts[0..kept];
     }
 
     fn popQueuedParts(self: *Agent, ctx: Swarm.SwarmContextV) ?[]const apt.ContentPart {

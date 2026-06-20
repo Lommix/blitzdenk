@@ -59,6 +59,7 @@ pub const SwarmContextV = struct {
 
 // ----------------------------------
 arena: std.heap.ArenaAllocator,
+stream_allocator: std.mem.Allocator,
 slots: [MAX_AGENTS]AgentSlot = [_]AgentSlot{.{}} ** MAX_AGENTS,
 
 // let it own
@@ -150,12 +151,14 @@ pub const PlanApprovalPayload = struct {
 pub fn init(
     self: *Self,
     alloc: std.mem.Allocator,
+    stream_allocator: std.mem.Allocator,
     io: std.Io,
     context: SwarmContextV,
     env: *const std.process.Environ.Map,
 ) !void {
     self.* = .{
         .arena = std.heap.ArenaAllocator.init(alloc),
+        .stream_allocator = stream_allocator,
         .pool = .{},
         .exec = r.exec.CmdPool.init(alloc, io, env),
         .context = context,
@@ -170,13 +173,17 @@ pub fn reset(self: *Self) void {
         if (s == .free or s == .reserved) continue;
 
         slot.event.set(self.pool.io);
-        slot.agent.arena.deinit();
+        slot.agent.deinit();
         slot.* = .{};
     }
     _ = self.arena.reset(.retain_capacity);
 }
 
 pub fn deinit(self: *Self) void {
+    for (&self.slots) |*slot| {
+        const state = slot.state.load(.acquire);
+        if (state != .free and state != .reserved) slot.agent.deinit();
+    }
     self.arena.deinit();
     self.pool.deinit();
     self.exec.deinit();
@@ -208,6 +215,7 @@ pub fn forkAgent(
         parent_slot.agent.config,
         parent_slot.agent.pool,
         self.arena.allocator(),
+        self.stream_allocator,
         parent_slot.agent.type_idx,
         parent_slot.agent.mode_idx,
     );
@@ -250,6 +258,7 @@ pub fn forkAgentInSlot(
         parent_slot.agent.config,
         parent_slot.agent.pool,
         self.arena.allocator(),
+        self.stream_allocator,
         parent_slot.agent.type_idx,
         parent_slot.agent.mode_idx,
     );
@@ -294,6 +303,7 @@ pub fn newAgent(
         config,
         &self.pool,
         self.arena.allocator(),
+        self.stream_allocator,
         agent_type_idx,
         mode_type_idx,
     );
@@ -327,6 +337,7 @@ pub fn newAgentInSlot(
         config,
         &self.pool,
         self.arena.allocator(),
+        self.stream_allocator,
         agent_type_idx,
         mode_type_idx,
     );
@@ -399,7 +410,7 @@ pub fn cancelAll(self: *Self) void {
         } else {
             slot.agent.cancel();
             slot.event.set(self.pool.io);
-            slot.agent.arena.deinit();
+            slot.agent.deinit();
             slot.* = .{};
         }
     }
@@ -424,7 +435,7 @@ pub fn releaseAgent(self: *Self, id: AgentId) void {
     if (slot.generation != id.generation) return;
     if (slot.state.load(.acquire) != .free) {
         slot.event.set(self.pool.io);
-        slot.agent.arena.deinit();
+        slot.agent.deinit();
     }
     const gen = slot.generation;
     slot.* = .{ .generation = gen };

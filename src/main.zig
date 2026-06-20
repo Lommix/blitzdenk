@@ -233,7 +233,7 @@ pub fn run(
         gpa.destroy(swarm);
     }
 
-    try swarm.init(arena, io, .{
+    try swarm.init(arena, gpa, io, .{
         .ptr = &app,
         .broadcast = (struct {
             fn func(ptr: *anyopaque, en: prv.Swarm.BroadcastEntry) void {

@@ -846,7 +846,7 @@ pub const StreamState = struct {
         }
         return null;
     }
-                    fn partialTagSuffix(s: []const u8, tag: []const u8) usize {
+    fn partialTagSuffix(s: []const u8, tag: []const u8) usize {
         // Largest k where s ends with tag[0..k]
         const max_k = @min(s.len, tag.len - 1);
         var k: usize = max_k;
@@ -867,39 +867,35 @@ pub const StreamState = struct {
         }
 
         var text_buf: std.ArrayList(u8) = .empty;
-        try text_buf.appendSlice(arena, self.text_acc.items);
-        defer text_buf.deinit(arena);
+        try text_buf.appendSlice(self.arena, self.text_acc.items);
 
         var valid_calls: std.ArrayList(adapter.ContentPart) = .empty;
         var dropped: u32 = 0;
         for (self.tools.items) |*t| {
             if (!t.started) continue;
-            const args = if (t.args.items.len == 0)
-                try arena.dupe(u8, "{}")
-            else
-                try arena.dupe(u8, t.args.items);
+            const raw_args = if (t.args.items.len == 0) "{}" else t.args.items;
             // Drop tool calls whose arguments don't parse as JSON. Truncation
             // (finish_reason "length") or any provider-side cutoff produces
             // partial JSON; replaying it provokes a 400 on the next request.
-            if (!isValidJsonObject(arena, args)) {
+            if (!isValidJsonObject(self.arena, raw_args)) {
                 dropped += 1;
                 continue;
             }
             try valid_calls.append(arena, .{ .tool_call = .{
-                .id = t.id,
-                .name = t.name,
-                .arguments = args,
+                .id = try arena.dupe(u8, t.id),
+                .name = try arena.dupe(u8, t.name),
+                .arguments = try arena.dupe(u8, raw_args),
             } });
         }
 
         if (dropped > 0) {
             const reason = self.finish_reason orelse "unknown";
             const note = try std.fmt.allocPrint(
-                arena,
+                self.arena,
                 "\n[response truncated: {d} tool call(s) dropped due to malformed arguments (finish_reason={s}). Retry with a smaller change.]",
                 .{ dropped, reason },
             );
-            try text_buf.appendSlice(arena, note);
+            try text_buf.appendSlice(self.arena, note);
         }
 
         try parts.append(arena, .{ .text = try arena.dupe(u8, text_buf.items) });

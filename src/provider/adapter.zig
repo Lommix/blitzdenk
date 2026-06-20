@@ -163,6 +163,32 @@ pub const Message = struct {
 
         return msg;
     }
+
+    pub fn freeParts(self: *Message, alloc: Allocator) void {
+        for (self.parts) |part| switch (part) {
+            .text => |text| alloc.free(text),
+            .thinking => |thinking| {
+                alloc.free(thinking.text);
+                if (thinking.signature) |signature| alloc.free(signature);
+            },
+            .image => |image| {
+                alloc.free(image.media_type);
+                alloc.free(image.data);
+            },
+            .tool_call => |call| {
+                alloc.free(call.id);
+                alloc.free(call.name);
+                alloc.free(call.arguments);
+            },
+            .tool_result => |result| {
+                alloc.free(result.call_id);
+                alloc.free(result.name);
+                alloc.free(result.content);
+            },
+        };
+        if (self.parts.len > 0) alloc.free(self.parts);
+        self.parts = &.{};
+    }
 };
 
 pub const ResponseResult = struct {
@@ -210,10 +236,10 @@ pub const Stream = struct {
         };
     }
 
-    pub fn finalize(self: *Stream) !ResponseResult {
+    pub fn finalize(self: *Stream, alloc: Allocator) !ResponseResult {
         return switch (self.impl) {
-            .ollama, .openai => |*s| s.finalize(self.arena),
-            .anthropic => |*s| s.finalize(self.arena),
+            .ollama, .openai => |*s| s.finalize(alloc),
+            .anthropic => |*s| s.finalize(alloc),
         };
     }
 };
@@ -309,9 +335,8 @@ pub const Chat = struct {
                     @memcpy(merged[0..existing.len], existing);
                     @memcpy(merged[existing.len..], s);
 
-                    alloc.free(existing);
-
                     last.* = .{ .text = merged };
+                    alloc.free(existing);
                     return;
                 },
                 .thinking => |existing| if (is_thinking) {
@@ -319,9 +344,8 @@ pub const Chat = struct {
                     @memcpy(merged[0..existing.text.len], existing.text);
                     @memcpy(merged[existing.text.len..], s);
 
-                    alloc.free(existing.text);
-
                     last.* = .{ .thinking = .{ .text = merged, .signature = existing.signature } };
+                    alloc.free(existing.text);
                     return;
                 },
                 else => {},
@@ -334,6 +358,7 @@ pub const Chat = struct {
             .{ .thinking = .{ .text = try alloc.dupe(u8, s) } }
         else
             .{ .text = try alloc.dupe(u8, s) };
+        if (msg.parts.len > 0) alloc.free(msg.parts);
         msg.parts = new_parts;
     }
 
@@ -342,13 +367,12 @@ pub const Chat = struct {
     /// parts that were only partially visible during streaming).
     pub fn finalizeStreamingMessage(
         self: *Chat,
-        alloc: Allocator,
+        stream_alloc: Allocator,
         idx: usize,
-        parts: []const ContentPart,
-    ) !void {
-        const duped = try alloc.alloc(ContentPart, parts.len);
-        @memcpy(duped, parts);
-        self.messages.items[idx].parts = duped;
+        parts: []ContentPart,
+    ) void {
+        self.messages.items[idx].freeParts(stream_alloc);
+        self.messages.items[idx].parts = parts;
     }
 };
 
@@ -374,4 +398,16 @@ pub fn parseCompletion(
         .openai, .ollama => openai.parseResponse(arena, body),
         .anthropic => anthropic.parseResponse(arena, body),
     };
+}
+
+test "streaming message chunks are reclaimable" {
+    const alloc = std.testing.allocator;
+    var chat: Chat = .{};
+    defer chat.messages.deinit(alloc);
+
+    const idx = try chat.beginStreamingMessage(alloc, .agent);
+    for (0..4096) |_| try chat.appendThinkingChunk(alloc, idx, "x");
+
+    try std.testing.expectEqual(@as(usize, 4096), chat.messages.items[idx].parts[0].thinking.text.len);
+    chat.messages.items[idx].freeParts(alloc);
 }

@@ -368,17 +368,6 @@ pub fn resetDefs(self: *Self) void {
             r.tools.agent.SendMessageToAgent.def.name,
         }),
     });
-    // self.agents.set(.review, .{
-    //     .name = @tagName(AgentType.review),
-    //     .description = "Review and audit specialist",
-    //     .prompt = r.prompts.review_sub_agent_prompt,
-    //     .tools = .from(&.{
-    //         r.tools.bash.BashTool.def.name,
-    //         r.tools.bash.CancelBackgroundCommand.def.name,
-    //         r.tools.read.ReadTool.def.name,
-    //         r.tools.agent.SendMessageToAgent.def.name,
-    //     }),
-    // });
 
     self.modes.set(.exec, .{
         .name = "EXEC",

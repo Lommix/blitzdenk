@@ -98,7 +98,6 @@ const AntResponse = struct {
     usage: ?AntUsage = null,
 };
 
-
 pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config: Config, mode: adapter.CompletionMode) ![]u8 {
     var messages: std.ArrayList(AntMessage) = .empty;
     defer {
@@ -415,8 +414,8 @@ const BlockKind = enum { text, thinking, tool_use };
 
 const BlockAcc = struct {
     kind: BlockKind,
-    text: std.ArrayList(u8) = .empty,      // for text / thinking
-    signature: ?[]u8 = null,               // thinking signature (final delta)
+    text: std.ArrayList(u8) = .empty, // for text / thinking
+    signature: ?[]u8 = null, // thinking signature (final delta)
     tool_id: []u8 = &.{},
     tool_name: []u8 = &.{},
     tool_input: std.ArrayList(u8) = .empty,
@@ -424,9 +423,9 @@ const BlockAcc = struct {
 
 pub const StreamState = struct {
     arena: Allocator,
-    sse_buf: std.ArrayList(u8) = .empty,     // raw bytes awaiting event boundary
-    event_name: std.ArrayList(u8) = .empty,  // current event name
-    event_data: std.ArrayList(u8) = .empty,  // accumulated data lines
+    sse_buf: std.ArrayList(u8) = .empty, // raw bytes awaiting event boundary
+    event_name: std.ArrayList(u8) = .empty, // current event name
+    event_data: std.ArrayList(u8) = .empty, // accumulated data lines
     blocks: std.ArrayList(BlockAcc) = .empty,
     usage: ?adapter.TokenUsage = null,
     pending_usage: ?adapter.TokenUsage = null,
@@ -683,27 +682,24 @@ pub const StreamState = struct {
                     // text is empty) invalidates the chain → 400 from API.
                     try parts.append(arena, .{ .thinking = .{
                         .text = try arena.dupe(u8, b.text.items),
-                        .signature = b.signature,
+                        .signature = if (b.signature) |signature| try arena.dupe(u8, signature) else null,
                     } });
                 },
                 .tool_use => {
-                    const args = if (b.tool_input.items.len == 0)
-                        try arena.dupe(u8, "{}")
-                    else
-                        try arena.dupe(u8, b.tool_input.items);
+                    const raw_args = if (b.tool_input.items.len == 0) "{}" else b.tool_input.items;
                     // Drop malformed tool_use. Truncation (stop_reason
                     // "max_tokens") cuts mid-input_json_delta, leaving partial
                     // JSON. Replaying it provokes a 400; thinking-block
                     // signatures stay valid because earlier blocks already
                     // received content_block_stop.
-                    if (!isValidJsonObject(arena, args)) {
+                    if (!isValidJsonObject(self.arena, raw_args)) {
                         dropped += 1;
                         continue;
                     }
                     try parts.append(arena, .{ .tool_call = .{
-                        .id = b.tool_id,
-                        .name = b.tool_name,
-                        .arguments = args,
+                        .id = try arena.dupe(u8, b.tool_id),
+                        .name = try arena.dupe(u8, b.tool_name),
+                        .arguments = try arena.dupe(u8, raw_args),
                     } });
                 },
             }

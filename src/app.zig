@@ -249,6 +249,8 @@ pub const App = struct {
     arena_app: prv.ThreadSafeArena,
     /// Reset between sessions. Chat entries, input buffer, plans, diffs, queued msgs.
     arena_session: prv.ThreadSafeArena,
+    /// Rebuilt from scratch while an agent response is streaming.
+    arena_streaming_preview: prv.ThreadSafeArena,
     mu: std.Io.Mutex = .init,
     io: std.Io,
     input_buffer: std.ArrayList(u8) = .empty,
@@ -302,30 +304,31 @@ pub const App = struct {
 
     // TODO: cleanup io
     pub fn init(
-        allocator: std.mem.Allocator,
+        app_arena: std.mem.Allocator,
         io: std.Io,
-        lua_allocator: std.mem.Allocator,
+        gpa_allocator: std.mem.Allocator,
         agent_factory: *r.ContextFactory,
         cwd: []const u8,
     ) !App {
-        var lua_vm = try r.lua.LuaVm.init(lua_allocator);
+        var lua_vm = try r.lua.LuaVm.init(gpa_allocator);
         errdefer lua_vm.deinit();
 
         return App{
-            .arena_app = .init(allocator, io),
-            .arena_session = .init(allocator, io),
+            .arena_app = .init(app_arena, io),
+            .arena_session = .init(app_arena, io),
+            .arena_streaming_preview = .init(gpa_allocator, io),
             .context_factory = agent_factory,
             .io = io,
             .cwd = cwd,
-            .cmd_queue = try r.cmd.CommandQueue.init(allocator),
+            .cmd_queue = try r.cmd.CommandQueue.init(app_arena),
             .lua_vm = lua_vm,
-            .mcp_manager = r.mcp.Manager.init(allocator, agent_factory.io),
-            .injection_hooks = try r.inject.InjectionsHooks.init(allocator),
+            .mcp_manager = r.mcp.Manager.init(app_arena, agent_factory.io),
+            .injection_hooks = try r.inject.InjectionsHooks.init(app_arena),
             .permission_queue = .{
-                .value = try .initCapacity(allocator, 16),
+                .value = try .initCapacity(app_arena, 16),
             },
             .broadcast_queue = .{
-                .value = try .initCapacity(allocator, 255),
+                .value = try .initCapacity(app_arena, 255),
             },
         };
     }
@@ -343,6 +346,7 @@ pub const App = struct {
 
         self.mcp_manager.deinit();
         self.lua_vm.deinit();
+        self.arena_streaming_preview.deinit();
         self.arena_session.deinit();
         self.arena_app.deinit();
     }
@@ -924,25 +928,20 @@ pub const App = struct {
             return;
         };
         const msg = agent.chat.messages.items[msg_idx];
-        const alloc = self.sessionAlloc();
+        _ = self.arena_streaming_preview.reset(.free_all);
+        self.streaming_entry = null;
+        const alloc = self.arena_streaming_preview.allocator();
         const slice = renderableParts(alloc, main_id, msg.parts) orelse {
             self.dropStreamingPreview();
             return;
         };
 
-        if (self.streaming_entry) |*entry| {
-            entry.free(self.sessionAlloc());
-            entry.parts = slice;
-        } else {
-            self.streaming_entry = .{ .role = .agent, .parts = slice };
-        }
+        self.streaming_entry = .{ .role = .agent, .parts = slice };
     }
 
     pub fn dropStreamingPreview(self: *App) void {
-        if (self.streaming_entry) |*entry| {
-            entry.free(self.sessionAlloc());
-            self.streaming_entry = null;
-        }
+        self.streaming_entry = null;
+        _ = self.arena_streaming_preview.reset(.free_all);
     }
 
     pub fn render_permission_preview(
