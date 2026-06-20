@@ -818,7 +818,6 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "RET_ERR", RET_ERR },
         .{ "AGENT_GENERAL", 0 },
         .{ "AGENT_EXPLORE", 1 },
-        .{ "AGENT_REVIEW", 2 },
         .{ "MODE_EXEC", 0 },
         .{ "REQ_STATUS_PENDING", REQ_STATUS_PENDING },
         .{ "REQ_STATUS_APPROVED", REQ_STATUS_APPROVED },

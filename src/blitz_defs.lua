@@ -75,7 +75,6 @@ function BlitzCtx:ask(header, question, options) end
 ---@field html_to_markdown fun(html: string): string Convert HTML to markdown using the built-in parser.
 ---@field AGENT_GENERAL integer Main agent type id
 ---@field AGENT_EXPLORE integer Explorer sub-agent type id
----@field AGENT_REVIEW integer Review sub-agent type id
 ---@field MODE_EXEC integer Exec mode id
 ---@field TOOL_BASH string Built-in tool name
 ---@field TOOL_CANCEL_BACKGROUND string Built-in tool name
@@ -206,12 +205,12 @@ function blitz.register_tool(def) end
 ---Override the tool set for a given agent type. Replaces defaults entirely.
 ---Names must match built-in tool names (see blitz.TOOL_*) or names of tools
 ---registered via blitz.register_tool. Unknown names are silently skipped.
----@param agent_type integer One of blitz.AGENT_GENERAL | blitz.AGENT_EXPLORE | blitz.AGENT_REVIEW
+---@param agent_type integer One of blitz.AGENT_GENERAL | blitz.AGENT_EXPLORE or custom
 ---@param tool_names string[] List of tool names this agent should have
 function blitz.set_agent_tools(agent_type, tool_names) end
 
 ---Add a single tool from the tool pool to an agent type's tool set.
----@param agent_type integer One of blitz.AGENT_GENERAL | blitz.AGENT_EXPLORE | blitz.AGENT_REVIEW
+---@param agent_type integer One of blitz.AGENT_GENERAL | blitz.AGENT_EXPLORE or custom
 ---@param tool_name string Tool name to add from the pool
 function blitz.add_tool(agent_type, tool_name) end
 
@@ -220,7 +219,7 @@ function blitz.add_tool(agent_type, tool_name) end
 function blitz.push_notification(message) end
 
 ---Override the system prompt for a given agent type.
----@param agent_type integer One of blitz.AGENT_GENERAL | blitz.AGENT_EXPLORE | blitz.AGENT_REVIEW
+---@param agent_type integer One of blitz.AGENT_GENERAL | blitz.AGENT_EXPLORE or custom
 ---@param prompt string Full prompt text
 function blitz.set_prompt(agent_type, prompt) end
 
