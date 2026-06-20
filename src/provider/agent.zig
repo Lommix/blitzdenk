@@ -8,11 +8,6 @@ const compact = r.compact;
 
 const log = std.log.scoped(.agent);
 
-pub const AgentPermissionLevel = enum {
-    read,
-    write,
-};
-
 pub const TickResult = enum { idle, pending, complete, failed };
 pub const State = enum {
     idle,
@@ -262,7 +257,6 @@ pub const Agent = struct {
     tool_call_done: std.StringHashMapUnmanaged(apt.ToolResult) = .{},
     max_allowed_tool_calls: u32 = 64,
     tool_call_count: u32 = 0,
-    permission_level: AgentPermissionLevel = .read,
     flags: AgentFlags = .{},
     loop_guard: LoopGuard = .{},
 

@@ -245,12 +245,14 @@ const ToolStatusStore = struct {
 };
 
 pub const App = struct {
-    /// Lives whole app run. Persistent state: history, keymap binds, cwd.
+    /// app arena,
     arena_app: prv.ThreadSafeArena,
-    /// Reset between sessions. Chat entries, input buffer, plans, diffs, queued msgs.
+    /// session arena,
     arena_session: prv.ThreadSafeArena,
-    /// Rebuilt from scratch while an agent response is streaming.
+    /// streaming arena
     arena_streaming_preview: prv.ThreadSafeArena,
+    /// frame render arena
+    arena_frame: std.heap.ArenaAllocator,
     mu: std.Io.Mutex = .init,
     io: std.Io,
     input_buffer: std.ArrayList(u8) = .empty,
@@ -317,6 +319,7 @@ pub const App = struct {
             .arena_app = .init(app_arena, io),
             .arena_session = .init(app_arena, io),
             .arena_streaming_preview = .init(gpa_allocator, io),
+            .arena_frame = .init(gpa_allocator),
             .context_factory = agent_factory,
             .io = io,
             .cwd = cwd,
@@ -631,12 +634,9 @@ pub const App = struct {
     }
 
     pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-        //inlining layout the ugliest way possible, deal with it
-
+        _ = app.arena_frame.reset(.free_all);
+        const frame_alloc = app.arena_frame.allocator();
         buf.fill(area, .{ .style = .{ .bg = app.theme.overlay } });
-        var frame_arena = std.heap.ArenaAllocator.init(app.sessionAlloc());
-        defer frame_arena.deinit();
-        const frame_alloc = frame_arena.allocator();
 
         // Input Field
         // const pending = app.firstPendingPermission();

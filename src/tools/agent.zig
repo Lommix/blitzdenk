@@ -87,10 +87,6 @@ pub fn dynamic_def(alloc: std.mem.Allocator, agent_defs: []const ctxf.AgentMeta)
 // - explore
 
 fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
-    if (ctx.agent().depth != 0) {
-        return r.errResult(call, "Subagents are not allowed to spawn more subagents");
-    }
-
     const Args = struct {
         description: []const u8,
         prompt: []const u8,
@@ -127,7 +123,6 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
             .parent_id = ctx.self_id,
             .agent_type = @intFromEnum(agent_type),
             .prompt = parts,
-            .level = .read, // TODO: read from type in registry or something
         },
     }) catch return r.errResult(call, "command queue is full, inform user");
 

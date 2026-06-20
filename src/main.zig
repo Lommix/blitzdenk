@@ -381,7 +381,7 @@ pub fn run(
 
             for (0..g.ptr.items.len) |_| {
                 const next = g.ptr.swapRemove(0);
-                const is_ask = next.payload == .ask;
+                const is_ask = next.payload == .ask or next.payload == .plan;
 
                 // check permission level against flags
                 if (app.flags.skip_permissions and !app.swarm.exec.ssh_active and !is_ask) {
@@ -786,7 +786,6 @@ pub fn run(
                                             .prompt = parts,
                                             .tool_budget = 1024,
                                             .chat_entry = chat_entry,
-                                            .level = .write,
                                         },
                                     });
                                 }

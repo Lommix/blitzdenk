@@ -2548,23 +2548,6 @@ fn luaQueueSpawnAgent(L: ?*c.lua_State) callconv(.c) c_int {
 
     if (getOptionalBool(state, 1, "fork")) |f| args.fork = f;
 
-    _ = c.lua_getfield(state, 1, "level");
-    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
-        var llen: usize = 0;
-        const lptr = c.lua_tolstring(state, -1, &llen);
-        const lvl = lptr[0..llen];
-        args.level = if (std.mem.eql(u8, lvl, "read"))
-            .read
-        else if (std.mem.eql(u8, lvl, "write"))
-            .write
-        else {
-            _ = c.luaL_error(state, "queue.spawn_agent: level must be 'read'|'write'");
-            return 0;
-        };
-    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
-        _ = c.luaL_error(state, "queue.spawn_agent: level must be a string");
-        return 0;
-    }
     c.lua_pop(state, 1);
 
     if (args.fork and args.parent_id == null) {

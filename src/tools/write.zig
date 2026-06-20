@@ -27,12 +27,7 @@ const Args = struct {
 };
 
 fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
-    if (ctx.agent().permission_level != .write) {
-        return r.errResult(call, "Subagents must not write/edit/plan. Instead write a report back to the user");
-    }
-
     const alloc = ctx.alloc;
-
     const args = std.json.parseFromSliceLeaky(Args, alloc, call.arguments, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\", \"content\": \"...\"}");

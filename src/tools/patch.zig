@@ -97,10 +97,6 @@ pub const PatchTool = prv.tool.Tool{
 const Args = struct { patch: []const u8 };
 
 fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
-    if (ctx.agent().permission_level != .write) {
-        return r.errResult(call, "Subagents must not write/edit/plan. Instead write a report back to the user");
-    }
-
     const alloc = ctx.alloc;
     r.setToolStatusPrint(ctx, call, "patch", .{});
 

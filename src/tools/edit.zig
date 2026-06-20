@@ -32,10 +32,6 @@ pub const EditTool = prv.tool.Tool{
 };
 
 fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
-    if (ctx.agent().permission_level != .write) {
-        return r.errResult(call, "Subagents must not write/edit/plan. Instead write a report back to the user");
-    }
-
     const alloc = ctx.alloc;
     const Args = struct {
         path: []const u8,
