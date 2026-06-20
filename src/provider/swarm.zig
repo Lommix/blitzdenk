@@ -182,7 +182,10 @@ pub fn reset(self: *Self) void {
 pub fn deinit(self: *Self) void {
     for (&self.slots) |*slot| {
         const state = slot.state.load(.acquire);
-        if (state != .free and state != .reserved) slot.agent.deinit();
+        if (state != .free and state != .reserved) {
+            slot.agent.deinit();
+            slot.* = .{};
+        }
     }
     self.arena.deinit();
     self.pool.deinit();

@@ -345,8 +345,8 @@ pub const App = struct {
         }
 
         self.mcp_manager.deinit();
-        self.lua_vm.deinit();
         self.arena_streaming_preview.deinit();
+        self.lua_vm.deinit();
         self.arena_session.deinit();
         self.arena_app.deinit();
     }
@@ -1674,10 +1674,9 @@ fn buildChatEntryParagraph(
     agent: ?*prv.agent.Agent,
     app: *App,
     entry: ChatEntry,
-    is_thinking: bool,
+    is_streaming: bool,
     inner_w: u16,
 ) !usize {
-    _ = agent; // autofix
     // var buf: [255]u8 = undefined;
 
     var total: usize = 0;
@@ -1698,9 +1697,26 @@ fn buildChatEntryParagraph(
 
     try header_line.pushSpan(arena, .{ .content = role_text, .style = .{ .modifier = .{ .bold = true }, .fg = role_color } });
 
-    if (is_thinking) {
+    const flags: r.prv.agent.AgentFlags = blk: {
+        const a = agent orelse break :blk .{};
+        break :blk a.flags;
+    };
+
+    if (is_streaming and flags.is_thinking) {
         const spinner = text_utils.spinnerDots(app.frame_count);
         try header_line.pushSpan(arena, .{ .content = "  thinking .. ", .style = .{ .fg = app.theme.muted } });
+        try header_line.pushSpan(arena, .{ .content = spinner, .style = .{ .modifier = .{ .bold = true } } });
+    }
+
+    if (is_streaming and flags.is_writing) {
+        const spinner = text_utils.spinnerDots(app.frame_count);
+        try header_line.pushSpan(arena, .{ .content = "  writing .. ", .style = .{ .fg = app.theme.muted } });
+        try header_line.pushSpan(arena, .{ .content = spinner, .style = .{ .modifier = .{ .bold = true } } });
+    }
+
+    if (is_streaming and flags.is_calling) {
+        const spinner = text_utils.spinnerDots(app.frame_count);
+        try header_line.pushSpan(arena, .{ .content = "  calling .. ", .style = .{ .fg = app.theme.muted } });
         try header_line.pushSpan(arena, .{ .content = spinner, .style = .{ .modifier = .{ .bold = true } } });
     }
 
@@ -2136,9 +2152,8 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
         }
     }
 
-    const is_thinking = if (maybe_agent) |ag| ag.flags.is_thinking else false;
     if (app.streaming_entry) |entry| {
-        const block_height = try buildChatEntryParagraph(alloc, &stack, maybe_agent, app, entry, is_thinking, inner_w);
+        const block_height = try buildChatEntryParagraph(alloc, &stack, maybe_agent, app, entry, true, inner_w);
         total += block_height;
     }
 

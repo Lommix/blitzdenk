@@ -204,6 +204,15 @@ const loop_guard_force_rethink_warning =
     \\
 ;
 
+pub const AgentFlags = packed struct {
+    force_full_reminder: bool = false,
+    is_fork: bool = false,
+    turn_has_reminder: bool = false,
+    is_thinking: bool = false,
+    is_writing: bool = false,
+    is_calling: bool = false,
+};
+
 // Fat and juicy
 pub const Agent = struct {
     pub const MAX_TOOL_CALLS = tc.MAX_TOOL_CALLS_PER_REQ;
@@ -254,14 +263,7 @@ pub const Agent = struct {
     max_allowed_tool_calls: u32 = 64,
     tool_call_count: u32 = 0,
     permission_level: AgentPermissionLevel = .read,
-    flags: packed struct {
-        force_full_reminder: bool = false,
-        is_fork: bool = false,
-        turn_has_reminder: bool = false,
-        is_thinking: bool = false,
-        is_writing: bool = false,
-        is_calling: bool = false,
-    } = .{},
+    flags: AgentFlags = .{},
     loop_guard: LoopGuard = .{},
 
     pub fn new(

@@ -225,11 +225,10 @@ pub fn run(
     defer term.deinit();
 
     var app = try App.init(arena, io, gpa, &context_factory, cwd);
-    defer app.deinit();
-
     const swarm = try gpa.create(prv.Swarm);
-    errdefer {
+    defer {
         swarm.deinit();
+        app.deinit();
         gpa.destroy(swarm);
     }
 
@@ -281,10 +280,6 @@ pub fn run(
         .pop_queued_message = &App.popQueuedMessageOpaque,
     }, env);
 
-    defer {
-        swarm.deinit();
-        gpa.destroy(swarm);
-    }
     app.swarm = swarm;
 
     // Lua VM holds an opaque pointer to App + a getter for the mutable cfg
