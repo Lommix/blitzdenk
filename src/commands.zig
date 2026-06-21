@@ -198,8 +198,8 @@ pub const Command = union(enum) {
                 if (arg.parent_id == null) {
                     if (app.main_agent_id) |ag_id| {
                         std.log.warn("Dropping active agent without reset!", .{});
-                        if (app.swarm.getAgent(ag_id)) |ag| ag.deinit();
                         app.chat_entries.clearRetainingCapacity();
+                        app.swarm.releaseAgent(ag_id);
                     }
                     app.main_agent_id = arg.agent_id;
                 }
