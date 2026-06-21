@@ -10,6 +10,17 @@ const HEADER_ART =
     \\╚═════╝ ╚══════╝╚═╝   ╚═╝   ╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝
 ;
 
+// TODO: load keybindings
+const keybinds = .{
+    .{ "c+g", "toggle permission" },
+    .{ "esc", "cancel" },
+    .{ "c+n", "clear" },
+    .{ "c+c", "quit" },
+    .{ "c+u", "scroll up" },
+    .{ "c+d", "scroll down" },
+    .{ "c+t", "show thinking" },
+};
+
 pub fn build_header(frame: usize, alloc: std.mem.Allocator, out: *std.ArrayList(r.tui.Line)) !void {
     var line_iter = std.mem.splitAny(u8, HEADER_ART, "\n");
     while (line_iter.next()) |line_text| {
@@ -57,49 +68,58 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
     );
 
     try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
-    try out.append(
-        alloc,
-        try r.tui.Line.new(alloc,
-            \\├[c+g] Toggle permissions
-            \\
-        , .{}, .{ .fg = app.theme.muted }),
-    );
 
-    try out.append(
-        alloc,
-        try r.tui.Line.new(alloc,
-            \\├[ecs] Cancel
-            \\
-        , .{}, .{ .fg = app.theme.muted }),
-    );
+    {
+        const bind_count = keybinds.len;
+        inline for (0..bind_count / 2) |row| {
+            const left = row * 2;
+            const right = left + 1;
+            const bind0 = keybinds[left];
+            const bind1 = keybinds[right];
 
-    try out.append(
-        alloc,
-        try r.tui.Line.new(alloc,
-            \\├[c+n] Clear session
-            \\
-        , .{}, .{ .fg = app.theme.muted }),
-    );
+            var l = r.tui.Line{};
+            try l.pushSpan(alloc, .{ .content = "├[", .style = .{ .fg = app.theme.muted } });
+            try l.pushSpanPrint(alloc, "{s}", .{bind0.@"0"}, .{ .fg = app.theme.info });
+            try l.pushSpan(alloc, .{ .content = "] ", .style = .{ .fg = app.theme.muted } });
+            try l.pushSpanPrint(alloc, "{s: <22}", .{bind0.@"1"}, .{ .fg = app.theme.muted });
 
-    try out.append(
-        alloc,
-        try r.tui.Line.new(alloc,
-            \\├[c+c] Quit
-            \\
-        , .{}, .{ .fg = app.theme.muted }),
-    );
+            try l.pushSpan(alloc, .{ .content = "[", .style = .{ .fg = app.theme.muted } });
+            try l.pushSpanPrint(alloc, "{s}", .{bind1.@"0"}, .{ .fg = app.theme.info });
+            try l.pushSpan(alloc, .{ .content = "] ", .style = .{ .fg = app.theme.muted } });
+            try l.pushSpanPrint(alloc, "{s}", .{bind1.@"1"}, .{ .fg = app.theme.muted });
+
+            try out.append(alloc, l);
+        }
+
+        if (bind_count % 2 != 0) {
+            const bind0 = keybinds[bind_count - 1];
+            var l = r.tui.Line{};
+            try l.pushSpan(alloc, .{ .content = "├[", .style = .{ .fg = app.theme.muted } });
+            try l.pushSpanPrint(alloc, "{s}", .{bind0.@"0"}, .{ .fg = app.theme.info });
+            try l.pushSpan(alloc, .{ .content = "] ", .style = .{ .fg = app.theme.muted } });
+            try l.pushSpanPrint(alloc, "{s}", .{bind0.@"1"}, .{ .fg = app.theme.muted });
+            try out.append(alloc, l);
+        }
+    }
 
     try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
-    try out.append(alloc, try r.tui.Line.new(alloc, "│  Agents", .{}, .{ .fg = app.theme.muted }));
 
-    for (0..app.context_factory.agent_counter) |i| {
-        const ag_type: r.ContextFactory.AgentType = @enumFromInt(i);
+    var line = r.tui.Line{};
+    try line.pushSpan(alloc, .{ .content = "├[cwd: ", .style = .{ .fg = app.theme.muted } });
+    try line.pushSpanPrint(alloc, "{s}", .{app.cwd}, .{ .fg = app.theme.info, .modifier = .{ .bold = true } });
+    try out.append(alloc, line);
+
+    try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
+    try out.append(alloc, try r.tui.Line.new(alloc, "│ Agents", .{}, .{ .fg = app.theme.muted }));
+
+    for (0..app.context_factory.agent_counter) |agent_idx| {
+        const ag_type: r.ContextFactory.AgentType = @enumFromInt(agent_idx);
         const def = app.context_factory.agents.get(ag_type) orelse continue;
 
         const model = def.model orelse continue;
 
         var l = r.tui.Line{};
-        try l.pushSpan(alloc, .{ .content = "├[ ", .style = .{ .fg = app.theme.muted } });
+        try l.pushSpan(alloc, .{ .content = "├[", .style = .{ .fg = app.theme.muted } });
         try l.pushSpanPrint(alloc, "{s: <8} ", .{def.name}, .{ .fg = app.theme.muted, .modifier = .{ .bold = true } });
         try l.pushSpanPrint(alloc, "{s: <28} ", .{model.name}, .{ .fg = app.theme.info });
         try l.pushSpanPrint(alloc, "@{s} ", .{@tagName(model.effort)}, .{ .fg = app.theme.text });
@@ -109,18 +129,8 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
     try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
     try out.append(alloc, try r.tui.Line.new(
         alloc,
-        "└[ default model: {s} ",
+        "└[default: {s} ",
         .{app.config.default_model.getName()},
         .{ .fg = app.theme.muted },
     ));
 }
-
-const HEADER_INFO =
-    \\├[Start SSH ----------------- :ssh user@host:/path/to/cwd
-    \\├[Change CWD ---------------- :cd /path/to/new/cwd
-    \\│
-    \\├[CWD]: {cwd}
-    \\│
-    \\├[{INFO}
-    \\└[Model: {MODEL}
-;

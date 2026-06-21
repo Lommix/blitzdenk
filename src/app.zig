@@ -655,7 +655,7 @@ pub const App = struct {
         if (app.chat_entries.items.len == 0 and !app.isMainAgentCompacting()) {
             var welcome_p = r.tui.Paragraph{};
             r.dash.build_info(app, &welcome_p.lines) catch {};
-            welcome_p.renderSimple(frame_alloc, _chat_status_area.center(70, 20), buf);
+            welcome_p.renderSimple(frame_alloc, _chat_status_area.center(70, 25), buf);
         } else {
             const chat_cap: u16 = _chat_status_area.height -| main_status_height;
             const _chat_area: r.tui.Rect = .{
