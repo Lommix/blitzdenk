@@ -169,12 +169,6 @@ function blitz.set_model(model, handle) end
 ---@param handle integer Provider handle from blitz.add_provider
 function blitz.set_model_agent(agent_type, model, effort, handle) end
 
----Register a documentation source
----@param name string Display name
----@param description string Purpose description
----@param location string File or directory path
-function blitz.add_doc(name, description, location) end
-
 ---Write a debug log line. Forwards to std.log.scoped(.lua) which the custom
 ---routes to CWD/.blitz/debug.log.
 ---@param msg string

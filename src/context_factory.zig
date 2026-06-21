@@ -539,6 +539,7 @@ pub fn build_system_prompt(
     config: *const r.prv.config.BlitzdenkCfg,
     agent_type: AgentType,
 ) ![]const u8 {
+    _ = config; // autofix
     var allocating = std.Io.Writer.Allocating.init(alloc);
     var w = &allocating.writer;
 
@@ -570,22 +571,6 @@ pub fn build_system_prompt(
             var filer_reader = user_ctx_file.reader(self.io, &buf);
             _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
         } else |_| {}
-    }
-
-    if (config.doc_count > 0) {
-        _ = try w.write("Available docs:\n");
-        for (config.doc_entries[0..config.doc_count]) |entry| {
-            try w.print(
-                \\name: "{s}"
-                \\description: "{s}"
-                \\location: "{s}"
-                \\
-            , .{
-                entry.getName(),
-                entry.getDescription(),
-                entry.getLocation(),
-            });
-        }
     }
 
     if (self.skill_dir) |skill_dir| {

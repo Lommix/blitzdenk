@@ -10,8 +10,7 @@ Configure, override and extend in Lua.
 - All IO goes through GNU core utils (ls, tee, cat, etc.)
 - Enables an invisible SSH layer that agents can pipe through.
 - Small: 5MB native binary, less than 200MB ram usage.
-- Doc Linking and Skill support.
-- MCP support
+- MCP support and Skill support.
 - Multi-provider: Any OpenAI or Anthropic chat schema supported. Includes local AI.
 - Customize in Lua. Code your own tools, system prompts, modes, commands and loops.
 

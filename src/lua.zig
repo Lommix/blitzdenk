@@ -788,7 +788,6 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "add_agent", &luaAddAgent },
         .{ "set_model", &luaSetModel },
         .{ "set_model_agent", &luaSetModelAgent },
-        .{ "add_doc", &luaAddDoc },
         .{ "token_usage", &luaTokenUsage },
         .{ "context_percent", &luaContextPercent },
         .{ "set_compact_edge", &luaSetCompactEdge },
@@ -1297,24 +1296,6 @@ fn luaSaveSession(L: ?*c.lua_State) callconv(.c) c_int {
     const path = readAnyArg([]const u8, state, "save_session", 1) orelse return 0;
     const cmd: r.cmd.Command = .{ .save_session = path };
     appQueueEnqueue(state, "save_session", a, cmd);
-    return 0;
-}
-
-fn luaAddDoc(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const cfg = getCfgFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "add_doc: config not initialized");
-        return 0;
-    };
-
-    const name = readAnyArg([]const u8, state, "add_doc", 1) orelse return 0;
-    const desc = readAnyArg([]const u8, state, "add_doc", 2) orelse return 0;
-    const loc = readAnyArg([]const u8, state, "add_doc", 3) orelse return 0;
-
-    if (!cfg.addDoc(name, desc, loc)) {
-        _ = c.luaL_error(state, "add_doc: failed (max %d docs or field too long)", @as(c_int, prv.config.MAX_DOCS));
-        return 0;
-    }
     return 0;
 }
 

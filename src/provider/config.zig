@@ -76,11 +76,7 @@ pub const PathEntry = struct {
 pub const BlitzdenkCfg = struct {
     providers: [MAX_PROVIDERS]Provider = @splat(.{}),
     provider_count: u32 = 0,
-
     default_model: ModelEntry = .{},
-
-    doc_entries: [MAX_DOCS]PathEntry = @splat(.{}),
-    doc_count: u32 = 0,
 
     /// Reserve the next provider slot. Caller fills url/key_envar/provider_config
     /// (including the inline buffer for thinking.type) then calls
@@ -146,27 +142,10 @@ pub const BlitzdenkCfg = struct {
         };
     }
 
-    pub fn addDoc(self: *BlitzdenkCfg, name: []const u8, desc: []const u8, location: []const u8) bool {
-        if (self.doc_count >= MAX_DOCS) return false;
-        if (name.len > 128 or desc.len > 256 or location.len > 512) return false;
-        var slot = &self.doc_entries[self.doc_count];
-        @memcpy(slot.name[0..name.len], name);
-        slot.name_len = name.len;
-        @memcpy(slot.description[0..desc.len], desc);
-        slot.desc_len = desc.len;
-        @memcpy(slot.location[0..location.len], location);
-        slot.loc_len = location.len;
-        self.doc_count += 1;
-        return true;
-    }
-
-
     pub fn resetProviders(self: *BlitzdenkCfg) void {
         self.providers = @splat(.{});
         self.provider_count = 0;
         self.default_model = .{};
-        self.doc_entries = @splat(.{});
-        self.doc_count = 0;
     }
 };
 
