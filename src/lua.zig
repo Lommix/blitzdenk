@@ -248,7 +248,7 @@ const Blitz = struct {
         slot.provider_config = switch (ptype) {
             .openai => .{ .openai = readOpenAiConfig(state, 1) },
             .anthropic => .{ .anthropic = readAnthropicConfig(state, 1, slot) },
-            .ollama => .{ .ollama = readOllamaConfig(state, 1, slot) },
+            .ollama => .{ .ollama = readOllamaConfig(state, 1) },
         };
 
         const handle = cfg.commitProvider();
@@ -286,7 +286,7 @@ const Blitz = struct {
             _ = c.luaL_error(state, "add_agent: tools must be an array of names");
             return 0;
         };
-        const provider = readAnyField(r.prv.config.ProviderHandle, state, 1, "provider") orelse {
+        const provider = readAnyFieldAlloc(r.prv.config.ProviderHandle, state, 1, "provider", null) orelse {
             _ = c.luaL_error(state, "add_agent: provider handle is required");
             return 0;
         };
@@ -613,7 +613,7 @@ const Blitz = struct {
             return 0;
         };
         const agent_type = readEnumArg(state, r.ContextFactory.AgentType, "set_prompt", 1) orelse return 0;
-        const prompt = readPromptArg(state, "set_prompt", 2) orelse return 0;
+        const prompt = readAnyArg([]const u8, state, "set_prompt", 2) orelse return 0;
         a.context_factory.setAgentPrompt(agent_type, prompt) catch {
             _ = c.luaL_error(state, "set_prompt: unknown agent or out of memory");
             return 0;
@@ -628,7 +628,7 @@ const Blitz = struct {
             return 0;
         };
         const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt", 1) orelse return 0;
-        const prompt = readPromptArg(state, "set_mode_prompt", 2) orelse return 0;
+        const prompt = readAnyArg([]const u8, state, "set_mode_prompt", 2) orelse return 0;
         a.context_factory.setModePrompt(mode, prompt) catch {
             _ = c.luaL_error(state, "set_mode_prompt: unknown mode or out of memory");
             return 0;
@@ -643,7 +643,7 @@ const Blitz = struct {
             return 0;
         };
         const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt_sparse", 1) orelse return 0;
-        const prompt = readPromptArg(state, "set_mode_prompt_sparse", 2) orelse return 0;
+        const prompt = readAnyArg([]const u8, state, "set_mode_prompt_sparse", 2) orelse return 0;
         a.context_factory.setSparseModePrompt(mode, prompt) catch {
             _ = c.luaL_error(state, "set_mode_prompt_sparse: unknown mode or out of memory");
             return 0;
@@ -658,7 +658,7 @@ const Blitz = struct {
             return 0;
         };
         const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_name", 1) orelse return 0;
-        const name = readPromptArg(state, "set_mode_name", 2) orelse return 0;
+        const name = readAnyArg([]const u8, state, "set_mode_name", 2) orelse return 0;
         a.context_factory.setModeName(mode, name) catch {
             _ = c.luaL_error(state, "set_mode_name: unknown mode or out of memory");
             return 0;
@@ -758,11 +758,7 @@ const Blitz = struct {
             return 0;
         };
 
-        if (c.lua_type(state, 1) != c.LUA_TSTRING) {
-            return pushNilBool(state, false);
-        }
-
-        const cmd = readAnyValue([]const u8, state, 1) orelse return pushNilBool(state, false);
+        const cmd = readAnyArg([]const u8, state, "shell", 1) orelse return pushNilBool(state, false);
 
         const cwd: ?[]const u8 = if (a.cwd.len > 0) a.cwd else null;
 
@@ -1513,9 +1509,7 @@ fn readAnyValueAlloc(comptime T: type, state: *c.lua_State, idx: c_int, allocato
     }
 }
 
-fn readAnyField(comptime T: type, state: *c.lua_State, table_idx: c_int, comptime field: []const u8) ?T {
-    return readAnyFieldAlloc(T, state, table_idx, field, null);
-}
+
 
 fn readAnyFieldAlloc(comptime T: type, state: *c.lua_State, table_idx: c_int, comptime field: []const u8, allocator: ?Allocator) ?T {
     const abs = luaAbsIndex(state, table_idx);
@@ -1952,19 +1946,18 @@ pub const LuaVm = struct {
 
             const name = entry.nameSlice();
             if (!startsWithIgnoreCase(name, prefix)) continue;
-            if (containsCompletion(out[0..count.*], name)) continue;
+            {
+                var dup = false;
+                for (out[0..count.*]) |item| {
+                    const value = item orelse continue;
+                    if (std.mem.eql(u8, value, name)) { dup = true; break; }
+                }
+                if (dup) continue;
+            }
 
             out[count.*] = name;
             count.* += 1;
         }
-    }
-
-    fn containsCompletion(items: []?[]const u8, needle: []const u8) bool {
-        for (items) |item| {
-            const value = item orelse continue;
-            if (std.mem.eql(u8, value, needle)) return true;
-        }
-        return false;
     }
 
     fn startsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
@@ -1988,15 +1981,6 @@ pub const LuaVm = struct {
             c.lua_pop(L, 1);
             return;
         }
-
-        // // blitz.search_api
-        // _ = c.lua_getfield(L, -1, "search_api");
-        // if (c.lua_type(L, -1) == c.LUA_TSTRING) {
-        //     var len: usize = 0;
-        //     const ptr = c.lua_tolstring(L, -1, &len);
-        //     _ = cfg.setSearchApi(ptr[0..len]);
-        // }
-        // c.lua_pop(L, 1);
 
         // blitz.status_bar_render = function() return "..." end
         _ = c.lua_getfield(L, -1, "status_bar_render");
@@ -2182,7 +2166,7 @@ fn readAnthropicConfig(state: *c.lua_State, table_idx: c_int, slot: *prv.config.
     return cfg;
 }
 
-fn readOllamaConfig(state: *c.lua_State, table_idx: c_int, _: *prv.config.Provider) prv.adapter.OllamaConfig {
+fn readOllamaConfig(state: *c.lua_State, table_idx: c_int) prv.adapter.OllamaConfig {
     return .{
         .temperature = getOptionalF32(state, table_idx, "temperature"),
         .max_tokens = getOptionalU32(state, table_idx, "max_tokens"),
@@ -2226,21 +2210,12 @@ fn readEnumArg(state: *c.lua_State, comptime E: type, comptime name: []const u8,
     return @enumFromInt(@as(u6, @intCast(n)));
 }
 
-fn readPromptArg(state: *c.lua_State, comptime name: []const u8, idx: c_int) ?[]const u8 {
-    return readAnyArg([]const u8, state, name, idx);
-}
 
-// blitz.add_mode(NAME,COLOR,PROMPT,SPARSE)
 
 // ── Trampoline: Zig ToolFn → Lua function call ─────────────────────
 
 // Import provider types used in tool interface
-const prv = struct {
-    const provider = @import("provider");
-    const tool = provider.tool;
-    const adapter = provider.adapter;
-    const config = provider.config;
-};
+const prv = r.prv;
 
 const ToolContext = prv.tool.ToolContext;
 const ToolCall = prv.adapter.ToolCall;
@@ -2444,11 +2419,6 @@ fn awaitPermAndPush(state: *c.lua_State, io: std.Io, req: *r.prv.Swarm.Permissio
         return pushStatusNil(state, REQ_STATUS_DENIED);
     };
 
-    // do i need this?
-    // if (ctx.isCanceled()) {
-    //     return pushStatusNil(state, REQ_STATUS_DENIED);
-    // }
-
     switch (req.state) {
         .pending => return pushStatusNil(state, REQ_STATUS_DENIED),
         .approved => return pushStatusNil(state, REQ_STATUS_APPROVED),
@@ -2561,7 +2531,7 @@ fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
 // ── blitz.queue.* — CommandQueue + Swarm reservation bindings ─────────
 
 /// Push AgentId as `{index, generation}` table.
-fn pushAgentId(L: *c.lua_State, id: prv.provider.Swarm.AgentId) void {
+fn pushAgentId(L: *c.lua_State, id: r.prv.Swarm.AgentId) void {
     c.lua_createtable(L, 0, 2);
     setFieldAny(L, -2, "index", id.index);
     setFieldAny(L, -2, "generation", id.generation);
@@ -2569,17 +2539,17 @@ fn pushAgentId(L: *c.lua_State, id: prv.provider.Swarm.AgentId) void {
 
 /// Read AgentId from table at `idx`. Reports a Lua error on shape mismatch.
 /// TODO: crash!
-fn readAgentIdArg(state: *c.lua_State, comptime fname: []const u8, idx: c_int) prv.provider.Swarm.AgentId {
+fn readAgentIdArg(state: *c.lua_State, comptime fname: []const u8, idx: c_int) r.prv.Swarm.AgentId {
     if (c.lua_type(state, idx) != c.LUA_TTABLE) {
         _ = c.luaL_error(state, fname ++ ": agent_id must be a table {index, generation}");
         return .{ .index = 0, .generation = 0 };
     }
-    const index = readAnyField(u16, state, idx, "index") orelse {
+    const index = readAnyFieldAlloc(u16, state, idx, "index", null) orelse {
         _ = c.luaL_error(state, fname ++ ": agent_id.index must be a number");
         return .{ .index = 0, .generation = 0 };
     };
 
-    const generation = readAnyField(u16, state, idx, "generation") orelse {
+    const generation = readAnyFieldAlloc(u16, state, idx, "generation", null) orelse {
         _ = c.luaL_error(state, fname ++ ": agent_id.generation must be a number");
         return .{ .index = 0, .generation = 0 };
     };
@@ -2596,26 +2566,7 @@ fn appQueueEnqueue(state: *c.lua_State, comptime fname: []const u8, a: *app.App,
     };
 }
 
-/// blitz.queue.spawn_agent({parent_id?, prompt, agent_type?, tool_budget?, effort?, fork?, level?})
-/// Reserves a free slot and returns the new agent_id (or nil if swarm full).
-/// Block until the referenced agent reaches a terminal state. Releases the
-/// VM mutex while waiting so the awaited agent's own Lua tools can run on
-/// other workers; re-acquires before return so the trampoline's defer-unlock
-/// stays balanced.
-/// Return the awaited agent's last assistant text, concatenated across
-/// .text parts. Caller is expected to invoke this after await_agent
-/// returned AWAIT_COMPLETE; returns nil otherwise.
-
 // ── JSON ↔ Lua conversion ──────────────────────────────────────────
-
-/// Serialize a Lua value at `idx` to JSON into `buf`. Returns slice written.
-/// Supports: string, number, boolean, nil, table (object/array).
-/// Tables with only consecutive integer keys [1..n] → JSON array, else object.
-fn luaToJson(L: *c.lua_State, idx: c_int, buf: []u8) ![]const u8 {
-    var w = std.Io.Writer.fixed(buf);
-    try luaToJsonWriter(L, idx, &w, 0);
-    return buf[0..w.end];
-}
 
 fn luaToJsonAlloc(alloc: Allocator, L: *c.lua_State, idx: c_int) ![]u8 {
     var w = std.Io.Writer.Allocating.init(alloc);
