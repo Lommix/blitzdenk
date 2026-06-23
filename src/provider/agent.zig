@@ -116,6 +116,11 @@ pub fn Guard(comptime T: type) type {
     };
 }
 
+pub const ToolDisplay = struct {
+    content: []const u8,
+    child: ?Swarm.AgentId = null,
+};
+
 pub fn Locked(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -252,6 +257,7 @@ pub const Agent = struct {
     approx_output_bytes: u64 = 0, // byte counter for token approximation
     /// In-flight tool fn coroutines, keyed by call.id. Pointer-stable so
     /// ToolContext.cancel pointers survive map growth.
+    tool_display: Locked(std.StringHashMapUnmanaged(ToolDisplay)) = .{},
     tool_call_runs: std.StringHashMapUnmanaged(*tc.RunningTool) = .{},
     /// Settled tool results awaiting commit, keyed by call.id.
     tool_call_done: std.StringHashMapUnmanaged(apt.ToolResult) = .{},

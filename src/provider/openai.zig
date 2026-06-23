@@ -476,7 +476,7 @@ const OaiStreamChunk = struct {
     eval_count: ?u64 = null,
 };
 
-const ThinkMode = enum { outside, inside };
+const ThinkMode = enum { outside, think, thinking, harmony };
 
 const ToolAcc = struct {
     id: []u8 = &.{},
@@ -487,13 +487,55 @@ const ToolAcc = struct {
 
 const PendingKind = enum { text, thinking };
 const PendingDelta = struct { kind: PendingKind, data: []const u8 };
+const OpenTag = struct {
+    offset: usize,
+    open: []const u8,
+    mode: ThinkMode,
+};
+
+fn findOpenTag(s: []const u8, startup: bool) ?OpenTag {
+    const tags = [_]struct { open: []const u8, mode: ThinkMode }{
+        .{ .open = "<think>", .mode = .think },
+        .{ .open = "<thinking>", .mode = .thinking },
+    };
+    var found: ?OpenTag = null;
+    for (tags) |tag| {
+        const offset = std.mem.indexOf(u8, s, tag.open) orelse continue;
+        if (found == null or offset < found.?.offset) {
+            found = .{ .offset = offset, .open = tag.open, .mode = tag.mode };
+        }
+    }
+    if (startup and std.mem.startsWith(u8, s, " thinking")) {
+        found = .{ .offset = 0, .open = " thinking", .mode = .harmony };
+    }
+    return found;
+}
+
+fn partialOpenSuffix(s: []const u8, startup: bool) usize {
+    var keep = @max(
+        StreamState.partialTagSuffix(s, "<think>"),
+        StreamState.partialTagSuffix(s, "<thinking>"),
+    );
+    if (startup) keep = @max(keep, StreamState.partialTagSuffix(s, " thinking"));
+    return keep;
+}
+
+fn closeTag(mode: ThinkMode) []const u8 {
+    return switch (mode) {
+        .outside => unreachable,
+        .think => "</think>",
+        .thinking => "</thinking>",
+        .harmony => " response",
+    };
+}
 
 pub const StreamState = struct {
     arena: Allocator,
     buf: std.ArrayList(u8) = .empty, // incoming byte buffer
     think_mode: ThinkMode = .outside,
     think_carry: std.ArrayList(u8) = .empty, // partial tag bytes held back
-    startup: bool = true, // only match OPEN tag at start of stream
+    think_carry_kind: PendingKind = .text,
+    startup: bool = true, // only match the Harmony opener at stream start
     text_acc: std.ArrayList(u8) = .empty,
     thinking_acc: std.ArrayList(u8) = .empty,
     // novita: raw JSON of each reasoning_details segment, joined into an
@@ -603,7 +645,7 @@ pub const StreamState = struct {
         if (chunk.message) |m| {
             if (m.content) |c| {
                 if (c.len > 0) {
-                    if (try self.pushText(arena, c)) |d| return d;
+                    try self.pushText(arena, c);
                 }
             }
             if (m.tool_calls) |calls| {
@@ -622,18 +664,17 @@ pub const StreamState = struct {
                         try self.captureReasoningDetails(arena, rd);
                     }
                     if (d.reasoning_content orelse d.reasoning) |r| {
-                        try self.thinking_acc.appendSlice(arena, r);
-                        return .{ .thinking_chunk = try arena.dupe(u8, r) };
+                        try self.pushTagged(arena, r, .thinking);
                     }
                     if (d.content) |c| {
-                        if (c.len > 0) if (try self.pushText(arena, c)) |out| return out;
+                        if (c.len > 0) try self.pushText(arena, c);
                     }
                     if (d.tool_calls) |calls| {
                         for (calls) |tc| if (try self.pushDeltaToolCall(arena, tc)) |out| return out;
                     }
                 }
                 if (ch.message) |m| {
-                    if (m.content) |c| if (try self.pushText(arena, c)) |out| return out;
+                    if (m.content) |c| try self.pushText(arena, c);
                     if (m.tool_calls) |calls| {
                         for (calls) |rtc| {
                             const func = rtc.function orelse continue;
@@ -783,69 +824,72 @@ pub const StreamState = struct {
         }
     }
 
-    /// Push a content fragment through the streaming <think> splitter.
+    /// Push a fragment through the streaming thinking-tag splitter.
     /// Enqueues one PendingDelta per text/thinking segment (preserving order)
     /// into pending_text_thinking; the `next` loop drains them one at a time.
-    fn pushText(self: *StreamState, arena: Allocator, content: []const u8) !?adapter.Delta {
+    fn pushText(self: *StreamState, arena: Allocator, content: []const u8) !void {
+        try self.pushTagged(arena, content, .text);
+    }
+
+    fn pushTagged(self: *StreamState, arena: Allocator, content: []const u8, default_kind: PendingKind) !void {
         var work_buf: std.ArrayList(u8) = .empty;
         defer work_buf.deinit(arena);
         try work_buf.appendSlice(arena, self.think_carry.items);
         try work_buf.appendSlice(arena, content);
         self.think_carry.clearRetainingCapacity();
 
-        const OPEN = " thinking";
-        const CLOSE = " response";
-
         var pos: usize = 0;
         const src = work_buf.items;
         while (pos < src.len) {
             if (self.think_mode == .outside) {
-                if (self.startup) {
-                    const rel = std.mem.indexOf(u8, src[pos..], OPEN);
-                    if (rel) |off| {
-                        if (off == 0) {
-                            pos += OPEN.len;
-                            self.think_mode = .inside;
-                            self.startup = false;
-                            continue;
-                        }
-                    }
+                if (findOpenTag(src[pos..], self.startup)) |tag| {
+                    if (tag.offset > 0) try self.emitTagged(arena, default_kind, src[pos .. pos + tag.offset]);
+                    pos += tag.offset + tag.open.len;
+                    self.think_mode = tag.mode;
+                    self.startup = false;
+                    continue;
+                }
+                const suffix_keep = partialOpenSuffix(src[pos..], self.startup);
+                const emit_end = src.len - suffix_keep;
+                if (emit_end > pos) try self.emitTagged(arena, default_kind, src[pos..emit_end]);
+                if (suffix_keep > 0) {
+                    try self.think_carry.appendSlice(arena, src[emit_end..]);
+                    self.think_carry_kind = default_kind;
+                } else {
                     self.startup = false;
                 }
-                const suffix_keep = partialTagSuffix(src[pos..], OPEN);
-                const emit_end = src.len - suffix_keep;
-                if (emit_end > pos) {
-                    const seg = try arena.dupe(u8, src[pos..emit_end]);
-                    try self.text_acc.appendSlice(arena, seg);
-                    try self.pending_text_thinking.append(arena, .{ .kind = .text, .data = seg });
-                }
-                if (suffix_keep > 0) try self.think_carry.appendSlice(arena, src[emit_end..]);
                 pos = src.len;
             } else {
-                const rel = std.mem.indexOf(u8, src[pos..], CLOSE);
+                const close = closeTag(self.think_mode);
+                const rel = std.mem.indexOf(u8, src[pos..], close);
                 if (rel) |off| {
-                    if (off > 0) {
-                        const seg = try arena.dupe(u8, src[pos .. pos + off]);
-                        try self.thinking_acc.appendSlice(arena, seg);
-                        try self.pending_text_thinking.append(arena, .{ .kind = .thinking, .data = seg });
-                    }
-                    pos += off + CLOSE.len;
+                    if (off > 0) try self.emitTagged(arena, .thinking, src[pos .. pos + off]);
+                    pos += off + close.len;
                     self.think_mode = .outside;
                 } else {
-                    const suffix_keep = partialTagSuffix(src[pos..], CLOSE);
+                    const suffix_keep = partialTagSuffix(src[pos..], close);
                     const emit_end = src.len - suffix_keep;
-                    if (emit_end > pos) {
-                        const seg = try arena.dupe(u8, src[pos..emit_end]);
-                        try self.thinking_acc.appendSlice(arena, seg);
-                        try self.pending_text_thinking.append(arena, .{ .kind = .thinking, .data = seg });
+                    if (emit_end > pos) try self.emitTagged(arena, .thinking, src[pos..emit_end]);
+                    if (suffix_keep > 0) {
+                        try self.think_carry.appendSlice(arena, src[emit_end..]);
+                        self.think_carry_kind = .thinking;
                     }
-                    if (suffix_keep > 0) try self.think_carry.appendSlice(arena, src[emit_end..]);
                     pos = src.len;
                 }
             }
         }
-        return null;
     }
+
+    fn emitTagged(self: *StreamState, arena: Allocator, kind: PendingKind, data: []const u8) !void {
+        if (data.len == 0) return;
+        const seg = try arena.dupe(u8, data);
+        switch (kind) {
+            .text => try self.text_acc.appendSlice(arena, seg),
+            .thinking => try self.thinking_acc.appendSlice(arena, seg),
+        }
+        try self.pending_text_thinking.append(arena, .{ .kind = kind, .data = seg });
+    }
+
     fn partialTagSuffix(s: []const u8, tag: []const u8) usize {
         // Largest k where s ends with tag[0..k]
         const max_k = @min(s.len, tag.len - 1);
@@ -857,6 +901,15 @@ pub const StreamState = struct {
     }
 
     pub fn finalize(self: *StreamState, arena: Allocator) !adapter.ResponseResult {
+        if (self.think_carry.items.len > 0) {
+            const acc = if (self.think_mode == .outside and self.think_carry_kind == .text)
+                &self.text_acc
+            else
+                &self.thinking_acc;
+            try acc.appendSlice(self.arena, self.think_carry.items);
+            self.think_carry.clearRetainingCapacity();
+        }
+
         var parts: std.ArrayList(adapter.ContentPart) = .empty;
         if (self.thinking_acc.items.len > 0 and std.mem.indexOfNone(u8, self.thinking_acc.items, " \t\n\r") != null) {
             const sig = try self.composeReasoningDetails(arena);
@@ -938,6 +991,37 @@ test "openai request stream mode is caller selected" {
     const obj = parsed.value.object;
     try testing.expectEqual(false, obj.get("stream").?.bool);
     try testing.expect(obj.get("stream_options") == null);
+}
+
+test "openai stream keeps tagged reasoning as thinking across schema fields" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    const chunks = [_]OaiDelta{
+        .{ .reasoning_content = "<thin" },
+        .{ .reasoning_content = "king>private " },
+        .{ .content = "tail</thin" },
+        .{ .content = "king>answer" },
+    };
+    for (chunks) |delta| {
+        var choices = [_]OaiStreamChoice{.{ .delta = delta }};
+        try testing.expect(try stream.applyChunk(arena, .{ .choices = &choices }) == null);
+    }
+
+    const result = try stream.finalize(arena);
+    try testing.expectEqual(@as(usize, 2), result.message.parts.len);
+    try testing.expectEqualStrings("private tail", result.message.parts[0].thinking.text);
+    try testing.expectEqualStrings("answer", result.message.parts[1].text);
+
+    var normal = StreamState.init(arena);
+    var combined = [_]OaiStreamChoice{.{ .delta = .{ .reasoning_content = "plan", .content = "answer" } }};
+    _ = try normal.applyChunk(arena, .{ .choices = &combined });
+    const normal_result = try normal.finalize(arena);
+    try testing.expectEqualStrings("plan", normal_result.message.parts[0].thinking.text);
+    try testing.expectEqualStrings("answer", normal_result.message.parts[1].text);
 }
 
 test "reasoning_details round-trip: stream capture then replay in request" {

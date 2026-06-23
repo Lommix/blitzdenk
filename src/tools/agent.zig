@@ -81,11 +81,6 @@ pub fn dynamic_def(alloc: std.mem.Allocator, agent_defs: []const ctxf.AgentMeta)
     };
 }
 
-// TODO: subagents types
-// - general
-// - audit
-// - explore
-
 fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
     const Args = struct {
         description: []const u8,
@@ -190,7 +185,8 @@ pub const AwaitAgent = prv.tool.Tool{
         .description = "Wait for a agent to finish and read its result",
         .parameters_schema =
         \\{"type":"object","properties":{
-        \\  "agent_id":{"type":"number","description":"the agent ID"}
+        \\  "agent_id":{"type":"number","description":"the agent ID"},
+        \\  "despawn":{"type":"boolean", "default": true, "description":"should the agent despawn after reading the report"}
         \\},"required":["agent_id"]}
         ,
     },
@@ -200,6 +196,7 @@ pub const AwaitAgent = prv.tool.Tool{
 fn run_await_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
     const Args = struct {
         agent_id: u32,
+        despawn: bool = true,
     };
 
     const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
@@ -234,7 +231,7 @@ fn run_await_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.ad
         return r.errResult(call, "oom");
     };
 
-    ctx.swarm.releaseAgent(child_id);
+    if (args.despawn) ctx.swarm.releaseAgent(child_id);
 
     {
         const g = ctx.agent().bg_agents.lock(ctx.io);

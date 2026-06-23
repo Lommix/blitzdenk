@@ -12,22 +12,20 @@ pub const Callback = union(enum) {
 ///!Too make models behave and don't loose focus
 pub const InjectionsHooks = struct {
     const Self = @This();
-    _hooks: std.StringHashMapUnmanaged(std.ArrayList(Callback)) = .empty,
+    _hooks: std.ArrayList(Callback) = .empty,
 
     pub fn init(alloc: std.mem.Allocator) !Self {
         var self = Self{};
 
         inline for (.{
-            .{ "env", &inject_env_information },
-            .{ "mode", &inject_mode_information },
-            .{ "task", &inject_task_information },
-            .{ "budget", &inject_budget_information },
-            .{ "background_bash", &inject_processes_information },
-            .{ "background_agents", &inject_bg_agents_information },
-        }) |entry| {
-            var list = std.ArrayList(Callback).empty;
-            try list.append(alloc, .{ .zig = entry[1] });
-            try self._hooks.put(alloc, entry[0], list);
+            &inject_env_information,
+            &inject_mode_information,
+            &inject_task_information,
+            &inject_budget_information,
+            &inject_processes_information,
+            &inject_bg_agents_information,
+        }) |cb| {
+            try self._hooks.append(alloc, .{ .zig = cb });
         }
 
         return self;
@@ -39,32 +37,26 @@ pub const InjectionsHooks = struct {
         var writer = std.Io.Writer.Allocating.init(alloc);
         var w = &writer.writer;
 
-        var it = self._hooks.iterator();
-
         // applying standard name conventions for now
         try w.print("<system-reminder>\n", .{});
 
-        while (it.next()) |en| {
-            for (en.value_ptr.items) |hook| {
-                var hook_w = std.Io.Writer.Allocating.init(alloc);
+        for (self._hooks.items) |cb| {
+            var hook_w = std.Io.Writer.Allocating.init(alloc);
 
-                switch (hook) {
-                    .zig => |call| {
-                        try call(&hook_w.writer, app, agent);
-                    },
-                    .lua => {
-                        @panic("not yet implemented");
-                    },
-                }
+            switch (cb) {
+                .zig => |call| {
+                    try call(&hook_w.writer, app, agent);
+                },
+                .lua => {
+                    @panic("not yet implemented");
+                },
+            }
 
-                const hook_res = try hook_w.toOwnedSlice();
-                defer alloc.free(hook_res);
+            const hook_res = try hook_w.toOwnedSlice();
+            defer alloc.free(hook_res);
 
-                if (hook_res.len > 0) {
-                    try w.print("<{s}>\n", .{en.key_ptr.*});
-                    try w.writeAll(hook_res);
-                    try w.print("</{s}>\n", .{en.key_ptr.*});
-                }
+            if (hook_res.len > 0) {
+                try w.writeAll(hook_res);
             }
             try w.flush();
         }
@@ -89,11 +81,11 @@ fn inject_processes_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.pr
             i -|= 1;
             const en = &g.ptr.list.items[i];
             if (app.swarm.exec.isDone(en.handle)) {
-                try w.print("Path: {s} cmd: {s} status: COMPLETED! Read the result!\n", .{ en.path, en.command });
+                try w.print("[BACKGROUND PROCESS] Path: {s} cmd: {s} status: complete\n", .{ en.path, en.command });
                 // TODO: it's not the responsibilty of the reminder to clean this up
                 _ = g.ptr.list.swapRemove(i);
             } else {
-                try w.print("Path: {s} cmd: {s} status: working\n", .{ en.path, en.command });
+                try w.print("[BACKGROUND PROCESS] Path: {s} cmd: {s} status: working\n", .{ en.path, en.command });
             }
         }
     }
@@ -113,12 +105,13 @@ fn inject_bg_agents_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.pr
                 .failed => .failed,
                 else => .running,
             };
+
             if (bg.status == .complete) {
-                try w.print("Background agent complete: agent_id={d} description: {s}. Read the result with await_agent\n", .{ bg.agent_id.pack(), bg.description });
+                try w.print("[BACKGROUND AGENT COMPLETE] agent_id={d} description: {s}. Read the result with await_agent\n", .{ bg.agent_id.pack(), bg.description });
             } else if (bg.status == .failed) {
-                try w.print("Background agent failed: agent_id={d} description: {s}. Read the result with await_agent\n", .{ bg.agent_id.pack(), bg.description });
+                try w.print("[BACKGROUND AGENT FAILED] agent_id={d} description: {s}. Read the result with await_agent\n", .{ bg.agent_id.pack(), bg.description });
             } else {
-                try w.print("Background agent running: agent_id={d} description: {s}\n", .{ bg.agent_id.pack(), bg.description });
+                try w.print("[BACKGROUND AGENT RUNNING] agent_id={d} description: {s}\n", .{ bg.agent_id.pack(), bg.description });
             }
         }
     }
@@ -127,9 +120,9 @@ fn inject_bg_agents_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.pr
 fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.prv.agent.Agent) !void {
     const tool_call_limit_reached = agent.tool_call_count >= agent.max_allowed_tool_calls;
     if (tool_call_limit_reached) {
-        try w.print("Budget limit reached! Summarize your findings and report back to the user\n", .{});
+        try w.print("[BUDGET LIMIT REACHED] Summarize your findings and report back to the user\n", .{});
     } else {
-        try w.print("Remaining tool call budget: {d}\n", .{agent.max_allowed_tool_calls -| agent.tool_call_count});
+        try w.print("[TOOL CALLS LEFT]: {d}\n", .{agent.max_allowed_tool_calls -| agent.tool_call_count});
     }
 }
 
@@ -146,11 +139,11 @@ fn inject_task_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.age
         for (g.ptr.tasks[0..g.ptr.count]) |t| {
             switch (t.state) {
                 .in_progress => {
-                    try w.print("[Active Task] id:{d} subject: {s}\n{s}\n", .{ t.id, t.subject, t.description });
+                    try w.print("[ACTIVE TODO] id:{d} subject: {s}\n{s}\n", .{ t.id, t.subject, t.description });
                     has_tasks = true;
                 },
                 .pending => {
-                    try w.print("[Pending] id:{d} subject: {s}\n", .{ t.id, t.subject });
+                    try w.print("[PENDING TODO] id:{d} subject: {s}\n", .{ t.id, t.subject });
                     has_tasks = true;
                 },
                 else => {},
