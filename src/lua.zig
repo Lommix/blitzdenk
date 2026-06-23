@@ -885,6 +885,7 @@ fn registerBlitzLib(L: *c.lua_State) void {
         .{ "TOOL_SEND_MESSAGE_TO_AGENT", tl.agent.SendMessageToAgent.def.name },
         .{ "TOOL_AWAIT_AGENT", tl.agent.AwaitAgent.def.name },
         .{ "TOOL_CANCEL_AGENT", tl.agent.CancelAgent.def.name },
+        .{ "TOOL_RIPGREP", tl.rg.RipGrepTool.def.name },
     }) |pair| {
         setFieldAny(L, -2, pair[0], pair[1]);
     }

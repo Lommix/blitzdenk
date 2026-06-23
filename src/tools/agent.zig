@@ -185,8 +185,8 @@ pub const AwaitAgent = prv.tool.Tool{
         .description = "Wait for a agent to finish and read its result",
         .parameters_schema =
         \\{"type":"object","properties":{
-        \\  "agent_id":{"type":"number","description":"the agent ID"},
-        \\  "despawn":{"type":"boolean", "default": true, "description":"should the agent despawn after reading the report"}
+        \\  "agent_id":{"type":"number","description":"the agent id"},
+        \\  "despawn":{"type":"boolean", "default": true, "description":"By default agents despawn after their final message is read"}
         \\},"required":["agent_id"]}
         ,
     },
@@ -258,7 +258,7 @@ pub const CancelAgent = prv.tool.Tool{
         .description = "Cancel a running agent",
         .parameters_schema =
         \\{"type":"object","properties":{
-        \\  "agent_id":{"type":"number","description":"packed AgentId (u32)"}
+        \\  "agent_id":{"type":"number","description":"The agent id to cancel"}
         \\},"required":["agent_id"]}
         ,
     },

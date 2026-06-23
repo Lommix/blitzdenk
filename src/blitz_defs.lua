@@ -94,6 +94,7 @@ function BlitzCtx:ask(header, question, options) end
 ---@field TOOL_SEND_MESSAGE_TO_AGENT string Send a message to a running agent
 ---@field TOOL_AWAIT_AGENT string Wait for an agent to finish and read its result
 ---@field TOOL_CANCEL_AGENT string Cancel a running agent
+---@field TOOL_RIPGREP string ripgrep wrapper for file and text search. better than bash for read only agents
 ---@field REQ_STATUS_PENDING integer 0
 ---@field REQ_STATUS_APPROVED integer 1
 ---@field REQ_STATUS_DENIED integer 2

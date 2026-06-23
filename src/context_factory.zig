@@ -25,6 +25,7 @@ pub const general_default_tool_set = .{
     r.tools.ask.AskTool,
     r.tools.ssh.EnterSshMode,
     r.tools.ssh.ExitSshMode,
+    r.tools.rg.RipGrepTool,
 };
 
 pub const AgentDef = struct {

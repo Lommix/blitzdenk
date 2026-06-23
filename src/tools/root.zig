@@ -1,6 +1,6 @@
-const prv = @import("provider");
 const std = @import("std");
 
+pub const prv = @import("provider");
 pub const bash = @import("bash.zig");
 pub const read = @import("read.zig");
 pub const tasks = @import("task.zig");
@@ -14,6 +14,7 @@ pub const reg = @import("../context_factory.zig");
 pub const patch = @import("patch.zig");
 pub const r = @import("../root.zig");
 pub const tui = r.tui;
+pub const rg = @import("rg.zig");
 
 pub const MAX_DISPLAY_BYTES = 16 * 1024;
 pub const MAX_DISPLAY_LINES = 500;
