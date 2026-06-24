@@ -640,10 +640,11 @@ fn luaRegisterTool(L: ?*c.lua_State) callconv(.c) c_int {
         return 0;
     }
 
-    const vm = getVmFromRegistry(state) orelse {
+    const a = getAppFromRegistry(state) orelse {
         _ = c.luaL_error(state, "register_tool: vm not initialized");
         return 0;
     };
+    const vm = &a.lua_vm;
     if (vm.tool_entries.items.len >= MAX_LUA_TOOLS) {
         _ = c.luaL_error(state, "register_tool: max tools reached (%d)", @as(c_int, MAX_LUA_TOOLS));
         return 0;
@@ -811,10 +812,7 @@ fn luaAddAgent(L: ?*c.lua_State) callconv(.c) c_int {
         return 0;
     };
 
-    const vm = getVmFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "add_agent: vm not initialized");
-        return 0;
-    };
+    const vm = &a.lua_vm;
     const def = readAnyValueAlloc(LuaAgentEntry, state, 1, vm.luaArena()) orelse {
         _ = c.luaL_error(state, "add_agent: expected an agent definition table");
         return 0;
@@ -983,10 +981,11 @@ fn luaBind(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "bind: arg 2 (func) must be a function");
         return 0;
     }
-    const vm = getVmFromRegistry(state) orelse {
+    const a = getAppFromRegistry(state) orelse {
         _ = c.luaL_error(state, "bind: vm not initialized");
         return 0;
     };
+    const vm = &a.lua_vm;
     if (vm.bind_entries.items.len >= MAX_LUA_BINDS) {
         _ = c.luaL_error(state, "bind: max binds reached (%d)", @as(c_int, MAX_LUA_BINDS));
         return 0;
@@ -1013,10 +1012,11 @@ fn luaBind(L: ?*c.lua_State) callconv(.c) c_int {
 
 fn luaHtmlToMarkdown(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
-    const vm = getVmFromRegistry(state) orelse {
+    const a = getAppFromRegistry(state) orelse {
         _ = c.luaL_error(state, "html_to_markdown: lua vm unavailable");
         return 0;
     };
+    const vm = &a.lua_vm;
 
     const html = readAnyArg([]const u8, state, "html_to_markdown", 1) orelse return 0;
 
@@ -1036,10 +1036,11 @@ fn luaAddCommand(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "add_command: arg 2 (func) must be a function");
         return 0;
     }
-    const vm = getVmFromRegistry(state) orelse {
+    const a = getAppFromRegistry(state) orelse {
         _ = c.luaL_error(state, "add_command: vm not initialized");
         return 0;
     };
+    const vm = &a.lua_vm;
     if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) {
         _ = c.luaL_error(state, "add_command: max commands reached (%d)", @as(c_int, MAX_LUA_COMMANDS));
         return 0;
@@ -1332,10 +1333,11 @@ fn luaMcpAdd(L: ?*c.lua_State) callconv(.c) c_int {
         return 0;
     }
 
-    const vm = getVmFromRegistry(state) orelse {
+    const a = getAppFromRegistry(state) orelse {
         _ = c.luaL_error(state, "mcp.add: vm not initialized");
         return 0;
     };
+    const vm = &a.lua_vm;
     if (vm.mcp_entries.items.len >= MAX_LUA_MCP_SERVERS) {
         _ = c.luaL_error(state, "mcp.add: max servers reached (%d)", @as(c_int, MAX_LUA_MCP_SERVERS));
         return 0;
@@ -1417,10 +1419,11 @@ fn luaMcpAdd(L: ?*c.lua_State) callconv(.c) c_int {
 
 fn luaMcpEnable(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
-    const vm = getVmFromRegistry(state) orelse {
+    const a = getAppFromRegistry(state) orelse {
         _ = c.luaL_error(state, "mcp.enable: vm not initialized");
         return 0;
     };
+    const vm = &a.lua_vm;
 
     if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
         _ = c.luaL_error(state, "mcp.enable: arg 1 (mcp_id) must be a number");
@@ -1440,8 +1443,8 @@ fn luaMcpEnable(L: ?*c.lua_State) callconv(.c) c_int {
 
     vm.mcp_entries.items[idx].enabled_agents.insert(agent_type);
 
-    if (getAppFromRegistry(state)) |a| {
-        appQueueEnqueue(state, "mcp.reload", a, .reload_mcp);
+    if (getAppFromRegistry(state)) |app_for_mcp| {
+        appQueueEnqueue(state, "mcp.reload", app_for_mcp, .reload_mcp);
     }
     return 0;
 }
@@ -1471,9 +1474,9 @@ const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
 
 fn luaJsonEncode(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
-    const vm = getVmFromRegistry(state) orelse {
+    const vm = &(getAppFromRegistry(state) orelse {
         return pushNilBool(state, false);
-    };
+    }).lua_vm;
     const json = luaToJsonAlloc(vm.luaArena(), state, 1) catch {
         return pushNilBool(state, false);
     };
@@ -1485,9 +1488,9 @@ fn luaJsonEncode(L: ?*c.lua_State) callconv(.c) c_int {
 
 fn luaJsonDecode(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
-    const vm = getVmFromRegistry(state) orelse {
+    const vm = &(getAppFromRegistry(state) orelse {
         return pushNilBool(state, false);
-    };
+    }).lua_vm;
     if (c.lua_type(state, 1) != c.LUA_TSTRING) {
         return pushNilBool(state, false);
     }
@@ -2236,7 +2239,6 @@ const CtxBridge = struct {
 // ── LuaVm ───────────────────────────────────────────────────────────
 
 var app_registry_key: u8 = 0;
-var vm_registry_key: u8 = 0;
 
 /// Process-wide pointer to the active VM. The tool trampoline receives no
 /// lua_State, so it relies on this to find the owning VM. Set by setApp and
@@ -2354,17 +2356,11 @@ pub const LuaVm = struct {
         registerBlitzLib(self.L);
     }
 
-    fn registerVmPtr(self: *LuaVm) void {
-        c.lua_pushlightuserdata(self.L, @ptrCast(self));
-        c.lua_rawsetp(self.L, c.LUA_REGISTRYINDEX, @ptrCast(&vm_registry_key));
-    }
-
     pub fn setApp(self: *LuaVm, a: *app.App) void {
         self.bindLuaAllocator();
         self.app = a;
         c.lua_pushlightuserdata(self.L, @ptrCast(a));
         c.lua_rawsetp(self.L, c.LUA_REGISTRYINDEX, @ptrCast(&app_registry_key));
-        self.registerVmPtr();
         active_vm = self;
         self.installStatusTables();
     }
@@ -2702,7 +2698,7 @@ fn registerBlitzLib(L: *c.lua_State) void {
 
 fn luaPrintToBuffer(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
-    const vm = getVmFromRegistry(state) orelse return 0;
+    const vm = &(getAppFromRegistry(state) orelse return 0).lua_vm;
     const top = c.lua_gettop(state);
     var i: c_int = 1;
     while (i <= top) : (i += 1) {
@@ -2730,14 +2726,6 @@ fn pushStatusTable(state: *c.lua_State, status: c_int, fallback: []const u8) voi
 
 pub fn getAppFromRegistry(L: *c.lua_State) ?*app.App {
     _ = c.lua_rawgetp(L, c.LUA_REGISTRYINDEX, @ptrCast(&app_registry_key));
-    defer c.lua_pop(L, 1);
-    if (c.lua_type(L, -1) != c.LUA_TLIGHTUSERDATA) return null;
-    const ptr = c.lua_touserdata(L, -1) orelse return null;
-    return @ptrCast(@alignCast(ptr));
-}
-
-fn getVmFromRegistry(L: *c.lua_State) ?*LuaVm {
-    _ = c.lua_rawgetp(L, c.LUA_REGISTRYINDEX, @ptrCast(&vm_registry_key));
     defer c.lua_pop(L, 1);
     if (c.lua_type(L, -1) != c.LUA_TLIGHTUSERDATA) return null;
     const ptr = c.lua_touserdata(L, -1) orelse return null;
