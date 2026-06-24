@@ -9,29 +9,26 @@ const log = std.log.scoped(.lua);
 const r = @import("root.zig");
 const lua = @This();
 
-pub const FunctionDef = struct {
-    desc: []const u8,
-    fn_ptr: *anyopaque,
-    args: []const Arg = &.{},
-    ret: ?LuaType = null,
-};
-
-pub const TableDef = struct {
-    name: []const u8,
-    fields: []const Arg,
-};
-
-pub const Arg = struct {
-    name: []const u8,
-    ty: LuaType,
-    optional: bool = false,
-};
+pub const RET_FAILED: c_int = 1;
+pub const RET_OK: c_int = 2;
+pub const RET_ERR: c_int = 3;
+pub const RET_EXIT_LOOP: c_int = 4;
+pub const REQ_STATUS_PENDING: c_int = 0;
+pub const REQ_STATUS_APPROVED: c_int = 1;
+pub const REQ_STATUS_DENIED: c_int = 2;
+pub const REQ_STATUS_CHOICE: c_int = 3;
+pub const REQ_STATUS_MESSAGE: c_int = 4;
+pub const AWAIT_COMPLETE: c_int = 1;
+pub const AWAIT_FAILED: c_int = 2;
+pub const AWAIT_CANCELED: c_int = 3;
+pub const AWAIT_INVALID: c_int = 4;
+// ----------------------------
 
 pub const LuaType = union(enum) {
     raw: []const u8,
     raw_refs: struct {
         text: []const u8,
-        refs: []const LuaType,
+        refs: []const LuaType = &.{},
     },
     nil,
     boolean,
@@ -39,12 +36,43 @@ pub const LuaType = union(enum) {
     number,
     string,
     table,
-    table_def: TableDef,
-    function,
+    table_def: struct {
+        name: []const u8,
+        fields: []const Field,
+    },
+    function: struct {
+        args: []const Field = &.{},
+        ret: ?*const LuaType = null,
+    },
     userdata,
     thread,
     any,
+
+    pub const Value = union(enum) {
+        integer: c.lua_Integer,
+        number: c.lua_Number,
+        boolean: bool,
+        string: []const u8,
+    };
+
+    pub const Field = struct {
+        name: []const u8,
+        ty: LuaType,
+        desc: ?[]const u8 = null,
+        optional: bool = false,
+        value: ?Value = null,
+        fn_ptr: ?c.lua_CFunction = null,
+    };
 };
+
+const LuaInteger: LuaType = .integer;
+const LuaNumber: LuaType = .number;
+const LuaString: LuaType = .string;
+const LuaAny: LuaType = .any;
+const AgentIdOrNilDef = LuaType{ .raw = "BlitzAgentId|nil" };
+const StringOrNilDef = LuaType{ .raw = "string|nil" };
+const JsonEncodeRet = LuaType{ .raw = "string|nil, boolean" };
+const JsonDecodeRet = LuaType{ .raw = "any, boolean" };
 
 const StringListDef = LuaType{ .raw = "string[]" };
 const StatusDef = LuaType{ .table_def = .{ .name = "BlitzStatus", .fields = &.{
@@ -142,1578 +170,1529 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
 } } };
 
-// ── blitz.* return status codes ─────────────────────────────────────
+pub const Blitz = LuaType{ .table_def = .{ .name = "Blitz", .fields = &.{
+    .{ .name = "mcp", .ty = BlitzMcp },
+    .{ .name = "json", .ty = BlitzJson },
+    .{ .name = "queue", .ty = BlitzQueue },
+    .{ .name = "tools", .ty = BlitzToolDef },
+    .{ .name = "events", .ty = BlitzEventDef },
+    .{ .name = "RET_FAILED", .ty = LuaType.integer, .value = .{ .integer = lua.RET_FAILED } },
+    .{ .name = "RET_OK", .ty = LuaType.integer, .value = .{ .integer = lua.RET_OK } },
+    .{ .name = "RET_ERR", .ty = LuaType.integer, .value = .{ .integer = lua.RET_ERR } },
+    .{ .name = "RET_EXIT_LOOP", .ty = LuaType.integer, .value = .{ .integer = lua.RET_EXIT_LOOP } },
+    .{ .name = "AGENT_GENERAL", .ty = LuaType.integer, .value = .{ .integer = 0 } },
+    .{ .name = "AGENT_EXPLORE", .ty = LuaType.integer, .value = .{ .integer = 1 } },
+    .{ .name = "MODE_EXEC", .ty = LuaType.integer, .value = .{ .integer = 0 } },
+    .{ .name = "REQ_STATUS_PENDING", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_PENDING } },
+    .{ .name = "REQ_STATUS_APPROVED", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_APPROVED } },
+    .{ .name = "REQ_STATUS_DENIED", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_DENIED } },
+    .{ .name = "REQ_STATUS_CHOICE", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_CHOICE } },
+    .{ .name = "REQ_STATUS_MESSAGE", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_MESSAGE } },
+    .{ .name = "AWAIT_COMPLETE", .ty = LuaType.integer, .value = .{ .integer = lua.AWAIT_COMPLETE } },
+    .{ .name = "AWAIT_FAILED", .ty = LuaType.integer, .value = .{ .integer = lua.AWAIT_FAILED } },
+    .{ .name = "AWAIT_CANCELED", .ty = LuaType.integer, .value = .{ .integer = lua.AWAIT_CANCELED } },
+    .{ .name = "AWAIT_INVALID", .ty = LuaType.integer, .value = .{ .integer = lua.AWAIT_INVALID } },
+    .{
+        .name = "register_tool",
+        .desc = "Register a tool.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "def", .ty = ToolDef }}, .ret = &LuaString } },
+        .fn_ptr = luaRegisterTool,
+    },
+    .{
+        .name = "add_tool",
+        .desc = "Add a single tool from the tool pool to an agent type's tool set.",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_name", .ty = LuaType.string } } } },
+        .fn_ptr = luaAddTool,
+    },
+    .{ .name = "get_main_agent", .desc = "Return the main agent, if a session is running.", .ty = LuaType{ .function = .{ .ret = &AgentIdOrNilDef } }, .fn_ptr = luaGetMainAgent },
+    .{
+        .name = "ok",
+        .desc = "Return success with content.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "content", .ty = LuaType.string, .optional = true }}, .ret = &StatusDef } },
+        .fn_ptr = luaOk,
+    },
+    .{
+        .name = "err",
+        .desc = "Return error with message.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "message", .ty = LuaType.string, .optional = true }}, .ret = &StatusDef } },
+        .fn_ptr = luaErr,
+    },
+    .{
+        .name = "exit_loop",
+        .desc = "Exit the agent loop with a message.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "content", .ty = LuaType.string, .optional = true }}, .ret = &StatusDef } },
+        .fn_ptr = luaExitLoop,
+    },
+    .{
+        .name = "add_provider",
+        .desc = "Register a provider.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "def", .ty = ProviderDef }}, .ret = &LuaInteger } },
+        .fn_ptr = luaAddProvider,
+    },
+    .{
+        .name = "add_agent",
+        .desc = "Register a complete agent configuration.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "def", .ty = AgentDef }}, .ret = &LuaInteger } },
+        .fn_ptr = luaAddAgent,
+    },
+    .{
+        .name = "set_model",
+        .desc = "Set the default model.",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "model", .ty = LuaType.string }, .{ .name = "handle", .ty = LuaType.integer } } } },
+        .fn_ptr = luaSetModel,
+    },
+    .{
+        .name = "set_model_agent",
+        .desc = "Set the model config for a specific agent.",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "model", .ty = LuaType.string }, .{ .name = "effort", .ty = LuaType.string }, .{ .name = "handle", .ty = LuaType.integer } } } },
+        .fn_ptr = luaSetModelAgent,
+    },
+    .{
+        .name = "token_usage",
+        .desc = "Return token usage currently shown by the statusbar.",
+        .ty = LuaType{ .function = .{ .ret = &TokenUsageDef } },
+        .fn_ptr = luaTokenUsage,
+    },
+    .{
+        .name = "context_percent",
+        .desc = "Return main-agent context fill percentage currently shown by the statusbar.",
+        .ty = LuaType{ .function = .{ .ret = &LuaNumber } },
+        .fn_ptr = luaContextPercent,
+    },
+    .{
+        .name = "set_compact_edge",
+        .desc = "Set the default context edge, in tokens, used for statusbar percentage and auto-compaction.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "tokens", .ty = LuaType.integer }} } },
+        .fn_ptr = luaSetCompactEdge,
+    },
+    .{
+        .name = "bind",
+        .desc =
+        \\Bind a vim-style key combo to a Lua callback.
+        \\Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
+        ,
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "key", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } } } },
+        .fn_ptr = luaBind,
+    },
+    .{
+        .name = "html_to_markdown",
+        .desc = "Convert HTML to markdown using the built-in parser.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "html", .ty = LuaType.string }}, .ret = &LuaString } },
+        .fn_ptr = luaHtmlToMarkdown,
+    },
+    .{
+        .name = "add_command",
+        .desc =
+        \\Bind a colon command to a Lua callback.
+        \\Example: blitz.add_command(":help", function(args) end)
+        ,
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "command", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } } } },
+        .fn_ptr = luaAddCommand,
+    },
+    .{
+        .name = "set_agent_tools",
+        .desc =
+        \\Override the tool set for a given agent type. Replaces defaults entirely.
+        \\Names must match built-in tool names or names of tools registered via blitz.register_tool.
+        ,
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_names", .ty = StringListDef } } } },
+        .fn_ptr = luaSetAgentTools,
+    },
+    .{
+        .name = "set_prompt",
+        .desc = "Override the system prompt for a given agent type.",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } } } },
+        .fn_ptr = luaSetPrompt,
+    },
+    .{
+        .name = "set_mode_prompt",
+        .desc = "Override the mode reminder prompt (full variant).",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } } } },
+        .fn_ptr = luaSetModePrompt,
+    },
+    .{
+        .name = "set_mode_prompt_sparse",
+        .desc = "Override the sparse mode reminder prompt (subsequent turns).",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } } } },
+        .fn_ptr = luaSetModePromptSparse,
+    },
+    .{
+        .name = "set_mode_name",
+        .desc = "Override the display name shown for a mode in the status bar.",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "name", .ty = LuaType.string } } } },
+        .fn_ptr = luaSetModeName,
+    },
+    .{
+        .name = "add_mode",
+        .desc = "Add a custom mode.",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "name", .ty = LuaType.string }, .{ .name = "color", .ty = LuaType.string }, .{ .name = "prompt", .ty = LuaType.string }, .{ .name = "sparse", .ty = LuaType.string } }, .ret = &LuaInteger } },
+        .fn_ptr = luaAddMode,
+    },
+    .{
+        .name = "set_mode",
+        .desc = "Switch the active session mode. Forces a full mode-reminder on the next turn.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "mode", .ty = LuaType.integer }} } },
+        .fn_ptr = luaSetMode,
+    },
+    .{
+        .name = "get_flags",
+        .desc = "Return the current app flags.",
+        .ty = LuaType{ .function = .{ .ret = &AppFlagsDef } },
+        .fn_ptr = luaGetFlags,
+    },
+    .{
+        .name = "set_flags",
+        .desc = "Set the app flags from a table. Missing fields are set to their default values.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "flags", .ty = AppFlagsDef }} } },
+        .fn_ptr = luaSetFlags,
+    },
+    .{
+        .name = "log",
+        .desc = "Write a debug log line.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "msg", .ty = LuaType.string }} } },
+        .fn_ptr = luaLog,
+    },
+    .{
+        .name = "shell",
+        .desc = "Execute a shell command.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "cmd", .ty = LuaType.string }}, .ret = &LuaAny } },
+        .fn_ptr = luaShell,
+    },
+    .{
+        .name = "push_notification",
+        .desc = "Push a new popup notification with a lifetime of 8s to the top right corner.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "message", .ty = LuaType.string }} } },
+        .fn_ptr = luaPushNotification,
+    },
+} } };
 
-pub const RET_FAILED: c_int = 1;
-pub const RET_OK: c_int = 2;
-pub const RET_ERR: c_int = 3;
-pub const RET_EXIT_LOOP: c_int = 4;
+pub const BlitzToolDef = LuaType{ .table_def = .{ .name = "BlitzToolDef", .fields = &.{
+    .{ .name = "BASH", .ty = LuaType.string, .value = .{ .string = tl.bash.BashTool.def.name } },
+    .{ .name = "CANCEL_BACKGROUND", .ty = LuaType.string, .value = .{ .string = tl.bash.CancelBackgroundCommand.def.name } },
+    .{ .name = "READ", .ty = LuaType.string, .value = .{ .string = tl.read.ReadTool.def.name } },
+    .{ .name = "WRITE", .ty = LuaType.string, .value = .{ .string = tl.write.WriteTool.def.name } },
+    .{ .name = "EDIT", .ty = LuaType.string, .value = .{ .string = tl.edit.EditTool.def.name } },
+    .{ .name = "PATCH", .ty = LuaType.string, .value = .{ .string = tl.patch.PatchTool.def.name } },
+    .{ .name = "AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AgentTool.def.name } },
+    .{ .name = "LIST_TASKS", .ty = LuaType.string, .value = .{ .string = tl.tasks.ListTasksTool.def.name } },
+    .{ .name = "UPDATE_TASK_STATE", .ty = LuaType.string, .value = .{ .string = tl.tasks.UpdateTaskStateTool.def.name } },
+    .{ .name = "CREATE_TASK", .ty = LuaType.string, .value = .{ .string = tl.tasks.CreateTaskTool.def.name } },
+    .{ .name = "ASK", .ty = LuaType.string, .value = .{ .string = tl.ask.AskTool.def.name } },
+    .{ .name = "ENTER_SSH", .ty = LuaType.string, .value = .{ .string = tl.ssh.EnterSshMode.def.name } },
+    .{ .name = "EXIT_SSH", .ty = LuaType.string, .value = .{ .string = tl.ssh.ExitSshMode.def.name } },
+    .{ .name = "SEND_MESSAGE_TO_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.SendMessageToAgent.def.name } },
+    .{ .name = "AWAIT_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AwaitAgent.def.name } },
+    .{ .name = "CANCEL_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.CancelAgent.def.name } },
+    .{ .name = "RIPGREP", .ty = LuaType.string, .value = .{ .string = tl.rg.RipGrepTool.def.name } },
+} } };
 
-// ── Request status codes (exposed to Lua) ─────────────────────────
+pub const BlitzEventDef = LuaType{ .table_def = .{ .name = "BlitzEventDef", .fields = &.{
+    .{ .name = "SESSION_RESET", .desc = "Emitted after the active session is reset.", .ty = LuaType.integer, .value = .{ .integer = 0 } },
+    .{ .name = "MODE_CHANGED", .desc = "Emitted after the active session mode changes.", .ty = LuaType.integer, .value = .{ .integer = 1 } },
+    .{ .name = "AGENT_CREATED", .desc = "Emitted after an agent slot is created.", .ty = LuaType.integer, .value = .{ .integer = 2 } },
+    .{ .name = "AGENT_STARTED", .desc = "Emitted when an agent starts running.", .ty = LuaType.integer, .value = .{ .integer = 3 } },
+    .{ .name = "AGENT_COMPLETE", .desc = "Emitted when an agent completes.", .ty = LuaType.integer, .value = .{ .integer = 4 } },
+    .{ .name = "AGENT_FAILED", .desc = "Emitted when an agent fails.", .ty = LuaType.integer, .value = .{ .integer = 5 } },
+    .{ .name = "AGENT_CANCELLED", .desc = "Emitted when an agent is cancelled.", .ty = LuaType.integer, .value = .{ .integer = 6 } },
+    .{ .name = "COMPACTION_STARTED", .desc = "Emitted when compaction starts.", .ty = LuaType.integer, .value = .{ .integer = 7 } },
+    .{ .name = "COMPACTION_COMPLETE", .desc = "Emitted when compaction completes.", .ty = LuaType.integer, .value = .{ .integer = 8 } },
+    .{ .name = "TOOL_CALL_STARTED", .desc = "Emitted when a tool call starts.", .ty = LuaType.integer, .value = .{ .integer = 9 } },
+    .{ .name = "TOOL_CALL_COMPLETE", .desc = "Emitted when a tool call completes.", .ty = LuaType.integer, .value = .{ .integer = 10 } },
+    .{ .name = "AGENT_BROADCAST", .desc = "Emitted when an agent broadcasts a message.", .ty = LuaType.integer, .value = .{ .integer = 11 } },
+    .{ .name = "PERMISSION_REQUESTED", .desc = "Emitted when a permission request is created.", .ty = LuaType.integer, .value = .{ .integer = 12 } },
+    .{ .name = "PERMISSION_RESOLVED", .desc = "Emitted when a permission request is resolved.", .ty = LuaType.integer, .value = .{ .integer = 13 } },
+    .{ .name = "USER_MESSAGE_SENT", .desc = "Emitted after the user sends a message.", .ty = LuaType.integer, .value = .{ .integer = 14 } },
+    .{ .name = "MCP_TOOLS_RELOADED", .desc = "Emitted after MCP tools are reloaded.", .ty = LuaType.integer, .value = .{ .integer = 15 } },
+    .{
+        .name = "add_listener",
+        .desc =
+        \\Bind an event listener.
+        \\Example: blitz.events.add_listener(blitz.events.MODE_CHANGED, function(new_mode_id) end)
+        ,
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "event", .ty = LuaType.integer }, .{ .name = "func", .ty = LuaType{ .function = .{} } } } } },
+        .fn_ptr = luaEventAddListener,
+    },
+} } };
 
-pub const REQ_STATUS_PENDING: c_int = 0;
-pub const REQ_STATUS_APPROVED: c_int = 1;
-pub const REQ_STATUS_DENIED: c_int = 2;
-pub const REQ_STATUS_CHOICE: c_int = 3;
-pub const REQ_STATUS_MESSAGE: c_int = 4;
+const BlitzMcp = LuaType{ .table_def = .{ .name = "BlitzMcp", .fields = &.{
+    .{
+        .name = "add",
+        .desc = "Register an MCP stdio server. Disabled until explicitly enabled.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "def", .ty = McpServerDef }}, .ret = &LuaInteger } },
+        .fn_ptr = luaMcpAdd,
+    },
+    .{
+        .name = "enable",
+        .desc = "Enable an MCP server for an agent type. Defaults to blitz.AGENT_GENERAL.",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "mcp_id", .ty = LuaType.integer }, .{ .name = "agent_type", .ty = LuaType.integer, .optional = true } } } },
+        .fn_ptr = luaMcpEnable,
+    },
+} } };
 
-// ── await_agent return codes ───────────────────────────────────────
-pub const AWAIT_COMPLETE: c_int = 1;
-pub const AWAIT_FAILED: c_int = 2;
-pub const AWAIT_CANCELED: c_int = 3;
-pub const AWAIT_INVALID: c_int = 4;
+fn luaRegisterTool(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
 
-pub const Blitz = struct {
-    mcp: BlitzMcp,
-    json: BlitzJson,
-    queue: BlitzQueue,
-    tools: BlitzToolDef,
-    events: BlitzEventDef,
+    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
+        _ = c.luaL_error(state, "register_tool: expected table argument");
+        return 0;
+    }
 
-    pub const RET_FAILED = lua.RET_FAILED;
-    pub const RET_OK = lua.RET_OK;
-    pub const RET_ERR = lua.RET_ERR;
-    pub const RET_EXIT_LOOP = lua.RET_EXIT_LOOP;
-    pub const AGENT_GENERAL = 0;
-    pub const AGENT_EXPLORE = 1;
-    pub const MODE_EXEC = 0;
-    pub const REQ_STATUS_PENDING = lua.REQ_STATUS_PENDING;
-    pub const REQ_STATUS_APPROVED = lua.REQ_STATUS_APPROVED;
-    pub const REQ_STATUS_DENIED = lua.REQ_STATUS_DENIED;
-    pub const REQ_STATUS_CHOICE = lua.REQ_STATUS_CHOICE;
-    pub const REQ_STATUS_MESSAGE = lua.REQ_STATUS_MESSAGE;
-    pub const AWAIT_COMPLETE = lua.AWAIT_COMPLETE;
-    pub const AWAIT_FAILED = lua.AWAIT_FAILED;
-    pub const AWAIT_CANCELED = lua.AWAIT_CANCELED;
-    pub const AWAIT_INVALID = lua.AWAIT_INVALID;
+    const vm = getVmFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "register_tool: vm not initialized");
+        return 0;
+    };
+    if (vm.tool_entries.items.len >= MAX_LUA_TOOLS) {
+        _ = c.luaL_error(state, "register_tool: max tools reached (%d)", @as(c_int, MAX_LUA_TOOLS));
+        return 0;
+    }
 
-    pub const _function_defs = .{
-        .{
-            .desc = "Register a tool.",
-            .fn_ptr = register_tool,
-            .args = .{.{ "def", ToolDef }},
-            .ret = LuaType.string,
-        },
-        .{
-            .desc = "Add a single tool from the tool pool to an agent type's tool set.",
-            .fn_ptr = add_tool,
-            .args = .{ .{ "agent_type", LuaType.integer }, .{ "tool_name", LuaType.string } },
-            .ret = null,
-        },
-        .{
-            .desc = "Return the main agent, if a session is running.",
-            .fn_ptr = get_main_agent,
-            .args = .{},
-            .ret = LuaType{ .raw = "BlitzAgentId|nil" },
-        },
-        .{
-            .desc = "Return success with content.",
-            .fn_ptr = ok,
-            .args = .{.{ .name = "content", .ty = LuaType.string, .optional = true }},
-            .ret = StatusDef,
-        },
-        .{
-            .desc = "Return error with message.",
-            .fn_ptr = err,
-            .args = .{.{ .name = "message", .ty = LuaType.string, .optional = true }},
-            .ret = StatusDef,
-        },
-        .{
-            .desc = "Exit the agent loop with a message.",
-            .fn_ptr = exit_loop,
-            .args = .{.{ .name = "content", .ty = LuaType.string, .optional = true }},
-            .ret = StatusDef,
-        },
-        .{
-            .desc = "Register a provider.",
-            .fn_ptr = add_provider,
-            .args = .{.{ "def", ProviderDef }},
-            .ret = LuaType.integer,
-        },
-        .{
-            .desc = "Register a complete agent configuration.",
-            .fn_ptr = add_agent,
-            .args = .{.{ "def", AgentDef }},
-            .ret = LuaType.integer,
-        },
-        .{
-            .desc = "Set the default model.",
-            .fn_ptr = set_model,
-            .args = .{ .{ "model", LuaType.string }, .{ "handle", LuaType.integer } },
-            .ret = null,
-        },
-        .{
-            .desc = "Set the model config for a specific agent.",
-            .fn_ptr = set_model_agent,
-            .args = .{ .{ "agent_type", LuaType.integer }, .{ "model", LuaType.string }, .{ "effort", LuaType.string }, .{ "handle", LuaType.integer } },
-            .ret = null,
-        },
-        .{
-            .desc = "Return token usage currently shown by the statusbar.",
-            .fn_ptr = token_usage,
-            .args = .{},
-            .ret = TokenUsageDef,
-        },
-        .{
-            .desc = "Return main-agent context fill percentage currently shown by the statusbar.",
-            .fn_ptr = context_percent,
-            .args = .{},
-            .ret = LuaType.number,
-        },
-        .{
-            .desc = "Set the default context edge, in tokens, used for statusbar percentage and auto-compaction.",
-            .fn_ptr = set_compact_edge,
-            .args = .{.{ "tokens", LuaType.integer }},
-            .ret = null,
-        },
-        .{
-            .desc =
-            \\Bind a vim-style key combo to a Lua callback.
-            \\Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
-            ,
-            .fn_ptr = bind,
-            .args = .{ .{ "key", LuaType.string }, .{ "func", LuaType.function } },
-            .ret = null,
-        },
-        .{
-            .desc = "Convert HTML to markdown using the built-in parser.",
-            .fn_ptr = html_to_markdown,
-            .args = .{.{ "html", LuaType.string }},
-            .ret = LuaType.string,
-        },
-        .{
-            .desc =
-            \\Bind a colon command to a Lua callback.
-            \\Example: blitz.add_command(":help", function(args) end)
-            ,
-            .fn_ptr = add_command,
-            .args = .{ .{ "command", LuaType.string }, .{ "func", LuaType.function } },
-            .ret = null,
-        },
-        .{
-            .desc =
-            \\Override the tool set for a given agent type. Replaces defaults entirely.
-            \\Names must match built-in tool names or names of tools registered via blitz.register_tool.
-            ,
-            .fn_ptr = set_agent_tools,
-            .args = .{ .{ "agent_type", LuaType.integer }, .{ "tool_names", StringListDef } },
-            .ret = null,
-        },
-        .{
-            .desc = "Override the system prompt for a given agent type.",
-            .fn_ptr = set_prompt,
-            .args = .{ .{ "agent_type", LuaType.integer }, .{ "prompt", LuaType.string } },
-            .ret = null,
-        },
-        .{
-            .desc = "Override the mode reminder prompt (full variant).",
-            .fn_ptr = set_mode_prompt,
-            .args = .{ .{ "mode", LuaType.integer }, .{ "prompt", LuaType.string } },
-            .ret = null,
-        },
-        .{
-            .desc = "Override the sparse mode reminder prompt (subsequent turns).",
-            .fn_ptr = set_mode_prompt_sparse,
-            .args = .{ .{ "mode", LuaType.integer }, .{ "prompt", LuaType.string } },
-            .ret = null,
-        },
-        .{
-            .desc = "Override the display name shown for a mode in the status bar.",
-            .fn_ptr = set_mode_name,
-            .args = .{ .{ "mode", LuaType.integer }, .{ "name", LuaType.string } },
-            .ret = null,
-        },
-        .{
-            .desc = "Add a custom mode.",
-            .fn_ptr = add_mode,
-            .args = .{ .{ "name", LuaType.string }, .{ "color", LuaType.string }, .{ "prompt", LuaType.string }, .{ "sparse", LuaType.string } },
-            .ret = LuaType.integer,
-        },
-        .{
-            .desc = "Switch the active session mode. Forces a full mode-reminder on the next turn.",
-            .fn_ptr = set_mode,
-            .args = .{.{ "mode", LuaType.integer }},
-            .ret = null,
-        },
-        .{
-            .desc = "Return the current app flags.",
-            .fn_ptr = get_flags,
-            .args = .{},
-            .ret = AppFlagsDef,
-        },
-        .{
-            .desc = "Set the app flags from a table. Missing fields are set to their default values.",
-            .fn_ptr = set_flags,
-            .args = .{.{ "flags", AppFlagsDef }},
-            .ret = null,
-        },
-        .{
-            .desc = "Write a debug log line.",
-            .fn_ptr = @This().log,
-            .args = .{.{ "msg", LuaType.string }},
-            .ret = null,
-        },
-        .{
-            .desc = "Execute a shell command.",
-            .fn_ptr = shell,
-            .args = .{.{ "cmd", LuaType.string }},
-            .ret = LuaType.any,
-        },
-        .{
-            .desc = "Push a new popup notification with a lifetime of 8s to the top right corner.",
-            .fn_ptr = push_notification,
-            .args = .{.{ "message", LuaType.string }},
-            .ret = null,
-        },
+    var entry: LuaToolEntry = .{};
+    entry.L = state;
+
+    // name (required)
+    entry.name_len = getStringField(state, 1, "name", &entry.name) orelse {
+        _ = c.luaL_error(state, "register_tool: 'name' must be a string (max %d)", @as(c_int, entry.name.len));
+        return 0;
     };
 
-    pub fn register_tool(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-            _ = c.luaL_error(state, "register_tool: expected table argument");
-            return 0;
-        }
-
-        const vm = getVmFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "register_tool: vm not initialized");
-            return 0;
-        };
-        if (vm.tool_entries.items.len >= MAX_LUA_TOOLS) {
-            _ = c.luaL_error(state, "register_tool: max tools reached (%d)", @as(c_int, MAX_LUA_TOOLS));
-            return 0;
-        }
-
-        var entry: LuaToolEntry = .{};
-        entry.L = state;
-
-        // name (required)
-        entry.name_len = getStringField(state, 1, "name", &entry.name) orelse {
-            _ = c.luaL_error(state, "register_tool: 'name' must be a string (max %d)", @as(c_int, entry.name.len));
-            return 0;
-        };
-
-        // description (required)
-        entry.desc_len = getStringField(state, 1, "description", &entry.description) orelse {
-            _ = c.luaL_error(state, "register_tool: 'description' must be a string (max %d)", @as(c_int, entry.description.len));
-            return 0;
-        };
-
-        // schema (string) OR args (table) — at least one required
-        if (getStringField(state, 1, "schema", &entry.schema)) |len| {
-            entry.schema_len = len;
-        } else {
-            _ = c.lua_getfield(state, 1, "args");
-            if (c.lua_type(state, -1) == c.LUA_TTABLE) {
-                const json = argsTableToJsonSchema(state, -1, &entry.schema) catch {
-                    _ = c.luaL_error(state, "register_tool: failed to convert args to schema");
-                    return 0;
-                };
-                entry.schema_len = json.len;
-                c.lua_pop(state, 1);
-            } else {
-                _ = c.luaL_error(state, "register_tool: 'schema' (string) or 'args' (table) required");
-                return 0;
-            }
-        }
-
-        // func (required)
-        _ = c.lua_getfield(state, 1, "func");
-        if (c.lua_type(state, -1) != c.LUA_TFUNCTION) {
-            _ = c.luaL_error(state, "register_tool: 'func' must be a function");
-            return 0;
-        }
-        entry.func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-        // persistent state table
-        c.lua_newtable(state);
-        entry.state_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-        vm.tool_entries.appendAssumeCapacity(entry);
-
-        pushAny(state, entry.name[0..entry.name_len]);
-        return 1;
-    }
-
-    pub fn add_tool(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
-            _ = c.luaL_error(state, "add_tool: arg 1 must be a number (blitz.AGENT_*)");
-            return 0;
-        }
-        const ty_int = c.lua_tointegerx(state, 1, null);
-        if (ty_int < 0 or ty_int > std.math.maxInt(u6)) {
-            _ = c.luaL_error(state, "add_tool: agent type out of range");
-            return 0;
-        }
-        const agent_type: r.ContextFactory.AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
-
-        const tool_name = readAnyArg([]const u8, state, "add_tool", 2) orelse return 0;
-
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "add_tool: app not initialized");
-            return 0;
-        };
-
-        appQueueEnqueue(state, "add_tool", a, .{ .add_tool = .{
-            .agent_type = agent_type,
-            .tool_name = tool_name,
-        } });
-
+    // description (required)
+    entry.desc_len = getStringField(state, 1, "description", &entry.description) orelse {
+        _ = c.luaL_error(state, "register_tool: 'description' must be a string (max %d)", @as(c_int, entry.description.len));
         return 0;
-    }
-
-    pub fn get_main_agent(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "Add Tool: failed to access app");
-            return 0;
-        };
-
-        if (a.main_agent_id) |id| {
-            pushAny(state, id);
-        } else {
-            c.lua_pushnil(state);
-        }
-
-        return 1;
-    }
-
-    pub fn ok(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        pushStatusTable(state, lua.RET_OK, "");
-        return 1;
-    }
-
-    pub fn err(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        pushStatusTable(state, lua.RET_ERR, "error");
-        return 1;
-    }
-
-    pub fn exit_loop(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        pushStatusTable(state, lua.RET_EXIT_LOOP, "");
-        return 1;
-    }
-
-    pub fn add_provider(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        const cfg = getCfgFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "add_provider: config not initialized");
-            return 0;
-        };
-
-        if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-            _ = c.luaL_error(state, "add_provider: expected a single table argument");
-            return 0;
-        }
-
-        const type_str = requireStringFieldOnStack(state, 1, "type");
-        const ptype = parseProviderType(state, type_str);
-        c.lua_pop(state, 1);
-
-        // Both url and key_envar slices must remain valid until reserveProvider
-        // has copied them into the slot buffers. Keep both fields on the stack
-        // simultaneously, then pop them together.
-        const url = requireStringFieldOnStack(state, 1, "url");
-        const key_envar = requireStringFieldOnStack(state, 1, "key_envar");
-        const slot = cfg.reserveProvider(url, key_envar) orelse {
-            _ = c.luaL_error(state, "add_provider: failed (max %d providers or url/key too long)", @as(c_int, prv.config.MAX_PROVIDERS));
-            return 0;
-        };
-        c.lua_pop(state, 2);
-
-        slot.reasoning_effort = readReasoningEffort(state, 1);
-        slot.provider_config = switch (ptype) {
-            .openai => .{ .openai = readOpenAiConfig(state, 1) },
-            .anthropic => .{ .anthropic = readAnthropicConfig(state, 1, slot) },
-            .ollama => .{ .ollama = readOllamaConfig(state, 1) },
-        };
-
-        const handle = cfg.commitProvider();
-        c.lua_pushinteger(state, @intCast(@intFromEnum(handle)));
-        return 1;
-    }
-
-    pub fn add_agent(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "add_agent: app not initialized");
-            return 0;
-        };
-
-        const vm = getVmFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "add_agent: vm not initialized");
-            return 0;
-        };
-        const def = readAnyValueAlloc(LuaAgentEntry, state, 1, vm.luaArena()) orelse {
-            _ = c.luaL_error(state, "add_agent: expected an agent definition table");
-            return 0;
-        };
-
-        if (def.name.len == 0 or def.description.len == 0 or def.prompt.len == 0 or def.model.len == 0 or def.effort.len == 0) {
-            _ = c.luaL_error(state, "add_agent: name, description, prompt, model, and effort are required");
-            return 0;
-        }
-
-        const effort = r.prv.config.parseReasoningEffort(def.effort) orelse {
-            _ = c.luaL_error(state, "add_agent: unknown effort (expected none/low/medium/high/xhigh/max)");
-            return 0;
-        };
-        const tools = readAnyFieldAlloc([]const []const u8, state, 1, "tools", vm.luaArena()) orelse {
-            _ = c.luaL_error(state, "add_agent: tools must be an array of names");
-            return 0;
-        };
-        const provider = readAnyFieldAlloc(r.prv.config.ProviderHandle, state, 1, "provider", null) orelse {
-            _ = c.luaL_error(state, "add_agent: provider handle is required");
-            return 0;
-        };
-        const provider_idx = @intFromEnum(provider);
-        if (provider_idx >= a.config.provider_count or !a.config.providers[provider_idx].active) {
-            _ = c.luaL_error(state, "add_agent: invalid provider handle");
-            return 0;
-        }
-
-        const agent_type = a.context_factory.addAgent(.{
-            .name = def.name,
-            .description = def.description,
-            .prompt = def.prompt,
-            .in_agent_tool = def.in_agent_tool,
-            .tools = tools,
-            .model = .{
-                .name = def.model,
-                .effort = effort,
-                .provider = provider,
-            },
-        }) catch {
-            _ = c.luaL_error(state, "add_agent: too many agents, invalid tools, or out of memory");
-            return 0;
-        };
-
-        pushAny(state, agent_type);
-        return 1;
-    }
-
-    pub fn set_model(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        const cfg = getCfgFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_model: config not initialized");
-            return 0;
-        };
-
-        const model = readAnyArg([]const u8, state, "set_model", 1) orelse return 0;
-        const handle: prv.config.ProviderHandle = @enumFromInt(readAnyArg(u32, state, "set_model", 2) orelse return 0);
-
-        if (!cfg.setModel(model, handle)) {
-            _ = c.luaL_error(state, "set_model: invalid provider handle or model name too long");
-            return 0;
-        }
-
-        return 0;
-    }
-
-    pub fn set_model_agent(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "app not initialized");
-            return 0;
-        };
-
-        const func_name = "set_model_agent";
-
-        const agent_type_idx = readAnyArg(r.ContextFactory.AgentType, state, func_name, 1) orelse {
-            _ = c.luaL_error(state, "model must be string");
-            return 0;
-        };
-
-        const model = readAnyArg([]const u8, state, func_name, 2) orelse {
-            _ = c.luaL_error(state, "model must be string");
-            return 0;
-        };
-        const effort_str = readAnyArg([]const u8, state, func_name, 3) orelse {
-            _ = c.luaL_error(state, "effort must be string");
-            return 0;
-        };
-
-        const effort = r.prv.config.parseReasoningEffort(effort_str) orelse {
-            _ = c.luaL_error(state, "unknown effort (expected none/low/medium/high/xhigh/max) ");
-            return 0;
-        };
-
-        const provider = readAnyArg(r.prv.config.ProviderHandle, state, func_name, 4) orelse {
-            _ = c.luaL_error(state, "provider handles are int!");
-            return 0;
-        };
-
-        a.context_factory.setAgentModel(agent_type_idx, model, effort, provider) catch {
-            _ = c.luaL_error(state, "set_model_agent: unknown agent or out of memory");
-            return 0;
-        };
-
-        return 0;
-    }
-
-    pub fn token_usage(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "token_usage: app not initialized");
-            return 0;
-        };
-        const usage = a.swarm.usage();
-
-        c.lua_createtable(state, 0, 4);
-        setFieldAny(state, -2, "input", usage.input_tokens);
-        setFieldAny(state, -2, "output", usage.output_tokens);
-        setFieldAny(state, -2, "cache", usage.cached_tokens);
-        setFieldAny(state, -2, "cache_creation", usage.cache_creation_tokens);
-        return 1;
-    }
-
-    pub fn context_percent(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "context_percent: app not initialized");
-            return 0;
-        };
-        c.lua_pushnumber(state, @floatCast(a.contextPercent()));
-        return 1;
-    }
-
-    pub fn set_compact_edge(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_compact_edge: app not initialized");
-            return 0;
-        };
-        if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
-            _ = c.luaL_error(state, "set_compact_edge: arg 1 (tokens) must be a number");
-            return 0;
-        }
-        const raw = c.lua_tointegerx(state, 1, null);
-        if (raw <= 0 or raw > std.math.maxInt(u32)) {
-            _ = c.luaL_error(state, "set_compact_edge: token count out of range");
-            return 0;
-        }
-        const limit: u32 = @intCast(raw);
-        a.default_context_limit = limit;
-        for (&a.swarm.slots) |*slot| {
-            const slot_state = slot.state.load(.acquire);
-            if (slot_state == .free or slot_state == .reserved) continue;
-            slot.agent.context_limit = limit;
-        }
-        a.dirty = true;
-        return 0;
-    }
-
-    pub fn bind(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
-            _ = c.luaL_error(state, "bind: arg 2 (func) must be a function");
-            return 0;
-        }
-        const vm = getVmFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "bind: vm not initialized");
-            return 0;
-        };
-        if (vm.bind_entries.items.len >= MAX_LUA_BINDS) {
-            _ = c.luaL_error(state, "bind: max binds reached (%d)", @as(c_int, MAX_LUA_BINDS));
-            return 0;
-        }
-
-        const key_str = readAnyArg([]const u8, state, "bind", 1) orelse return 0;
-
-        const parsed = keys.parseKeyString(key_str) orelse {
-            _ = c.luaL_error(state, "bind: invalid key string");
-            return 0;
-        };
-
-        // ref the function (pops it from stack — push a copy first so order doesn't matter)
-        c.lua_pushvalue(state, 2);
-        const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-        vm.bind_entries.appendAssumeCapacity(.{
-            .key = parsed,
-            .func_ref = func_ref,
-            .L = state,
-        });
-        return 0;
-    }
-
-    pub fn html_to_markdown(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const vm = getVmFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "html_to_markdown: lua vm unavailable");
-            return 0;
-        };
-
-        const html = readAnyArg([]const u8, state, "html_to_markdown", 1) orelse return 0;
-
-        const markdown = tl.parse.htmlToMarkdown(vm.luaArena(), html) catch {
-            _ = c.luaL_error(state, "html_to_markdown: failed to convert html");
-            return 0;
-        };
-
-        _ = c.lua_pushlstring(state, markdown.ptr, markdown.len);
-        return 1;
-    }
-
-    pub fn add_command(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
-            _ = c.luaL_error(state, "add_command: arg 2 (func) must be a function");
-            return 0;
-        }
-        const vm = getVmFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "add_command: vm not initialized");
-            return 0;
-        };
-        if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) {
-            _ = c.luaL_error(state, "add_command: max commands reached (%d)", @as(c_int, MAX_LUA_COMMANDS));
-            return 0;
-        }
-
-        const name = readAnyArg([]const u8, state, "add_command", 1) orelse return 0;
-        if (name.len == 0 or (name[0] != ':' and name[0] != '/')) {
-            _ = c.luaL_error(state, "add_command: command must start with ':' or '/'");
-            return 0;
-        }
-        if (std.mem.indexOfScalar(u8, name, ' ') != null) {
-            _ = c.luaL_error(state, "add_command: command must not contain spaces");
-            return 0;
-        }
-        if (name.len > 128) {
-            _ = c.luaL_error(state, "add_command: command too long (max %d bytes)", @as(c_int, 128));
-            return 0;
-        }
-
-        c.lua_pushvalue(state, 2);
-        const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-        var entry = LuaCommandEntry{
-            .name_len = name.len,
-            .func_ref = func_ref,
-            .L = state,
-        };
-        @memcpy(entry.name[0..name.len], name);
-        vm.command_entries.appendAssumeCapacity(entry);
-        return 0;
-    }
-
-    pub fn set_agent_tools(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
-            _ = c.luaL_error(state, "set_agent_tools: arg 1 (agent type) must be a number (blitz.AGENT_*)");
-            return 0;
-        }
-        const ty_int = c.lua_tointegerx(state, 1, null);
-        if (ty_int < 0 or ty_int > std.math.maxInt(u6)) {
-            _ = c.luaL_error(state, "set_agent_tools: agent type out of range");
-            return 0;
-        }
-        const agent_type: r.ContextFactory.AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
-
-        if (c.lua_type(state, 2) != c.LUA_TTABLE) {
-            _ = c.luaL_error(state, "set_agent_tools: arg 2 (tools) must be a table of strings");
-            return 0;
-        }
-
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_agent_tools: app not initialized");
-            return 0;
-        };
-
-        const factory = a.context_factory;
-
-        var names_buf: [r.ContextFactory.MAX_AGENT_TOOLS][]const u8 = undefined;
-        var names_count: usize = 0;
-
-        const len = c.lua_rawlen(state, 2);
-        for (1..len + 1) |i| {
-            if (names_count >= names_buf.len) {
-                _ = c.luaL_error(state, "set_agent_tools: too many tool names (max %d)", @as(c_int, @intCast(names_buf.len)));
-                return 0;
-            }
-            _ = c.lua_rawgeti(state, 2, @intCast(i));
-            if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-                c.lua_pop(state, 1);
-                _ = c.luaL_error(state, "set_agent_tools: tool list entry %d is not a string", @as(c_int, @intCast(i)));
-                return 0;
-            }
-            var slen: usize = 0;
-            const sptr = c.lua_tolstring(state, -1, &slen);
-            names_buf[names_count] = sptr[0..slen];
-            names_count += 1;
-            c.lua_pop(state, 1);
-        }
-
-        factory.setAgentTools(agent_type, names_buf[0..names_count]) catch {
-            _ = c.luaL_error(state, "set_agent_tools: failed to set tools");
-            return 0;
-        };
-        return 0;
-    }
-
-    pub fn set_prompt(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_prompt: app not initialized");
-            return 0;
-        };
-        const agent_type = readEnumArg(state, r.ContextFactory.AgentType, "set_prompt", 1) orelse return 0;
-        const prompt = readAnyArg([]const u8, state, "set_prompt", 2) orelse return 0;
-        a.context_factory.setAgentPrompt(agent_type, prompt) catch {
-            _ = c.luaL_error(state, "set_prompt: unknown agent or out of memory");
-            return 0;
-        };
-        return 0;
-    }
-
-    pub fn set_mode_prompt(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_mode_prompt: app not initialized");
-            return 0;
-        };
-        const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt", 1) orelse return 0;
-        const prompt = readAnyArg([]const u8, state, "set_mode_prompt", 2) orelse return 0;
-        a.context_factory.setModePrompt(mode, prompt) catch {
-            _ = c.luaL_error(state, "set_mode_prompt: unknown mode or out of memory");
-            return 0;
-        };
-        return 0;
-    }
-
-    pub fn set_mode_prompt_sparse(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_mode_prompt_sparse: app not initialized");
-            return 0;
-        };
-        const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt_sparse", 1) orelse return 0;
-        const prompt = readAnyArg([]const u8, state, "set_mode_prompt_sparse", 2) orelse return 0;
-        a.context_factory.setSparseModePrompt(mode, prompt) catch {
-            _ = c.luaL_error(state, "set_mode_prompt_sparse: unknown mode or out of memory");
-            return 0;
-        };
-        return 0;
-    }
-
-    pub fn set_mode_name(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_mode_name: app not initialized");
-            return 0;
-        };
-        const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_name", 1) orelse return 0;
-        const name = readAnyArg([]const u8, state, "set_mode_name", 2) orelse return 0;
-        a.context_factory.setModeName(mode, name) catch {
-            _ = c.luaL_error(state, "set_mode_name: unknown mode or out of memory");
-            return 0;
-        };
-        a.dirty = true;
-        return 0;
-    }
-
-    pub fn add_mode(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "add_mode: app not initialized");
-            return 0;
-        };
-
-        const name = readAnyArg([]const u8, state, "add_mode", 1) orelse return 0;
-        const color = readAnyArg([]const u8, state, "add_mode", 2) orelse return 0;
-        const prompt = readAnyArg([]const u8, state, "add_mode", 3) orelse return 0;
-        const sparse = readAnyArg([]const u8, state, "add_mode", 4) orelse return 0;
-
-        const mode = a.context_factory.addMode(
-            name,
-            prompt,
-            sparse,
-            color,
-        ) catch {
-            _ = c.luaL_error(state, "add_mode: too many modes or out of memory");
-            return 0;
-        };
-
-        c.lua_pushinteger(state, @intFromEnum(mode));
-        return 1;
-    }
-
-    pub fn set_mode(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_mode: app not initialized");
-            return 0;
-        };
-        const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode", 1) orelse return 0;
-        a.mode = mode;
-
-        a.event_bus.emit(a, .{ .mode_changed = @intFromEnum(mode) }) catch |emit_err| {
-            lua.log.err("Failed to fire event: {any}", .{emit_err});
-        };
-
-        if (a.main_agent_id) |id| {
-            if (a.swarm.getAgent(id)) |agent| agent.flags.force_full_reminder = true;
-        }
-        a.dirty = true;
-        return 0;
-    }
-
-    pub fn get_flags(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "get_flags: app not initialized");
-            return 0;
-        };
-
-        pushAny(state, a.flags);
-
-        return 1;
-    }
-
-    pub fn set_flags(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_flags: app not initialized");
-            return 0;
-        };
-
-        const flags = readAnyArg(r.app.AppFlags, state, "set_flags", 1) orelse {
-            _ = c.luaL_error(state, "set_flags: arg 1 must be a table with boolean fields");
-            return 0;
-        };
-
-        a.flags = flags;
-        a.dirty = true;
-
-        return 0;
-    }
-
-    pub fn log(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const msg = readAnyArg([]const u8, state, "log", 1) orelse return 0;
-        std.log.scoped(.lua).info("{s}", .{msg});
-        return 0;
-    }
-
-    pub fn shell(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "shell: app not initialized");
-            return 0;
-        };
-
-        const cmd = readAnyArg([]const u8, state, "shell", 1) orelse return pushNilBool(state, false);
-
-        const cwd: ?[]const u8 = if (a.cwd.len > 0) a.cwd else null;
-
-        const result = a.swarm.exec.runAndWait(.{
-            .cwd = cwd,
-            .argv = &.{ "/bin/sh", "-c", cmd },
-        }) catch {
-            _ = c.lua_pushliteral(state, "failed to execute command");
-            c.lua_pushboolean(state, 0);
-            return 2;
-        };
-        defer a.swarm.exec.alloc.free(result.stdout);
-        defer a.swarm.exec.alloc.free(result.stderr);
-
-        const success = result.ty == .success;
-        const output = if (success)
-            result.stdout
-        else
-            (if (result.stderr.len > 0) result.stderr else result.stdout);
-
-        _ = c.lua_pushlstring(state, output.ptr, output.len);
-        c.lua_pushboolean(state, @intFromBool(success));
-        return 2;
-    }
-
-    pub fn push_notification(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.push_notification: app not initialized");
-            return 0;
-        };
-
-        const msg = readAnyArg([]const u8, state, "queue.push_notification", 1) orelse return 0;
-        appQueueEnqueue(state, "queue.attach_notfication", a, .{ .push_notification = msg });
-
-        return 0;
-    }
-};
-
-pub const BlitzToolDef = struct {
-    pub const BASH = tl.bash.BashTool.def.name;
-    pub const CANCEL_BACKGROUND = tl.bash.CancelBackgroundCommand.def.name;
-    pub const READ = tl.read.ReadTool.def.name;
-    pub const WRITE = tl.write.WriteTool.def.name;
-    pub const EDIT = tl.edit.EditTool.def.name;
-    pub const PATCH = tl.patch.PatchTool.def.name;
-    pub const AGENT = tl.agent.AgentTool.def.name;
-    pub const LIST_TASKS = tl.tasks.ListTasksTool.def.name;
-    pub const UPDATE_TASK_STATE = tl.tasks.UpdateTaskStateTool.def.name;
-    pub const CREATE_TASK = tl.tasks.CreateTaskTool.def.name;
-    pub const ASK = tl.ask.AskTool.def.name;
-    pub const ENTER_SSH = tl.ssh.EnterSshMode.def.name;
-    pub const EXIT_SSH = tl.ssh.ExitSshMode.def.name;
-    pub const SEND_MESSAGE_TO_AGENT = tl.agent.SendMessageToAgent.def.name;
-    pub const AWAIT_AGENT = tl.agent.AwaitAgent.def.name;
-    pub const CANCEL_AGENT = tl.agent.CancelAgent.def.name;
-    pub const RIPGREP = tl.rg.RipGrepTool.def.name;
-};
-
-pub const BlitzEventDef = struct {
-    pub const SESSION_RESET = 0;
-    pub const MODE_CHANGED = 1;
-    pub const AGENT_CREATED = 2;
-    pub const AGENT_STARTED = 3;
-    pub const AGENT_COMPLETE = 4;
-    pub const AGENT_FAILED = 5;
-    pub const AGENT_CANCELLED = 6;
-    pub const COMPACTION_STARTED = 7;
-    pub const COMPACTION_COMPLETE = 8;
-    pub const TOOL_CALL_STARTED = 9;
-    pub const TOOL_CALL_COMPLETE = 10;
-    pub const AGENT_BROADCAST = 11;
-    pub const PERMISSION_REQUESTED = 12;
-    pub const PERMISSION_RESOLVED = 13;
-    pub const USER_MESSAGE_SENT = 14;
-    pub const MCP_TOOLS_RELOADED = 15;
-
-    pub const _function_defs = .{
-        .{
-            .desc =
-            \\Bind an event listener.
-            \\Example: blitz.add_listener(blitz.EVENT_MODE_CHANGED, function(new_mode_id) end)
-            ,
-            .fn_ptr = add_listener,
-            .args = .{ .{ "event", LuaType.integer }, .{ "func", LuaType.function } },
-            .ret = null,
-        },
     };
 
-    pub fn add_listener(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_compact_edge: app not initialized");
-            return 0;
-        };
-
-        if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
-            _ = c.luaL_error(state, "add_listner: arg 2 (func) must be a function");
-            return 0;
-        }
-
-        const event = readEnumArg(state, r.events.AppEventTag, "add_listener", 1) orelse return 0;
-
-        c.lua_pushvalue(state, 2);
-        const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-        a.event_bus.addLuaListener(a.arena_app.allocator(), event, func_ref) catch {
-            _ = c.luaL_error(state, "failed to add listener");
-            return 0;
-        };
-
-        return 0;
-    }
-};
-
-const BlitzMcp = struct {
-    pub const _function_defs = .{
-        .{
-            .desc = "Register an MCP stdio server. Disabled until explicitly enabled.",
-            .fn_ptr = add,
-            .args = .{.{ "def", McpServerDef }},
-            .ret = LuaType.integer,
-        },
-        .{
-            .desc = "Enable an MCP server for an agent type. Defaults to blitz.AGENT_GENERAL.",
-            .fn_ptr = enable,
-            .args = .{ .{ "mcp_id", LuaType.integer }, .{ .name = "agent_type", .ty = LuaType.integer, .optional = true } },
-            .ret = null,
-        },
-    };
-
-    pub fn add(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-            _ = c.luaL_error(state, "mcp.add: expected table argument");
-            return 0;
-        }
-
-        const vm = getVmFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "mcp.add: vm not initialized");
-            return 0;
-        };
-        if (vm.mcp_entries.items.len >= MAX_LUA_MCP_SERVERS) {
-            _ = c.luaL_error(state, "mcp.add: max servers reached (%d)", @as(c_int, MAX_LUA_MCP_SERVERS));
-            return 0;
-        }
-
-        var entry: LuaMcpServerEntry = .{};
-
-        entry.name_len = getStringField(state, 1, "name", &entry.name) orelse {
-            _ = c.luaL_error(state, "mcp.add: 'name' must be a string (max %d)", @as(c_int, entry.name.len));
-            return 0;
-        };
-
-        entry.command_len = getStringField(state, 1, "command", &entry.command) orelse {
-            _ = c.luaL_error(state, "mcp.add: 'command' must be a string (max %d)", @as(c_int, entry.command.len));
-            return 0;
-        };
-
-        _ = c.lua_getfield(state, 1, "transport");
-        if (c.lua_type(state, -1) == c.LUA_TSTRING) {
-            var len: usize = 0;
-            const ptr = c.lua_tolstring(state, -1, &len);
-            if (!std.mem.eql(u8, ptr[0..len], "stdio")) {
-                c.lua_pop(state, 1);
-                _ = c.luaL_error(state, "mcp.add: only transport='stdio' is supported");
-                return 0;
-            }
-        }
-        c.lua_pop(state, 1);
-
-        if (getStringField(state, 1, "tools_prefix", &entry.tools_prefix)) |len| {
-            entry.tools_prefix_len = len;
-        } else {
-            var w = std.Io.Writer.fixed(&entry.tools_prefix);
-            w.print("mcp_{s}_", .{entry.nameSlice()}) catch {
-                _ = c.luaL_error(state, "mcp.add: generated tools_prefix too long");
-                return 0;
-            };
-            entry.tools_prefix_len = w.end;
-        }
-
+    // schema (string) OR args (table) — at least one required
+    if (getStringField(state, 1, "schema", &entry.schema)) |len| {
+        entry.schema_len = len;
+    } else {
         _ = c.lua_getfield(state, 1, "args");
         if (c.lua_type(state, -1) == c.LUA_TTABLE) {
-            const len = c.lua_rawlen(state, -1);
-            if (len > MAX_LUA_MCP_ARGS) {
-                c.lua_pop(state, 1);
-                _ = c.luaL_error(state, "mcp.add: too many args (max %d)", @as(c_int, MAX_LUA_MCP_ARGS));
+            const json = argsTableToJsonSchema(state, -1, &entry.schema) catch {
+                _ = c.luaL_error(state, "register_tool: failed to convert args to schema");
                 return 0;
-            }
-            for (1..len + 1) |i| {
-                _ = c.lua_rawgeti(state, -1, @intCast(i));
-                if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-                    c.lua_pop(state, 2);
-                    _ = c.luaL_error(state, "mcp.add: args[%d] must be a string", @as(c_int, @intCast(i)));
-                    return 0;
-                }
-                var arg_len: usize = 0;
-                const arg_ptr = c.lua_tolstring(state, -1, &arg_len);
-                if (arg_len > entry.args[i - 1].len) {
-                    c.lua_pop(state, 2);
-                    _ = c.luaL_error(state, "mcp.add: args[%d] too long", @as(c_int, @intCast(i)));
-                    return 0;
-                }
-                @memcpy(entry.args[i - 1][0..arg_len], arg_ptr[0..arg_len]);
-                entry.arg_lens[i - 1] = @intCast(arg_len);
-                entry.args_len += 1;
-                c.lua_pop(state, 1);
-            }
-        } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
+            };
+            entry.schema_len = json.len;
             c.lua_pop(state, 1);
-            _ = c.luaL_error(state, "mcp.add: 'args' must be a table of strings");
+        } else {
+            _ = c.luaL_error(state, "register_tool: 'schema' (string) or 'args' (table) required");
             return 0;
         }
-        c.lua_pop(state, 1);
-
-        vm.mcp_entries.appendAssumeCapacity(entry);
-        c.lua_pushinteger(state, @intCast(vm.mcp_entries.items.len));
-        return 1;
     }
 
-    pub fn enable(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const vm = getVmFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "mcp.enable: vm not initialized");
-            return 0;
-        };
-
-        if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
-            _ = c.luaL_error(state, "mcp.enable: arg 1 (mcp_id) must be a number");
-            return 0;
-        }
-        const raw_id = c.lua_tointegerx(state, 1, null);
-        if (raw_id <= 0 or raw_id > vm.mcp_entries.items.len) {
-            _ = c.luaL_error(state, "mcp.enable: mcp_id out of range");
-            return 0;
-        }
-        const idx: usize = @intCast(raw_id - 1);
-
-        const agent_type: r.ContextFactory.AgentType = if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL)
-            readEnumArg(state, r.ContextFactory.AgentType, "mcp.enable", 2) orelse return 0
-        else
-            .general;
-
-        vm.mcp_entries.items[idx].enabled_agents.insert(agent_type);
-
-        if (getAppFromRegistry(state)) |a| {
-            appQueueEnqueue(state, "mcp.reload", a, .reload_mcp);
-        }
+    // func (required)
+    _ = c.lua_getfield(state, 1, "func");
+    if (c.lua_type(state, -1) != c.LUA_TFUNCTION) {
+        _ = c.luaL_error(state, "register_tool: 'func' must be a function");
         return 0;
     }
-};
+    entry.func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
 
-const BlitzJson = struct {
-    pub const _function_defs = .{
-        .{
-            .desc =
-            \\Encode a Lua value as JSON.
-            \\Supports nil, booleans, numbers, strings, and tables.
-            ,
-            .fn_ptr = encode,
-            .args = .{.{ "obj", LuaType.any }},
-            .ret = LuaType{ .raw = "string|nil, boolean" },
-        },
-        .{
-            .desc =
-            \\Decode a JSON string into Lua values.
-            \\JSON arrays become 1-indexed Lua tables; objects become Lua tables; JSON null becomes nil.
-            ,
-            .fn_ptr = decode,
-            .args = .{.{ "json", LuaType.string }},
-            .ret = LuaType{ .raw = "any, boolean" },
-        },
+    // persistent state table
+    c.lua_newtable(state);
+    entry.state_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+
+    vm.tool_entries.appendAssumeCapacity(entry);
+
+    pushAny(state, entry.name[0..entry.name_len]);
+    return 1;
+}
+
+fn luaAddTool(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
+        _ = c.luaL_error(state, "add_tool: arg 1 must be a number (blitz.AGENT_*)");
+        return 0;
+    }
+    const ty_int = c.lua_tointegerx(state, 1, null);
+    if (ty_int < 0 or ty_int > std.math.maxInt(u6)) {
+        _ = c.luaL_error(state, "add_tool: agent type out of range");
+        return 0;
+    }
+    const agent_type: r.ContextFactory.AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
+
+    const tool_name = readAnyArg([]const u8, state, "add_tool", 2) orelse return 0;
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "add_tool: app not initialized");
+        return 0;
     };
 
-    pub fn encode(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const vm = getVmFromRegistry(state) orelse {
-            return pushNilBool(state, false);
-        };
-        const json = luaToJsonAlloc(vm.luaArena(), state, 1) catch {
-            return pushNilBool(state, false);
-        };
+    appQueueEnqueue(state, "add_tool", a, .{ .add_tool = .{
+        .agent_type = agent_type,
+        .tool_name = tool_name,
+    } });
 
-        _ = c.lua_pushlstring(state, json.ptr, json.len);
-        c.lua_pushboolean(state, 1);
-        return 2;
-    }
+    return 0;
+}
 
-    pub fn decode(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const vm = getVmFromRegistry(state) orelse {
-            return pushNilBool(state, false);
-        };
-        if (c.lua_type(state, 1) != c.LUA_TSTRING) {
-            return pushNilBool(state, false);
-        }
-
-        var len: usize = 0;
-        const ptr = c.lua_tolstring(state, 1, &len) orelse {
-            return pushNilBool(state, false);
-        };
-
-        pushJsonValue(vm.luaArena(), state, ptr[0..len]) catch {
-            return pushNilBool(state, false);
-        };
-        c.lua_pushboolean(state, 1);
-        return 2;
-    }
-};
-
-const BlitzQueue = struct {
-    pub const _function_defs = .{
-        .{
-            .desc = "Reset the active session.",
-            .fn_ptr = reset_session,
-            .args = .{},
-            .ret = null,
-        },
-        .{
-            .desc = "Cancel all in-flight agent work and drop streaming preview.",
-            .fn_ptr = cancel,
-            .args = .{},
-            .ret = null,
-        },
-        .{
-            .desc = "Retry the main agent's last turn.",
-            .fn_ptr = retry,
-            .args = .{},
-            .ret = null,
-        },
-        .{
-            .desc = "Request compaction for the main agent.",
-            .fn_ptr = compact,
-            .args = .{},
-            .ret = null,
-        },
-        .{
-            .desc = "Switch the active mode. Forces a full mode-reminder on the next turn.",
-            .fn_ptr = set_mode,
-            .args = .{.{ "mode", LuaType.integer }},
-            .ret = null,
-        },
-        .{
-            .desc = "Push a chat entry into the chat log.",
-            .fn_ptr = push_chat_entry,
-            .args = .{ .{ "role", LuaType.string }, .{ "text", LuaType.string } },
-            .ret = null,
-        },
-        .{
-            .desc = "Queue a user message for the given agent.",
-            .fn_ptr = queue_agent_message,
-            .args = .{ .{ "agent_id", AgentIdDef }, .{ "text", LuaType.string } },
-            .ret = null,
-        },
-        .{
-            .desc = "Reserve a free slot and enqueue a spawn or fork into it.",
-            .fn_ptr = spawn_agent,
-            .args = .{.{ "args", SpawnAgentArgsDef }},
-            .ret = LuaType{ .raw = "BlitzAgentId|nil" },
-        },
-        .{
-            .desc = "Block until the referenced agent reaches a terminal state.",
-            .fn_ptr = await_agent,
-            .args = .{.{ "agent_id", AgentIdDef }},
-            .ret = LuaType.integer,
-        },
-        .{
-            .desc = "Return the awaited agent's last assistant text.",
-            .fn_ptr = await_agent_result,
-            .args = .{.{ "agent_id", AgentIdDef }},
-            .ret = LuaType{ .raw = "string|nil" },
-        },
-        .{
-            .desc = "Save current session to disk.",
-            .fn_ptr = save_session,
-            .args = .{.{ "path", LuaType.string }},
-            .ret = null,
-        },
-        .{
-            .desc = "Load a session from disk.",
-            .fn_ptr = load_session,
-            .args = .{.{ "path", LuaType.string }},
-            .ret = null,
-        },
-        .{
-            .desc = "Attach a screenshot/image to the current input.",
-            .fn_ptr = attach_screenshot,
-            .args = .{ .{ "data", LuaType.string }, .{ .name = "media_type", .ty = LuaType.string, .optional = true } },
-            .ret = null,
-        },
+fn luaGetMainAgent(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "Add Tool: failed to access app");
+        return 0;
     };
 
-    pub fn reset_session(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.reset_session: app not initialized");
-            return 0;
-        };
-        appQueueEnqueue(state, "queue.reset_session", a, .reset_session);
+    if (a.main_agent_id) |id| {
+        pushAny(state, id);
+    } else {
+        c.lua_pushnil(state);
+    }
+
+    return 1;
+}
+
+fn luaOk(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    pushStatusTable(state, lua.RET_OK, "");
+    return 1;
+}
+
+fn luaErr(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    pushStatusTable(state, lua.RET_ERR, "error");
+    return 1;
+}
+
+fn luaExitLoop(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    pushStatusTable(state, lua.RET_EXIT_LOOP, "");
+    return 1;
+}
+
+fn luaAddProvider(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const cfg = getCfgFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "add_provider: config not initialized");
+        return 0;
+    };
+
+    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
+        _ = c.luaL_error(state, "add_provider: expected a single table argument");
         return 0;
     }
 
-    pub fn cancel(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.cancel: app not initialized");
-            return 0;
-        };
-        appQueueEnqueue(state, "queue.cancel", a, .cancel);
+    const type_str = requireStringFieldOnStack(state, 1, "type");
+    const ptype = parseProviderType(state, type_str);
+    c.lua_pop(state, 1);
+
+    // Both url and key_envar slices must remain valid until reserveProvider
+    // has copied them into the slot buffers. Keep both fields on the stack
+    // simultaneously, then pop them together.
+    const url = requireStringFieldOnStack(state, 1, "url");
+    const key_envar = requireStringFieldOnStack(state, 1, "key_envar");
+    const slot = cfg.reserveProvider(url, key_envar) orelse {
+        _ = c.luaL_error(state, "add_provider: failed (max %d providers or url/key too long)", @as(c_int, prv.config.MAX_PROVIDERS));
+        return 0;
+    };
+    c.lua_pop(state, 2);
+
+    slot.reasoning_effort = readReasoningEffort(state, 1);
+    slot.provider_config = switch (ptype) {
+        .openai => .{ .openai = readOpenAiConfig(state, 1) },
+        .anthropic => .{ .anthropic = readAnthropicConfig(state, 1, slot) },
+        .ollama => .{ .ollama = readOllamaConfig(state, 1) },
+    };
+
+    const handle = cfg.commitProvider();
+    c.lua_pushinteger(state, @intCast(@intFromEnum(handle)));
+    return 1;
+}
+
+fn luaAddAgent(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "add_agent: app not initialized");
+        return 0;
+    };
+
+    const vm = getVmFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "add_agent: vm not initialized");
+        return 0;
+    };
+    const def = readAnyValueAlloc(LuaAgentEntry, state, 1, vm.luaArena()) orelse {
+        _ = c.luaL_error(state, "add_agent: expected an agent definition table");
+        return 0;
+    };
+
+    if (def.name.len == 0 or def.description.len == 0 or def.prompt.len == 0 or def.model.len == 0 or def.effort.len == 0) {
+        _ = c.luaL_error(state, "add_agent: name, description, prompt, model, and effort are required");
         return 0;
     }
 
-    pub fn retry(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.retry: app not initialized");
-            return 0;
-        };
-        appQueueEnqueue(state, "queue.retry", a, .retry);
+    const effort = r.prv.config.parseReasoningEffort(def.effort) orelse {
+        _ = c.luaL_error(state, "add_agent: unknown effort (expected none/low/medium/high/xhigh/max)");
+        return 0;
+    };
+    const tools = readAnyFieldAlloc([]const []const u8, state, 1, "tools", vm.luaArena()) orelse {
+        _ = c.luaL_error(state, "add_agent: tools must be an array of names");
+        return 0;
+    };
+    const provider = readAnyFieldAlloc(r.prv.config.ProviderHandle, state, 1, "provider", null) orelse {
+        _ = c.luaL_error(state, "add_agent: provider handle is required");
+        return 0;
+    };
+    const provider_idx = @intFromEnum(provider);
+    if (provider_idx >= a.config.provider_count or !a.config.providers[provider_idx].active) {
+        _ = c.luaL_error(state, "add_agent: invalid provider handle");
         return 0;
     }
 
-    pub fn compact(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.compact: app not initialized");
-            return 0;
-        };
-        appQueueEnqueue(state, "queue.compact", a, .compact);
+    const agent_type = a.context_factory.addAgent(.{
+        .name = def.name,
+        .description = def.description,
+        .prompt = def.prompt,
+        .in_agent_tool = def.in_agent_tool,
+        .tools = tools,
+        .model = .{
+            .name = def.model,
+            .effort = effort,
+            .provider = provider,
+        },
+    }) catch {
+        _ = c.luaL_error(state, "add_agent: too many agents, invalid tools, or out of memory");
+        return 0;
+    };
+
+    pushAny(state, agent_type);
+    return 1;
+}
+
+fn luaSetModel(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const cfg = getCfgFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_model: config not initialized");
+        return 0;
+    };
+
+    const model = readAnyArg([]const u8, state, "set_model", 1) orelse return 0;
+    const handle: prv.config.ProviderHandle = @enumFromInt(readAnyArg(u32, state, "set_model", 2) orelse return 0);
+
+    if (!cfg.setModel(model, handle)) {
+        _ = c.luaL_error(state, "set_model: invalid provider handle or model name too long");
         return 0;
     }
 
-    pub fn set_mode(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.set_mode: app not initialized");
-            return 0;
-        };
-        const mode = readAnyArg(u8, state, "queue.set_mode", 1) orelse return 0;
-        appQueueEnqueue(state, "queue.set_mode", a, .{ .set_mode = mode });
+    return 0;
+}
+
+fn luaSetModelAgent(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "app not initialized");
+        return 0;
+    };
+
+    const func_name = "set_model_agent";
+
+    const agent_type_idx = readAnyArg(r.ContextFactory.AgentType, state, func_name, 1) orelse {
+        _ = c.luaL_error(state, "model must be string");
+        return 0;
+    };
+
+    const model = readAnyArg([]const u8, state, func_name, 2) orelse {
+        _ = c.luaL_error(state, "model must be string");
+        return 0;
+    };
+    const effort_str = readAnyArg([]const u8, state, func_name, 3) orelse {
+        _ = c.luaL_error(state, "effort must be string");
+        return 0;
+    };
+
+    const effort = r.prv.config.parseReasoningEffort(effort_str) orelse {
+        _ = c.luaL_error(state, "unknown effort (expected none/low/medium/high/xhigh/max) ");
+        return 0;
+    };
+
+    const provider = readAnyArg(r.prv.config.ProviderHandle, state, func_name, 4) orelse {
+        _ = c.luaL_error(state, "provider handles are int!");
+        return 0;
+    };
+
+    a.context_factory.setAgentModel(agent_type_idx, model, effort, provider) catch {
+        _ = c.luaL_error(state, "set_model_agent: unknown agent or out of memory");
+        return 0;
+    };
+
+    return 0;
+}
+
+fn luaTokenUsage(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "token_usage: app not initialized");
+        return 0;
+    };
+    const usage = a.swarm.usage();
+
+    c.lua_createtable(state, 0, 4);
+    setFieldAny(state, -2, "input", usage.input_tokens);
+    setFieldAny(state, -2, "output", usage.output_tokens);
+    setFieldAny(state, -2, "cache", usage.cached_tokens);
+    setFieldAny(state, -2, "cache_creation", usage.cache_creation_tokens);
+    return 1;
+}
+
+fn luaContextPercent(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "context_percent: app not initialized");
+        return 0;
+    };
+    c.lua_pushnumber(state, @floatCast(a.contextPercent()));
+    return 1;
+}
+
+fn luaSetCompactEdge(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_compact_edge: app not initialized");
+        return 0;
+    };
+    if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
+        _ = c.luaL_error(state, "set_compact_edge: arg 1 (tokens) must be a number");
+        return 0;
+    }
+    const raw = c.lua_tointegerx(state, 1, null);
+    if (raw <= 0 or raw > std.math.maxInt(u32)) {
+        _ = c.luaL_error(state, "set_compact_edge: token count out of range");
+        return 0;
+    }
+    const limit: u32 = @intCast(raw);
+    a.default_context_limit = limit;
+    for (&a.swarm.slots) |*slot| {
+        const slot_state = slot.state.load(.acquire);
+        if (slot_state == .free or slot_state == .reserved) continue;
+        slot.agent.context_limit = limit;
+    }
+    a.dirty = true;
+    return 0;
+}
+
+fn luaBind(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
+        _ = c.luaL_error(state, "bind: arg 2 (func) must be a function");
+        return 0;
+    }
+    const vm = getVmFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "bind: vm not initialized");
+        return 0;
+    };
+    if (vm.bind_entries.items.len >= MAX_LUA_BINDS) {
+        _ = c.luaL_error(state, "bind: max binds reached (%d)", @as(c_int, MAX_LUA_BINDS));
         return 0;
     }
 
-    pub fn push_chat_entry(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.push_chat_entry: app not initialized");
-            return 0;
-        };
-        const role_str = readAnyArg([]const u8, state, "queue.push_chat_entry", 1) orelse return 0;
-        const role: prv.adapter.Role = if (std.mem.eql(u8, role_str, "system"))
-            .system
-        else if (std.mem.eql(u8, role_str, "user"))
-            .user
-        else if (std.mem.eql(u8, role_str, "agent"))
-            .agent
-        else {
-            _ = c.luaL_error(state, "queue.push_chat_entry: role must be 'system'|'user'|'agent'");
-            return 0;
-        };
+    const key_str = readAnyArg([]const u8, state, "bind", 1) orelse return 0;
 
-        const text = readAnyArg([]const u8, state, "queue.push_chat_entry", 2) orelse return 0;
+    const parsed = keys.parseKeyString(key_str) orelse {
+        _ = c.luaL_error(state, "bind: invalid key string");
+        return 0;
+    };
 
-        var parts = a.sessionAlloc().alloc(r.app.ChatPart, 1) catch return 0;
-        parts[0] = .{ .message = text };
+    // ref the function (pops it from stack — push a copy first so order doesn't matter)
+    c.lua_pushvalue(state, 2);
+    const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
 
-        appQueueEnqueue(state, "queue.push_chat_entry", a, .{ .push_chat_entry = .{
-            .role = role,
-            .parts = parts,
-        } });
+    vm.bind_entries.appendAssumeCapacity(.{
+        .key = parsed,
+        .func_ref = func_ref,
+        .L = state,
+    });
+    return 0;
+}
+
+fn luaHtmlToMarkdown(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const vm = getVmFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "html_to_markdown: lua vm unavailable");
+        return 0;
+    };
+
+    const html = readAnyArg([]const u8, state, "html_to_markdown", 1) orelse return 0;
+
+    const markdown = tl.parse.htmlToMarkdown(vm.luaArena(), html) catch {
+        _ = c.luaL_error(state, "html_to_markdown: failed to convert html");
+        return 0;
+    };
+
+    _ = c.lua_pushlstring(state, markdown.ptr, markdown.len);
+    return 1;
+}
+
+fn luaAddCommand(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
+        _ = c.luaL_error(state, "add_command: arg 2 (func) must be a function");
+        return 0;
+    }
+    const vm = getVmFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "add_command: vm not initialized");
+        return 0;
+    };
+    if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) {
+        _ = c.luaL_error(state, "add_command: max commands reached (%d)", @as(c_int, MAX_LUA_COMMANDS));
         return 0;
     }
 
-    pub fn queue_agent_message(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.queue_agent_message: app not initialized");
-            return 0;
-        };
-        const id = readAgentIdArg(state, "queue.queue_agent_message", 1);
-
-        const text = readAnyArg([]const u8, state, "queue.queue_agent_message", 2) orelse return 0;
-        const parts = [_]prv.adapter.ContentPart{.{ .text = text }};
-        appQueueEnqueue(state, "queue.queue_agent_message", a, .{ .queue_agent_message = .{
-            .agent_id = id,
-            .parts = &parts,
-        } });
+    const name = readAnyArg([]const u8, state, "add_command", 1) orelse return 0;
+    if (name.len == 0 or (name[0] != ':' and name[0] != '/')) {
+        _ = c.luaL_error(state, "add_command: command must start with ':' or '/'");
+        return 0;
+    }
+    if (std.mem.indexOfScalar(u8, name, ' ') != null) {
+        _ = c.luaL_error(state, "add_command: command must not contain spaces");
+        return 0;
+    }
+    if (name.len > 128) {
+        _ = c.luaL_error(state, "add_command: command too long (max %d bytes)", @as(c_int, 128));
         return 0;
     }
 
-    pub fn spawn_agent(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.spawn_agent: app not initialized");
-            return 0;
-        };
-        if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-            _ = c.luaL_error(state, "queue.spawn_agent: expected a single table argument");
+    c.lua_pushvalue(state, 2);
+    const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+
+    var entry = LuaCommandEntry{
+        .name_len = name.len,
+        .func_ref = func_ref,
+        .L = state,
+    };
+    @memcpy(entry.name[0..name.len], name);
+    vm.command_entries.appendAssumeCapacity(entry);
+    return 0;
+}
+
+fn luaSetAgentTools(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
+        _ = c.luaL_error(state, "set_agent_tools: arg 1 (agent type) must be a number (blitz.AGENT_*)");
+        return 0;
+    }
+    const ty_int = c.lua_tointegerx(state, 1, null);
+    if (ty_int < 0 or ty_int > std.math.maxInt(u6)) {
+        _ = c.luaL_error(state, "set_agent_tools: agent type out of range");
+        return 0;
+    }
+    const agent_type: r.ContextFactory.AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
+
+    if (c.lua_type(state, 2) != c.LUA_TTABLE) {
+        _ = c.luaL_error(state, "set_agent_tools: arg 2 (tools) must be a table of strings");
+        return 0;
+    }
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_agent_tools: app not initialized");
+        return 0;
+    };
+
+    const factory = a.context_factory;
+
+    var names_buf: [r.ContextFactory.MAX_AGENT_TOOLS][]const u8 = undefined;
+    var names_count: usize = 0;
+
+    const len = c.lua_rawlen(state, 2);
+    for (1..len + 1) |i| {
+        if (names_count >= names_buf.len) {
+            _ = c.luaL_error(state, "set_agent_tools: too many tool names (max %d)", @as(c_int, @intCast(names_buf.len)));
             return 0;
         }
-
-        var args: r.cmd.Command.SpawnArgs = .{
-            .agent_id = .{ .index = 0, .generation = 0 },
-            .prompt = &.{},
-        };
-
-        _ = c.lua_getfield(state, 1, "parent_id");
-        if (c.lua_type(state, -1) == c.LUA_TTABLE) {
-            args.parent_id = readAgentIdArg(state, "queue.spawn_agent", c.lua_gettop(state));
-        } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
-            _ = c.luaL_error(state, "queue.spawn_agent: parent_id must be a table or nil");
-            return 0;
-        }
-        c.lua_pop(state, 1);
-
-        _ = c.lua_getfield(state, 1, "prompt");
+        _ = c.lua_rawgeti(state, 2, @intCast(i));
         if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-            _ = c.luaL_error(state, "queue.spawn_agent: 'prompt' (string) required");
+            c.lua_pop(state, 1);
+            _ = c.luaL_error(state, "set_agent_tools: tool list entry %d is not a string", @as(c_int, @intCast(i)));
             return 0;
         }
-        var p_len: usize = 0;
-        const p_ptr = c.lua_tolstring(state, -1, &p_len);
-        const parts = [_]prv.adapter.ContentPart{.{ .text = p_ptr[0..p_len] }};
-        args.prompt = &parts;
+        var slen: usize = 0;
+        const sptr = c.lua_tolstring(state, -1, &slen);
+        names_buf[names_count] = sptr[0..slen];
+        names_count += 1;
+        c.lua_pop(state, 1);
+    }
 
-        if (getOptionalU32(state, 1, "agent_type")) |t| {
-            if (t > std.math.maxInt(u8)) {
-                _ = c.luaL_error(state, "queue.spawn_agent: agent_type out of range");
+    factory.setAgentTools(agent_type, names_buf[0..names_count]) catch {
+        _ = c.luaL_error(state, "set_agent_tools: failed to set tools");
+        return 0;
+    };
+    return 0;
+}
+
+fn luaSetPrompt(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_prompt: app not initialized");
+        return 0;
+    };
+    const agent_type = readEnumArg(state, r.ContextFactory.AgentType, "set_prompt", 1) orelse return 0;
+    const prompt = readAnyArg([]const u8, state, "set_prompt", 2) orelse return 0;
+    a.context_factory.setAgentPrompt(agent_type, prompt) catch {
+        _ = c.luaL_error(state, "set_prompt: unknown agent or out of memory");
+        return 0;
+    };
+    return 0;
+}
+
+fn luaSetModePrompt(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_mode_prompt: app not initialized");
+        return 0;
+    };
+    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt", 1) orelse return 0;
+    const prompt = readAnyArg([]const u8, state, "set_mode_prompt", 2) orelse return 0;
+    a.context_factory.setModePrompt(mode, prompt) catch {
+        _ = c.luaL_error(state, "set_mode_prompt: unknown mode or out of memory");
+        return 0;
+    };
+    return 0;
+}
+
+fn luaSetModePromptSparse(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_mode_prompt_sparse: app not initialized");
+        return 0;
+    };
+    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt_sparse", 1) orelse return 0;
+    const prompt = readAnyArg([]const u8, state, "set_mode_prompt_sparse", 2) orelse return 0;
+    a.context_factory.setSparseModePrompt(mode, prompt) catch {
+        _ = c.luaL_error(state, "set_mode_prompt_sparse: unknown mode or out of memory");
+        return 0;
+    };
+    return 0;
+}
+
+fn luaSetModeName(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_mode_name: app not initialized");
+        return 0;
+    };
+    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_name", 1) orelse return 0;
+    const name = readAnyArg([]const u8, state, "set_mode_name", 2) orelse return 0;
+    a.context_factory.setModeName(mode, name) catch {
+        _ = c.luaL_error(state, "set_mode_name: unknown mode or out of memory");
+        return 0;
+    };
+    a.dirty = true;
+    return 0;
+}
+
+fn luaAddMode(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "add_mode: app not initialized");
+        return 0;
+    };
+
+    const name = readAnyArg([]const u8, state, "add_mode", 1) orelse return 0;
+    const color = readAnyArg([]const u8, state, "add_mode", 2) orelse return 0;
+    const prompt = readAnyArg([]const u8, state, "add_mode", 3) orelse return 0;
+    const sparse = readAnyArg([]const u8, state, "add_mode", 4) orelse return 0;
+
+    const mode = a.context_factory.addMode(
+        name,
+        prompt,
+        sparse,
+        color,
+    ) catch {
+        _ = c.luaL_error(state, "add_mode: too many modes or out of memory");
+        return 0;
+    };
+
+    c.lua_pushinteger(state, @intFromEnum(mode));
+    return 1;
+}
+
+fn luaSetMode(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_mode: app not initialized");
+        return 0;
+    };
+    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode", 1) orelse return 0;
+    a.mode = mode;
+
+    a.event_bus.emit(a, .{ .mode_changed = @intFromEnum(mode) }) catch |emit_err| {
+        lua.log.err("Failed to fire event: {any}", .{emit_err});
+    };
+
+    if (a.main_agent_id) |id| {
+        if (a.swarm.getAgent(id)) |agent| agent.flags.force_full_reminder = true;
+    }
+    a.dirty = true;
+    return 0;
+}
+
+fn luaGetFlags(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "get_flags: app not initialized");
+        return 0;
+    };
+
+    pushAny(state, a.flags);
+
+    return 1;
+}
+
+fn luaSetFlags(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_flags: app not initialized");
+        return 0;
+    };
+
+    const flags = readAnyArg(r.app.AppFlags, state, "set_flags", 1) orelse {
+        _ = c.luaL_error(state, "set_flags: arg 1 must be a table with boolean fields");
+        return 0;
+    };
+
+    a.flags = flags;
+    a.dirty = true;
+
+    return 0;
+}
+
+fn luaLog(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const msg = readAnyArg([]const u8, state, "log", 1) orelse return 0;
+    std.log.scoped(.lua).info("{s}", .{msg});
+    return 0;
+}
+
+fn luaShell(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "shell: app not initialized");
+        return 0;
+    };
+
+    const cmd = readAnyArg([]const u8, state, "shell", 1) orelse return pushNilBool(state, false);
+
+    const cwd: ?[]const u8 = if (a.cwd.len > 0) a.cwd else null;
+
+    const result = a.swarm.exec.runAndWait(.{
+        .cwd = cwd,
+        .argv = &.{ "/bin/sh", "-c", cmd },
+    }) catch {
+        _ = c.lua_pushliteral(state, "failed to execute command");
+        c.lua_pushboolean(state, 0);
+        return 2;
+    };
+    defer a.swarm.exec.alloc.free(result.stdout);
+    defer a.swarm.exec.alloc.free(result.stderr);
+
+    const success = result.ty == .success;
+    const output = if (success)
+        result.stdout
+    else
+        (if (result.stderr.len > 0) result.stderr else result.stdout);
+
+    _ = c.lua_pushlstring(state, output.ptr, output.len);
+    c.lua_pushboolean(state, @intFromBool(success));
+    return 2;
+}
+
+fn luaPushNotification(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.push_notification: app not initialized");
+        return 0;
+    };
+
+    const msg = readAnyArg([]const u8, state, "queue.push_notification", 1) orelse return 0;
+    appQueueEnqueue(state, "queue.attach_notfication", a, .{ .push_notification = msg });
+
+    return 0;
+}
+
+fn luaEventAddListener(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "set_compact_edge: app not initialized");
+        return 0;
+    };
+
+    if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
+        _ = c.luaL_error(state, "add_listner: arg 2 (func) must be a function");
+        return 0;
+    }
+
+    const event = readEnumArg(state, r.events.AppEventTag, "add_listener", 1) orelse return 0;
+
+    c.lua_pushvalue(state, 2);
+    const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+
+    a.event_bus.addLuaListener(a.arena_app.allocator(), event, func_ref) catch {
+        _ = c.luaL_error(state, "failed to add listener");
+        return 0;
+    };
+
+    return 0;
+}
+
+fn luaMcpAdd(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+
+    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
+        _ = c.luaL_error(state, "mcp.add: expected table argument");
+        return 0;
+    }
+
+    const vm = getVmFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "mcp.add: vm not initialized");
+        return 0;
+    };
+    if (vm.mcp_entries.items.len >= MAX_LUA_MCP_SERVERS) {
+        _ = c.luaL_error(state, "mcp.add: max servers reached (%d)", @as(c_int, MAX_LUA_MCP_SERVERS));
+        return 0;
+    }
+
+    var entry: LuaMcpServerEntry = .{};
+
+    entry.name_len = getStringField(state, 1, "name", &entry.name) orelse {
+        _ = c.luaL_error(state, "mcp.add: 'name' must be a string (max %d)", @as(c_int, entry.name.len));
+        return 0;
+    };
+
+    entry.command_len = getStringField(state, 1, "command", &entry.command) orelse {
+        _ = c.luaL_error(state, "mcp.add: 'command' must be a string (max %d)", @as(c_int, entry.command.len));
+        return 0;
+    };
+
+    _ = c.lua_getfield(state, 1, "transport");
+    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
+        var len: usize = 0;
+        const ptr = c.lua_tolstring(state, -1, &len);
+        if (!std.mem.eql(u8, ptr[0..len], "stdio")) {
+            c.lua_pop(state, 1);
+            _ = c.luaL_error(state, "mcp.add: only transport='stdio' is supported");
+            return 0;
+        }
+    }
+    c.lua_pop(state, 1);
+
+    if (getStringField(state, 1, "tools_prefix", &entry.tools_prefix)) |len| {
+        entry.tools_prefix_len = len;
+    } else {
+        var w = std.Io.Writer.fixed(&entry.tools_prefix);
+        w.print("mcp_{s}_", .{entry.nameSlice()}) catch {
+            _ = c.luaL_error(state, "mcp.add: generated tools_prefix too long");
+            return 0;
+        };
+        entry.tools_prefix_len = w.end;
+    }
+
+    _ = c.lua_getfield(state, 1, "args");
+    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
+        const len = c.lua_rawlen(state, -1);
+        if (len > MAX_LUA_MCP_ARGS) {
+            c.lua_pop(state, 1);
+            _ = c.luaL_error(state, "mcp.add: too many args (max %d)", @as(c_int, MAX_LUA_MCP_ARGS));
+            return 0;
+        }
+        for (1..len + 1) |i| {
+            _ = c.lua_rawgeti(state, -1, @intCast(i));
+            if (c.lua_type(state, -1) != c.LUA_TSTRING) {
+                c.lua_pop(state, 2);
+                _ = c.luaL_error(state, "mcp.add: args[%d] must be a string", @as(c_int, @intCast(i)));
                 return 0;
             }
-            args.agent_type = @intCast(t);
+            var arg_len: usize = 0;
+            const arg_ptr = c.lua_tolstring(state, -1, &arg_len);
+            if (arg_len > entry.args[i - 1].len) {
+                c.lua_pop(state, 2);
+                _ = c.luaL_error(state, "mcp.add: args[%d] too long", @as(c_int, @intCast(i)));
+                return 0;
+            }
+            @memcpy(entry.args[i - 1][0..arg_len], arg_ptr[0..arg_len]);
+            entry.arg_lens[i - 1] = @intCast(arg_len);
+            entry.args_len += 1;
+            c.lua_pop(state, 1);
         }
-
-        if (getOptionalU32(state, 1, "tool_budget")) |b| args.tool_budget = b;
-
-        if (getOptionalBool(state, 1, "fork")) |f| args.fork = f;
-
+    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
         c.lua_pop(state, 1);
+        _ = c.luaL_error(state, "mcp.add: 'args' must be a table of strings");
+        return 0;
+    }
+    c.lua_pop(state, 1);
 
-        if (args.fork and args.parent_id == null) {
-            _ = c.luaL_error(state, "queue.spawn_agent: fork=true requires parent_id");
-            return 0;
-        }
+    vm.mcp_entries.appendAssumeCapacity(entry);
+    c.lua_pushinteger(state, @intCast(vm.mcp_entries.items.len));
+    return 1;
+}
 
-        const id = a.swarm.reserveFreeSlot() orelse {
-            c.lua_pushnil(state);
-            return 1;
-        };
-        args.agent_id = id;
+fn luaMcpEnable(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const vm = getVmFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "mcp.enable: vm not initialized");
+        return 0;
+    };
 
-        appQueueEnqueue(state, "queue.spawn_agent", a, .{ .spawn_agent = args });
-        pushAgentId(state, id);
-        return 1;
+    if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
+        _ = c.luaL_error(state, "mcp.enable: arg 1 (mcp_id) must be a number");
+        return 0;
+    }
+    const raw_id = c.lua_tointegerx(state, 1, null);
+    if (raw_id <= 0 or raw_id > vm.mcp_entries.items.len) {
+        _ = c.luaL_error(state, "mcp.enable: mcp_id out of range");
+        return 0;
+    }
+    const idx: usize = @intCast(raw_id - 1);
+
+    const agent_type: r.ContextFactory.AgentType = if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL)
+        readEnumArg(state, r.ContextFactory.AgentType, "mcp.enable", 2) orelse return 0
+    else
+        .general;
+
+    vm.mcp_entries.items[idx].enabled_agents.insert(agent_type);
+
+    if (getAppFromRegistry(state)) |a| {
+        appQueueEnqueue(state, "mcp.reload", a, .reload_mcp);
+    }
+    return 0;
+}
+
+const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
+    .{ .name = "encode", .desc =
+    \\Encode a Lua value as JSON.
+    \\Supports nil, booleans, numbers, strings, and tables.
+    , .ty = LuaType{ .function = .{ .args = &.{.{ .name = "obj", .ty = LuaType.any }}, .ret = &JsonEncodeRet } }, .fn_ptr = luaJsonEncode },
+    .{ .name = "decode", .desc =
+    \\Decode a JSON string into Lua values.
+    \\JSON arrays become 1-indexed Lua tables; objects become Lua tables; JSON null becomes nil.
+    , .ty = LuaType{ .function = .{ .args = &.{.{ .name = "json", .ty = LuaType.string }}, .ret = &JsonDecodeRet } }, .fn_ptr = luaJsonDecode },
+} } };
+
+fn luaJsonEncode(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const vm = getVmFromRegistry(state) orelse {
+        return pushNilBool(state, false);
+    };
+    const json = luaToJsonAlloc(vm.luaArena(), state, 1) catch {
+        return pushNilBool(state, false);
+    };
+
+    _ = c.lua_pushlstring(state, json.ptr, json.len);
+    c.lua_pushboolean(state, 1);
+    return 2;
+}
+
+fn luaJsonDecode(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const vm = getVmFromRegistry(state) orelse {
+        return pushNilBool(state, false);
+    };
+    if (c.lua_type(state, 1) != c.LUA_TSTRING) {
+        return pushNilBool(state, false);
     }
 
-    pub fn await_agent(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.await_agent: app not initialized");
-            return 0;
-        };
-        const vm = activeVm() orelse {
-            _ = c.luaL_error(state, "queue.await_agent: no active lua vm");
-            return 0;
-        };
-        const id = readAgentIdArg(state, "queue.await_agent", 1);
-        const io = a.swarm.pool.io;
+    var len: usize = 0;
+    const ptr = c.lua_tolstring(state, 1, &len) orelse {
+        return pushNilBool(state, false);
+    };
 
-        const slot = a.swarm.getSlot(id) orelse {
+    pushJsonValue(vm.luaArena(), state, ptr[0..len]) catch {
+        return pushNilBool(state, false);
+    };
+    c.lua_pushboolean(state, 1);
+    return 2;
+}
+
+const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
+    .{
+        .name = "reset_session",
+        .desc = "Reset the active session.",
+        .ty = LuaType{ .function = .{} },
+        .fn_ptr = luaQueueResetSession,
+    },
+    .{
+        .name = "cancel",
+        .desc = "Cancel all in-flight agent work and drop streaming preview.",
+        .ty = LuaType{ .function = .{} },
+        .fn_ptr = luaQueueCancel,
+    },
+    .{
+        .name = "retry",
+        .desc = "Retry the main agent's last turn.",
+        .ty = LuaType{ .function = .{} },
+        .fn_ptr = luaQueueRetry,
+    },
+    .{
+        .name = "compact",
+        .desc = "Request compaction for the main agent.",
+        .ty = LuaType{ .function = .{} },
+        .fn_ptr = luaQueueCompact,
+    },
+    .{
+        .name = "set_mode",
+        .desc = "Switch the active mode. Forces a full mode-reminder on the next turn.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "mode", .ty = LuaType.integer }} } },
+        .fn_ptr = luaQueueSetMode,
+    },
+    .{
+        .name = "push_chat_entry",
+        .desc = "Push a chat entry into the chat log.",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "role", .ty = LuaType.string }, .{ .name = "text", .ty = LuaType.string } } } },
+        .fn_ptr = luaQueuePushChatEntry,
+    },
+    .{
+        .name = "queue_agent_message",
+        .desc = "Queue a user message for the given agent.",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "text", .ty = LuaType.string } } } },
+        .fn_ptr = luaQueueAgentMessage,
+    },
+    .{
+        .name = "spawn_agent",
+        .desc = "Reserve a free slot and enqueue a spawn or fork into it.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "args", .ty = SpawnAgentArgsDef }}, .ret = &AgentIdOrNilDef } },
+        .fn_ptr = luaQueueSpawnAgent,
+    },
+    .{
+        .name = "await_agent",
+        .desc = "Block until the referenced agent reaches a terminal state.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }}, .ret = &LuaInteger } },
+        .fn_ptr = luaQueueAwaitAgent,
+    },
+    .{
+        .name = "await_agent_result",
+        .desc = "Return the awaited agent's last assistant text.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }}, .ret = &StringOrNilDef } },
+        .fn_ptr = luaQueueAwaitAgentResult,
+    },
+    .{
+        .name = "save_session",
+        .desc = "Save current session to disk.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "path", .ty = LuaType.string }} } },
+        .fn_ptr = luaQueueSaveSession,
+    },
+    .{
+        .name = "load_session",
+        .desc = "Load a session from disk.",
+        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "path", .ty = LuaType.string }} } },
+        .fn_ptr = luaQueueLoadSession,
+    },
+    .{
+        .name = "attach_screenshot",
+        .desc = "Attach a screenshot/image to the current input.",
+        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "data", .ty = LuaType.string }, .{ .name = "media_type", .ty = LuaType.string, .optional = true } } } },
+        .fn_ptr = luaQueueAttachScreenshot,
+    },
+} } };
+
+fn luaQueueResetSession(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.reset_session: app not initialized");
+        return 0;
+    };
+    appQueueEnqueue(state, "queue.reset_session", a, .reset_session);
+    return 0;
+}
+
+fn luaQueueCancel(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.cancel: app not initialized");
+        return 0;
+    };
+    appQueueEnqueue(state, "queue.cancel", a, .cancel);
+    return 0;
+}
+
+fn luaQueueRetry(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.retry: app not initialized");
+        return 0;
+    };
+    appQueueEnqueue(state, "queue.retry", a, .retry);
+    return 0;
+}
+
+fn luaQueueCompact(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.compact: app not initialized");
+        return 0;
+    };
+    appQueueEnqueue(state, "queue.compact", a, .compact);
+    return 0;
+}
+
+fn luaQueueSetMode(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.set_mode: app not initialized");
+        return 0;
+    };
+    const mode = readAnyArg(u8, state, "queue.set_mode", 1) orelse return 0;
+    appQueueEnqueue(state, "queue.set_mode", a, .{ .set_mode = mode });
+    return 0;
+}
+
+fn luaQueuePushChatEntry(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.push_chat_entry: app not initialized");
+        return 0;
+    };
+    const role_str = readAnyArg([]const u8, state, "queue.push_chat_entry", 1) orelse return 0;
+    const role: prv.adapter.Role = if (std.mem.eql(u8, role_str, "system"))
+        .system
+    else if (std.mem.eql(u8, role_str, "user"))
+        .user
+    else if (std.mem.eql(u8, role_str, "agent"))
+        .agent
+    else {
+        _ = c.luaL_error(state, "queue.push_chat_entry: role must be 'system'|'user'|'agent'");
+        return 0;
+    };
+
+    const text = readAnyArg([]const u8, state, "queue.push_chat_entry", 2) orelse return 0;
+
+    var parts = a.sessionAlloc().alloc(r.app.ChatPart, 1) catch return 0;
+    parts[0] = .{ .message = text };
+
+    appQueueEnqueue(state, "queue.push_chat_entry", a, .{ .push_chat_entry = .{
+        .role = role,
+        .parts = parts,
+    } });
+    return 0;
+}
+
+fn luaQueueAgentMessage(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.queue_agent_message: app not initialized");
+        return 0;
+    };
+    const id = readAgentIdArg(state, "queue.queue_agent_message", 1);
+
+    const text = readAnyArg([]const u8, state, "queue.queue_agent_message", 2) orelse return 0;
+    const parts = [_]prv.adapter.ContentPart{.{ .text = text }};
+    appQueueEnqueue(state, "queue.queue_agent_message", a, .{ .queue_agent_message = .{
+        .agent_id = id,
+        .parts = &parts,
+    } });
+    return 0;
+}
+
+fn luaQueueSpawnAgent(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.spawn_agent: app not initialized");
+        return 0;
+    };
+    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
+        _ = c.luaL_error(state, "queue.spawn_agent: expected a single table argument");
+        return 0;
+    }
+
+    var args: r.cmd.Command.SpawnArgs = .{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .prompt = &.{},
+    };
+
+    _ = c.lua_getfield(state, 1, "parent_id");
+    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
+        args.parent_id = readAgentIdArg(state, "queue.spawn_agent", c.lua_gettop(state));
+    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
+        _ = c.luaL_error(state, "queue.spawn_agent: parent_id must be a table or nil");
+        return 0;
+    }
+    c.lua_pop(state, 1);
+
+    _ = c.lua_getfield(state, 1, "prompt");
+    if (c.lua_type(state, -1) != c.LUA_TSTRING) {
+        _ = c.luaL_error(state, "queue.spawn_agent: 'prompt' (string) required");
+        return 0;
+    }
+    var p_len: usize = 0;
+    const p_ptr = c.lua_tolstring(state, -1, &p_len);
+    const parts = [_]prv.adapter.ContentPart{.{ .text = p_ptr[0..p_len] }};
+    args.prompt = &parts;
+
+    if (getOptionalU32(state, 1, "agent_type")) |t| {
+        if (t > std.math.maxInt(u8)) {
+            _ = c.luaL_error(state, "queue.spawn_agent: agent_type out of range");
+            return 0;
+        }
+        args.agent_type = @intCast(t);
+    }
+
+    if (getOptionalU32(state, 1, "tool_budget")) |b| args.tool_budget = b;
+
+    if (getOptionalBool(state, 1, "fork")) |f| args.fork = f;
+
+    c.lua_pop(state, 1);
+
+    if (args.fork and args.parent_id == null) {
+        _ = c.luaL_error(state, "queue.spawn_agent: fork=true requires parent_id");
+        return 0;
+    }
+
+    const id = a.swarm.reserveFreeSlot() orelse {
+        c.lua_pushnil(state);
+        return 1;
+    };
+    args.agent_id = id;
+
+    appQueueEnqueue(state, "queue.spawn_agent", a, .{ .spawn_agent = args });
+    pushAgentId(state, id);
+    return 1;
+}
+
+fn luaQueueAwaitAgent(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.await_agent: app not initialized");
+        return 0;
+    };
+    const vm = activeVm() orelse {
+        _ = c.luaL_error(state, "queue.await_agent: no active lua vm");
+        return 0;
+    };
+    const id = readAgentIdArg(state, "queue.await_agent", 1);
+    const io = a.swarm.pool.io;
+
+    const slot = a.swarm.getSlot(id) orelse {
+        c.lua_pushinteger(state, AWAIT_INVALID);
+        return 1;
+    };
+
+    const s0 = slot.state.load(.acquire);
+    switch (s0) {
+        .complete => {
+            c.lua_pushinteger(state, AWAIT_COMPLETE);
+            return 1;
+        },
+        .failed => {
+            c.lua_pushinteger(state, AWAIT_FAILED);
+            return 1;
+        },
+        .free => {
             c.lua_pushinteger(state, AWAIT_INVALID);
             return 1;
-        };
+        },
+        .reserved, .active => {},
+    }
 
-        const s0 = slot.state.load(.acquire);
-        switch (s0) {
-            .complete => {
-                c.lua_pushinteger(state, AWAIT_COMPLETE);
-                return 1;
-            },
-            .failed => {
-                c.lua_pushinteger(state, AWAIT_FAILED);
-                return 1;
-            },
-            .free => {
-                c.lua_pushinteger(state, AWAIT_INVALID);
-                return 1;
-            },
-            .reserved, .active => {},
-        }
-
-        vm.vm_mu.unlock(io);
-        slot.event.wait(io) catch {
-            vm.vm_mu.lockUncancelable(io);
-            c.lua_pushinteger(state, AWAIT_CANCELED);
-            return 1;
-        };
+    vm.vm_mu.unlock(io);
+    slot.event.wait(io) catch {
         vm.vm_mu.lockUncancelable(io);
+        c.lua_pushinteger(state, AWAIT_CANCELED);
+        return 1;
+    };
+    vm.vm_mu.lockUncancelable(io);
 
-        // Slot generation may have changed if a release+reuse raced us. Re-validate.
-        const slot_now = a.swarm.getSlot(id) orelse {
-            c.lua_pushinteger(state, AWAIT_CANCELED);
-            return 1;
-        };
-        const code: c_int = switch (slot_now.state.load(.acquire)) {
-            .complete => AWAIT_COMPLETE,
-            .failed => AWAIT_FAILED,
-            else => AWAIT_CANCELED,
-        };
-        c.lua_pushinteger(state, code);
+    // Slot generation may have changed if a release+reuse raced us. Re-validate.
+    const slot_now = a.swarm.getSlot(id) orelse {
+        c.lua_pushinteger(state, AWAIT_CANCELED);
+        return 1;
+    };
+    const code: c_int = switch (slot_now.state.load(.acquire)) {
+        .complete => AWAIT_COMPLETE,
+        .failed => AWAIT_FAILED,
+        else => AWAIT_CANCELED,
+    };
+    c.lua_pushinteger(state, code);
+    return 1;
+}
+
+fn luaQueueAwaitAgentResult(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.await_agent_result: app not initialized");
+        return 0;
+    };
+    const id = readAgentIdArg(state, "queue.await_agent_result", 1);
+
+    const agent = a.swarm.getAgent(id) orelse {
+        _ = c.luaL_error(state, "queue.await_agent_result: agent not found");
+        return 0;
+    };
+
+    if (agent.chat.messages.items.len == 0) {
+        _ = c.luaL_error(state, "queue.await_agent_result: agent has no chat entries");
+        return 0;
+    }
+
+    const last_msg = &agent.chat.messages.items[agent.chat.messages.items.len -| 1];
+
+    var total: usize = 0;
+    for (last_msg.parts) |p| switch (p) {
+        .text => |t| total += t.len,
+        else => {},
+    };
+    if (total == 0) {
+        _ = c.lua_pushlstring(state, "", 0);
         return 1;
     }
 
-    pub fn await_agent_result(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.await_agent_result: app not initialized");
-            return 0;
-        };
-        const id = readAgentIdArg(state, "queue.await_agent_result", 1);
+    var b: c.luaL_Buffer = undefined;
+    c.luaL_buffinit(state, &b);
+    for (last_msg.parts) |p| switch (p) {
+        .text => |t| c.luaL_addlstring(&b, t.ptr, t.len),
+        else => {},
+    };
+    c.luaL_pushresult(&b);
+    return 1;
+}
 
-        const agent = a.swarm.getAgent(id) orelse {
-            _ = c.luaL_error(state, "queue.await_agent_result: agent not found");
-            return 0;
-        };
-
-        if (agent.chat.messages.items.len == 0) {
-            _ = c.luaL_error(state, "queue.await_agent_result: agent has no chat entries");
-            return 0;
-        }
-
-        const last_msg = &agent.chat.messages.items[agent.chat.messages.items.len -| 1];
-
-        var total: usize = 0;
-        for (last_msg.parts) |p| switch (p) {
-            .text => |t| total += t.len,
-            else => {},
-        };
-        if (total == 0) {
-            _ = c.lua_pushlstring(state, "", 0);
-            return 1;
-        }
-
-        var b: c.luaL_Buffer = undefined;
-        c.luaL_buffinit(state, &b);
-        for (last_msg.parts) |p| switch (p) {
-            .text => |t| c.luaL_addlstring(&b, t.ptr, t.len),
-            else => {},
-        };
-        c.luaL_pushresult(&b);
-        return 1;
-    }
-
-    pub fn save_session(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "save_session: app not initialized");
-            return 0;
-        };
-        const path = readAnyArg([]const u8, state, "save_session", 1) orelse return 0;
-        const cmd: r.cmd.Command = .{ .save_session = path };
-        appQueueEnqueue(state, "save_session", a, cmd);
+fn luaQueueSaveSession(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "save_session: app not initialized");
         return 0;
-    }
+    };
+    const path = readAnyArg([]const u8, state, "save_session", 1) orelse return 0;
+    const cmd: r.cmd.Command = .{ .save_session = path };
+    appQueueEnqueue(state, "save_session", a, cmd);
+    return 0;
+}
 
-    pub fn load_session(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "load_session: app not initialized");
-            return 0;
-        };
-        const path = readAnyArg([]const u8, state, "load_session", 1) orelse return 0;
-        const cmd: r.cmd.Command = .{ .load_session = path };
-        appQueueEnqueue(state, "load_session", a, cmd);
+fn luaQueueLoadSession(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "load_session: app not initialized");
         return 0;
-    }
+    };
+    const path = readAnyArg([]const u8, state, "load_session", 1) orelse return 0;
+    const cmd: r.cmd.Command = .{ .load_session = path };
+    appQueueEnqueue(state, "load_session", a, cmd);
+    return 0;
+}
 
-    pub fn attach_screenshot(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "queue.attach_screenshot: app not initialized");
-            return 0;
-        };
-
-        const data = readAnyArg([]const u8, state, "queue.attach_screenshot", 1) orelse return 0;
-        const media_type = if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL)
-            readAnyArg([]const u8, state, "queue.attach_screenshot", 2) orelse return 0
-        else
-            "image/png";
-
-        appQueueEnqueue(state, "queue.attach_screenshot", a, .{ .attach_screenshot = .{
-            .media_type = media_type,
-            .data = data,
-        } });
+fn luaQueueAttachScreenshot(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "queue.attach_screenshot: app not initialized");
         return 0;
-    }
-};
+    };
+
+    const data = readAnyArg([]const u8, state, "queue.attach_screenshot", 1) orelse return 0;
+    const media_type = if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL)
+        readAnyArg([]const u8, state, "queue.attach_screenshot", 2) orelse return 0
+    else
+        "image/png";
+
+    appQueueEnqueue(state, "queue.attach_screenshot", a, .{ .attach_screenshot = .{
+        .media_type = media_type,
+        .data = data,
+    } });
+    return 0;
+}
 
 // ── Lua Tool Registry (per-VM, reached via registry lookup) ─────────
 
@@ -1832,31 +1811,40 @@ fn setCFunctionField(
     setFieldPushed(L, table_idx, field);
 }
 
-fn pushComptimeStruct(L: *c.lua_State, comptime T: type) void {
-    const info = switch (@typeInfo(T)) {
-        .@"struct" => |info| info,
-        else => @compileError("Lua API namespace must be a struct, got " ++ @typeName(T)),
+fn pushLuaValue(L: *c.lua_State, comptime value: LuaType.Value) void {
+    switch (value) {
+        .integer => |n| c.lua_pushinteger(L, n),
+        .number => |n| c.lua_pushnumber(L, n),
+        .boolean => |b| c.lua_pushboolean(L, @intFromBool(b)),
+        .string => |s| _ = c.lua_pushlstring(L, s.ptr, s.len),
+    }
+}
+
+fn pushLuaType(L: *c.lua_State, comptime ty: LuaType) void {
+    const def = switch (ty) {
+        .table_def => |def| def,
+        else => @compileError("Lua API root must be a table_def"),
     };
 
-    c.lua_createtable(L, 0, @intCast(info.fields.len + info.decls.len));
-
-    inline for (info.fields) |field| {
-        pushComptimeStruct(L, field.type);
-        setFieldPushed(L, -2, field.name);
-    }
-
-    inline for (info.decls) |decl| {
-        if (decl.name[0] == '_') continue;
-        const value = @field(T, decl.name);
-        switch (@typeInfo(@TypeOf(value))) {
-            .@"fn" => setCFunctionField(L, -2, decl.name, value),
-            else => setFieldAny(L, -2, decl.name, value),
+    c.lua_createtable(L, 0, @intCast(def.fields.len));
+    inline for (def.fields) |field| {
+        if (field.value) |value| {
+            pushLuaValue(L, value);
+            setFieldPushed(L, -2, field.name);
+        } else if (field.fn_ptr) |fn_ptr| {
+            setCFunctionField(L, -2, field.name, fn_ptr);
+        } else switch (field.ty) {
+            .table_def => {
+                pushLuaType(L, field.ty);
+                setFieldPushed(L, -2, field.name);
+            },
+            else => {},
         }
     }
 }
 
-fn setComptimeGlobal(L: *c.lua_State, comptime name: []const u8, comptime T: type) void {
-    pushComptimeStruct(L, T);
+fn setLuaTypeGlobal(L: *c.lua_State, comptime name: []const u8, comptime ty: LuaType) void {
+    pushLuaType(L, ty);
     c.lua_setglobal(L, fieldName(name));
 }
 
@@ -2478,7 +2466,7 @@ pub const LuaVm = struct {
 // ── blitz.* Lua library ─────────────────────────────────────────────
 
 fn registerBlitzLib(L: *c.lua_State) void {
-    setComptimeGlobal(L, "blitz", Blitz);
+    setLuaTypeGlobal(L, "blitz", Blitz);
 }
 
 fn luaPrintToBuffer(L: ?*c.lua_State) callconv(.c) c_int {
@@ -3259,11 +3247,11 @@ test "pushAny and readAnyValue handle arrays and slices" {
     try std.testing.expectEqualStrings("read", slice[1]);
 }
 
-test "comptime structs define recursive Lua globals" {
+test "LuaType defines recursive Lua globals" {
     const state = c.luaL_newstate() orelse return error.LuaInitFailed;
     defer c.lua_close(state);
 
-    setComptimeGlobal(state, "blitz", Blitz);
+    setLuaTypeGlobal(state, "blitz", Blitz);
 
     try std.testing.expectEqual(c.LUA_TTABLE, c.lua_getglobal(state, "blitz"));
     try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "register_tool"));

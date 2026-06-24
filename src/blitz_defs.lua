@@ -1,13 +1,125 @@
 ---Blitz Lua meta file
 ---@meta
----@class BlitzArgDef
----@field type string
----@field description string
----@field required? boolean
+---@class BlitzMcpServerDef
+---@field name string
+---@field command string
+---@field transport? string
+---@field args? string[]
+---@field tools_prefix? string
+
+---@class BlitzMcp
+---Register an MCP stdio server. Disabled until explicitly enabled.
+---@field add fun(def: BlitzMcpServerDef): integer
+---Enable an MCP server for an agent type. Defaults to blitz.AGENT_GENERAL.
+---@field enable fun(mcp_id: integer, agent_type?: integer)
+
+---@class BlitzJson
+---Encode a Lua value as JSON.
+---Supports nil, booleans, numbers, strings, and tables.
+---@field encode fun(obj: any): string|nil, boolean
+---Decode a JSON string into Lua values.
+---JSON arrays become 1-indexed Lua tables; objects become Lua tables; JSON null becomes nil.
+---@field decode fun(json: string): any, boolean
 
 ---@class BlitzAgentId
 ---@field index integer
 ---@field generation integer
+
+---@class BlitzSpawnArgs
+---@field parent_id? BlitzAgentId
+---@field prompt string
+---@field agent_type? integer
+---@field tool_budget? integer
+---@field fork? boolean
+
+---@class BlitzQueue
+---Reset the active session.
+---@field reset_session fun()
+---Cancel all in-flight agent work and drop streaming preview.
+---@field cancel fun()
+---Retry the main agent's last turn.
+---@field retry fun()
+---Request compaction for the main agent.
+---@field compact fun()
+---Switch the active mode. Forces a full mode-reminder on the next turn.
+---@field set_mode fun(mode: integer)
+---Push a chat entry into the chat log.
+---@field push_chat_entry fun(role: string, text: string)
+---Queue a user message for the given agent.
+---@field queue_agent_message fun(agent_id: BlitzAgentId, text: string)
+---Reserve a free slot and enqueue a spawn or fork into it.
+---@field spawn_agent fun(args: BlitzSpawnArgs): BlitzAgentId|nil
+---Block until the referenced agent reaches a terminal state.
+---@field await_agent fun(agent_id: BlitzAgentId): integer
+---Return the awaited agent's last assistant text.
+---@field await_agent_result fun(agent_id: BlitzAgentId): string|nil
+---Save current session to disk.
+---@field save_session fun(path: string)
+---Load a session from disk.
+---@field load_session fun(path: string)
+---Attach a screenshot/image to the current input.
+---@field attach_screenshot fun(data: string, media_type?: string)
+
+---@class BlitzToolDef
+---@field BASH string
+---@field CANCEL_BACKGROUND string
+---@field READ string
+---@field WRITE string
+---@field EDIT string
+---@field PATCH string
+---@field AGENT string
+---@field LIST_TASKS string
+---@field UPDATE_TASK_STATE string
+---@field CREATE_TASK string
+---@field ASK string
+---@field ENTER_SSH string
+---@field EXIT_SSH string
+---@field SEND_MESSAGE_TO_AGENT string
+---@field AWAIT_AGENT string
+---@field CANCEL_AGENT string
+---@field RIPGREP string
+
+---@class BlitzEventDef
+---Emitted after the active session is reset.
+---@field SESSION_RESET integer
+---Emitted after the active session mode changes.
+---@field MODE_CHANGED integer
+---Emitted after an agent slot is created.
+---@field AGENT_CREATED integer
+---Emitted when an agent starts running.
+---@field AGENT_STARTED integer
+---Emitted when an agent completes.
+---@field AGENT_COMPLETE integer
+---Emitted when an agent fails.
+---@field AGENT_FAILED integer
+---Emitted when an agent is cancelled.
+---@field AGENT_CANCELLED integer
+---Emitted when compaction starts.
+---@field COMPACTION_STARTED integer
+---Emitted when compaction completes.
+---@field COMPACTION_COMPLETE integer
+---Emitted when a tool call starts.
+---@field TOOL_CALL_STARTED integer
+---Emitted when a tool call completes.
+---@field TOOL_CALL_COMPLETE integer
+---Emitted when an agent broadcasts a message.
+---@field AGENT_BROADCAST integer
+---Emitted when a permission request is created.
+---@field PERMISSION_REQUESTED integer
+---Emitted when a permission request is resolved.
+---@field PERMISSION_RESOLVED integer
+---Emitted after the user sends a message.
+---@field USER_MESSAGE_SENT integer
+---Emitted after MCP tools are reloaded.
+---@field MCP_TOOLS_RELOADED integer
+---Bind an event listener.
+---Example: blitz.events.add_listener(blitz.events.MODE_CHANGED, function(new_mode_id) end)
+---@field add_listener fun(event: integer, func: function)
+
+---@class BlitzArgDef
+---@field type string
+---@field description string
+---@field required? boolean
 
 ---@class BlitzCtx
 ---@field cwd string
@@ -75,20 +187,6 @@
 ---@field debug_log? boolean
 ---@field ssh_agent_control? boolean
 ---@field skip_permissions? boolean
-
----@class BlitzMcpServerDef
----@field name string
----@field command string
----@field transport? string
----@field args? string[]
----@field tools_prefix? string
-
----@class BlitzSpawnArgs
----@field parent_id? BlitzAgentId
----@field prompt string
----@field agent_type? integer
----@field tool_budget? integer
----@field fork? boolean
 
 ---@class Blitz
 ---@field mcp BlitzMcp
@@ -171,88 +269,6 @@
 ---@field shell fun(cmd: string): any
 ---Push a new popup notification with a lifetime of 8s to the top right corner.
 ---@field push_notification fun(message: string)
-
----@class BlitzMcp
----Register an MCP stdio server. Disabled until explicitly enabled.
----@field add fun(def: BlitzMcpServerDef): integer
----Enable an MCP server for an agent type. Defaults to blitz.AGENT_GENERAL.
----@field enable fun(mcp_id: integer, agent_type?: integer)
-
----@class BlitzJson
----Encode a Lua value as JSON.
----Supports nil, booleans, numbers, strings, and tables.
----@field encode fun(obj: any): string|nil, boolean
----Decode a JSON string into Lua values.
----JSON arrays become 1-indexed Lua tables; objects become Lua tables; JSON null becomes nil.
----@field decode fun(json: string): any, boolean
-
----@class BlitzQueue
----Reset the active session.
----@field reset_session fun()
----Cancel all in-flight agent work and drop streaming preview.
----@field cancel fun()
----Retry the main agent's last turn.
----@field retry fun()
----Request compaction for the main agent.
----@field compact fun()
----Switch the active mode. Forces a full mode-reminder on the next turn.
----@field set_mode fun(mode: integer)
----Push a chat entry into the chat log.
----@field push_chat_entry fun(role: string, text: string)
----Queue a user message for the given agent.
----@field queue_agent_message fun(agent_id: BlitzAgentId, text: string)
----Reserve a free slot and enqueue a spawn or fork into it.
----@field spawn_agent fun(args: BlitzSpawnArgs): BlitzAgentId|nil
----Block until the referenced agent reaches a terminal state.
----@field await_agent fun(agent_id: BlitzAgentId): integer
----Return the awaited agent's last assistant text.
----@field await_agent_result fun(agent_id: BlitzAgentId): string|nil
----Save current session to disk.
----@field save_session fun(path: string)
----Load a session from disk.
----@field load_session fun(path: string)
----Attach a screenshot/image to the current input.
----@field attach_screenshot fun(data: string, media_type?: string)
-
----@class BlitzToolDef
----@field BASH string
----@field CANCEL_BACKGROUND string
----@field READ string
----@field WRITE string
----@field EDIT string
----@field PATCH string
----@field AGENT string
----@field LIST_TASKS string
----@field UPDATE_TASK_STATE string
----@field CREATE_TASK string
----@field ASK string
----@field ENTER_SSH string
----@field EXIT_SSH string
----@field SEND_MESSAGE_TO_AGENT string
----@field AWAIT_AGENT string
----@field CANCEL_AGENT string
----@field RIPGREP string
-
----@class BlitzEventDef
----@field SESSION_RESET integer
----@field MODE_CHANGED integer
----@field AGENT_CREATED integer
----@field AGENT_STARTED integer
----@field AGENT_COMPLETE integer
----@field AGENT_FAILED integer
----@field AGENT_CANCELLED integer
----@field COMPACTION_STARTED integer
----@field COMPACTION_COMPLETE integer
----@field TOOL_CALL_STARTED integer
----@field TOOL_CALL_COMPLETE integer
----@field AGENT_BROADCAST integer
----@field PERMISSION_REQUESTED integer
----@field PERMISSION_RESOLVED integer
----@field USER_MESSAGE_SENT integer
----@field MCP_TOOLS_RELOADED integer
----Bind an event listener.
----Example: blitz.add_listener(blitz.EVENT_MODE_CHANGED, function(new_mode_id) end)
----@field add_listener fun(event: integer, func: function)
 
 ---@type Blitz
 blitz = {}
