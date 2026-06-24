@@ -78,6 +78,8 @@
 ---@field AWAIT_AGENT string
 ---@field CANCEL_AGENT string
 ---@field RIPGREP string
+---remove test function
+---@field remove fun(value: string)
 
 ---@class BlitzEventDef
 ---Emitted after the active session is reset.

@@ -24,6 +24,90 @@ pub const AWAIT_CANCELED: c_int = 3;
 pub const AWAIT_INVALID: c_int = 4;
 // ----------------------------
 
+const FunctionDef = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+};
+
+const LuaFnRef = struct {
+    idx: c_int,
+};
+
+// TODO: finalize and implement for all lua bindings
+pub fn LuaFnBind(
+    comptime func: anytype,
+    comptime name: []const u8,
+) fn (?*c.lua_State) callconv(.c) c_int {
+    const FnInfo = @typeInfo(@TypeOf(func)).@"fn";
+
+    comptime var arg_types: [FnInfo.params.len]type = undefined;
+    inline for (FnInfo.params, 0..) |p, i| arg_types[i] = p.type.?;
+    const Args = @Tuple(&arg_types);
+
+    return struct {
+        fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+            const state = L.?;
+
+            var args: Args = undefined;
+            var offset: c_int = 1;
+
+            inline for (FnInfo.params, 0..) |p, i| {
+                switch (p.type.?) {
+                    *r.app.App => {
+                        @field(args, std.fmt.comptimePrint("{}", .{i})) = getAppFromRegistry(state) orelse {
+                            _ = c.luaL_error(state, "failed to get app");
+                            return 0;
+                        };
+                    },
+                    *c.lua_State => {
+                        @field(args, std.fmt.comptimePrint("{}", .{i})) = state;
+                    },
+                    else => |any| {
+                        @field(args, std.fmt.comptimePrint("{}", .{i})) =
+                            readAnyArg(any, state, name, @as(c_int, offset)) orelse {
+                                _ = c.luaL_error(state, "Invalid argument , expected " ++ @typeName(any) ++ " @arg %d", i);
+                                return 0;
+                            };
+
+                        offset += 1;
+                    },
+                }
+            }
+
+            if (FnInfo.return_type) |ret_type| {
+                const RetInfo = @typeInfo(ret_type);
+                const ret: ret_type = @call(.auto, func, args);
+
+                switch (RetInfo) {
+                    .error_union => |eun| {
+                        const value = ret catch |err| {
+                            _ = c.luaL_error(state, "function '" ++ name ++ "' failed with '%s'", @errorName(err).ptr);
+                            return 0;
+                        };
+
+                        const Info = @typeInfo(eun.payload);
+                        switch (Info) {
+                            .optional => {
+                                if (value) |inner| {
+                                    pushAny(state, inner);
+                                } else {
+                                    c.lua_pushnil(state);
+                                }
+                                return 1;
+                            },
+                            else => {
+                                pushAny(state, value);
+                                return 1;
+                            },
+                        }
+                    },
+                    else => @compileError("must return error union"),
+                }
+            }
+        }
+    }.lua_fn;
+}
+
 pub const LuaType = union(enum) {
     raw: []const u8,
     raw_refs: struct {
@@ -366,53 +450,84 @@ pub const Blitz = LuaType{ .table_def = .{ .name = "Blitz", .fields = &.{
     },
 } } };
 
-pub const BlitzToolDef = LuaType{ .table_def = .{ .name = "BlitzToolDef", .fields = &.{
-    .{ .name = "BASH", .ty = LuaType.string, .value = .{ .string = tl.bash.BashTool.def.name } },
-    .{ .name = "CANCEL_BACKGROUND", .ty = LuaType.string, .value = .{ .string = tl.bash.CancelBackgroundCommand.def.name } },
-    .{ .name = "READ", .ty = LuaType.string, .value = .{ .string = tl.read.ReadTool.def.name } },
-    .{ .name = "WRITE", .ty = LuaType.string, .value = .{ .string = tl.write.WriteTool.def.name } },
-    .{ .name = "EDIT", .ty = LuaType.string, .value = .{ .string = tl.edit.EditTool.def.name } },
-    .{ .name = "PATCH", .ty = LuaType.string, .value = .{ .string = tl.patch.PatchTool.def.name } },
-    .{ .name = "AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AgentTool.def.name } },
-    .{ .name = "LIST_TASKS", .ty = LuaType.string, .value = .{ .string = tl.tasks.ListTasksTool.def.name } },
-    .{ .name = "UPDATE_TASK_STATE", .ty = LuaType.string, .value = .{ .string = tl.tasks.UpdateTaskStateTool.def.name } },
-    .{ .name = "CREATE_TASK", .ty = LuaType.string, .value = .{ .string = tl.tasks.CreateTaskTool.def.name } },
-    .{ .name = "ASK", .ty = LuaType.string, .value = .{ .string = tl.ask.AskTool.def.name } },
-    .{ .name = "ENTER_SSH", .ty = LuaType.string, .value = .{ .string = tl.ssh.EnterSshMode.def.name } },
-    .{ .name = "EXIT_SSH", .ty = LuaType.string, .value = .{ .string = tl.ssh.ExitSshMode.def.name } },
-    .{ .name = "SEND_MESSAGE_TO_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.SendMessageToAgent.def.name } },
-    .{ .name = "AWAIT_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AwaitAgent.def.name } },
-    .{ .name = "CANCEL_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.CancelAgent.def.name } },
-    .{ .name = "RIPGREP", .ty = LuaType.string, .value = .{ .string = tl.rg.RipGrepTool.def.name } },
-} } };
-
-pub const BlitzEventDef = LuaType{ .table_def = .{ .name = "BlitzEventDef", .fields = &.{
-    .{ .name = "SESSION_RESET", .desc = "Emitted after the active session is reset.", .ty = LuaType.integer, .value = .{ .integer = 0 } },
-    .{ .name = "MODE_CHANGED", .desc = "Emitted after the active session mode changes.", .ty = LuaType.integer, .value = .{ .integer = 1 } },
-    .{ .name = "AGENT_CREATED", .desc = "Emitted after an agent slot is created.", .ty = LuaType.integer, .value = .{ .integer = 2 } },
-    .{ .name = "AGENT_STARTED", .desc = "Emitted when an agent starts running.", .ty = LuaType.integer, .value = .{ .integer = 3 } },
-    .{ .name = "AGENT_COMPLETE", .desc = "Emitted when an agent completes.", .ty = LuaType.integer, .value = .{ .integer = 4 } },
-    .{ .name = "AGENT_FAILED", .desc = "Emitted when an agent fails.", .ty = LuaType.integer, .value = .{ .integer = 5 } },
-    .{ .name = "AGENT_CANCELLED", .desc = "Emitted when an agent is cancelled.", .ty = LuaType.integer, .value = .{ .integer = 6 } },
-    .{ .name = "COMPACTION_STARTED", .desc = "Emitted when compaction starts.", .ty = LuaType.integer, .value = .{ .integer = 7 } },
-    .{ .name = "COMPACTION_COMPLETE", .desc = "Emitted when compaction completes.", .ty = LuaType.integer, .value = .{ .integer = 8 } },
-    .{ .name = "TOOL_CALL_STARTED", .desc = "Emitted when a tool call starts.", .ty = LuaType.integer, .value = .{ .integer = 9 } },
-    .{ .name = "TOOL_CALL_COMPLETE", .desc = "Emitted when a tool call completes.", .ty = LuaType.integer, .value = .{ .integer = 10 } },
-    .{ .name = "AGENT_BROADCAST", .desc = "Emitted when an agent broadcasts a message.", .ty = LuaType.integer, .value = .{ .integer = 11 } },
-    .{ .name = "PERMISSION_REQUESTED", .desc = "Emitted when a permission request is created.", .ty = LuaType.integer, .value = .{ .integer = 12 } },
-    .{ .name = "PERMISSION_RESOLVED", .desc = "Emitted when a permission request is resolved.", .ty = LuaType.integer, .value = .{ .integer = 13 } },
-    .{ .name = "USER_MESSAGE_SENT", .desc = "Emitted after the user sends a message.", .ty = LuaType.integer, .value = .{ .integer = 14 } },
-    .{ .name = "MCP_TOOLS_RELOADED", .desc = "Emitted after MCP tools are reloaded.", .ty = LuaType.integer, .value = .{ .integer = 15 } },
-    .{
-        .name = "add_listener",
-        .desc =
-        \\Bind an event listener.
-        \\Example: blitz.events.add_listener(blitz.events.MODE_CHANGED, function(new_mode_id) end)
-        ,
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "event", .ty = LuaType.integer }, .{ .name = "func", .ty = LuaType{ .function = .{} } } } } },
-        .fn_ptr = luaEventAddListener,
+pub const BlitzToolDef = LuaType{
+    .table_def = .{
+        .name = "BlitzToolDef",
+        .fields = &.{
+            .{ .name = "BASH", .ty = LuaType.string, .value = .{ .string = tl.bash.BashTool.def.name } },
+            .{ .name = "CANCEL_BACKGROUND", .ty = LuaType.string, .value = .{ .string = tl.bash.CancelBackgroundCommand.def.name } },
+            .{ .name = "READ", .ty = LuaType.string, .value = .{ .string = tl.read.ReadTool.def.name } },
+            .{ .name = "WRITE", .ty = LuaType.string, .value = .{ .string = tl.write.WriteTool.def.name } },
+            .{ .name = "EDIT", .ty = LuaType.string, .value = .{ .string = tl.edit.EditTool.def.name } },
+            .{ .name = "PATCH", .ty = LuaType.string, .value = .{ .string = tl.patch.PatchTool.def.name } },
+            .{ .name = "AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AgentTool.def.name } },
+            .{ .name = "LIST_TASKS", .ty = LuaType.string, .value = .{ .string = tl.tasks.ListTasksTool.def.name } },
+            .{ .name = "UPDATE_TASK_STATE", .ty = LuaType.string, .value = .{ .string = tl.tasks.UpdateTaskStateTool.def.name } },
+            .{ .name = "CREATE_TASK", .ty = LuaType.string, .value = .{ .string = tl.tasks.CreateTaskTool.def.name } },
+            .{ .name = "ASK", .ty = LuaType.string, .value = .{ .string = tl.ask.AskTool.def.name } },
+            .{ .name = "ENTER_SSH", .ty = LuaType.string, .value = .{ .string = tl.ssh.EnterSshMode.def.name } },
+            .{ .name = "EXIT_SSH", .ty = LuaType.string, .value = .{ .string = tl.ssh.ExitSshMode.def.name } },
+            .{ .name = "SEND_MESSAGE_TO_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.SendMessageToAgent.def.name } },
+            .{ .name = "AWAIT_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AwaitAgent.def.name } },
+            .{ .name = "CANCEL_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.CancelAgent.def.name } },
+            .{ .name = "RIPGREP", .ty = LuaType.string, .value = .{ .string = tl.rg.RipGrepTool.def.name } },
+            .{
+                .name = "remove",
+                .desc = "remove test function",
+                .ty = LuaType{ .function = .{ .args = &.{
+                    .{ .name = "value", .ty = .string, .desc = "print this test" },
+                } } },
+                .fn_ptr = LuaFnBind((struct {
+                    fn t(a: *r.app.App, val: []const u8) !?[]const u8 {
+                        std.log.debug("val {s}", .{val});
+                        try a.cmd_queue.append(a.io, .{ .push_notification = "hello world" });
+                        // return null;
+                        return error.LolFAILED;
+                    }
+                }).t, "remove"),
+            },
+        },
     },
-} } };
+};
+
+pub const BlitzEventDef = LuaType{
+    .table_def = .{
+        .name = "BlitzEventDef",
+        .fields = &.{
+            .{ .name = "SESSION_RESET", .desc = "Emitted after the active session is reset.", .ty = LuaType.integer, .value = .{ .integer = 0 } },
+            .{ .name = "MODE_CHANGED", .desc = "Emitted after the active session mode changes.", .ty = LuaType.integer, .value = .{ .integer = 1 } },
+            .{ .name = "AGENT_CREATED", .desc = "Emitted after an agent slot is created.", .ty = LuaType.integer, .value = .{ .integer = 2 } },
+            .{ .name = "AGENT_STARTED", .desc = "Emitted when an agent starts running.", .ty = LuaType.integer, .value = .{ .integer = 3 } },
+            .{ .name = "AGENT_COMPLETE", .desc = "Emitted when an agent completes.", .ty = LuaType.integer, .value = .{ .integer = 4 } },
+            .{ .name = "AGENT_FAILED", .desc = "Emitted when an agent fails.", .ty = LuaType.integer, .value = .{ .integer = 5 } },
+            .{ .name = "AGENT_CANCELLED", .desc = "Emitted when an agent is cancelled.", .ty = LuaType.integer, .value = .{ .integer = 6 } },
+            .{ .name = "COMPACTION_STARTED", .desc = "Emitted when compaction starts.", .ty = LuaType.integer, .value = .{ .integer = 7 } },
+            .{ .name = "COMPACTION_COMPLETE", .desc = "Emitted when compaction completes.", .ty = LuaType.integer, .value = .{ .integer = 8 } },
+            .{ .name = "TOOL_CALL_STARTED", .desc = "Emitted when a tool call starts.", .ty = LuaType.integer, .value = .{ .integer = 9 } },
+            .{ .name = "TOOL_CALL_COMPLETE", .desc = "Emitted when a tool call completes.", .ty = LuaType.integer, .value = .{ .integer = 10 } },
+            .{ .name = "AGENT_BROADCAST", .desc = "Emitted when an agent broadcasts a message.", .ty = LuaType.integer, .value = .{ .integer = 11 } },
+            .{ .name = "PERMISSION_REQUESTED", .desc = "Emitted when a permission request is created.", .ty = LuaType.integer, .value = .{ .integer = 12 } },
+            .{ .name = "PERMISSION_RESOLVED", .desc = "Emitted when a permission request is resolved.", .ty = LuaType.integer, .value = .{ .integer = 13 } },
+            .{ .name = "USER_MESSAGE_SENT", .desc = "Emitted after the user sends a message.", .ty = LuaType.integer, .value = .{ .integer = 14 } },
+            .{ .name = "MCP_TOOLS_RELOADED", .desc = "Emitted after MCP tools are reloaded.", .ty = LuaType.integer, .value = .{ .integer = 15 } },
+            .{
+                .name = "add_listener",
+                .desc =
+                \\Bind an event listener.
+                \\Example: blitz.events.add_listener(blitz.events.MODE_CHANGED, function(new_mode_id) end)
+                ,
+                .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "event", .ty = LuaType.integer }, .{ .name = "func", .ty = LuaType{ .function = .{} } } } } },
+                // .fn_ptr = luaEventAddListener,
+                .fn_ptr = LuaFnBind((struct {
+                    fn t(a: *r.app.App, event: u32, func: LuaFnRef) !void {
+                        const ev: r.events.AppEventTag = @enumFromInt(event);
+                        a.event_bus.addLuaListener(a.arena_app.allocator(), ev, func.idx) catch {};
+                    }
+                }).t, "remove"),
+            },
+        },
+    },
+};
 
 const BlitzMcp = LuaType{ .table_def = .{ .name = "BlitzMcp", .fields = &.{
     .{
@@ -1877,6 +1992,12 @@ fn readAnyValue(comptime T: type, state: *c.lua_State, idx: c_int) ?T {
 }
 
 fn readAnyValueAlloc(comptime T: type, state: *c.lua_State, idx: c_int, allocator: ?Allocator) ?T {
+    if (T == LuaFnRef) {
+        if (c.lua_type(state, idx) != c.LUA_TFUNCTION) return null;
+        c.lua_pushvalue(state, idx);
+        return .{ .idx = c.luaL_ref(state, c.LUA_REGISTRYINDEX) };
+    }
+
     switch (@typeInfo(T)) {
         .pointer => |ptr| {
             if (ptr.size != .slice) @compileError("readAnyValue: unsupported pointer type " ++ @typeName(T));
