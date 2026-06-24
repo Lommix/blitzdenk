@@ -3,11 +3,7 @@
 Coding and research harness for posix systems. No dependencies, just Zig and vendored Lua.
 Configure, override and extend in Lua.
 
-"If `Opencode` and `Pi` had a baby on bare metal and choose Lua as configuration base, that's Blitzdenk!"
-
 ![screenshot](docs/screen.jpg)
-
-There will never be a risk of supply chain attacks, because there are no chains. This repo is fully self contained.
 
 ## Core features and patterns
 
@@ -20,7 +16,7 @@ There will never be a risk of supply chain attacks, because there are no chains.
 
 ## Default tools
 
-- `write`,`edit`, `bash`,`read`, `patch` = SSH compliant
+- `write`,`edit`, `bash`,`read`, `patch`, `rg` = SSH compliant
 - `Subagents` and`Forks`
 - `list_tasks`, `update_task_state`, `create_task`
 - `ask_user` simple multiple choice questions

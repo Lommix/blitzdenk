@@ -5,12 +5,14 @@ const ChatEntry = r.app.ChatEntry;
 
 // thread safe command queue
 pub const CommandQueue = struct {
+    alloc: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     _data: std.ArrayList(Command) = .empty,
     _m: std.Io.Mutex = .init,
 
     pub fn init(alloc: std.mem.Allocator) !CommandQueue {
         return CommandQueue{
+            .alloc = alloc,
             .arena = std.heap.ArenaAllocator.init(alloc),
         };
     }
@@ -28,15 +30,17 @@ pub const CommandQueue = struct {
 
     pub fn apply(self: *CommandQueue, io: std.Io, app: *App) !void {
         try self._m.lock(io);
-        defer self._m.unlock(io);
+        var arena = self.arena;
+        var data = self._data;
+        self.arena = std.heap.ArenaAllocator.init(self.alloc);
+        self._data = .empty;
+        self._m.unlock(io);
+        defer arena.deinit();
 
         var i: u32 = 0;
-        while (i < self._data.items.len) : (i += 1) {
-            try self._data.items[i].execute(app);
+        while (i < data.items.len) : (i += 1) {
+            try data.items[i].execute(app);
         }
-
-        self._data = .empty;
-        _ = self.arena.reset(.retain_capacity);
     }
 };
 
