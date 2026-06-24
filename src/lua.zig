@@ -127,6 +127,7 @@ pub const LuaType = union(enum) {
     function: struct {
         args: []const Field = &.{},
         ret: ?*const LuaType = null,
+        fn_ptr: c.lua_CFunction = null,
     },
     userdata,
     thread,
@@ -145,7 +146,6 @@ pub const LuaType = union(enum) {
         desc: ?[]const u8 = null,
         optional: bool = false,
         value: ?Value = null,
-        fn_ptr: ?c.lua_CFunction = null,
     };
 };
 
@@ -279,75 +279,108 @@ pub const Blitz = LuaType{ .table_def = .{ .name = "Blitz", .fields = &.{
     .{
         .name = "register_tool",
         .desc = "Register a tool.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "def", .ty = ToolDef }}, .ret = &LuaString } },
-        .fn_ptr = luaRegisterTool,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "def", .ty = ToolDef }},
+            .ret = &LuaString,
+            .fn_ptr = luaRegisterTool,
+        } },
     },
     .{
         .name = "add_tool",
         .desc = "Add a single tool from the tool pool to an agent type's tool set.",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_name", .ty = LuaType.string } } } },
-        .fn_ptr = luaAddTool,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_name", .ty = LuaType.string } },
+            .fn_ptr = luaAddTool,
+        } },
     },
-    .{ .name = "get_main_agent", .desc = "Return the main agent, if a session is running.", .ty = LuaType{ .function = .{ .ret = &AgentIdOrNilDef } }, .fn_ptr = luaGetMainAgent },
+    .{ .name = "get_main_agent", .desc = "Return the main agent, if a session is running.", .ty = LuaType{ .function = .{
+        .fn_ptr = luaGetMainAgent,
+        .ret = &AgentIdOrNilDef,
+    } } },
     .{
         .name = "ok",
         .desc = "Return success with content.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "content", .ty = LuaType.string, .optional = true }}, .ret = &StatusDef } },
-        .fn_ptr = luaOk,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "content", .ty = LuaType.string, .optional = true }},
+            .ret = &StatusDef,
+            .fn_ptr = luaOk,
+        } },
     },
     .{
         .name = "err",
         .desc = "Return error with message.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "message", .ty = LuaType.string, .optional = true }}, .ret = &StatusDef } },
-        .fn_ptr = luaErr,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "message", .ty = LuaType.string, .optional = true }},
+            .ret = &StatusDef,
+            .fn_ptr = luaErr,
+        } },
     },
     .{
         .name = "exit_loop",
         .desc = "Exit the agent loop with a message.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "content", .ty = LuaType.string, .optional = true }}, .ret = &StatusDef } },
-        .fn_ptr = luaExitLoop,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "content", .ty = LuaType.string, .optional = true }},
+            .ret = &StatusDef,
+            .fn_ptr = luaExitLoop,
+        } },
     },
     .{
         .name = "add_provider",
         .desc = "Register a provider.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "def", .ty = ProviderDef }}, .ret = &LuaInteger } },
-        .fn_ptr = luaAddProvider,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "def", .ty = ProviderDef }},
+            .ret = &LuaInteger,
+            .fn_ptr = luaAddProvider,
+        } },
     },
     .{
         .name = "add_agent",
         .desc = "Register a complete agent configuration.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "def", .ty = AgentDef }}, .ret = &LuaInteger } },
-        .fn_ptr = luaAddAgent,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "def", .ty = AgentDef }},
+            .ret = &LuaInteger,
+            .fn_ptr = luaAddAgent,
+        } },
     },
     .{
         .name = "set_model",
         .desc = "Set the default model.",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "model", .ty = LuaType.string }, .{ .name = "handle", .ty = LuaType.integer } } } },
-        .fn_ptr = luaSetModel,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "model", .ty = LuaType.string }, .{ .name = "handle", .ty = LuaType.integer } },
+            .fn_ptr = luaSetModel,
+        } },
     },
     .{
         .name = "set_model_agent",
         .desc = "Set the model config for a specific agent.",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "model", .ty = LuaType.string }, .{ .name = "effort", .ty = LuaType.string }, .{ .name = "handle", .ty = LuaType.integer } } } },
-        .fn_ptr = luaSetModelAgent,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "model", .ty = LuaType.string }, .{ .name = "effort", .ty = LuaType.string }, .{ .name = "handle", .ty = LuaType.integer } },
+            .fn_ptr = luaSetModelAgent,
+        } },
     },
     .{
         .name = "token_usage",
         .desc = "Return token usage currently shown by the statusbar.",
-        .ty = LuaType{ .function = .{ .ret = &TokenUsageDef } },
-        .fn_ptr = luaTokenUsage,
+        .ty = LuaType{ .function = .{
+            .ret = &TokenUsageDef,
+            .fn_ptr = luaTokenUsage,
+        } },
     },
     .{
         .name = "context_percent",
         .desc = "Return main-agent context fill percentage currently shown by the statusbar.",
-        .ty = LuaType{ .function = .{ .ret = &LuaNumber } },
-        .fn_ptr = luaContextPercent,
+        .ty = LuaType{ .function = .{
+            .ret = &LuaNumber,
+            .fn_ptr = luaContextPercent,
+        } },
     },
     .{
         .name = "set_compact_edge",
         .desc = "Set the default context edge, in tokens, used for statusbar percentage and auto-compaction.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "tokens", .ty = LuaType.integer }} } },
-        .fn_ptr = luaSetCompactEdge,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "tokens", .ty = LuaType.integer }},
+            .fn_ptr = luaSetCompactEdge,
+        } },
     },
     .{
         .name = "bind",
@@ -355,14 +388,19 @@ pub const Blitz = LuaType{ .table_def = .{ .name = "Blitz", .fields = &.{
         \\Bind a vim-style key combo to a Lua callback.
         \\Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
         ,
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "key", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } } } },
-        .fn_ptr = luaBind,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "key", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
+            .fn_ptr = luaBind,
+        } },
     },
     .{
         .name = "html_to_markdown",
         .desc = "Convert HTML to markdown using the built-in parser.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "html", .ty = LuaType.string }}, .ret = &LuaString } },
-        .fn_ptr = luaHtmlToMarkdown,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "html", .ty = LuaType.string }},
+            .ret = &LuaString,
+            .fn_ptr = luaHtmlToMarkdown,
+        } },
     },
     .{
         .name = "add_command",
@@ -370,8 +408,10 @@ pub const Blitz = LuaType{ .table_def = .{ .name = "Blitz", .fields = &.{
         \\Bind a colon command to a Lua callback.
         \\Example: blitz.add_command(":help", function(args) end)
         ,
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "command", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } } } },
-        .fn_ptr = luaAddCommand,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "command", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
+            .fn_ptr = luaAddCommand,
+        } },
     },
     .{
         .name = "set_agent_tools",
@@ -379,74 +419,105 @@ pub const Blitz = LuaType{ .table_def = .{ .name = "Blitz", .fields = &.{
         \\Override the tool set for a given agent type. Replaces defaults entirely.
         \\Names must match built-in tool names or names of tools registered via blitz.register_tool.
         ,
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_names", .ty = StringListDef } } } },
-        .fn_ptr = luaSetAgentTools,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_names", .ty = StringListDef } },
+            .fn_ptr = luaSetAgentTools,
+        } },
     },
     .{
         .name = "set_prompt",
         .desc = "Override the system prompt for a given agent type.",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } } } },
-        .fn_ptr = luaSetPrompt,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } },
+            .fn_ptr = luaSetPrompt,
+        } },
     },
     .{
         .name = "set_mode_prompt",
         .desc = "Override the mode reminder prompt (full variant).",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } } } },
-        .fn_ptr = luaSetModePrompt,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } },
+            .fn_ptr = luaSetModePrompt,
+        } },
     },
     .{
         .name = "set_mode_prompt_sparse",
         .desc = "Override the sparse mode reminder prompt (subsequent turns).",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } } } },
-        .fn_ptr = luaSetModePromptSparse,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } },
+            .fn_ptr = luaSetModePromptSparse,
+        } },
     },
     .{
         .name = "set_mode_name",
         .desc = "Override the display name shown for a mode in the status bar.",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "name", .ty = LuaType.string } } } },
-        .fn_ptr = luaSetModeName,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "name", .ty = LuaType.string } },
+            .fn_ptr = luaSetModeName,
+        } },
     },
     .{
         .name = "add_mode",
         .desc = "Add a custom mode.",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "name", .ty = LuaType.string }, .{ .name = "color", .ty = LuaType.string }, .{ .name = "prompt", .ty = LuaType.string }, .{ .name = "sparse", .ty = LuaType.string } }, .ret = &LuaInteger } },
-        .fn_ptr = luaAddMode,
+        .ty = LuaType{ .function = .{
+            .args = &.{
+                .{ .name = "name", .ty = LuaType.string },
+                .{ .name = "color", .ty = LuaType.string },
+                .{ .name = "prompt", .ty = LuaType.string },
+                .{ .name = "sparse", .ty = LuaType.string },
+            },
+            .ret = &LuaInteger,
+            .fn_ptr = luaAddMode,
+        } },
     },
     .{
         .name = "set_mode",
         .desc = "Switch the active session mode. Forces a full mode-reminder on the next turn.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "mode", .ty = LuaType.integer }} } },
-        .fn_ptr = luaSetMode,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "mode", .ty = LuaType.integer }},
+            .fn_ptr = luaSetMode,
+        } },
     },
     .{
         .name = "get_flags",
         .desc = "Return the current app flags.",
-        .ty = LuaType{ .function = .{ .ret = &AppFlagsDef } },
-        .fn_ptr = luaGetFlags,
+        .ty = LuaType{ .function = .{
+            .ret = &AppFlagsDef,
+            .fn_ptr = luaGetFlags,
+        } },
     },
     .{
         .name = "set_flags",
         .desc = "Set the app flags from a table. Missing fields are set to their default values.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "flags", .ty = AppFlagsDef }} } },
-        .fn_ptr = luaSetFlags,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "flags", .ty = AppFlagsDef }},
+            .fn_ptr = luaSetFlags,
+        } },
     },
     .{
         .name = "log",
         .desc = "Write a debug log line.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "msg", .ty = LuaType.string }} } },
-        .fn_ptr = luaLog,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "msg", .ty = LuaType.string }},
+            .fn_ptr = luaLog,
+        } },
     },
     .{
         .name = "shell",
         .desc = "Execute a shell command.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "cmd", .ty = LuaType.string }}, .ret = &LuaAny } },
-        .fn_ptr = luaShell,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "cmd", .ty = LuaType.string }},
+            .ret = &LuaAny,
+            .fn_ptr = luaShell,
+        } },
     },
     .{
         .name = "push_notification",
         .desc = "Push a new popup notification with a lifetime of 8s to the top right corner.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "message", .ty = LuaType.string }} } },
-        .fn_ptr = luaPushNotification,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "message", .ty = LuaType.string }},
+            .fn_ptr = luaPushNotification,
+        } },
     },
 } } };
 
@@ -474,17 +545,22 @@ pub const BlitzToolDef = LuaType{
             .{
                 .name = "remove",
                 .desc = "remove test function",
-                .ty = LuaType{ .function = .{ .args = &.{
-                    .{ .name = "value", .ty = .string, .desc = "print this test" },
-                } } },
-                .fn_ptr = LuaFnBind((struct {
-                    fn t(a: *r.app.App, val: []const u8) !?[]const u8 {
-                        std.log.debug("val {s}", .{val});
-                        try a.cmd_queue.append(a.io, .{ .push_notification = "hello world" });
-                        // return null;
-                        return error.LolFAILED;
-                    }
-                }).t, "remove"),
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{
+                            .{ .name = "value", .ty = .string, .desc = "print this test" },
+                        },
+
+                        .fn_ptr = LuaFnBind((struct {
+                            fn t(a: *r.app.App, val: []const u8) !?[]const u8 {
+                                std.log.debug("val {s}", .{val});
+                                try a.cmd_queue.append(a.io, .{ .push_notification = "hello world" });
+                                // return null;
+                                return error.LolFAILED;
+                            }
+                        }).t, "remove"),
+                    },
+                },
             },
         },
     },
@@ -516,14 +592,16 @@ pub const BlitzEventDef = LuaType{
                 \\Bind an event listener.
                 \\Example: blitz.events.add_listener(blitz.events.MODE_CHANGED, function(new_mode_id) end)
                 ,
-                .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "event", .ty = LuaType.integer }, .{ .name = "func", .ty = LuaType{ .function = .{} } } } } },
+                .ty = LuaType{ .function = .{
+                    .args = &.{ .{ .name = "event", .ty = LuaType.integer }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
+                    .fn_ptr = LuaFnBind((struct {
+                        fn t(a: *r.app.App, event: u32, func: LuaFnRef) !void {
+                            const ev: r.events.AppEventTag = @enumFromInt(event);
+                            a.event_bus.addLuaListener(a.arena_app.allocator(), ev, func.idx) catch {};
+                        }
+                    }).t, "remove"),
+                } },
                 // .fn_ptr = luaEventAddListener,
-                .fn_ptr = LuaFnBind((struct {
-                    fn t(a: *r.app.App, event: u32, func: LuaFnRef) !void {
-                        const ev: r.events.AppEventTag = @enumFromInt(event);
-                        a.event_bus.addLuaListener(a.arena_app.allocator(), ev, func.idx) catch {};
-                    }
-                }).t, "remove"),
             },
         },
     },
@@ -533,14 +611,21 @@ const BlitzMcp = LuaType{ .table_def = .{ .name = "BlitzMcp", .fields = &.{
     .{
         .name = "add",
         .desc = "Register an MCP stdio server. Disabled until explicitly enabled.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "def", .ty = McpServerDef }}, .ret = &LuaInteger } },
-        .fn_ptr = luaMcpAdd,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "def", .ty = McpServerDef }},
+            .ret = &LuaInteger,
+            .fn_ptr = luaMcpAdd,
+        } },
     },
     .{
         .name = "enable",
         .desc = "Enable an MCP server for an agent type. Defaults to blitz.AGENT_GENERAL.",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "mcp_id", .ty = LuaType.integer }, .{ .name = "agent_type", .ty = LuaType.integer, .optional = true } } } },
-        .fn_ptr = luaMcpEnable,
+        .ty = LuaType{
+            .function = .{
+                .args = &.{ .{ .name = "mcp_id", .ty = LuaType.integer }, .{ .name = "agent_type", .ty = LuaType.integer, .optional = true } },
+                .fn_ptr = luaMcpEnable,
+            },
+        },
     },
 } } };
 
@@ -1379,14 +1464,26 @@ fn luaMcpEnable(L: ?*c.lua_State) callconv(.c) c_int {
 }
 
 const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
-    .{ .name = "encode", .desc =
-    \\Encode a Lua value as JSON.
-    \\Supports nil, booleans, numbers, strings, and tables.
-    , .ty = LuaType{ .function = .{ .args = &.{.{ .name = "obj", .ty = LuaType.any }}, .ret = &JsonEncodeRet } }, .fn_ptr = luaJsonEncode },
+    .{
+        .name = "encode",
+        .desc =
+        \\Encode a Lua value as JSON.
+        \\Supports nil, booleans, numbers, strings, and tables.
+        ,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "obj", .ty = LuaType.any }},
+            .fn_ptr = luaJsonEncode,
+            .ret = &JsonEncodeRet,
+        } },
+    },
     .{ .name = "decode", .desc =
     \\Decode a JSON string into Lua values.
     \\JSON arrays become 1-indexed Lua tables; objects become Lua tables; JSON null becomes nil.
-    , .ty = LuaType{ .function = .{ .args = &.{.{ .name = "json", .ty = LuaType.string }}, .ret = &JsonDecodeRet } }, .fn_ptr = luaJsonDecode },
+    , .ty = LuaType{ .function = .{
+        .args = &.{.{ .name = "json", .ty = LuaType.string }},
+        .ret = &JsonDecodeRet,
+        .fn_ptr = luaJsonDecode,
+    } } },
 } } };
 
 fn luaJsonEncode(L: ?*c.lua_State) callconv(.c) c_int {
@@ -1428,80 +1525,107 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
     .{
         .name = "reset_session",
         .desc = "Reset the active session.",
-        .ty = LuaType{ .function = .{} },
-        .fn_ptr = luaQueueResetSession,
+        .ty = LuaType{
+            .function = .{
+                .fn_ptr = luaQueueResetSession,
+            },
+        },
     },
     .{
         .name = "cancel",
         .desc = "Cancel all in-flight agent work and drop streaming preview.",
-        .ty = LuaType{ .function = .{} },
-        .fn_ptr = luaQueueCancel,
+        .ty = LuaType{ .function = .{
+            .fn_ptr = luaQueueCancel,
+        } },
     },
     .{
         .name = "retry",
         .desc = "Retry the main agent's last turn.",
-        .ty = LuaType{ .function = .{} },
-        .fn_ptr = luaQueueRetry,
+        .ty = LuaType{ .function = .{
+            .fn_ptr = luaQueueRetry,
+        } },
     },
     .{
         .name = "compact",
         .desc = "Request compaction for the main agent.",
-        .ty = LuaType{ .function = .{} },
-        .fn_ptr = luaQueueCompact,
+        .ty = LuaType{ .function = .{
+            .fn_ptr = luaQueueCompact,
+        } },
     },
     .{
         .name = "set_mode",
         .desc = "Switch the active mode. Forces a full mode-reminder on the next turn.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "mode", .ty = LuaType.integer }} } },
-        .fn_ptr = luaQueueSetMode,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "mode", .ty = LuaType.integer }},
+            .fn_ptr = luaQueueSetMode,
+        } },
     },
     .{
         .name = "push_chat_entry",
         .desc = "Push a chat entry into the chat log.",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "role", .ty = LuaType.string }, .{ .name = "text", .ty = LuaType.string } } } },
-        .fn_ptr = luaQueuePushChatEntry,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "role", .ty = LuaType.string }, .{ .name = "text", .ty = LuaType.string } },
+            .fn_ptr = luaQueuePushChatEntry,
+        } },
     },
     .{
         .name = "queue_agent_message",
         .desc = "Queue a user message for the given agent.",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "text", .ty = LuaType.string } } } },
-        .fn_ptr = luaQueueAgentMessage,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "text", .ty = LuaType.string } },
+            .fn_ptr = luaQueueAgentMessage,
+        } },
     },
     .{
         .name = "spawn_agent",
         .desc = "Reserve a free slot and enqueue a spawn or fork into it.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "args", .ty = SpawnAgentArgsDef }}, .ret = &AgentIdOrNilDef } },
-        .fn_ptr = luaQueueSpawnAgent,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "args", .ty = SpawnAgentArgsDef }},
+            .fn_ptr = luaQueueSpawnAgent,
+            .ret = &AgentIdOrNilDef,
+        } },
     },
     .{
         .name = "await_agent",
         .desc = "Block until the referenced agent reaches a terminal state.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }}, .ret = &LuaInteger } },
-        .fn_ptr = luaQueueAwaitAgent,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &LuaInteger,
+            .fn_ptr = luaQueueAwaitAgent,
+        } },
     },
     .{
         .name = "await_agent_result",
         .desc = "Return the awaited agent's last assistant text.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }}, .ret = &StringOrNilDef } },
-        .fn_ptr = luaQueueAwaitAgentResult,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &StringOrNilDef,
+            .fn_ptr = luaQueueAwaitAgentResult,
+        } },
     },
     .{
         .name = "save_session",
         .desc = "Save current session to disk.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "path", .ty = LuaType.string }} } },
-        .fn_ptr = luaQueueSaveSession,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "path", .ty = LuaType.string }},
+            .fn_ptr = luaQueueSaveSession,
+        } },
     },
     .{
         .name = "load_session",
         .desc = "Load a session from disk.",
-        .ty = LuaType{ .function = .{ .args = &.{.{ .name = "path", .ty = LuaType.string }} } },
-        .fn_ptr = luaQueueLoadSession,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "path", .ty = LuaType.string }},
+            .fn_ptr = luaQueueLoadSession,
+        } },
     },
     .{
         .name = "attach_screenshot",
         .desc = "Attach a screenshot/image to the current input.",
-        .ty = LuaType{ .function = .{ .args = &.{ .{ .name = "data", .ty = LuaType.string }, .{ .name = "media_type", .ty = LuaType.string, .optional = true } } } },
-        .fn_ptr = luaQueueAttachScreenshot,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "data", .ty = LuaType.string }, .{ .name = "media_type", .ty = LuaType.string, .optional = true } },
+            .fn_ptr = luaQueueAttachScreenshot,
+        } },
     },
 } } };
 
@@ -1946,12 +2070,15 @@ fn pushLuaType(L: *c.lua_State, comptime ty: LuaType) void {
         if (field.value) |value| {
             pushLuaValue(L, value);
             setFieldPushed(L, -2, field.name);
-        } else if (field.fn_ptr) |fn_ptr| {
-            setCFunctionField(L, -2, field.name, fn_ptr);
         } else switch (field.ty) {
             .table_def => {
                 pushLuaType(L, field.ty);
                 setFieldPushed(L, -2, field.name);
+            },
+            .function => |f| {
+                if (f.fn_ptr) |fn_ptr| {
+                    setCFunctionField(L, -2, field.name, fn_ptr);
+                }
             },
             else => {},
         }
