@@ -154,8 +154,11 @@
 ---@field budget_tokens? integer
 
 ---@class BlitzProviderDef
+---'openai' | 'anthropic' | 'ollama'
 ---@field type string
+---the endpoint url
 ---@field url string
+---the ENVAR holding the api key (not the key itself!)
 ---@field key_envar string
 ---@field effort? string
 ---@field temperature? number

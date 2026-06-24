@@ -28,7 +28,7 @@ const LuaFnRef = struct {
     idx: c_int,
 };
 
-// TODO: finalize and implement for all lua bindings
+/// Comptime Helper to convert zig function to lua
 pub fn LuaFnBind(
     comptime func: anytype,
     comptime name: []const u8,
@@ -193,9 +193,9 @@ const ThinkingDef = LuaType{ .table_def = .{ .name = "BlitzThinking", .fields = 
     .{ .name = "budget_tokens", .ty = LuaType.integer, .optional = true },
 } } };
 const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields = &.{
-    .{ .name = "type", .ty = LuaType.string },
-    .{ .name = "url", .ty = LuaType.string },
-    .{ .name = "key_envar", .ty = LuaType.string },
+    .{ .name = "type", .ty = LuaType.string, .desc = "'openai' | 'anthropic' | 'ollama'" },
+    .{ .name = "url", .ty = LuaType.string, .desc = "the endpoint url" },
+    .{ .name = "key_envar", .ty = LuaType.string, .desc = "the ENVAR holding the api key (not the key itself!)" },
     .{ .name = "effort", .ty = LuaType.string, .optional = true },
     .{ .name = "temperature", .ty = LuaType.number, .optional = true },
     .{ .name = "max_tokens", .ty = LuaType.integer, .optional = true },
@@ -248,7 +248,6 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "tool_budget", .ty = LuaType.integer, .optional = true },
     .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
 } } };
-
 pub const Blitz = LuaType{
     .table_def = .{
         .name = "Blitz",
@@ -525,7 +524,6 @@ pub const Blitz = LuaType{
         },
     },
 };
-
 pub const BlitzToolDef = LuaType{
     .table_def = .{
         .name = "BlitzToolDef",
@@ -604,7 +602,7 @@ pub const BlitzEventDef = LuaType{
                             const ev: r.events.AppEventTag = @enumFromInt(event);
                             a.event_bus.addLuaListener(a.arena_app.allocator(), ev, func.idx) catch {};
                         }
-                    }).t, "remove"),
+                    }).t, "add_listener"),
                 } },
                 // .fn_ptr = luaEventAddListener,
             },

@@ -1,7 +1,7 @@
 -- Blitzdenk Default CFG HOTRELOAD active
 
 -- Context edge used for CTX:% in the statusbar and auto-compaction.
--- blitz.set_compact_edge(124 * 1024)
+blitz.set_compact_edge(128000)
 
 -- Optional custom statusbar renderer. The UI calls this only when Lua is free
 -- and otherwise renders the last returned value.
@@ -120,18 +120,18 @@ blitz.set_compact_edge(128000)
 -- Per-agent tool overrides (full replace). Omit a call to keep defaults.
 -- You need to overwrite this, if you want to add your custom tools
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
-	blitz.TOOL_BASH,
-	blitz.TOOL_CANCEL_AGENT,
-	blitz.TOOL_AWAIT_AGENT,
-	blitz.TOOL_SEND_MESSAGE_TO_AGENT,
-	blitz.TOOL_READ,
-	blitz.TOOL_LIST_TASKS,
-	blitz.TOOL_UPDATE_TASK_STATE,
-	blitz.TOOL_CREATE_TASK,
-	blitz.TOOL_ASK,
-	-- blitz.TOOL_PATCH, -- Some models(GPT) may prefer codex style patch for (edit,write,delte,move).
-	blitz.TOOL_WRITE,
-	blitz.TOOL_EDIT,
+	blitz.tools.BASH,
+	blitz.tools.CANCEL_AGENT,
+	blitz.tools.AWAIT_AGENT,
+	blitz.tools.SEND_MESSAGE_TO_AGENT,
+	blitz.tools.READ,
+	blitz.tools.LIST_TASKS,
+	blitz.tools.UPDATE_TASK_STATE,
+	blitz.tools.CREATE_TASK,
+	blitz.tools.ASK,
+	-- blitz.tools.PATCH, -- Some models(GPT) may prefer codex style patch for (edit,write,delte,move).
+	blitz.tools.WRITE,
+	blitz.tools.EDIT,
 	"lua_repl", -- your tool by name
 })
 

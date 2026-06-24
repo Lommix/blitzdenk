@@ -8,8 +8,5 @@ install:
 test:
 	zig build test
 
-upgrade: install
-	cp src/blitz_defs.lua ~/.config/blitzdenk/meta.lua
-
 gen:
 	zig build gen
