@@ -9,6 +9,139 @@ const log = std.log.scoped(.lua);
 const r = @import("root.zig");
 const lua = @This();
 
+pub const FunctionDef = struct {
+    desc: []const u8,
+    fn_ptr: *anyopaque,
+    args: []const Arg = &.{},
+    ret: ?LuaType = null,
+};
+
+pub const TableDef = struct {
+    name: []const u8,
+    fields: []const Arg,
+};
+
+pub const Arg = struct {
+    name: []const u8,
+    ty: LuaType,
+    optional: bool = false,
+};
+
+pub const LuaType = union(enum) {
+    raw: []const u8,
+    raw_refs: struct {
+        text: []const u8,
+        refs: []const LuaType,
+    },
+    nil,
+    boolean,
+    integer,
+    number,
+    string,
+    table,
+    table_def: TableDef,
+    function,
+    userdata,
+    thread,
+    any,
+};
+
+const StringListDef = LuaType{ .raw = "string[]" };
+const StatusDef = LuaType{ .table_def = .{ .name = "BlitzStatus", .fields = &.{
+    .{ .name = "status", .ty = LuaType.integer },
+    .{ .name = "msg", .ty = LuaType.string, .optional = true },
+} } };
+const AgentIdDef = LuaType{ .table_def = .{ .name = "BlitzAgentId", .fields = &.{
+    .{ .name = "index", .ty = LuaType.integer },
+    .{ .name = "generation", .ty = LuaType.integer },
+} } };
+const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
+    .{ .name = "cwd", .ty = LuaType.string },
+    .{ .name = "agent_id", .ty = AgentIdDef },
+    .{ .name = "state", .ty = LuaType.table },
+    .{ .name = "set_status", .ty = LuaType{ .raw = "fun(msg: string)" } },
+    .{ .name = "set_child_id", .ty = LuaType{ .raw = "fun(agent_id: BlitzAgentId)" } },
+    .{ .name = "approve", .ty = LuaType{ .raw = "fun(tool_name: string, tool_arguments: string): integer, string|nil" } },
+    .{ .name = "plan", .ty = LuaType{ .raw = "fun(path: string, plan_text: string): integer, string|nil" } },
+    .{ .name = "ask", .ty = LuaType{ .raw = "fun(header: string, question: string, options: string[]): integer, string|nil" } },
+} } };
+const CallDef = LuaType{ .table_def = .{ .name = "BlitzCall", .fields = &.{
+    .{ .name = "id", .ty = LuaType.string },
+    .{ .name = "name", .ty = LuaType.string },
+    .{ .name = "arguments", .ty = LuaType.table },
+} } };
+const ToolArgDef = LuaType{ .table_def = .{ .name = "BlitzArgDef", .fields = &.{
+    .{ .name = "type", .ty = LuaType.string },
+    .{ .name = "description", .ty = LuaType.string },
+    .{ .name = "required", .ty = LuaType.boolean, .optional = true },
+} } };
+const TokenUsageDef = LuaType{ .table_def = .{ .name = "BlitzTokenUsage", .fields = &.{
+    .{ .name = "input", .ty = LuaType.integer },
+    .{ .name = "output", .ty = LuaType.integer },
+    .{ .name = "cache", .ty = LuaType.integer },
+    .{ .name = "cache_creation", .ty = LuaType.integer },
+} } };
+const ThinkingDef = LuaType{ .table_def = .{ .name = "BlitzThinking", .fields = &.{
+    .{ .name = "type", .ty = LuaType.string },
+    .{ .name = "budget_tokens", .ty = LuaType.integer, .optional = true },
+} } };
+const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields = &.{
+    .{ .name = "type", .ty = LuaType.string },
+    .{ .name = "url", .ty = LuaType.string },
+    .{ .name = "key_envar", .ty = LuaType.string },
+    .{ .name = "effort", .ty = LuaType.string, .optional = true },
+    .{ .name = "temperature", .ty = LuaType.number, .optional = true },
+    .{ .name = "max_tokens", .ty = LuaType.integer, .optional = true },
+    .{ .name = "max_completion_tokens", .ty = LuaType.integer, .optional = true },
+    .{ .name = "top_p", .ty = LuaType.number, .optional = true },
+    .{ .name = "top_k", .ty = LuaType.integer, .optional = true },
+    .{ .name = "frequency_penalty", .ty = LuaType.number, .optional = true },
+    .{ .name = "presence_penalty", .ty = LuaType.number, .optional = true },
+    .{ .name = "enable_thinking", .ty = LuaType.boolean, .optional = true },
+    .{ .name = "thinking", .ty = ThinkingDef, .optional = true },
+} } };
+const ToolArgsDef = LuaType{ .raw_refs = .{ .text = "table<string, BlitzArgDef>", .refs = &.{ToolArgDef} } };
+const ToolDef = LuaType{ .table_def = .{ .name = "ToolDef", .fields = &.{
+    .{ .name = "name", .ty = LuaType.string },
+    .{ .name = "description", .ty = LuaType.string },
+    .{ .name = "schema", .ty = LuaType.string, .optional = true },
+    .{ .name = "args", .ty = ToolArgsDef, .optional = true },
+    .{ .name = "func", .ty = LuaType{ .raw_refs = .{
+        .text = "fun(ctx: BlitzCtx, call: BlitzCall): BlitzStatus",
+        .refs = &.{ CtxDef, CallDef, StatusDef },
+    } } },
+} } };
+const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
+    .{ .name = "name", .ty = LuaType.string },
+    .{ .name = "description", .ty = LuaType.string },
+    .{ .name = "prompt", .ty = LuaType.string },
+    .{ .name = "tools", .ty = StringListDef },
+    .{ .name = "model", .ty = LuaType.string },
+    .{ .name = "effort", .ty = LuaType.string },
+    .{ .name = "provider", .ty = LuaType.integer },
+    .{ .name = "in_agent_tool", .ty = LuaType.boolean, .optional = true },
+} } };
+const AppFlagsDef = LuaType{ .table_def = .{ .name = "BlitzAppFlags", .fields = &.{
+    .{ .name = "show_thinking", .ty = LuaType.boolean, .optional = true },
+    .{ .name = "debug_log", .ty = LuaType.boolean, .optional = true },
+    .{ .name = "ssh_agent_control", .ty = LuaType.boolean, .optional = true },
+    .{ .name = "skip_permissions", .ty = LuaType.boolean, .optional = true },
+} } };
+const McpServerDef = LuaType{ .table_def = .{ .name = "BlitzMcpServerDef", .fields = &.{
+    .{ .name = "name", .ty = LuaType.string },
+    .{ .name = "command", .ty = LuaType.string },
+    .{ .name = "transport", .ty = LuaType.string, .optional = true },
+    .{ .name = "args", .ty = StringListDef, .optional = true },
+    .{ .name = "tools_prefix", .ty = LuaType.string, .optional = true },
+} } };
+const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fields = &.{
+    .{ .name = "parent_id", .ty = AgentIdDef, .optional = true },
+    .{ .name = "prompt", .ty = LuaType.string },
+    .{ .name = "agent_type", .ty = LuaType.integer, .optional = true },
+    .{ .name = "tool_budget", .ty = LuaType.integer, .optional = true },
+    .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
+} } };
+
 // ── blitz.* return status codes ─────────────────────────────────────
 
 pub const RET_FAILED: c_int = 1;
@@ -30,14 +163,17 @@ pub const AWAIT_FAILED: c_int = 2;
 pub const AWAIT_CANCELED: c_int = 3;
 pub const AWAIT_INVALID: c_int = 4;
 
-const Blitz = struct {
+pub const Blitz = struct {
     mcp: BlitzMcp,
     json: BlitzJson,
     queue: BlitzQueue,
+    tools: BlitzToolDef,
+    events: BlitzEventDef,
 
     pub const RET_FAILED = lua.RET_FAILED;
     pub const RET_OK = lua.RET_OK;
     pub const RET_ERR = lua.RET_ERR;
+    pub const RET_EXIT_LOOP = lua.RET_EXIT_LOOP;
     pub const AGENT_GENERAL = 0;
     pub const AGENT_EXPLORE = 1;
     pub const MODE_EXEC = 0;
@@ -50,40 +186,186 @@ const Blitz = struct {
     pub const AWAIT_FAILED = lua.AWAIT_FAILED;
     pub const AWAIT_CANCELED = lua.AWAIT_CANCELED;
     pub const AWAIT_INVALID = lua.AWAIT_INVALID;
-    pub const EVENT_SESSION_RESET = 0;
-    pub const EVENT_MODE_CHANGED = 1;
-    pub const EVENT_AGENT_CREATED = 2;
-    pub const EVENT_AGENT_STARTED = 3;
-    pub const EVENT_AGENT_COMPLETE = 4;
-    pub const EVENT_AGENT_FAILED = 5;
-    pub const EVENT_AGENT_CANCELLED = 6;
-    pub const EVENT_COMPACTION_STARTED = 7;
-    pub const EVENT_COMPACTION_COMPLETE = 8;
-    pub const EVENT_TOOL_CALL_STARTED = 9;
-    pub const EVENT_TOOL_CALL_COMPLETE = 10;
-    pub const EVENT_AGENT_BROADCAST = 11;
-    pub const EVENT_PERMISSION_REQUESTED = 12;
-    pub const EVENT_PERMISSION_RESOLVED = 13;
-    pub const EVENT_USER_MESSAGE_SENT = 14;
-    pub const EVENT_MCP_TOOLS_RELOADED = 15;
 
-    pub const TOOL_BASH = tl.bash.BashTool.def.name;
-    pub const TOOL_CANCEL_BACKGROUND = tl.bash.CancelBackgroundCommand.def.name;
-    pub const TOOL_READ = tl.read.ReadTool.def.name;
-    pub const TOOL_WRITE = tl.write.WriteTool.def.name;
-    pub const TOOL_EDIT = tl.edit.EditTool.def.name;
-    pub const TOOL_PATCH = tl.patch.PatchTool.def.name;
-    pub const TOOL_AGENT = tl.agent.AgentTool.def.name;
-    pub const TOOL_LIST_TASKS = tl.tasks.ListTasksTool.def.name;
-    pub const TOOL_UPDATE_TASK_STATE = tl.tasks.UpdateTaskStateTool.def.name;
-    pub const TOOL_CREATE_TASK = tl.tasks.CreateTaskTool.def.name;
-    pub const TOOL_ASK = tl.ask.AskTool.def.name;
-    pub const TOOL_ENTER_SSH = tl.ssh.EnterSshMode.def.name;
-    pub const TOOL_EXIT_SSH = tl.ssh.ExitSshMode.def.name;
-    pub const TOOL_SEND_MESSAGE_TO_AGENT = tl.agent.SendMessageToAgent.def.name;
-    pub const TOOL_AWAIT_AGENT = tl.agent.AwaitAgent.def.name;
-    pub const TOOL_CANCEL_AGENT = tl.agent.CancelAgent.def.name;
-    pub const TOOL_RIPGREP = tl.rg.RipGrepTool.def.name;
+    pub const _function_defs = .{
+        .{
+            .desc = "Register a tool.",
+            .fn_ptr = register_tool,
+            .args = .{.{ "def", ToolDef }},
+            .ret = LuaType.string,
+        },
+        .{
+            .desc = "Add a single tool from the tool pool to an agent type's tool set.",
+            .fn_ptr = add_tool,
+            .args = .{ .{ "agent_type", LuaType.integer }, .{ "tool_name", LuaType.string } },
+            .ret = null,
+        },
+        .{
+            .desc = "Return the main agent, if a session is running.",
+            .fn_ptr = get_main_agent,
+            .args = .{},
+            .ret = LuaType{ .raw = "BlitzAgentId|nil" },
+        },
+        .{
+            .desc = "Return success with content.",
+            .fn_ptr = ok,
+            .args = .{.{ .name = "content", .ty = LuaType.string, .optional = true }},
+            .ret = StatusDef,
+        },
+        .{
+            .desc = "Return error with message.",
+            .fn_ptr = err,
+            .args = .{.{ .name = "message", .ty = LuaType.string, .optional = true }},
+            .ret = StatusDef,
+        },
+        .{
+            .desc = "Exit the agent loop with a message.",
+            .fn_ptr = exit_loop,
+            .args = .{.{ .name = "content", .ty = LuaType.string, .optional = true }},
+            .ret = StatusDef,
+        },
+        .{
+            .desc = "Register a provider.",
+            .fn_ptr = add_provider,
+            .args = .{.{ "def", ProviderDef }},
+            .ret = LuaType.integer,
+        },
+        .{
+            .desc = "Register a complete agent configuration.",
+            .fn_ptr = add_agent,
+            .args = .{.{ "def", AgentDef }},
+            .ret = LuaType.integer,
+        },
+        .{
+            .desc = "Set the default model.",
+            .fn_ptr = set_model,
+            .args = .{ .{ "model", LuaType.string }, .{ "handle", LuaType.integer } },
+            .ret = null,
+        },
+        .{
+            .desc = "Set the model config for a specific agent.",
+            .fn_ptr = set_model_agent,
+            .args = .{ .{ "agent_type", LuaType.integer }, .{ "model", LuaType.string }, .{ "effort", LuaType.string }, .{ "handle", LuaType.integer } },
+            .ret = null,
+        },
+        .{
+            .desc = "Return token usage currently shown by the statusbar.",
+            .fn_ptr = token_usage,
+            .args = .{},
+            .ret = TokenUsageDef,
+        },
+        .{
+            .desc = "Return main-agent context fill percentage currently shown by the statusbar.",
+            .fn_ptr = context_percent,
+            .args = .{},
+            .ret = LuaType.number,
+        },
+        .{
+            .desc = "Set the default context edge, in tokens, used for statusbar percentage and auto-compaction.",
+            .fn_ptr = set_compact_edge,
+            .args = .{.{ "tokens", LuaType.integer }},
+            .ret = null,
+        },
+        .{
+            .desc =
+            \\Bind a vim-style key combo to a Lua callback.
+            \\Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
+            ,
+            .fn_ptr = bind,
+            .args = .{ .{ "key", LuaType.string }, .{ "func", LuaType.function } },
+            .ret = null,
+        },
+        .{
+            .desc = "Convert HTML to markdown using the built-in parser.",
+            .fn_ptr = html_to_markdown,
+            .args = .{.{ "html", LuaType.string }},
+            .ret = LuaType.string,
+        },
+        .{
+            .desc =
+            \\Bind a colon command to a Lua callback.
+            \\Example: blitz.add_command(":help", function(args) end)
+            ,
+            .fn_ptr = add_command,
+            .args = .{ .{ "command", LuaType.string }, .{ "func", LuaType.function } },
+            .ret = null,
+        },
+        .{
+            .desc =
+            \\Override the tool set for a given agent type. Replaces defaults entirely.
+            \\Names must match built-in tool names or names of tools registered via blitz.register_tool.
+            ,
+            .fn_ptr = set_agent_tools,
+            .args = .{ .{ "agent_type", LuaType.integer }, .{ "tool_names", StringListDef } },
+            .ret = null,
+        },
+        .{
+            .desc = "Override the system prompt for a given agent type.",
+            .fn_ptr = set_prompt,
+            .args = .{ .{ "agent_type", LuaType.integer }, .{ "prompt", LuaType.string } },
+            .ret = null,
+        },
+        .{
+            .desc = "Override the mode reminder prompt (full variant).",
+            .fn_ptr = set_mode_prompt,
+            .args = .{ .{ "mode", LuaType.integer }, .{ "prompt", LuaType.string } },
+            .ret = null,
+        },
+        .{
+            .desc = "Override the sparse mode reminder prompt (subsequent turns).",
+            .fn_ptr = set_mode_prompt_sparse,
+            .args = .{ .{ "mode", LuaType.integer }, .{ "prompt", LuaType.string } },
+            .ret = null,
+        },
+        .{
+            .desc = "Override the display name shown for a mode in the status bar.",
+            .fn_ptr = set_mode_name,
+            .args = .{ .{ "mode", LuaType.integer }, .{ "name", LuaType.string } },
+            .ret = null,
+        },
+        .{
+            .desc = "Add a custom mode.",
+            .fn_ptr = add_mode,
+            .args = .{ .{ "name", LuaType.string }, .{ "color", LuaType.string }, .{ "prompt", LuaType.string }, .{ "sparse", LuaType.string } },
+            .ret = LuaType.integer,
+        },
+        .{
+            .desc = "Switch the active session mode. Forces a full mode-reminder on the next turn.",
+            .fn_ptr = set_mode,
+            .args = .{.{ "mode", LuaType.integer }},
+            .ret = null,
+        },
+        .{
+            .desc = "Return the current app flags.",
+            .fn_ptr = get_flags,
+            .args = .{},
+            .ret = AppFlagsDef,
+        },
+        .{
+            .desc = "Set the app flags from a table. Missing fields are set to their default values.",
+            .fn_ptr = set_flags,
+            .args = .{.{ "flags", AppFlagsDef }},
+            .ret = null,
+        },
+        .{
+            .desc = "Write a debug log line.",
+            .fn_ptr = @This().log,
+            .args = .{.{ "msg", LuaType.string }},
+            .ret = null,
+        },
+        .{
+            .desc = "Execute a shell command.",
+            .fn_ptr = shell,
+            .args = .{.{ "cmd", LuaType.string }},
+            .ret = LuaType.any,
+        },
+        .{
+            .desc = "Push a new popup notification with a lifetime of 8s to the top right corner.",
+            .fn_ptr = push_notification,
+            .args = .{.{ "message", LuaType.string }},
+            .ret = null,
+        },
+    };
 
     pub fn register_tool(L: ?*c.lua_State) callconv(.c) c_int {
         const state = L.?;
@@ -212,7 +494,7 @@ const Blitz = struct {
 
     pub fn exit_loop(L: ?*c.lua_State) callconv(.c) c_int {
         const state = L.?;
-        pushStatusTable(state, RET_EXIT_LOOP, "");
+        pushStatusTable(state, lua.RET_EXIT_LOOP, "");
         return 1;
     }
 
@@ -525,32 +807,6 @@ const Blitz = struct {
         return 0;
     }
 
-    pub fn add_listener(L: ?*c.lua_State) callconv(.c) c_int {
-        const state = L.?;
-
-        const a = getAppFromRegistry(state) orelse {
-            _ = c.luaL_error(state, "set_compact_edge: app not initialized");
-            return 0;
-        };
-
-        if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
-            _ = c.luaL_error(state, "add_listner: arg 2 (func) must be a function");
-            return 0;
-        }
-
-        const event = readEnumArg(state, r.events.AppEventTag, "add_listener", 1) orelse return 0;
-
-        c.lua_pushvalue(state, 2);
-        const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-        a.event_bus.addLuaListener(a.arena_app.allocator(), event, func_ref) catch {
-            _ = c.luaL_error(state, "failed to add listener");
-            return 0;
-        };
-
-        return 0;
-    }
-
     pub fn set_agent_tools(L: ?*c.lua_State) callconv(.c) c_int {
         const state = L.?;
 
@@ -798,7 +1054,99 @@ const Blitz = struct {
     }
 };
 
+pub const BlitzToolDef = struct {
+    pub const BASH = tl.bash.BashTool.def.name;
+    pub const CANCEL_BACKGROUND = tl.bash.CancelBackgroundCommand.def.name;
+    pub const READ = tl.read.ReadTool.def.name;
+    pub const WRITE = tl.write.WriteTool.def.name;
+    pub const EDIT = tl.edit.EditTool.def.name;
+    pub const PATCH = tl.patch.PatchTool.def.name;
+    pub const AGENT = tl.agent.AgentTool.def.name;
+    pub const LIST_TASKS = tl.tasks.ListTasksTool.def.name;
+    pub const UPDATE_TASK_STATE = tl.tasks.UpdateTaskStateTool.def.name;
+    pub const CREATE_TASK = tl.tasks.CreateTaskTool.def.name;
+    pub const ASK = tl.ask.AskTool.def.name;
+    pub const ENTER_SSH = tl.ssh.EnterSshMode.def.name;
+    pub const EXIT_SSH = tl.ssh.ExitSshMode.def.name;
+    pub const SEND_MESSAGE_TO_AGENT = tl.agent.SendMessageToAgent.def.name;
+    pub const AWAIT_AGENT = tl.agent.AwaitAgent.def.name;
+    pub const CANCEL_AGENT = tl.agent.CancelAgent.def.name;
+    pub const RIPGREP = tl.rg.RipGrepTool.def.name;
+};
+
+pub const BlitzEventDef = struct {
+    pub const SESSION_RESET = 0;
+    pub const MODE_CHANGED = 1;
+    pub const AGENT_CREATED = 2;
+    pub const AGENT_STARTED = 3;
+    pub const AGENT_COMPLETE = 4;
+    pub const AGENT_FAILED = 5;
+    pub const AGENT_CANCELLED = 6;
+    pub const COMPACTION_STARTED = 7;
+    pub const COMPACTION_COMPLETE = 8;
+    pub const TOOL_CALL_STARTED = 9;
+    pub const TOOL_CALL_COMPLETE = 10;
+    pub const AGENT_BROADCAST = 11;
+    pub const PERMISSION_REQUESTED = 12;
+    pub const PERMISSION_RESOLVED = 13;
+    pub const USER_MESSAGE_SENT = 14;
+    pub const MCP_TOOLS_RELOADED = 15;
+
+    pub const _function_defs = .{
+        .{
+            .desc =
+            \\Bind an event listener.
+            \\Example: blitz.add_listener(blitz.EVENT_MODE_CHANGED, function(new_mode_id) end)
+            ,
+            .fn_ptr = add_listener,
+            .args = .{ .{ "event", LuaType.integer }, .{ "func", LuaType.function } },
+            .ret = null,
+        },
+    };
+
+    pub fn add_listener(L: ?*c.lua_State) callconv(.c) c_int {
+        const state = L.?;
+
+        const a = getAppFromRegistry(state) orelse {
+            _ = c.luaL_error(state, "set_compact_edge: app not initialized");
+            return 0;
+        };
+
+        if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
+            _ = c.luaL_error(state, "add_listner: arg 2 (func) must be a function");
+            return 0;
+        }
+
+        const event = readEnumArg(state, r.events.AppEventTag, "add_listener", 1) orelse return 0;
+
+        c.lua_pushvalue(state, 2);
+        const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+
+        a.event_bus.addLuaListener(a.arena_app.allocator(), event, func_ref) catch {
+            _ = c.luaL_error(state, "failed to add listener");
+            return 0;
+        };
+
+        return 0;
+    }
+};
+
 const BlitzMcp = struct {
+    pub const _function_defs = .{
+        .{
+            .desc = "Register an MCP stdio server. Disabled until explicitly enabled.",
+            .fn_ptr = add,
+            .args = .{.{ "def", McpServerDef }},
+            .ret = LuaType.integer,
+        },
+        .{
+            .desc = "Enable an MCP server for an agent type. Defaults to blitz.AGENT_GENERAL.",
+            .fn_ptr = enable,
+            .args = .{ .{ "mcp_id", LuaType.integer }, .{ .name = "agent_type", .ty = LuaType.integer, .optional = true } },
+            .ret = null,
+        },
+    };
+
     pub fn add(L: ?*c.lua_State) callconv(.c) c_int {
         const state = L.?;
 
@@ -923,6 +1271,27 @@ const BlitzMcp = struct {
 };
 
 const BlitzJson = struct {
+    pub const _function_defs = .{
+        .{
+            .desc =
+            \\Encode a Lua value as JSON.
+            \\Supports nil, booleans, numbers, strings, and tables.
+            ,
+            .fn_ptr = encode,
+            .args = .{.{ "obj", LuaType.any }},
+            .ret = LuaType{ .raw = "string|nil, boolean" },
+        },
+        .{
+            .desc =
+            \\Decode a JSON string into Lua values.
+            \\JSON arrays become 1-indexed Lua tables; objects become Lua tables; JSON null becomes nil.
+            ,
+            .fn_ptr = decode,
+            .args = .{.{ "json", LuaType.string }},
+            .ret = LuaType{ .raw = "any, boolean" },
+        },
+    };
+
     pub fn encode(L: ?*c.lua_State) callconv(.c) c_int {
         const state = L.?;
         const vm = getVmFromRegistry(state) orelse {
@@ -960,6 +1329,87 @@ const BlitzJson = struct {
 };
 
 const BlitzQueue = struct {
+    pub const _function_defs = .{
+        .{
+            .desc = "Reset the active session.",
+            .fn_ptr = reset_session,
+            .args = .{},
+            .ret = null,
+        },
+        .{
+            .desc = "Cancel all in-flight agent work and drop streaming preview.",
+            .fn_ptr = cancel,
+            .args = .{},
+            .ret = null,
+        },
+        .{
+            .desc = "Retry the main agent's last turn.",
+            .fn_ptr = retry,
+            .args = .{},
+            .ret = null,
+        },
+        .{
+            .desc = "Request compaction for the main agent.",
+            .fn_ptr = compact,
+            .args = .{},
+            .ret = null,
+        },
+        .{
+            .desc = "Switch the active mode. Forces a full mode-reminder on the next turn.",
+            .fn_ptr = set_mode,
+            .args = .{.{ "mode", LuaType.integer }},
+            .ret = null,
+        },
+        .{
+            .desc = "Push a chat entry into the chat log.",
+            .fn_ptr = push_chat_entry,
+            .args = .{ .{ "role", LuaType.string }, .{ "text", LuaType.string } },
+            .ret = null,
+        },
+        .{
+            .desc = "Queue a user message for the given agent.",
+            .fn_ptr = queue_agent_message,
+            .args = .{ .{ "agent_id", AgentIdDef }, .{ "text", LuaType.string } },
+            .ret = null,
+        },
+        .{
+            .desc = "Reserve a free slot and enqueue a spawn or fork into it.",
+            .fn_ptr = spawn_agent,
+            .args = .{.{ "args", SpawnAgentArgsDef }},
+            .ret = LuaType{ .raw = "BlitzAgentId|nil" },
+        },
+        .{
+            .desc = "Block until the referenced agent reaches a terminal state.",
+            .fn_ptr = await_agent,
+            .args = .{.{ "agent_id", AgentIdDef }},
+            .ret = LuaType.integer,
+        },
+        .{
+            .desc = "Return the awaited agent's last assistant text.",
+            .fn_ptr = await_agent_result,
+            .args = .{.{ "agent_id", AgentIdDef }},
+            .ret = LuaType{ .raw = "string|nil" },
+        },
+        .{
+            .desc = "Save current session to disk.",
+            .fn_ptr = save_session,
+            .args = .{.{ "path", LuaType.string }},
+            .ret = null,
+        },
+        .{
+            .desc = "Load a session from disk.",
+            .fn_ptr = load_session,
+            .args = .{.{ "path", LuaType.string }},
+            .ret = null,
+        },
+        .{
+            .desc = "Attach a screenshot/image to the current input.",
+            .fn_ptr = attach_screenshot,
+            .args = .{ .{ "data", LuaType.string }, .{ .name = "media_type", .ty = LuaType.string, .optional = true } },
+            .ret = null,
+        },
+    };
+
     pub fn reset_session(L: ?*c.lua_State) callconv(.c) c_int {
         const state = L.?;
         const a = getAppFromRegistry(state) orelse {
@@ -1396,6 +1846,7 @@ fn pushComptimeStruct(L: *c.lua_State, comptime T: type) void {
     }
 
     inline for (info.decls) |decl| {
+        if (decl.name[0] == '_') continue;
         const value = @field(T, decl.name);
         switch (@typeInfo(@TypeOf(value))) {
             .@"fn" => setCFunctionField(L, -2, decl.name, value),
@@ -1508,8 +1959,6 @@ fn readAnyValueAlloc(comptime T: type, state: *c.lua_State, idx: c_int, allocato
         else => @compileError("readAnyValue: unsupported type " ++ @typeName(T)),
     }
 }
-
-
 
 fn readAnyFieldAlloc(comptime T: type, state: *c.lua_State, table_idx: c_int, comptime field: []const u8, allocator: ?Allocator) ?T {
     const abs = luaAbsIndex(state, table_idx);
@@ -1950,7 +2399,10 @@ pub const LuaVm = struct {
                 var dup = false;
                 for (out[0..count.*]) |item| {
                     const value = item orelse continue;
-                    if (std.mem.eql(u8, value, name)) { dup = true; break; }
+                    if (std.mem.eql(u8, value, name)) {
+                        dup = true;
+                        break;
+                    }
                 }
                 if (dup) continue;
             }
@@ -2209,8 +2661,6 @@ fn readEnumArg(state: *c.lua_State, comptime E: type, comptime name: []const u8,
     }
     return @enumFromInt(@as(u6, @intCast(n)));
 }
-
-
 
 // ── Trampoline: Zig ToolFn → Lua function call ─────────────────────
 

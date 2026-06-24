@@ -31,8 +31,28 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
-
     run_cmd.step.dependOn(b.getInstallStep());
+
+    // -----------------------------------------------
+    // lua
+    const gen = b.addExecutable(.{
+        .name = "gen_lua",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lua_gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "provider", .module = provider_mod },
+                .{ .name = "c", .module = lua_c_mod },
+            },
+        }),
+    });
+    b.installArtifact(gen);
+    const gen_step = b.step("gen", "Run the app");
+    const run_lua_gen = b.addRunArtifact(gen);
+    gen_step.dependOn(&run_lua_gen.step);
+    run_lua_gen.step.dependOn(b.getInstallStep());
+    // -----------------------------------------------
 
     if (b.args) |args| {
         run_cmd.addArgs(args);
