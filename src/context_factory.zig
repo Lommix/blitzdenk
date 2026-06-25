@@ -401,7 +401,9 @@ pub fn configureAgent(
     self: *const Self,
     agent: *r.prv.agent.Agent,
     config: *const r.prv.config.BlitzdenkCfg,
+    cwd: []const u8,
 ) !void {
+    _ = config; // autofix
     agent.reset();
     const alloc = agent.arena.allocator();
 
@@ -436,7 +438,7 @@ pub fn configureAgent(
         try agent.chat.addTool(alloc, tool.def);
     }
 
-    const prompt = try self.build_system_prompt(alloc, config, @enumFromInt(agent.type_idx));
+    const prompt = try self.build_system_prompt(alloc, cwd, @enumFromInt(agent.type_idx));
     try agent.setSystemPrompt(prompt);
 }
 
@@ -535,10 +537,9 @@ pub fn clearTools(self: *Self) void {
 pub fn build_system_prompt(
     self: *const Self,
     alloc: std.mem.Allocator,
-    config: *const r.prv.config.BlitzdenkCfg,
+    cwd: []const u8,
     agent_type: AgentType,
 ) ![]const u8 {
-    _ = config; // autofix
     var allocating = std.Io.Writer.Allocating.init(alloc);
     var w = &allocating.writer;
 
@@ -607,6 +608,14 @@ pub fn build_system_prompt(
             try w.writeAll("\n\n");
         } else |_| {}
     }
+
+    _ = try w.print(
+        \\
+        \\# Env
+        \\
+        \\cwd: {s}
+        \\
+    , .{cwd});
 
     return allocating.written();
 }

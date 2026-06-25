@@ -18,7 +18,6 @@ pub const InjectionsHooks = struct {
         var self = Self{};
 
         inline for (.{
-            &inject_env_information,
             &inject_mode_information,
             &inject_task_information,
             &inject_budget_information,
@@ -170,25 +169,4 @@ fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.age
     _ = try w.print("<system-mode>{s}</system-mode>", .{reminder});
 
     try w.flush();
-}
-
-fn inject_env_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
-    const cwd = if (app.swarm.exec.ssh_target != null and app.swarm.exec.ssh_active)
-        app.remote_cwd
-    else
-        app.cwd;
-
-    try w.print("cwd: {s}\n", .{cwd});
-
-    if (agent.depth > 0) {
-        if (agent.swarm) |swarm| {
-            if (agent.swarm_id) |self_id| {
-                if (swarm.getSlot(self_id)) |slot| {
-                    if (slot.parent_id) |pid| {
-                        try w.print("PARENT_AGENT_ID: {d}\n", .{pid.pack()});
-                    }
-                }
-            }
-        }
-    }
 }
