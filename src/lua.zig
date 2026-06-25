@@ -95,6 +95,7 @@ pub fn LuaFnBind(
 
                         const Info = @typeInfo(eun.payload);
                         switch (Info) {
+                            .void => return 0,
                             .optional => {
                                 if (value) |inner| {
                                     pushAny(state, inner);
@@ -357,7 +358,12 @@ pub const Blitz = LuaType{
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "content", .ty = LuaType.string, .optional = true }},
                     .ret = &StatusDef,
-                    .fn_ptr = luaOk,
+                    .fn_ptr = LuaFnBind((struct {
+                        const Ret = struct { status: c_int, msg: []const u8 };
+                        fn lua_fn(content: ?[]const u8) !Ret {
+                            return .{ .status = RET_OK, .msg = content orelse "" };
+                        }
+                    }).lua_fn, "ok"),
                 } },
             },
             .{
@@ -366,7 +372,12 @@ pub const Blitz = LuaType{
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "message", .ty = LuaType.string, .optional = true }},
                     .ret = &StatusDef,
-                    .fn_ptr = luaErr,
+                    .fn_ptr = LuaFnBind((struct {
+                        const Ret = struct { status: c_int, msg: []const u8 };
+                        fn lua_fn(message: ?[]const u8) !Ret {
+                            return .{ .status = RET_ERR, .msg = message orelse "error" };
+                        }
+                    }).lua_fn, "err"),
                 } },
             },
             .{
@@ -375,7 +386,12 @@ pub const Blitz = LuaType{
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "content", .ty = LuaType.string, .optional = true }},
                     .ret = &StatusDef,
-                    .fn_ptr = luaExitLoop,
+                    .fn_ptr = LuaFnBind((struct {
+                        const Ret = struct { status: c_int, msg: []const u8 };
+                        fn lua_fn(content: ?[]const u8) !Ret {
+                            return .{ .status = RET_EXIT_LOOP, .msg = content orelse "" };
+                        }
+                    }).lua_fn, "exit_loop"),
                 } },
             },
             .{
@@ -616,7 +632,11 @@ pub const Blitz = LuaType{
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "html", .ty = LuaType.string }},
                     .ret = &LuaString,
-                    .fn_ptr = luaHtmlToMarkdown,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, html: []const u8) ![]const u8 {
+                            return tl.parse.htmlToMarkdown(a.lua_vm.luaArena(), html);
+                        }
+                    }).lua_fn, "html_to_markdown"),
                 } },
             },
             .{
@@ -627,7 +647,23 @@ pub const Blitz = LuaType{
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{ .{ .name = "command", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
-                    .fn_ptr = luaAddCommand,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, state: *c.lua_State, name: []const u8, func: LuaFnRef) !void {
+                            const vm = &a.lua_vm;
+                            if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) return error.TooManyCommands;
+                            if (name.len == 0 or (name[0] != ':' and name[0] != '/')) return error.InvalidCommandPrefix;
+                            if (std.mem.indexOfScalar(u8, name, ' ') != null) return error.InvalidCommandName;
+                            if (name.len > 128) return error.CommandNameTooLong;
+
+                            var entry = LuaCommandEntry{
+                                .name_len = name.len,
+                                .func_ref = func.idx,
+                                .L = state,
+                            };
+                            @memcpy(entry.name[0..name.len], name);
+                            vm.command_entries.appendAssumeCapacity(entry);
+                        }
+                    }).lua_fn, "add_command"),
                 } },
             },
             .{
@@ -638,7 +674,11 @@ pub const Blitz = LuaType{
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_names", .ty = StringListDef } },
-                    .fn_ptr = luaSetAgentTools,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, agent_type: r.ContextFactory.AgentType, tool_names: [][]const u8) !void {
+                            try a.context_factory.setAgentTools(agent_type, tool_names);
+                        }
+                    }).lua_fn, "set_agent_tools"),
                 } },
             },
             .{
@@ -646,7 +686,11 @@ pub const Blitz = LuaType{
                 .desc = "Override the system prompt for a given agent type.",
                 .ty = LuaType{ .function = .{
                     .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } },
-                    .fn_ptr = luaSetPrompt,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, agent_type: r.ContextFactory.AgentType, prompt: []const u8) !void {
+                            try a.context_factory.setAgentPrompt(agent_type, prompt);
+                        }
+                    }).lua_fn, "set_prompt"),
                 } },
             },
             .{
@@ -654,7 +698,11 @@ pub const Blitz = LuaType{
                 .desc = "Override the mode reminder prompt (full variant).",
                 .ty = LuaType{ .function = .{
                     .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } },
-                    .fn_ptr = luaSetModePrompt,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, mode: r.ContextFactory.Mode, prompt: []const u8) !void {
+                            try a.context_factory.setModePrompt(mode, prompt);
+                        }
+                    }).lua_fn, "set_mode_prompt"),
                 } },
             },
             .{
@@ -662,7 +710,11 @@ pub const Blitz = LuaType{
                 .desc = "Override the sparse mode reminder prompt (subsequent turns).",
                 .ty = LuaType{ .function = .{
                     .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } },
-                    .fn_ptr = luaSetModePromptSparse,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, mode: r.ContextFactory.Mode, prompt: []const u8) !void {
+                            try a.context_factory.setSparseModePrompt(mode, prompt);
+                        }
+                    }).lua_fn, "set_mode_prompt_sparse"),
                 } },
             },
             .{
@@ -670,7 +722,12 @@ pub const Blitz = LuaType{
                 .desc = "Override the display name shown for a mode in the status bar.",
                 .ty = LuaType{ .function = .{
                     .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "name", .ty = LuaType.string } },
-                    .fn_ptr = luaSetModeName,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, mode: r.ContextFactory.Mode, name: []const u8) !void {
+                            try a.context_factory.setModeName(mode, name);
+                            a.dirty = true;
+                        }
+                    }).lua_fn, "set_mode_name"),
                 } },
             },
             .{
@@ -684,7 +741,11 @@ pub const Blitz = LuaType{
                         .{ .name = "sparse", .ty = LuaType.string },
                     },
                     .ret = &LuaInteger,
-                    .fn_ptr = luaAddMode,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, name: []const u8, color: []const u8, prompt: []const u8, sparse: []const u8) !r.ContextFactory.Mode {
+                            return a.context_factory.addMode(name, prompt, sparse, color);
+                        }
+                    }).lua_fn, "add_mode"),
                 } },
             },
             .{
@@ -705,7 +766,11 @@ pub const Blitz = LuaType{
                 .desc = "Return the current app flags.",
                 .ty = LuaType{ .function = .{
                     .ret = &AppFlagsDef,
-                    .fn_ptr = luaGetFlags,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App) !r.app.AppFlags {
+                            return a.flags;
+                        }
+                    }).lua_fn, "get_flags"),
                 } },
             },
             .{
@@ -713,7 +778,12 @@ pub const Blitz = LuaType{
                 .desc = "Set the app flags from a table. Missing fields are set to their default values.",
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "flags", .ty = AppFlagsDef }},
-                    .fn_ptr = luaSetFlags,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, flags: r.app.AppFlags) !void {
+                            a.flags = flags;
+                            a.dirty = true;
+                        }
+                    }).lua_fn, "set_flags"),
                 } },
             },
             .{
@@ -721,7 +791,11 @@ pub const Blitz = LuaType{
                 .desc = "Write a debug log line.",
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "msg", .ty = LuaType.string }},
-                    .fn_ptr = luaLog,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(msg: []const u8) !void {
+                            std.log.scoped(.lua).info("{s}", .{msg});
+                        }
+                    }).lua_fn, "log"),
                 } },
             },
             .{
@@ -730,7 +804,33 @@ pub const Blitz = LuaType{
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "cmd", .ty = LuaType.string }},
                     .ret = &LuaAny,
-                    .fn_ptr = luaShell,
+                    .fn_ptr = (struct {
+                        fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                            const state = L.?;
+                            const a = getAppFromRegistry(state) orelse {
+                                _ = c.luaL_error(state, "shell: app not initialized");
+                                return 0;
+                            };
+                            const cmd = readAnyArg([]const u8, state, "shell", 1) orelse return pushNilBool(state, false);
+                            const cwd: ?[]const u8 = if (a.cwd.len > 0) a.cwd else null;
+                            const result = a.swarm.exec.runAndWait(.{
+                                .cwd = cwd,
+                                .argv = &.{ "/bin/sh", "-c", cmd },
+                            }) catch {
+                                _ = c.lua_pushliteral(state, "failed to execute command");
+                                c.lua_pushboolean(state, 0);
+                                return 2;
+                            };
+                            defer a.swarm.exec.alloc.free(result.stdout);
+                            defer a.swarm.exec.alloc.free(result.stderr);
+
+                            const success = result.ty == .success;
+                            const output = if (success) result.stdout else if (result.stderr.len > 0) result.stderr else result.stdout;
+                            _ = c.lua_pushlstring(state, output.ptr, output.len);
+                            c.lua_pushboolean(state, @intFromBool(success));
+                            return 2;
+                        }
+                    }).lua_fn,
                 } },
             },
             .{
@@ -738,7 +838,11 @@ pub const Blitz = LuaType{
                 .desc = "Push a new popup notification with a lifetime of 8s to the top right corner.",
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "message", .ty = LuaType.string }},
-                    .fn_ptr = luaPushNotification,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, state: *c.lua_State, message: []const u8) !void {
+                            appQueueEnqueue(state, "queue.attach_notfication", a, .{ .push_notification = message });
+                        }
+                    }).lua_fn, "push_notification"),
                 } },
             },
         },
@@ -824,7 +928,6 @@ pub const BlitzEventDef = LuaType{
                         }
                     }).t, "add_listener"),
                 } },
-                // .fn_ptr = luaEventAddListener,
             },
         },
     },
@@ -837,7 +940,96 @@ const BlitzMcp = LuaType{ .table_def = .{ .name = "BlitzMcp", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "def", .ty = McpServerDef }},
             .ret = &LuaInteger,
-            .fn_ptr = luaMcpAdd,
+            .fn_ptr = (struct {
+                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                    const state = L.?;
+                    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
+                        _ = c.luaL_error(state, "mcp.add: expected table argument");
+                        return 0;
+                    }
+
+                    const a = getAppFromRegistry(state) orelse {
+                        _ = c.luaL_error(state, "mcp.add: vm not initialized");
+                        return 0;
+                    };
+                    const vm = &a.lua_vm;
+                    if (vm.mcp_entries.items.len >= MAX_LUA_MCP_SERVERS) {
+                        _ = c.luaL_error(state, "mcp.add: max servers reached (%d)", @as(c_int, MAX_LUA_MCP_SERVERS));
+                        return 0;
+                    }
+
+                    var entry: LuaMcpServerEntry = .{};
+                    entry.name_len = getStringField(state, 1, "name", &entry.name) orelse {
+                        _ = c.luaL_error(state, "mcp.add: 'name' must be a string (max %d)", @as(c_int, entry.name.len));
+                        return 0;
+                    };
+                    entry.command_len = getStringField(state, 1, "command", &entry.command) orelse {
+                        _ = c.luaL_error(state, "mcp.add: 'command' must be a string (max %d)", @as(c_int, entry.command.len));
+                        return 0;
+                    };
+
+                    _ = c.lua_getfield(state, 1, "transport");
+                    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
+                        var len: usize = 0;
+                        const ptr = c.lua_tolstring(state, -1, &len);
+                        if (!std.mem.eql(u8, ptr[0..len], "stdio")) {
+                            c.lua_pop(state, 1);
+                            _ = c.luaL_error(state, "mcp.add: only transport='stdio' is supported");
+                            return 0;
+                        }
+                    }
+                    c.lua_pop(state, 1);
+
+                    if (getStringField(state, 1, "tools_prefix", &entry.tools_prefix)) |len| {
+                        entry.tools_prefix_len = len;
+                    } else {
+                        var w = std.Io.Writer.fixed(&entry.tools_prefix);
+                        w.print("mcp_{s}_", .{entry.nameSlice()}) catch {
+                            _ = c.luaL_error(state, "mcp.add: generated tools_prefix too long");
+                            return 0;
+                        };
+                        entry.tools_prefix_len = w.end;
+                    }
+
+                    _ = c.lua_getfield(state, 1, "args");
+                    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
+                        const len = c.lua_rawlen(state, -1);
+                        if (len > MAX_LUA_MCP_ARGS) {
+                            c.lua_pop(state, 1);
+                            _ = c.luaL_error(state, "mcp.add: too many args (max %d)", @as(c_int, MAX_LUA_MCP_ARGS));
+                            return 0;
+                        }
+                        for (1..len + 1) |i| {
+                            _ = c.lua_rawgeti(state, -1, @intCast(i));
+                            if (c.lua_type(state, -1) != c.LUA_TSTRING) {
+                                c.lua_pop(state, 2);
+                                _ = c.luaL_error(state, "mcp.add: args[%d] must be a string", @as(c_int, @intCast(i)));
+                                return 0;
+                            }
+                            var arg_len: usize = 0;
+                            const arg_ptr = c.lua_tolstring(state, -1, &arg_len);
+                            if (arg_len > entry.args[i - 1].len) {
+                                c.lua_pop(state, 2);
+                                _ = c.luaL_error(state, "mcp.add: args[%d] too long", @as(c_int, @intCast(i)));
+                                return 0;
+                            }
+                            @memcpy(entry.args[i - 1][0..arg_len], arg_ptr[0..arg_len]);
+                            entry.arg_lens[i - 1] = @intCast(arg_len);
+                            entry.args_len += 1;
+                            c.lua_pop(state, 1);
+                        }
+                    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
+                        c.lua_pop(state, 1);
+                        _ = c.luaL_error(state, "mcp.add: 'args' must be a table of strings");
+                        return 0;
+                    }
+                    c.lua_pop(state, 1);
+
+                    vm.mcp_entries.appendAssumeCapacity(entry);
+                    c.lua_pushinteger(state, @intCast(vm.mcp_entries.items.len));
+                    return 1;
+                }
+            }).lua_fn,
         } },
     },
     .{
@@ -846,468 +1038,18 @@ const BlitzMcp = LuaType{ .table_def = .{ .name = "BlitzMcp", .fields = &.{
         .ty = LuaType{
             .function = .{
                 .args = &.{ .{ .name = "mcp_id", .ty = LuaType.integer }, .{ .name = "agent_type", .ty = LuaType.integer, .optional = true } },
-                .fn_ptr = luaMcpEnable,
+                .fn_ptr = LuaFnBind((struct {
+                    fn lua_fn(a: *r.app.App, state: *c.lua_State, mcp_id: u32, agent_type: ?r.ContextFactory.AgentType) !void {
+                        const vm = &a.lua_vm;
+                        if (mcp_id == 0 or mcp_id > vm.mcp_entries.items.len) return error.InvalidMcpId;
+                        vm.mcp_entries.items[mcp_id - 1].enabled_agents.insert(agent_type orelse .general);
+                        appQueueEnqueue(state, "mcp.reload", a, .reload_mcp);
+                    }
+                }).lua_fn, "mcp.enable"),
             },
         },
     },
 } } };
-
-fn luaOk(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    pushStatusTable(state, lua.RET_OK, "");
-    return 1;
-}
-
-fn luaErr(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    pushStatusTable(state, lua.RET_ERR, "error");
-    return 1;
-}
-
-fn luaExitLoop(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    pushStatusTable(state, lua.RET_EXIT_LOOP, "");
-    return 1;
-}
-
-fn luaHtmlToMarkdown(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "html_to_markdown: lua vm unavailable");
-        return 0;
-    };
-    const vm = &a.lua_vm;
-
-    const html = readAnyArg([]const u8, state, "html_to_markdown", 1) orelse return 0;
-
-    const markdown = tl.parse.htmlToMarkdown(vm.luaArena(), html) catch {
-        _ = c.luaL_error(state, "html_to_markdown: failed to convert html");
-        return 0;
-    };
-
-    _ = c.lua_pushlstring(state, markdown.ptr, markdown.len);
-    return 1;
-}
-
-fn luaAddCommand(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
-        _ = c.luaL_error(state, "add_command: arg 2 (func) must be a function");
-        return 0;
-    }
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "add_command: vm not initialized");
-        return 0;
-    };
-    const vm = &a.lua_vm;
-    if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) {
-        _ = c.luaL_error(state, "add_command: max commands reached (%d)", @as(c_int, MAX_LUA_COMMANDS));
-        return 0;
-    }
-
-    const name = readAnyArg([]const u8, state, "add_command", 1) orelse return 0;
-    if (name.len == 0 or (name[0] != ':' and name[0] != '/')) {
-        _ = c.luaL_error(state, "add_command: command must start with ':' or '/'");
-        return 0;
-    }
-    if (std.mem.indexOfScalar(u8, name, ' ') != null) {
-        _ = c.luaL_error(state, "add_command: command must not contain spaces");
-        return 0;
-    }
-    if (name.len > 128) {
-        _ = c.luaL_error(state, "add_command: command too long (max %d bytes)", @as(c_int, 128));
-        return 0;
-    }
-
-    c.lua_pushvalue(state, 2);
-    const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-    var entry = LuaCommandEntry{
-        .name_len = name.len,
-        .func_ref = func_ref,
-        .L = state,
-    };
-    @memcpy(entry.name[0..name.len], name);
-    vm.command_entries.appendAssumeCapacity(entry);
-    return 0;
-}
-
-fn luaSetAgentTools(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
-        _ = c.luaL_error(state, "set_agent_tools: arg 1 (agent type) must be a number (blitz.AGENT_*)");
-        return 0;
-    }
-    const ty_int = c.lua_tointegerx(state, 1, null);
-    if (ty_int < 0 or ty_int > std.math.maxInt(u6)) {
-        _ = c.luaL_error(state, "set_agent_tools: agent type out of range");
-        return 0;
-    }
-    const agent_type: r.ContextFactory.AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
-
-    if (c.lua_type(state, 2) != c.LUA_TTABLE) {
-        _ = c.luaL_error(state, "set_agent_tools: arg 2 (tools) must be a table of strings");
-        return 0;
-    }
-
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "set_agent_tools: app not initialized");
-        return 0;
-    };
-
-    const factory = a.context_factory;
-
-    var names_buf: [r.ContextFactory.MAX_AGENT_TOOLS][]const u8 = undefined;
-    var names_count: usize = 0;
-
-    const len = c.lua_rawlen(state, 2);
-    for (1..len + 1) |i| {
-        if (names_count >= names_buf.len) {
-            _ = c.luaL_error(state, "set_agent_tools: too many tool names (max %d)", @as(c_int, @intCast(names_buf.len)));
-            return 0;
-        }
-        _ = c.lua_rawgeti(state, 2, @intCast(i));
-        if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-            c.lua_pop(state, 1);
-            _ = c.luaL_error(state, "set_agent_tools: tool list entry %d is not a string", @as(c_int, @intCast(i)));
-            return 0;
-        }
-        var slen: usize = 0;
-        const sptr = c.lua_tolstring(state, -1, &slen);
-        names_buf[names_count] = sptr[0..slen];
-        names_count += 1;
-        c.lua_pop(state, 1);
-    }
-
-    factory.setAgentTools(agent_type, names_buf[0..names_count]) catch {
-        _ = c.luaL_error(state, "set_agent_tools: failed to set tools");
-        return 0;
-    };
-    return 0;
-}
-
-fn luaSetPrompt(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "set_prompt: app not initialized");
-        return 0;
-    };
-    const agent_type = readEnumArg(state, r.ContextFactory.AgentType, "set_prompt", 1) orelse return 0;
-    const prompt = readAnyArg([]const u8, state, "set_prompt", 2) orelse return 0;
-    a.context_factory.setAgentPrompt(agent_type, prompt) catch {
-        _ = c.luaL_error(state, "set_prompt: unknown agent or out of memory");
-        return 0;
-    };
-    return 0;
-}
-
-fn luaSetModePrompt(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "set_mode_prompt: app not initialized");
-        return 0;
-    };
-    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt", 1) orelse return 0;
-    const prompt = readAnyArg([]const u8, state, "set_mode_prompt", 2) orelse return 0;
-    a.context_factory.setModePrompt(mode, prompt) catch {
-        _ = c.luaL_error(state, "set_mode_prompt: unknown mode or out of memory");
-        return 0;
-    };
-    return 0;
-}
-
-fn luaSetModePromptSparse(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "set_mode_prompt_sparse: app not initialized");
-        return 0;
-    };
-    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_prompt_sparse", 1) orelse return 0;
-    const prompt = readAnyArg([]const u8, state, "set_mode_prompt_sparse", 2) orelse return 0;
-    a.context_factory.setSparseModePrompt(mode, prompt) catch {
-        _ = c.luaL_error(state, "set_mode_prompt_sparse: unknown mode or out of memory");
-        return 0;
-    };
-    return 0;
-}
-
-fn luaSetModeName(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "set_mode_name: app not initialized");
-        return 0;
-    };
-    const mode = readEnumArg(state, r.ContextFactory.Mode, "set_mode_name", 1) orelse return 0;
-    const name = readAnyArg([]const u8, state, "set_mode_name", 2) orelse return 0;
-    a.context_factory.setModeName(mode, name) catch {
-        _ = c.luaL_error(state, "set_mode_name: unknown mode or out of memory");
-        return 0;
-    };
-    a.dirty = true;
-    return 0;
-}
-
-fn luaAddMode(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "add_mode: app not initialized");
-        return 0;
-    };
-
-    const name = readAnyArg([]const u8, state, "add_mode", 1) orelse return 0;
-    const color = readAnyArg([]const u8, state, "add_mode", 2) orelse return 0;
-    const prompt = readAnyArg([]const u8, state, "add_mode", 3) orelse return 0;
-    const sparse = readAnyArg([]const u8, state, "add_mode", 4) orelse return 0;
-
-    const mode = a.context_factory.addMode(
-        name,
-        prompt,
-        sparse,
-        color,
-    ) catch {
-        _ = c.luaL_error(state, "add_mode: too many modes or out of memory");
-        return 0;
-    };
-
-    c.lua_pushinteger(state, @intFromEnum(mode));
-    return 1;
-}
-
-fn luaGetFlags(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "get_flags: app not initialized");
-        return 0;
-    };
-
-    pushAny(state, a.flags);
-
-    return 1;
-}
-
-fn luaSetFlags(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "set_flags: app not initialized");
-        return 0;
-    };
-
-    const flags = readAnyArg(r.app.AppFlags, state, "set_flags", 1) orelse {
-        _ = c.luaL_error(state, "set_flags: arg 1 must be a table with boolean fields");
-        return 0;
-    };
-
-    a.flags = flags;
-    a.dirty = true;
-
-    return 0;
-}
-
-fn luaLog(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const msg = readAnyArg([]const u8, state, "log", 1) orelse return 0;
-    std.log.scoped(.lua).info("{s}", .{msg});
-    return 0;
-}
-
-fn luaShell(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "shell: app not initialized");
-        return 0;
-    };
-
-    const cmd = readAnyArg([]const u8, state, "shell", 1) orelse return pushNilBool(state, false);
-
-    const cwd: ?[]const u8 = if (a.cwd.len > 0) a.cwd else null;
-
-    const result = a.swarm.exec.runAndWait(.{
-        .cwd = cwd,
-        .argv = &.{ "/bin/sh", "-c", cmd },
-    }) catch {
-        _ = c.lua_pushliteral(state, "failed to execute command");
-        c.lua_pushboolean(state, 0);
-        return 2;
-    };
-    defer a.swarm.exec.alloc.free(result.stdout);
-    defer a.swarm.exec.alloc.free(result.stderr);
-
-    const success = result.ty == .success;
-    const output = if (success)
-        result.stdout
-    else
-        (if (result.stderr.len > 0) result.stderr else result.stdout);
-
-    _ = c.lua_pushlstring(state, output.ptr, output.len);
-    c.lua_pushboolean(state, @intFromBool(success));
-    return 2;
-}
-
-fn luaPushNotification(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.push_notification: app not initialized");
-        return 0;
-    };
-
-    const msg = readAnyArg([]const u8, state, "queue.push_notification", 1) orelse return 0;
-    appQueueEnqueue(state, "queue.attach_notfication", a, .{ .push_notification = msg });
-
-    return 0;
-}
-
-fn luaEventAddListener(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "set_compact_edge: app not initialized");
-        return 0;
-    };
-
-    if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
-        _ = c.luaL_error(state, "add_listner: arg 2 (func) must be a function");
-        return 0;
-    }
-
-    const event = readEnumArg(state, r.events.AppEventTag, "add_listener", 1) orelse return 0;
-
-    c.lua_pushvalue(state, 2);
-    const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-    a.event_bus.addLuaListener(a.arena_app.allocator(), event, func_ref) catch {
-        _ = c.luaL_error(state, "failed to add listener");
-        return 0;
-    };
-
-    return 0;
-}
-
-fn luaMcpAdd(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-        _ = c.luaL_error(state, "mcp.add: expected table argument");
-        return 0;
-    }
-
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "mcp.add: vm not initialized");
-        return 0;
-    };
-    const vm = &a.lua_vm;
-    if (vm.mcp_entries.items.len >= MAX_LUA_MCP_SERVERS) {
-        _ = c.luaL_error(state, "mcp.add: max servers reached (%d)", @as(c_int, MAX_LUA_MCP_SERVERS));
-        return 0;
-    }
-
-    var entry: LuaMcpServerEntry = .{};
-
-    entry.name_len = getStringField(state, 1, "name", &entry.name) orelse {
-        _ = c.luaL_error(state, "mcp.add: 'name' must be a string (max %d)", @as(c_int, entry.name.len));
-        return 0;
-    };
-
-    entry.command_len = getStringField(state, 1, "command", &entry.command) orelse {
-        _ = c.luaL_error(state, "mcp.add: 'command' must be a string (max %d)", @as(c_int, entry.command.len));
-        return 0;
-    };
-
-    _ = c.lua_getfield(state, 1, "transport");
-    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
-        var len: usize = 0;
-        const ptr = c.lua_tolstring(state, -1, &len);
-        if (!std.mem.eql(u8, ptr[0..len], "stdio")) {
-            c.lua_pop(state, 1);
-            _ = c.luaL_error(state, "mcp.add: only transport='stdio' is supported");
-            return 0;
-        }
-    }
-    c.lua_pop(state, 1);
-
-    if (getStringField(state, 1, "tools_prefix", &entry.tools_prefix)) |len| {
-        entry.tools_prefix_len = len;
-    } else {
-        var w = std.Io.Writer.fixed(&entry.tools_prefix);
-        w.print("mcp_{s}_", .{entry.nameSlice()}) catch {
-            _ = c.luaL_error(state, "mcp.add: generated tools_prefix too long");
-            return 0;
-        };
-        entry.tools_prefix_len = w.end;
-    }
-
-    _ = c.lua_getfield(state, 1, "args");
-    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
-        const len = c.lua_rawlen(state, -1);
-        if (len > MAX_LUA_MCP_ARGS) {
-            c.lua_pop(state, 1);
-            _ = c.luaL_error(state, "mcp.add: too many args (max %d)", @as(c_int, MAX_LUA_MCP_ARGS));
-            return 0;
-        }
-        for (1..len + 1) |i| {
-            _ = c.lua_rawgeti(state, -1, @intCast(i));
-            if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-                c.lua_pop(state, 2);
-                _ = c.luaL_error(state, "mcp.add: args[%d] must be a string", @as(c_int, @intCast(i)));
-                return 0;
-            }
-            var arg_len: usize = 0;
-            const arg_ptr = c.lua_tolstring(state, -1, &arg_len);
-            if (arg_len > entry.args[i - 1].len) {
-                c.lua_pop(state, 2);
-                _ = c.luaL_error(state, "mcp.add: args[%d] too long", @as(c_int, @intCast(i)));
-                return 0;
-            }
-            @memcpy(entry.args[i - 1][0..arg_len], arg_ptr[0..arg_len]);
-            entry.arg_lens[i - 1] = @intCast(arg_len);
-            entry.args_len += 1;
-            c.lua_pop(state, 1);
-        }
-    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
-        c.lua_pop(state, 1);
-        _ = c.luaL_error(state, "mcp.add: 'args' must be a table of strings");
-        return 0;
-    }
-    c.lua_pop(state, 1);
-
-    vm.mcp_entries.appendAssumeCapacity(entry);
-    c.lua_pushinteger(state, @intCast(vm.mcp_entries.items.len));
-    return 1;
-}
-
-fn luaMcpEnable(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "mcp.enable: vm not initialized");
-        return 0;
-    };
-    const vm = &a.lua_vm;
-
-    if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
-        _ = c.luaL_error(state, "mcp.enable: arg 1 (mcp_id) must be a number");
-        return 0;
-    }
-    const raw_id = c.lua_tointegerx(state, 1, null);
-    if (raw_id <= 0 or raw_id > vm.mcp_entries.items.len) {
-        _ = c.luaL_error(state, "mcp.enable: mcp_id out of range");
-        return 0;
-    }
-    const idx: usize = @intCast(raw_id - 1);
-
-    const agent_type: r.ContextFactory.AgentType = if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL)
-        readEnumArg(state, r.ContextFactory.AgentType, "mcp.enable", 2) orelse return 0
-    else
-        .general;
-
-    vm.mcp_entries.items[idx].enabled_agents.insert(agent_type);
-
-    if (getAppFromRegistry(state)) |app_for_mcp| {
-        appQueueEnqueue(state, "mcp.reload", app_for_mcp, .reload_mcp);
-    }
-    return 0;
-}
 
 const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
     .{
@@ -1318,7 +1060,16 @@ const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
         ,
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "obj", .ty = LuaType.any }},
-            .fn_ptr = luaJsonEncode,
+            .fn_ptr = (struct {
+                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                    const state = L.?;
+                    const vm = &(getAppFromRegistry(state) orelse return pushNilBool(state, false)).lua_vm;
+                    const json = luaToJsonAlloc(vm.luaArena(), state, 1) catch return pushNilBool(state, false);
+                    _ = c.lua_pushlstring(state, json.ptr, json.len);
+                    c.lua_pushboolean(state, 1);
+                    return 2;
+                }
+            }).lua_fn,
             .ret = &JsonEncodeRet,
         } },
     },
@@ -1328,44 +1079,20 @@ const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
     , .ty = LuaType{ .function = .{
         .args = &.{.{ .name = "json", .ty = LuaType.string }},
         .ret = &JsonDecodeRet,
-        .fn_ptr = luaJsonDecode,
+        .fn_ptr = (struct {
+            fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                const state = L.?;
+                const vm = &(getAppFromRegistry(state) orelse return pushNilBool(state, false)).lua_vm;
+                if (c.lua_type(state, 1) != c.LUA_TSTRING) return pushNilBool(state, false);
+                var len: usize = 0;
+                const ptr = c.lua_tolstring(state, 1, &len) orelse return pushNilBool(state, false);
+                pushJsonValue(vm.luaArena(), state, ptr[0..len]) catch return pushNilBool(state, false);
+                c.lua_pushboolean(state, 1);
+                return 2;
+            }
+        }).lua_fn,
     } } },
 } } };
-
-fn luaJsonEncode(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const vm = &(getAppFromRegistry(state) orelse {
-        return pushNilBool(state, false);
-    }).lua_vm;
-    const json = luaToJsonAlloc(vm.luaArena(), state, 1) catch {
-        return pushNilBool(state, false);
-    };
-
-    _ = c.lua_pushlstring(state, json.ptr, json.len);
-    c.lua_pushboolean(state, 1);
-    return 2;
-}
-
-fn luaJsonDecode(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const vm = &(getAppFromRegistry(state) orelse {
-        return pushNilBool(state, false);
-    }).lua_vm;
-    if (c.lua_type(state, 1) != c.LUA_TSTRING) {
-        return pushNilBool(state, false);
-    }
-
-    var len: usize = 0;
-    const ptr = c.lua_tolstring(state, 1, &len) orelse {
-        return pushNilBool(state, false);
-    };
-
-    pushJsonValue(vm.luaArena(), state, ptr[0..len]) catch {
-        return pushNilBool(state, false);
-    };
-    c.lua_pushboolean(state, 1);
-    return 2;
-}
 
 const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
     .{
@@ -1373,7 +1100,11 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Reset the active session.",
         .ty = LuaType{
             .function = .{
-                .fn_ptr = luaQueueResetSession,
+                .fn_ptr = LuaFnBind((struct {
+                    fn lua_fn(a: *r.app.App, state: *c.lua_State) !void {
+                        appQueueEnqueue(state, "queue.reset_session", a, .reset_session);
+                    }
+                }).lua_fn, "queue.reset_session"),
             },
         },
     },
@@ -1381,21 +1112,33 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .name = "cancel",
         .desc = "Cancel all in-flight agent work and drop streaming preview.",
         .ty = LuaType{ .function = .{
-            .fn_ptr = luaQueueCancel,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, state: *c.lua_State) !void {
+                    appQueueEnqueue(state, "queue.cancel", a, .cancel);
+                }
+            }).lua_fn, "queue.cancel"),
         } },
     },
     .{
         .name = "retry",
         .desc = "Retry the main agent's last turn.",
         .ty = LuaType{ .function = .{
-            .fn_ptr = luaQueueRetry,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, state: *c.lua_State) !void {
+                    appQueueEnqueue(state, "queue.retry", a, .retry);
+                }
+            }).lua_fn, "queue.retry"),
         } },
     },
     .{
         .name = "compact",
         .desc = "Request compaction for the main agent.",
         .ty = LuaType{ .function = .{
-            .fn_ptr = luaQueueCompact,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, state: *c.lua_State) !void {
+                    appQueueEnqueue(state, "queue.compact", a, .compact);
+                }
+            }).lua_fn, "queue.compact"),
         } },
     },
     .{
@@ -1403,7 +1146,11 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Switch the active mode. Forces a full mode-reminder on the next turn.",
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "mode", .ty = LuaType.integer }},
-            .fn_ptr = luaQueueSetMode,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, state: *c.lua_State, mode: u8) !void {
+                    appQueueEnqueue(state, "queue.set_mode", a, .{ .set_mode = mode });
+                }
+            }).lua_fn, "queue.set_mode"),
         } },
     },
     .{
@@ -1411,7 +1158,25 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Push a chat entry into the chat log.",
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "role", .ty = LuaType.string }, .{ .name = "text", .ty = LuaType.string } },
-            .fn_ptr = luaQueuePushChatEntry,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, state: *c.lua_State, role_str: []const u8, text: []const u8) !void {
+                    const role: prv.adapter.Role = if (std.mem.eql(u8, role_str, "system"))
+                        .system
+                    else if (std.mem.eql(u8, role_str, "user"))
+                        .user
+                    else if (std.mem.eql(u8, role_str, "agent"))
+                        .agent
+                    else
+                        return error.InvalidRole;
+
+                    var parts = try a.sessionAlloc().alloc(r.app.ChatPart, 1);
+                    parts[0] = .{ .message = text };
+                    appQueueEnqueue(state, "queue.push_chat_entry", a, .{ .push_chat_entry = .{
+                        .role = role,
+                        .parts = parts,
+                    } });
+                }
+            }).lua_fn, "queue.push_chat_entry"),
         } },
     },
     .{
@@ -1419,7 +1184,15 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Queue a user message for the given agent.",
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "text", .ty = LuaType.string } },
-            .fn_ptr = luaQueueAgentMessage,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, state: *c.lua_State, agent_id: r.prv.Swarm.AgentId, text: []const u8) !void {
+                    const parts = [_]prv.adapter.ContentPart{.{ .text = text }};
+                    appQueueEnqueue(state, "queue.queue_agent_message", a, .{ .queue_agent_message = .{
+                        .agent_id = agent_id,
+                        .parts = &parts,
+                    } });
+                }
+            }).lua_fn, "queue.queue_agent_message"),
         } },
     },
     .{
@@ -1427,7 +1200,69 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Reserve a free slot and enqueue a spawn or fork into it.",
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "args", .ty = SpawnAgentArgsDef }},
-            .fn_ptr = luaQueueSpawnAgent,
+            .fn_ptr = (struct {
+                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                    const state = L.?;
+                    const a = getAppFromRegistry(state) orelse {
+                        _ = c.luaL_error(state, "queue.spawn_agent: app not initialized");
+                        return 0;
+                    };
+                    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
+                        _ = c.luaL_error(state, "queue.spawn_agent: expected a single table argument");
+                        return 0;
+                    }
+
+                    var args: r.cmd.Command.SpawnArgs = .{
+                        .agent_id = .{ .index = 0, .generation = 0 },
+                        .prompt = &.{},
+                    };
+
+                    _ = c.lua_getfield(state, 1, "parent_id");
+                    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
+                        args.parent_id = readAgentIdArg(state, "queue.spawn_agent", c.lua_gettop(state));
+                    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
+                        _ = c.luaL_error(state, "queue.spawn_agent: parent_id must be a table or nil");
+                        return 0;
+                    }
+                    c.lua_pop(state, 1);
+
+                    _ = c.lua_getfield(state, 1, "prompt");
+                    if (c.lua_type(state, -1) != c.LUA_TSTRING) {
+                        _ = c.luaL_error(state, "queue.spawn_agent: 'prompt' (string) required");
+                        return 0;
+                    }
+                    var p_len: usize = 0;
+                    const p_ptr = c.lua_tolstring(state, -1, &p_len);
+                    const parts = [_]prv.adapter.ContentPart{.{ .text = p_ptr[0..p_len] }};
+                    args.prompt = &parts;
+
+                    if (getOptionalU32(state, 1, "agent_type")) |t| {
+                        if (t > std.math.maxInt(u8)) {
+                            _ = c.luaL_error(state, "queue.spawn_agent: agent_type out of range");
+                            return 0;
+                        }
+                        args.agent_type = @intCast(t);
+                    }
+                    if (getOptionalU32(state, 1, "tool_budget")) |b| args.tool_budget = b;
+                    if (getOptionalBool(state, 1, "fork")) |f| args.fork = f;
+                    c.lua_pop(state, 1);
+
+                    if (args.fork and args.parent_id == null) {
+                        _ = c.luaL_error(state, "queue.spawn_agent: fork=true requires parent_id");
+                        return 0;
+                    }
+
+                    const id = a.swarm.reserveFreeSlot() orelse {
+                        c.lua_pushnil(state);
+                        return 1;
+                    };
+                    args.agent_id = id;
+
+                    appQueueEnqueue(state, "queue.spawn_agent", a, .{ .spawn_agent = args });
+                    pushAgentId(state, id);
+                    return 1;
+                }
+            }).lua_fn,
             .ret = &AgentIdOrNilDef,
         } },
     },
@@ -1437,7 +1272,61 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
             .ret = &LuaInteger,
-            .fn_ptr = luaQueueAwaitAgent,
+            .fn_ptr = (struct {
+                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                    const state = L.?;
+                    const a = getAppFromRegistry(state) orelse {
+                        _ = c.luaL_error(state, "queue.await_agent: app not initialized");
+                        return 0;
+                    };
+                    const vm = activeVm() orelse {
+                        _ = c.luaL_error(state, "queue.await_agent: no active lua vm");
+                        return 0;
+                    };
+                    const id = readAgentIdArg(state, "queue.await_agent", 1);
+                    const io = a.swarm.pool.io;
+                    const slot = a.swarm.getSlot(id) orelse {
+                        c.lua_pushinteger(state, AWAIT_INVALID);
+                        return 1;
+                    };
+
+                    switch (slot.state.load(.acquire)) {
+                        .complete => {
+                            c.lua_pushinteger(state, AWAIT_COMPLETE);
+                            return 1;
+                        },
+                        .failed => {
+                            c.lua_pushinteger(state, AWAIT_FAILED);
+                            return 1;
+                        },
+                        .free => {
+                            c.lua_pushinteger(state, AWAIT_INVALID);
+                            return 1;
+                        },
+                        .reserved, .active => {},
+                    }
+
+                    vm.vm_mu.unlock(io);
+                    slot.event.wait(io) catch {
+                        vm.vm_mu.lockUncancelable(io);
+                        c.lua_pushinteger(state, AWAIT_CANCELED);
+                        return 1;
+                    };
+                    vm.vm_mu.lockUncancelable(io);
+
+                    const slot_now = a.swarm.getSlot(id) orelse {
+                        c.lua_pushinteger(state, AWAIT_CANCELED);
+                        return 1;
+                    };
+                    const code: c_int = switch (slot_now.state.load(.acquire)) {
+                        .complete => AWAIT_COMPLETE,
+                        .failed => AWAIT_FAILED,
+                        else => AWAIT_CANCELED,
+                    };
+                    c.lua_pushinteger(state, code);
+                    return 1;
+                }
+            }).lua_fn,
         } },
     },
     .{
@@ -1446,7 +1335,44 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
             .ret = &StringOrNilDef,
-            .fn_ptr = luaQueueAwaitAgentResult,
+            .fn_ptr = (struct {
+                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                    const state = L.?;
+                    const a = getAppFromRegistry(state) orelse {
+                        _ = c.luaL_error(state, "queue.await_agent_result: app not initialized");
+                        return 0;
+                    };
+                    const id = readAgentIdArg(state, "queue.await_agent_result", 1);
+                    const agent = a.swarm.getAgent(id) orelse {
+                        _ = c.luaL_error(state, "queue.await_agent_result: agent not found");
+                        return 0;
+                    };
+                    if (agent.chat.messages.items.len == 0) {
+                        _ = c.luaL_error(state, "queue.await_agent_result: agent has no chat entries");
+                        return 0;
+                    }
+
+                    const last_msg = &agent.chat.messages.items[agent.chat.messages.items.len -| 1];
+                    var total: usize = 0;
+                    for (last_msg.parts) |p| switch (p) {
+                        .text => |t| total += t.len,
+                        else => {},
+                    };
+                    if (total == 0) {
+                        _ = c.lua_pushlstring(state, "", 0);
+                        return 1;
+                    }
+
+                    var b: c.luaL_Buffer = undefined;
+                    c.luaL_buffinit(state, &b);
+                    for (last_msg.parts) |p| switch (p) {
+                        .text => |t| c.luaL_addlstring(&b, t.ptr, t.len),
+                        else => {},
+                    };
+                    c.luaL_pushresult(&b);
+                    return 1;
+                }
+            }).lua_fn,
         } },
     },
     .{
@@ -1454,7 +1380,11 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Save current session to disk.",
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "path", .ty = LuaType.string }},
-            .fn_ptr = luaQueueSaveSession,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, state: *c.lua_State, path: []const u8) !void {
+                    appQueueEnqueue(state, "save_session", a, .{ .save_session = path });
+                }
+            }).lua_fn, "save_session"),
         } },
     },
     .{
@@ -1462,7 +1392,11 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Load a session from disk.",
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "path", .ty = LuaType.string }},
-            .fn_ptr = luaQueueLoadSession,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, state: *c.lua_State, path: []const u8) !void {
+                    appQueueEnqueue(state, "load_session", a, .{ .load_session = path });
+                }
+            }).lua_fn, "load_session"),
         } },
     },
     .{
@@ -1470,314 +1404,17 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Attach a screenshot/image to the current input.",
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "data", .ty = LuaType.string }, .{ .name = "media_type", .ty = LuaType.string, .optional = true } },
-            .fn_ptr = luaQueueAttachScreenshot,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, state: *c.lua_State, data: []const u8, media_type: ?[]const u8) !void {
+                    appQueueEnqueue(state, "queue.attach_screenshot", a, .{ .attach_screenshot = .{
+                        .media_type = media_type orelse "image/png",
+                        .data = data,
+                    } });
+                }
+            }).lua_fn, "queue.attach_screenshot"),
         } },
     },
 } } };
-
-fn luaQueueResetSession(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.reset_session: app not initialized");
-        return 0;
-    };
-    appQueueEnqueue(state, "queue.reset_session", a, .reset_session);
-    return 0;
-}
-
-fn luaQueueCancel(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.cancel: app not initialized");
-        return 0;
-    };
-    appQueueEnqueue(state, "queue.cancel", a, .cancel);
-    return 0;
-}
-
-fn luaQueueRetry(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.retry: app not initialized");
-        return 0;
-    };
-    appQueueEnqueue(state, "queue.retry", a, .retry);
-    return 0;
-}
-
-fn luaQueueCompact(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.compact: app not initialized");
-        return 0;
-    };
-    appQueueEnqueue(state, "queue.compact", a, .compact);
-    return 0;
-}
-
-fn luaQueueSetMode(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.set_mode: app not initialized");
-        return 0;
-    };
-    const mode = readAnyArg(u8, state, "queue.set_mode", 1) orelse return 0;
-    appQueueEnqueue(state, "queue.set_mode", a, .{ .set_mode = mode });
-    return 0;
-}
-
-fn luaQueuePushChatEntry(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.push_chat_entry: app not initialized");
-        return 0;
-    };
-    const role_str = readAnyArg([]const u8, state, "queue.push_chat_entry", 1) orelse return 0;
-    const role: prv.adapter.Role = if (std.mem.eql(u8, role_str, "system"))
-        .system
-    else if (std.mem.eql(u8, role_str, "user"))
-        .user
-    else if (std.mem.eql(u8, role_str, "agent"))
-        .agent
-    else {
-        _ = c.luaL_error(state, "queue.push_chat_entry: role must be 'system'|'user'|'agent'");
-        return 0;
-    };
-
-    const text = readAnyArg([]const u8, state, "queue.push_chat_entry", 2) orelse return 0;
-
-    var parts = a.sessionAlloc().alloc(r.app.ChatPart, 1) catch return 0;
-    parts[0] = .{ .message = text };
-
-    appQueueEnqueue(state, "queue.push_chat_entry", a, .{ .push_chat_entry = .{
-        .role = role,
-        .parts = parts,
-    } });
-    return 0;
-}
-
-fn luaQueueAgentMessage(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.queue_agent_message: app not initialized");
-        return 0;
-    };
-    const id = readAgentIdArg(state, "queue.queue_agent_message", 1);
-
-    const text = readAnyArg([]const u8, state, "queue.queue_agent_message", 2) orelse return 0;
-    const parts = [_]prv.adapter.ContentPart{.{ .text = text }};
-    appQueueEnqueue(state, "queue.queue_agent_message", a, .{ .queue_agent_message = .{
-        .agent_id = id,
-        .parts = &parts,
-    } });
-    return 0;
-}
-
-fn luaQueueSpawnAgent(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.spawn_agent: app not initialized");
-        return 0;
-    };
-    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-        _ = c.luaL_error(state, "queue.spawn_agent: expected a single table argument");
-        return 0;
-    }
-
-    var args: r.cmd.Command.SpawnArgs = .{
-        .agent_id = .{ .index = 0, .generation = 0 },
-        .prompt = &.{},
-    };
-
-    _ = c.lua_getfield(state, 1, "parent_id");
-    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
-        args.parent_id = readAgentIdArg(state, "queue.spawn_agent", c.lua_gettop(state));
-    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
-        _ = c.luaL_error(state, "queue.spawn_agent: parent_id must be a table or nil");
-        return 0;
-    }
-    c.lua_pop(state, 1);
-
-    _ = c.lua_getfield(state, 1, "prompt");
-    if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-        _ = c.luaL_error(state, "queue.spawn_agent: 'prompt' (string) required");
-        return 0;
-    }
-    var p_len: usize = 0;
-    const p_ptr = c.lua_tolstring(state, -1, &p_len);
-    const parts = [_]prv.adapter.ContentPart{.{ .text = p_ptr[0..p_len] }};
-    args.prompt = &parts;
-
-    if (getOptionalU32(state, 1, "agent_type")) |t| {
-        if (t > std.math.maxInt(u8)) {
-            _ = c.luaL_error(state, "queue.spawn_agent: agent_type out of range");
-            return 0;
-        }
-        args.agent_type = @intCast(t);
-    }
-
-    if (getOptionalU32(state, 1, "tool_budget")) |b| args.tool_budget = b;
-
-    if (getOptionalBool(state, 1, "fork")) |f| args.fork = f;
-
-    c.lua_pop(state, 1);
-
-    if (args.fork and args.parent_id == null) {
-        _ = c.luaL_error(state, "queue.spawn_agent: fork=true requires parent_id");
-        return 0;
-    }
-
-    const id = a.swarm.reserveFreeSlot() orelse {
-        c.lua_pushnil(state);
-        return 1;
-    };
-    args.agent_id = id;
-
-    appQueueEnqueue(state, "queue.spawn_agent", a, .{ .spawn_agent = args });
-    pushAgentId(state, id);
-    return 1;
-}
-
-fn luaQueueAwaitAgent(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.await_agent: app not initialized");
-        return 0;
-    };
-    const vm = activeVm() orelse {
-        _ = c.luaL_error(state, "queue.await_agent: no active lua vm");
-        return 0;
-    };
-    const id = readAgentIdArg(state, "queue.await_agent", 1);
-    const io = a.swarm.pool.io;
-
-    const slot = a.swarm.getSlot(id) orelse {
-        c.lua_pushinteger(state, AWAIT_INVALID);
-        return 1;
-    };
-
-    const s0 = slot.state.load(.acquire);
-    switch (s0) {
-        .complete => {
-            c.lua_pushinteger(state, AWAIT_COMPLETE);
-            return 1;
-        },
-        .failed => {
-            c.lua_pushinteger(state, AWAIT_FAILED);
-            return 1;
-        },
-        .free => {
-            c.lua_pushinteger(state, AWAIT_INVALID);
-            return 1;
-        },
-        .reserved, .active => {},
-    }
-
-    vm.vm_mu.unlock(io);
-    slot.event.wait(io) catch {
-        vm.vm_mu.lockUncancelable(io);
-        c.lua_pushinteger(state, AWAIT_CANCELED);
-        return 1;
-    };
-    vm.vm_mu.lockUncancelable(io);
-
-    // Slot generation may have changed if a release+reuse raced us. Re-validate.
-    const slot_now = a.swarm.getSlot(id) orelse {
-        c.lua_pushinteger(state, AWAIT_CANCELED);
-        return 1;
-    };
-    const code: c_int = switch (slot_now.state.load(.acquire)) {
-        .complete => AWAIT_COMPLETE,
-        .failed => AWAIT_FAILED,
-        else => AWAIT_CANCELED,
-    };
-    c.lua_pushinteger(state, code);
-    return 1;
-}
-
-fn luaQueueAwaitAgentResult(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.await_agent_result: app not initialized");
-        return 0;
-    };
-    const id = readAgentIdArg(state, "queue.await_agent_result", 1);
-
-    const agent = a.swarm.getAgent(id) orelse {
-        _ = c.luaL_error(state, "queue.await_agent_result: agent not found");
-        return 0;
-    };
-
-    if (agent.chat.messages.items.len == 0) {
-        _ = c.luaL_error(state, "queue.await_agent_result: agent has no chat entries");
-        return 0;
-    }
-
-    const last_msg = &agent.chat.messages.items[agent.chat.messages.items.len -| 1];
-
-    var total: usize = 0;
-    for (last_msg.parts) |p| switch (p) {
-        .text => |t| total += t.len,
-        else => {},
-    };
-    if (total == 0) {
-        _ = c.lua_pushlstring(state, "", 0);
-        return 1;
-    }
-
-    var b: c.luaL_Buffer = undefined;
-    c.luaL_buffinit(state, &b);
-    for (last_msg.parts) |p| switch (p) {
-        .text => |t| c.luaL_addlstring(&b, t.ptr, t.len),
-        else => {},
-    };
-    c.luaL_pushresult(&b);
-    return 1;
-}
-
-fn luaQueueSaveSession(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "save_session: app not initialized");
-        return 0;
-    };
-    const path = readAnyArg([]const u8, state, "save_session", 1) orelse return 0;
-    const cmd: r.cmd.Command = .{ .save_session = path };
-    appQueueEnqueue(state, "save_session", a, cmd);
-    return 0;
-}
-
-fn luaQueueLoadSession(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "load_session: app not initialized");
-        return 0;
-    };
-    const path = readAnyArg([]const u8, state, "load_session", 1) orelse return 0;
-    const cmd: r.cmd.Command = .{ .load_session = path };
-    appQueueEnqueue(state, "load_session", a, cmd);
-    return 0;
-}
-
-fn luaQueueAttachScreenshot(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "queue.attach_screenshot: app not initialized");
-        return 0;
-    };
-
-    const data = readAnyArg([]const u8, state, "queue.attach_screenshot", 1) orelse return 0;
-    const media_type = if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL)
-        readAnyArg([]const u8, state, "queue.attach_screenshot", 2) orelse return 0
-    else
-        "image/png";
-
-    appQueueEnqueue(state, "queue.attach_screenshot", a, .{ .attach_screenshot = .{
-        .media_type = media_type,
-        .data = data,
-    } });
-    return 0;
-}
 
 // ── Lua Tool Registry (per-VM, reached via registry lookup) ─────────
 
@@ -2066,7 +1703,7 @@ fn readAnyValueAlloc(
                 _ = c.lua_rawgeti(state, abs, @intCast(i + 1));
                 defer c.lua_pop(state, 1);
 
-                const res = readAnyFieldAlloc(arr.child, state, -1, allocator);
+                const res = readAnyValueAlloc(arr.child, state, @typeName(arr.child), -1, allocator);
                 switch (res) {
                     .ok => |val| item.* = val,
                     .err => |msg| return .Err(msg),
@@ -3389,7 +3026,7 @@ test "pushAny and readAnyValue handle arrays and slices" {
     try std.testing.expectEqualStrings("ask", fixed[0]);
     try std.testing.expectEqualStrings("read", fixed[1]);
 
-    const slice = readAnyValueAlloc([]const []const u8, state, -1, std.testing.allocator).?;
+    const slice = readAnyValueAlloc([]const []const u8, state, "slice", -1, std.testing.allocator).ok;
     defer std.testing.allocator.free(slice);
     try std.testing.expectEqual(@as(usize, 2), slice.len);
     try std.testing.expectEqualStrings("ask", slice[0]);
