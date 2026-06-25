@@ -78,6 +78,7 @@
 ---@field AWAIT_AGENT string
 ---@field CANCEL_AGENT string
 ---@field RIPGREP string
+---@field LOADSKILL string
 ---remove test function
 ---@field remove fun(value: string)
 

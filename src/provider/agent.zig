@@ -311,7 +311,7 @@ pub const Agent = struct {
         self.tool_call_count = 0;
         self.max_allowed_tool_calls = 64;
         self.loop_guard = .{};
-        _ = self.arena.reset(.retain_capacity);
+        _ = self.arena.reset(.free_all);
     }
 
     pub fn setTools(self: *Agent, tools: []const tc.Tool) !void {

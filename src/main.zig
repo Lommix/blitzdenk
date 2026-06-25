@@ -425,6 +425,7 @@ pub fn run(
                 config_lua_mtime = new_config_mtime;
 
                 app.lua_vm.clearLastError();
+                app.event_bus.listner.clearAndFree(app.appAlloc());
                 var lua_reload_failed = false;
 
                 app.lua_vm.reset() catch |err| {

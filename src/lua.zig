@@ -869,6 +869,7 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "AWAIT_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AwaitAgent.def.name } },
             .{ .name = "CANCEL_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.CancelAgent.def.name } },
             .{ .name = "RIPGREP", .ty = LuaType.string, .value = .{ .string = tl.rg.RipGrepTool.def.name } },
+            .{ .name = "LOADSKILL", .ty = LuaType.string, .value = .{ .string = tl.skill.LoadSkillTool.def.name } },
             .{
                 .name = "remove",
                 .desc = "remove test function",

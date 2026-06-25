@@ -176,7 +176,7 @@ pub fn reset(self: *Self) void {
         slot.agent.deinit();
         slot.* = .{};
     }
-    _ = self.arena.reset(.retain_capacity);
+    _ = self.arena.reset(.free_all);
 }
 
 pub fn deinit(self: *Self) void {

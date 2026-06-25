@@ -15,6 +15,7 @@ pub const patch = @import("patch.zig");
 pub const r = @import("../root.zig");
 pub const tui = r.tui;
 pub const rg = @import("rg.zig");
+pub const skill = @import("skill.zig");
 
 pub const MAX_DISPLAY_BYTES = 32 * 1024;
 pub const MAX_DISPLAY_LINES = 1000;

@@ -26,6 +26,7 @@ pub const general_default_tool_set = .{
     r.tools.ssh.EnterSshMode,
     r.tools.ssh.ExitSshMode,
     r.tools.rg.RipGrepTool,
+    r.tools.skill.LoadSkillTool,
 };
 
 pub const AgentDef = struct {
@@ -120,10 +121,8 @@ pub const AgentMeta = struct {
 
 // -------------------------------------------------------------------------------
 loaded_tools: std.ArrayList(ToolEntry) = .empty,
-
 mode_counter: u32 = 2, // skip first 2 for interal modes
 agent_counter: u32 = 3,
-
 agents: std.EnumArray(AgentType, ?AgentDef) = .initFill(null),
 modes: std.EnumArray(Mode, ?ModeDef) = .initFill(null),
 
@@ -594,14 +593,13 @@ pub fn build_system_prompt(
             };
 
             try w.print(
-                \\skill: "{s}"
-                \\description: "{s}"
-                \\location: "{s}"
+                \\skill: `{s}`
+                \\description:
+                \\{s}
                 \\
             , .{
                 skill.name,
                 skill.description,
-                path,
             });
         }
     }
@@ -672,6 +670,30 @@ pub fn loadSkillMeta(io: std.Io, path: []const u8, buf: []u8) ?SkillMeta {
 
     if (meta.name.len == 0 or meta.description.len == 0) return null;
     return meta;
+}
+
+/// Reads only the markdown content after the yaml header from `path`.
+/// Caller owns the returned slice.
+pub fn loadSkillContent(alloc: std.mem.Allocator, io: std.Io, path: []const u8) ?[]u8 {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
+
+    const stat = file.stat(io) catch return null;
+    const size: usize = std.math.cast(usize, stat.size) orelse return null;
+    const raw = alloc.alloc(u8, size) catch return null;
+    defer alloc.free(raw);
+
+    var read_buf: [256]u8 = undefined;
+    var file_reader = file.reader(io, &read_buf);
+    const n = file_reader.interface.readSliceShort(raw) catch return null;
+    if (n != raw.len) return null;
+    if (!std.mem.startsWith(u8, raw, "---\n")) return null;
+
+    const header_end = std.mem.indexOf(u8, raw[4..], "\n---") orelse return null;
+    var content_start = 4 + header_end + "\n---".len;
+    if (content_start < raw.len and raw[content_start] == '\r') content_start += 1;
+    if (content_start < raw.len and raw[content_start] == '\n') content_start += 1;
+    return alloc.dupe(u8, raw[content_start..]) catch return null;
 }
 
 test "agent defaults can be replaced with an empty tool list" {
