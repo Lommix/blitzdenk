@@ -41,6 +41,8 @@ pub const CommandQueue = struct {
         while (i < data.items.len) : (i += 1) {
             try data.items[i].execute(app);
         }
+
+        if (self._data.items.len > 0) try self.apply(io, app);
     }
 };
 

@@ -16,8 +16,8 @@ pub const r = @import("../root.zig");
 pub const tui = r.tui;
 pub const rg = @import("rg.zig");
 
-pub const MAX_DISPLAY_BYTES = 16 * 1024;
-pub const MAX_DISPLAY_LINES = 500;
+pub const MAX_DISPLAY_BYTES = 32 * 1024;
+pub const MAX_DISPLAY_LINES = 1000;
 
 pub fn fmtSpan(ctx: *r.prv.tool.ToolContext, comptime fmt: []const u8, args: anytype, style: tui.Style) r.tui.Span {
     const app: *r.app.App = @ptrCast(@alignCast(ctx.swarm.context.ptr));
