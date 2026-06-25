@@ -128,7 +128,10 @@ pub const Command = union(enum) {
                 app.auto_scroll = true;
             },
             .set_mode => |m| {
-                app.mode = @enumFromInt(m);
+                const next_mode: r.ContextFactory.Mode = @enumFromInt(m);
+                if (app.mode == next_mode) return;
+
+                app.mode = next_mode;
                 if (app.main_agent_id) |id| {
                     const agent = app.swarm.getAgent(id).?;
                     agent.mode_idx = m;

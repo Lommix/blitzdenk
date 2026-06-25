@@ -754,9 +754,8 @@ pub const Blitz = LuaType{
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "mode", .ty = LuaType.integer }},
                     .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(a: *r.app.App, mode_id: u32) !void {
-                            a.mode = @enumFromInt(mode_id);
-                            if (a.mainAgent()) |agent| agent.flags.force_full_reminder = true;
+                        fn lua_fn(a: *r.app.App, mode_id: u8) !void {
+                            try a.cmd_queue.append(a.io, .{ .set_mode = mode_id });
                         }
                     }).lua_fn, "set_mode"),
                 } },
@@ -839,8 +838,8 @@ pub const Blitz = LuaType{
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "message", .ty = LuaType.string }},
                     .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(a: *r.app.App, state: *c.lua_State, message: []const u8) !void {
-                            appQueueEnqueue(state, "queue.attach_notfication", a, .{ .push_notification = message });
+                        fn lua_fn(a: *r.app.App, message: []const u8) !void {
+                            try a.cmd_queue.append(a.io, .{ .push_notification = message });
                         }
                     }).lua_fn, "push_notification"),
                 } },
@@ -1040,11 +1039,11 @@ const BlitzMcp = LuaType{ .table_def = .{ .name = "BlitzMcp", .fields = &.{
             .function = .{
                 .args = &.{ .{ .name = "mcp_id", .ty = LuaType.integer }, .{ .name = "agent_type", .ty = LuaType.integer, .optional = true } },
                 .fn_ptr = LuaFnBind((struct {
-                    fn lua_fn(a: *r.app.App, state: *c.lua_State, mcp_id: u32, agent_type: ?r.ContextFactory.AgentType) !void {
+                    fn lua_fn(a: *r.app.App, mcp_id: u32, agent_type: ?r.ContextFactory.AgentType) !void {
                         const vm = &a.lua_vm;
                         if (mcp_id == 0 or mcp_id > vm.mcp_entries.items.len) return error.InvalidMcpId;
                         vm.mcp_entries.items[mcp_id - 1].enabled_agents.insert(agent_type orelse .general);
-                        appQueueEnqueue(state, "mcp.reload", a, .reload_mcp);
+                        try a.cmd_queue.append(a.io, .reload_mcp);
                     }
                 }).lua_fn, "mcp.enable"),
             },
@@ -1102,8 +1101,8 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .ty = LuaType{
             .function = .{
                 .fn_ptr = LuaFnBind((struct {
-                    fn lua_fn(a: *r.app.App, state: *c.lua_State) !void {
-                        appQueueEnqueue(state, "queue.reset_session", a, .reset_session);
+                    fn lua_fn(a: *r.app.App) !void {
+                        try a.cmd_queue.append(a.io, .reset_session);
                     }
                 }).lua_fn, "queue.reset_session"),
             },
@@ -1114,8 +1113,8 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Cancel all in-flight agent work and drop streaming preview.",
         .ty = LuaType{ .function = .{
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, state: *c.lua_State) !void {
-                    appQueueEnqueue(state, "queue.cancel", a, .cancel);
+                fn lua_fn(a: *r.app.App) !void {
+                    try a.cmd_queue.append(a.io, .cancel);
                 }
             }).lua_fn, "queue.cancel"),
         } },
@@ -1125,8 +1124,8 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Retry the main agent's last turn.",
         .ty = LuaType{ .function = .{
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, state: *c.lua_State) !void {
-                    appQueueEnqueue(state, "queue.retry", a, .retry);
+                fn lua_fn(a: *r.app.App) !void {
+                    try a.cmd_queue.append(a.io, .retry);
                 }
             }).lua_fn, "queue.retry"),
         } },
@@ -1136,8 +1135,8 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .desc = "Request compaction for the main agent.",
         .ty = LuaType{ .function = .{
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, state: *c.lua_State) !void {
-                    appQueueEnqueue(state, "queue.compact", a, .compact);
+                fn lua_fn(a: *r.app.App) !void {
+                    try a.cmd_queue.append(a.io, .compact);
                 }
             }).lua_fn, "queue.compact"),
         } },
@@ -1148,8 +1147,8 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "mode", .ty = LuaType.integer }},
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, state: *c.lua_State, mode: u8) !void {
-                    appQueueEnqueue(state, "queue.set_mode", a, .{ .set_mode = mode });
+                fn lua_fn(a: *r.app.App, mode: u8) !void {
+                    try a.cmd_queue.append(a.io, .{ .set_mode = mode });
                 }
             }).lua_fn, "queue.set_mode"),
         } },
@@ -1160,7 +1159,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "role", .ty = LuaType.string }, .{ .name = "text", .ty = LuaType.string } },
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, state: *c.lua_State, role_str: []const u8, text: []const u8) !void {
+                fn lua_fn(a: *r.app.App, role_str: []const u8, text: []const u8) !void {
                     const role: prv.adapter.Role = if (std.mem.eql(u8, role_str, "system"))
                         .system
                     else if (std.mem.eql(u8, role_str, "user"))
@@ -1172,7 +1171,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
 
                     var parts = try a.sessionAlloc().alloc(r.app.ChatPart, 1);
                     parts[0] = .{ .message = text };
-                    appQueueEnqueue(state, "queue.push_chat_entry", a, .{ .push_chat_entry = .{
+                    try a.cmd_queue.append(a.io, .{ .push_chat_entry = .{
                         .role = role,
                         .parts = parts,
                     } });
@@ -1186,9 +1185,9 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "text", .ty = LuaType.string } },
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, state: *c.lua_State, agent_id: r.prv.Swarm.AgentId, text: []const u8) !void {
+                fn lua_fn(a: *r.app.App, agent_id: r.prv.Swarm.AgentId, text: []const u8) !void {
                     const parts = [_]prv.adapter.ContentPart{.{ .text = text }};
-                    appQueueEnqueue(state, "queue.queue_agent_message", a, .{ .queue_agent_message = .{
+                    try a.cmd_queue.append(a.io, .{ .queue_agent_message = .{
                         .agent_id = agent_id,
                         .parts = &parts,
                     } });
@@ -1259,7 +1258,10 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                     };
                     args.agent_id = id;
 
-                    appQueueEnqueue(state, "queue.spawn_agent", a, .{ .spawn_agent = args });
+                    a.cmd_queue.append(a.io, .{ .spawn_agent = args }) catch {
+                        c.lua_pushnil(state);
+                        return 1;
+                    };
                     pushAgentId(state, id);
                     return 1;
                 }
@@ -1382,8 +1384,8 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "path", .ty = LuaType.string }},
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, state: *c.lua_State, path: []const u8) !void {
-                    appQueueEnqueue(state, "save_session", a, .{ .save_session = path });
+                fn lua_fn(a: *r.app.App, path: []const u8) !void {
+                    try a.cmd_queue.append(a.io, .{ .save_session = path });
                 }
             }).lua_fn, "save_session"),
         } },
@@ -1394,8 +1396,8 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "path", .ty = LuaType.string }},
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, state: *c.lua_State, path: []const u8) !void {
-                    appQueueEnqueue(state, "load_session", a, .{ .load_session = path });
+                fn lua_fn(a: *r.app.App, path: []const u8) !void {
+                    try a.cmd_queue.append(a.io, .{ .load_session = path });
                 }
             }).lua_fn, "load_session"),
         } },
@@ -1406,8 +1408,8 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "data", .ty = LuaType.string }, .{ .name = "media_type", .ty = LuaType.string, .optional = true } },
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, state: *c.lua_State, data: []const u8, media_type: ?[]const u8) !void {
-                    appQueueEnqueue(state, "queue.attach_screenshot", a, .{ .attach_screenshot = .{
+                fn lua_fn(a: *r.app.App, data: []const u8, media_type: ?[]const u8) !void {
+                    try a.cmd_queue.append(a.io, .{ .attach_screenshot = .{
                         .media_type = media_type orelse "image/png",
                         .data = data,
                     } });
@@ -2782,12 +2784,6 @@ fn readAgentIdArg(state: *c.lua_State, comptime fname: []const u8, idx: c_int) r
     return .{
         .index = index,
         .generation = generation,
-    };
-}
-
-fn appQueueEnqueue(state: *c.lua_State, comptime fname: []const u8, a: *app.App, cmd: r.cmd.Command) void {
-    a.cmd_queue.append(a.swarm.pool.io, cmd) catch {
-        _ = c.luaL_error(state, fname ++ ": command queue full");
     };
 }
 

@@ -154,6 +154,10 @@ fn inject_task_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.age
 }
 
 fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
+
+    // mode main agent only
+    if (agent.swarm_id != app.main_agent_id) return;
+
     const mode: r.ContextFactory.Mode = @enumFromInt(agent.mode_idx);
     const def = app.context_factory.getMode(mode);
     const reminder = if (agent.flags.force_full_reminder)
