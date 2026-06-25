@@ -109,6 +109,26 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
     try line.pushSpanPrint(alloc, "{s}", .{app.cwd}, .{ .fg = app.theme.info, .modifier = .{ .bold = true } });
     try out.append(alloc, line);
 
+    {
+        var skill_count: usize = 0;
+        if (app.context_factory.skill_dir) |skill_dir| {
+            var it = skill_dir.iterate();
+            while (true) {
+                const entry = it.next(app.io) catch break orelse break;
+                if (std.mem.endsWith(u8, entry.name, ".md")) {
+                    skill_count += 1;
+                }
+            }
+        }
+
+        var l = r.tui.Line{};
+        try l.pushSpan(alloc, .{ .content = "├[context:  ", .style = .{ .fg = app.theme.muted } });
+        try l.pushSpanPrint(alloc, "skills: {}", .{skill_count}, .{ .fg = app.theme.info });
+        try l.pushSpanPrint(alloc, "  mcp: {}", .{app.mcp_manager.clients.items.len}, .{ .fg = app.theme.info });
+        try l.pushSpanPrint(alloc, "  lsp: {}", .{app.lsp_manager.clients.items.len}, .{ .fg = app.theme.info });
+        try out.append(alloc, l);
+    }
+
     try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
     try out.append(alloc, try r.tui.Line.new(alloc, "│ Agents", .{}, .{ .fg = app.theme.muted }));
 
