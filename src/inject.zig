@@ -166,7 +166,9 @@ fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.age
         def.sparse;
     agent.flags.force_full_reminder = false;
 
-    _ = try w.write(reminder);
+    if (reminder.len == 0) return;
+    _ = try w.print("<system-mode>{s}</system-mode>", .{reminder});
+
     try w.flush();
 }
 

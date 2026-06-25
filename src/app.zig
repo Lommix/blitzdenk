@@ -2225,41 +2225,47 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
 
 fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     if (area.width == 0 or area.height == 0) return;
-    if (!app.running) return;
 
     const aid = id orelse return;
     const slot = &app.swarm.slots[aid.index];
-    if (slot.state.load(.acquire) != .active) return;
+    const state = slot.state.load(.acquire);
+    if (state != .active and state != .complete and state != .failed) return;
 
     const alloc = app.sessionAlloc();
-    const spinner_str = text_utils.spinnerDots(app.frame_count);
+    const secs = @as(u32, @intFromFloat(slot.time_elapsed));
 
     var para = r.tui.Paragraph{
         .padding = .all(1),
     };
 
-    const exec_pool = app.swarm.exec;
-    const ssh_suffix: []const u8 = if (exec_pool.ssh_active and exec_pool.ssh_target != null) " (SSH ON)" else "";
-
-    var queued_buf: [64]u8 = undefined;
-    const queued_count = app.queued.count();
-    const queued_suffix: []const u8 = if (queued_count == 0)
-        ""
-    else if (queued_count == 1)
-        "(1 message queued up)"
-    else
-        std.fmt.bufPrint(&queued_buf, "({d} queued messages up)", .{queued_count}) catch "(queued messages up)";
-
     var b: [255]u8 = undefined;
-    const line = std.fmt.bufPrint(&b, "{s} ({d}s) Consuming tokens …{s} {s}", .{
-        spinner_str,
-        @as(u32, @intFromFloat(slot.time_elapsed)),
-        ssh_suffix,
-        queued_suffix,
-    }) catch "…";
+    const line = if (state == .active) blk: {
+        const spinner_str = text_utils.spinnerDots(app.frame_count);
+        const exec_pool = app.swarm.exec;
+        const ssh_suffix: []const u8 = if (exec_pool.ssh_active and exec_pool.ssh_target != null) " (SSH ON)" else "";
+
+        var queued_buf: [64]u8 = undefined;
+        const queued_count = app.queued.count();
+        const queued_suffix: []const u8 = if (queued_count == 0)
+            ""
+        else if (queued_count == 1)
+            "(1 message queued up)"
+        else
+            std.fmt.bufPrint(&queued_buf, "({d} queued messages up)", .{queued_count}) catch "(queued messages up)";
+
+        break :blk std.fmt.bufPrint(&b, "{s} ({d}s) Consuming tokens …{s} {s}", .{
+            spinner_str,
+            secs,
+            ssh_suffix,
+            queued_suffix,
+        }) catch "…";
+    } else if (state == .complete) blk: {
+        break :blk std.fmt.bufPrint(&b, "Done ({d}s)", .{secs}) catch "…";
+    } else blk: {
+        break :blk std.fmt.bufPrint(&b, "Failed ({d}s)", .{secs}) catch "…";
+    };
 
     var l = r.tui.Line{};
-
     l.pushText(alloc, line, .{ .fg = .cyan }) catch {};
     para.lines.append(alloc, l) catch {};
     para.render(alloc, area, area, buf);

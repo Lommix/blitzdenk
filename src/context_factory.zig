@@ -546,38 +546,12 @@ pub fn build_system_prompt(
     _ = try w.write(def.prompt);
     try w.writeByte('\n');
 
-    // global context
-    if (self.config_dir) |dir| {
-        inline for (CONTEXT_FILES) |context_file| {
-            var buf: [255]u8 = undefined;
-            const path_len = try dir.realPath(self.io, &buf);
-
-            if (dir.openFile(self.io, context_file, .{})) |user_ctx_file| {
-                try w.print("Instructions from: {s}/{s}\n", .{ buf[0..path_len], context_file });
-                var filer_reader = user_ctx_file.reader(self.io, &buf);
-                _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-            } else |_| {}
-        }
-    }
-
-    try w.writeAll("\n\n");
-
-    // local context
-    inline for (CONTEXT_FILES) |context_file| {
-        if (std.Io.Dir.cwd().openFile(self.io, context_file, .{})) |user_ctx_file| {
-            var buf: [100]u8 = undefined;
-            try w.print("Instructions from: ./{s}\n", .{context_file});
-            var filer_reader = user_ctx_file.reader(self.io, &buf);
-            _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-        } else |_| {}
-    }
-
     if (self.skill_dir) |skill_dir| {
         var it = skill_dir.iterate();
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         var header_buf: [4096]u8 = undefined;
 
-        _ = try w.write("Available skills:\n");
+        _ = try w.write("<available-skills>\n");
 
         while (try it.next(self.io)) |entry| {
             if (entry.kind != .file) continue;
@@ -591,30 +565,51 @@ pub fn build_system_prompt(
                 continue;
             };
 
-            try w.print("skill-name: `{s}`\ndescription:\n", .{skill.name});
-            var skill_lines = std.mem.splitScalar(u8, skill.description, '\n');
-            while (skill_lines.next()) |line| {
-                try w.print("\t{s}\n", .{line});
-            }
+            try w.print(
+                \\<skill>
+                \\<name>{s}</name>
+                \\<description>{s}</description>
+                \\</skill>
+                \\
+            , .{ skill.name, skill.description });
         }
+
+        _ = try w.write("</available-skills>\n");
+    }
+
+    // global context
+    if (self.config_dir) |dir| {
+        inline for (CONTEXT_FILES) |context_file| {
+            var buf: [255]u8 = undefined;
+            const path_len = try dir.realPath(self.io, &buf);
+
+            if (dir.openFile(self.io, context_file, .{})) |user_ctx_file| {
+                try w.print("<instruction-content from=\"{s}/{s}\">\n", .{ buf[0..path_len], context_file });
+                try w.writeAll("<instruction-content>");
+                var filer_reader = user_ctx_file.reader(self.io, &buf);
+                _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
+                try w.writeAll("</instruction-content>");
+            } else |_| {}
+        }
+    }
+
+    try w.writeAll("\n\n");
+
+    // local context
+    inline for (CONTEXT_FILES) |context_file| {
+        if (std.Io.Dir.cwd().openFile(self.io, context_file, .{})) |user_ctx_file| {
+            var buf: [100]u8 = undefined;
+            try w.print("<instruction-content from=\"./{s}\">\n", .{context_file});
+
+            try w.writeAll("<instruction-content>");
+            var filer_reader = user_ctx_file.reader(self.io, &buf);
+            _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
+            try w.writeAll("</instruction-content>");
+        } else |_| {}
     }
 
     return allocating.written();
 }
-
-// Example: skill.md, yaml header followed by plain text content.
-//
-//```skill.md
-//---
-//name: pdf-processing
-//description: Extract PDF text, fill forms, merge files. Use when handling PDFs.
-//license: Apache-2.0
-//metadata:
-//  author: example-org
-//  version: "1.0"
-//---
-//The skill content ...
-//```
 
 pub const SkillMeta = struct {
     name: []const u8,
@@ -634,7 +629,10 @@ pub fn loadSkillMeta(io: std.Io, path: []const u8, buf: []u8) ?SkillMeta {
     var read_buf: [256]u8 = undefined;
     var file_reader = file.reader(io, &read_buf);
     const n = file_reader.interface.readSliceShort(buf) catch return null;
-    const raw = buf[0..n];
+    return parseSkillMeta(buf[0..n]);
+}
+
+fn parseSkillMeta(raw: []u8) ?SkillMeta {
     if (!std.mem.startsWith(u8, raw, "---\n")) return null;
 
     const header_end = std.mem.indexOf(u8, raw[4..], "\n---") orelse return null;
@@ -642,13 +640,31 @@ pub fn loadSkillMeta(io: std.Io, path: []const u8, buf: []u8) ?SkillMeta {
 
     var meta: SkillMeta = .{ .name = "", .description = "" };
 
-    var lines = std.mem.splitScalar(u8, header, '\n');
-    while (lines.next()) |line| {
+    var i: usize = 0;
+    while (i < header.len) {
+        const line_start = i;
+        const line_end = lineEnd(header, line_start);
+        var line = trimCr(header[line_start..line_end]);
+        i = if (line_end < header.len) line_end + 1 else header.len;
+
         if (line.len == 0 or line[0] == ' ' or line[0] == '\t') continue;
 
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         const key = std.mem.trim(u8, line[0..colon], " \t");
-        const val = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        var val = std.mem.trim(u8, line[colon + 1 ..], " \t");
+
+        if (val.len == 1 and (val[0] == '>' or val[0] == '|')) {
+            const block_start = i;
+            var block_end = i;
+            while (block_end < header.len) {
+                const next_end = lineEnd(header, block_end);
+                const block_line = trimCr(header[block_end..next_end]);
+                if (block_line.len != 0 and block_line[0] != ' ' and block_line[0] != '\t') break;
+                block_end = if (next_end < header.len) next_end + 1 else header.len;
+            }
+            val = parseYamlBlock(header[block_start..block_end], val[0] == '|');
+            i = block_end;
+        }
 
         if (std.mem.eql(u8, key, "name")) {
             meta.name = val;
@@ -665,6 +681,45 @@ pub fn loadSkillMeta(io: std.Io, path: []const u8, buf: []u8) ?SkillMeta {
 
     if (meta.name.len == 0 or meta.description.len == 0) return null;
     return meta;
+}
+
+fn lineEnd(buf: []const u8, start: usize) usize {
+    return start + (std.mem.indexOfScalar(u8, buf[start..], '\n') orelse buf.len - start);
+}
+
+fn trimCr(line: []u8) []u8 {
+    if (line.len > 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
+    return line;
+}
+
+fn parseYamlBlock(block: []u8, literal: bool) []const u8 {
+    var out: usize = 0;
+    var i: usize = 0;
+    var wrote = false;
+
+    while (i < block.len) {
+        const end = lineEnd(block, i);
+        const line = std.mem.trim(u8, trimCr(block[i..end]), " \t");
+        i = if (end < block.len) end + 1 else block.len;
+
+        if (line.len == 0) {
+            if (wrote and out > 0 and block[out - 1] != '\n') {
+                block[out] = '\n';
+                out += 1;
+            }
+            continue;
+        }
+
+        if (wrote) {
+            block[out] = if (literal) '\n' else ' ';
+            out += 1;
+        }
+        @memmove(block[out .. out + line.len], line);
+        out += line.len;
+        wrote = true;
+    }
+
+    return std.mem.trim(u8, block[0..out], " \t\r\n");
 }
 
 /// Reads only the markdown content after the yaml header from `path`.
@@ -689,6 +744,25 @@ pub fn loadSkillContent(alloc: std.mem.Allocator, io: std.Io, path: []const u8) 
     if (content_start < raw.len and raw[content_start] == '\r') content_start += 1;
     if (content_start < raw.len and raw[content_start] == '\n') content_start += 1;
     return alloc.dupe(u8, raw[content_start..]) catch return null;
+}
+
+test "skill meta parses folded yaml description" {
+    var raw = ("---\n" ++
+        "name: ponytail-audit\n" ++
+        "description: >\n" ++
+        "  Whole-repo audit for over-engineering. Like ponytail-review, but scans the\n" ++
+        "  entire codebase instead of a diff.\n" ++
+        "license: MIT\n" ++
+        "---\n" ++
+        "body\n").*;
+
+    const meta = parseSkillMeta(raw[0..]).?;
+    try std.testing.expectEqualStrings("ponytail-audit", meta.name);
+    try std.testing.expectEqualStrings(
+        "Whole-repo audit for over-engineering. Like ponytail-review, but scans the entire codebase instead of a diff.",
+        meta.description,
+    );
+    try std.testing.expectEqualStrings("MIT", meta.license.?);
 }
 
 test "agent defaults can be replaced with an empty tool list" {
