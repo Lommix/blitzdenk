@@ -414,6 +414,7 @@ pub const Blitz = LuaType{
                                         .max_completion_tokens = args.max_completion_tokens,
                                         .enable_thinking = args.enable_thinking,
                                         .top_p = args.top_p,
+                                        .top_k = args.top_k,
                                         .frequency_penalty = args.frequency_penalty,
                                         .presence_penalty = args.presence_penalty,
                                     } },

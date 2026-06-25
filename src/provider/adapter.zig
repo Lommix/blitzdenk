@@ -62,6 +62,7 @@ pub const OpenAiConfig = struct {
     max_completion_tokens: ?u32 = null,
     enable_thinking: ?bool = null, // novita extension; false silences kimi/minimax
     top_p: ?f32 = null,
+    top_k: ?u32 = null,
     frequency_penalty: ?f32 = null,
     presence_penalty: ?f32 = null,
     stop: ?[]const []const u8 = null,

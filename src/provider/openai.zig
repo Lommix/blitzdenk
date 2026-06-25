@@ -306,6 +306,7 @@ pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config:
             .reasoning_effort = if (config.reasoning_effort) |e| @tagName(e) else null,
             .enable_thinking = oc.enable_thinking,
             .top_p = oc.top_p,
+            .top_k = oc.top_k,
             .frequency_penalty = oc.frequency_penalty,
             .presence_penalty = oc.presence_penalty,
             .stop = oc.stop,
