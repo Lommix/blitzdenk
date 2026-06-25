@@ -360,8 +360,7 @@ pub fn resetDefs(self: *Self) void {
     self.agents.set(.explore, .{
         .name = @tagName(AgentType.explore),
         .description =
-        \\Search specialist for code, documentation and web
-        \\When to use:
+        \\Search specialist for code, documentation and web. Useful for:
         \\- Any questions against documentation
         \\- Explore how certain parts of code work
         \\- Doing research on the web
@@ -369,9 +368,9 @@ pub fn resetDefs(self: *Self) void {
         ,
         .prompt = r.prompts.explore_sub_agent_prompt,
         .tools = .from(&.{
-            r.tools.bash.BashTool.def.name,
-            r.tools.bash.CancelBackgroundCommand.def.name,
             r.tools.read.ReadTool.def.name,
+            r.tools.rg.RipGrepTool.def.name,
+            r.tools.skill.LoadSkillTool.def.name,
             r.tools.agent.SendMessageToAgent.def.name,
         }),
     });
@@ -592,15 +591,11 @@ pub fn build_system_prompt(
                 continue;
             };
 
-            try w.print(
-                \\skill: `{s}`
-                \\description:
-                \\{s}
-                \\
-            , .{
-                skill.name,
-                skill.description,
-            });
+            try w.print("skill-name: `{s}`\ndescription:\n", .{skill.name});
+            var skill_lines = std.mem.splitScalar(u8, skill.description, '\n');
+            while (skill_lines.next()) |line| {
+                try w.print("\t{s}\n", .{line});
+            }
         }
     }
 
