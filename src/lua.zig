@@ -62,11 +62,20 @@ pub fn LuaFnBind(
                         @field(args, std.fmt.comptimePrint("{}", .{i})) = state;
                     },
                     else => |any| {
-                        @field(args, std.fmt.comptimePrint("{}", .{i})) =
-                            readAnyArg(any, state, name, @as(c_int, offset)) orelse {
-                                _ = c.luaL_error(state, "Invalid argument , expected " ++ @typeName(any) ++ " @arg %d", i);
+                        const a = getAppFromRegistry(state) orelse {
+                            _ = c.luaL_error(state, "failed to get app");
+                            return 0;
+                        };
+
+                        switch (readAnyValueAlloc(any, state, name, @as(c_int, offset), a.lua_vm.arena_state.allocator())) {
+                            .ok => |val| {
+                                @field(args, std.fmt.comptimePrint("{}", .{i})) = val;
+                            },
+                            .err => |msg| {
+                                _ = c.luaL_error(state, "%s", msg.ptr);
                                 return 0;
-                            };
+                            },
+                        }
 
                         offset += 1;
                     },
@@ -439,20 +448,128 @@ pub const Blitz = LuaType{
                     },
                 },
             },
+
+            // const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
+            //     .{ .name = "name", .ty = LuaType.string },
+            //     .{ .name = "description", .ty = LuaType.string },
+            //     .{ .name = "prompt", .ty = LuaType.string },
+            //     .{ .name = "tools", .ty = StringListDef },
+            //     .{ .name = "model", .ty = LuaType.string },
+            //     .{ .name = "effort", .ty = LuaType.string },
+            //     .{ .name = "provider", .ty = LuaType.integer },
+            //     .{ .name = "in_agent_tool", .ty = LuaType.boolean, .optional = true },
+            // } } };
+
             .{
                 .name = "add_agent",
                 .desc = "Register a complete agent configuration.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{.{ .name = "def", .ty = AgentDef }},
-                    .ret = &LuaInteger,
-                    .fn_ptr = luaAddAgent,
-                } },
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{.{ .name = "def", .ty = AgentDef }},
+                        .ret = &LuaInteger,
+                        .fn_ptr = LuaFnBind((struct {
+                            const Args = struct {
+                                name: []const u8,
+                                description: []const u8,
+                                prompt: []const u8,
+                                tools: [][]const u8,
+                                model: []const u8,
+                                effort: ?[]const u8,
+                                provider: u32,
+                                in_agent_tool: ?bool,
+                            };
+
+                            fn lua_fn(a: *r.app.App, def: Args) !u32 {
+                                const effort = if (def.effort) |eff|
+                                    r.prv.config.parseReasoningEffort(eff) orelse return error.UnknownEffortType
+                                else
+                                    .medium;
+
+                                const agent_type = try a.context_factory.addAgent(.{
+                                    .name = def.name,
+                                    .description = def.description,
+                                    .prompt = def.prompt,
+                                    .in_agent_tool = def.in_agent_tool orelse true,
+                                    .tools = def.tools,
+                                    .model = .{
+                                        .name = def.model,
+                                        .effort = effort,
+                                        .provider = @enumFromInt(def.provider),
+                                    },
+                                });
+
+                                return @intFromEnum(agent_type);
+                            }
+                        }).lua_fn, "add_agent"),
+                    },
+                },
             },
+
+            // fn luaAddAgent(L: ?*c.lua_State) callconv(.c) c_int {
+            //     const state = L.?;
+            //
+            //     const a = getAppFromRegistry(state) orelse {
+            //         _ = c.luaL_error(state, "add_agent: app not initialized");
+            //         return 0;
+            //     };
+            //
+            //     const vm = &a.lua_vm;
+            //     const def = readAnyValueAlloc(LuaAgentEntry, state, 1, vm.luaArena()) orelse {
+            //         _ = c.luaL_error(state, "add_agent: expected an agent definition table");
+            //         return 0;
+            //     };
+            //
+            //     if (def.name.len == 0 or def.description.len == 0 or def.prompt.len == 0 or def.model.len == 0 or def.effort.len == 0) {
+            //         _ = c.luaL_error(state, "add_agent: name, description, prompt, model, and effort are required");
+            //         return 0;
+            //     }
+            //
+            //     const effort = r.prv.config.parseReasoningEffort(def.effort) orelse {
+            //         _ = c.luaL_error(state, "add_agent: unknown effort (expected none/low/medium/high/xhigh/max)");
+            //         return 0;
+            //     };
+            //     const tools = readAnyFieldAlloc([]const []const u8, state, 1, "tools", vm.luaArena()) orelse {
+            //         _ = c.luaL_error(state, "add_agent: tools must be an array of names");
+            //         return 0;
+            //     };
+            //     const provider = readAnyFieldAlloc(r.prv.config.ProviderHandle, state, 1, "provider", null) orelse {
+            //         _ = c.luaL_error(state, "add_agent: provider handle is required");
+            //         return 0;
+            //     };
+            //     const provider_idx = @intFromEnum(provider);
+            //     if (provider_idx >= a.config.provider_count or !a.config.providers[provider_idx].active) {
+            //         _ = c.luaL_error(state, "add_agent: invalid provider handle");
+            //         return 0;
+            //     }
+            //
+            //     const agent_type = a.context_factory.addAgent(.{
+            //         .name = def.name,
+            //         .description = def.description,
+            //         .prompt = def.prompt,
+            //         .in_agent_tool = def.in_agent_tool,
+            //         .tools = tools,
+            //         .model = .{
+            //             .name = def.model,
+            //             .effort = effort,
+            //             .provider = provider,
+            //         },
+            //     }) catch {
+            //         _ = c.luaL_error(state, "add_agent: too many agents, invalid tools, or out of memory");
+            //         return 0;
+            //     };
+            //
+            //     pushAny(state, agent_type);
+            //     return 1;
+            // }
+
             .{
                 .name = "set_model",
                 .desc = "Set the default model.",
                 .ty = LuaType{ .function = .{
-                    .args = &.{ .{ .name = "model", .ty = LuaType.string }, .{ .name = "handle", .ty = LuaType.integer } },
+                    .args = &.{
+                        .{ .name = "model", .ty = LuaType.string },
+                        .{ .name = "handle", .ty = LuaType.integer },
+                    },
                     .fn_ptr = luaSetModel,
                 } },
             },
@@ -460,7 +577,12 @@ pub const Blitz = LuaType{
                 .name = "set_model_agent",
                 .desc = "Set the model config for a specific agent.",
                 .ty = LuaType{ .function = .{
-                    .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "model", .ty = LuaType.string }, .{ .name = "effort", .ty = LuaType.string }, .{ .name = "handle", .ty = LuaType.integer } },
+                    .args = &.{
+                        .{ .name = "agent_type", .ty = LuaType.integer },
+                        .{ .name = "model", .ty = LuaType.string },
+                        .{ .name = "effort", .ty = LuaType.string },
+                        .{ .name = "handle", .ty = LuaType.integer },
+                    },
                     .fn_ptr = luaSetModelAgent,
                 } },
             },
@@ -756,63 +878,6 @@ fn luaErr(L: ?*c.lua_State) callconv(.c) c_int {
 fn luaExitLoop(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
     pushStatusTable(state, lua.RET_EXIT_LOOP, "");
-    return 1;
-}
-
-fn luaAddAgent(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "add_agent: app not initialized");
-        return 0;
-    };
-
-    const vm = &a.lua_vm;
-    const def = readAnyValueAlloc(LuaAgentEntry, state, 1, vm.luaArena()) orelse {
-        _ = c.luaL_error(state, "add_agent: expected an agent definition table");
-        return 0;
-    };
-
-    if (def.name.len == 0 or def.description.len == 0 or def.prompt.len == 0 or def.model.len == 0 or def.effort.len == 0) {
-        _ = c.luaL_error(state, "add_agent: name, description, prompt, model, and effort are required");
-        return 0;
-    }
-
-    const effort = r.prv.config.parseReasoningEffort(def.effort) orelse {
-        _ = c.luaL_error(state, "add_agent: unknown effort (expected none/low/medium/high/xhigh/max)");
-        return 0;
-    };
-    const tools = readAnyFieldAlloc([]const []const u8, state, 1, "tools", vm.luaArena()) orelse {
-        _ = c.luaL_error(state, "add_agent: tools must be an array of names");
-        return 0;
-    };
-    const provider = readAnyFieldAlloc(r.prv.config.ProviderHandle, state, 1, "provider", null) orelse {
-        _ = c.luaL_error(state, "add_agent: provider handle is required");
-        return 0;
-    };
-    const provider_idx = @intFromEnum(provider);
-    if (provider_idx >= a.config.provider_count or !a.config.providers[provider_idx].active) {
-        _ = c.luaL_error(state, "add_agent: invalid provider handle");
-        return 0;
-    }
-
-    const agent_type = a.context_factory.addAgent(.{
-        .name = def.name,
-        .description = def.description,
-        .prompt = def.prompt,
-        .in_agent_tool = def.in_agent_tool,
-        .tools = tools,
-        .model = .{
-            .name = def.model,
-            .effort = effort,
-            .provider = provider,
-        },
-    }) catch {
-        _ = c.luaL_error(state, "add_agent: too many agents, invalid tools, or out of memory");
-        return 0;
-    };
-
-    pushAny(state, agent_type);
     return 1;
 }
 
@@ -2056,102 +2121,155 @@ fn pushStatusNil(L: *c.lua_State, status: c_int) c_int {
 }
 
 fn readAnyValue(comptime T: type, state: *c.lua_State, idx: c_int) ?T {
-    return readAnyValueAlloc(T, state, idx, null);
+    const res = readAnyValueAlloc(T, state, "unknown", idx, null);
+    switch (res) {
+        .ok => |t| return t,
+        .err => return null,
+    }
 }
 
-fn readAnyValueAlloc(comptime T: type, state: *c.lua_State, idx: c_int, allocator: ?Allocator) ?T {
+fn ReadResult(comptime T: type) type {
+    return union(enum) {
+        ok: T,
+        err: []const u8,
+
+        /// to many curly brackets?
+        pub fn Err(err: []const u8) @This() {
+            return .{ .err = err };
+        }
+
+        /// to many curly brackets?
+        pub fn Ok(v: T) @This() {
+            return .{ .ok = v };
+        }
+
+        pub fn E(err: anyerror) @This() {
+            return .{ .err = @tagName(err) };
+        }
+    };
+}
+
+fn readAnyValueAlloc(
+    comptime T: type,
+    state: *c.lua_State,
+    comptime name: []const u8,
+    idx: c_int,
+    allocator: ?Allocator,
+) ReadResult(T) {
     if (T == LuaFnRef) {
-        if (c.lua_type(state, idx) != c.LUA_TFUNCTION) return null;
+        if (c.lua_type(state, idx) != c.LUA_TFUNCTION) return .Err(name ++ " is not a function");
         c.lua_pushvalue(state, idx);
-        return .{ .idx = c.luaL_ref(state, c.LUA_REGISTRYINDEX) };
+        return .Ok(.{ .idx = c.luaL_ref(state, c.LUA_REGISTRYINDEX) });
     }
 
     if (T == LuaTableRef) {
-        if (c.lua_type(state, idx) != c.LUA_TTABLE) return null;
-        return .{ .idx = luaAbsIndex(state, idx) };
+        if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " is not a table");
+        return .Ok(.{ .idx = luaAbsIndex(state, idx) });
     }
 
     switch (@typeInfo(T)) {
         .pointer => |ptr| {
             if (ptr.size != .slice) @compileError("readAnyValue: unsupported pointer type " ++ @typeName(T));
             if (ptr.child == u8) {
-                if (c.lua_type(state, idx) != c.LUA_TSTRING) return null;
+                if (c.lua_type(state, idx) != c.LUA_TSTRING) return .Err(name ++ " is not a string");
                 var len: usize = 0;
-                const sptr = c.lua_tolstring(state, idx, &len) orelse return null;
-                return sptr[0..len];
+                const sptr = c.lua_tolstring(state, idx, &len) orelse return .Err(name ++ ": failed string conversion");
+                return .Ok(sptr[0..len]);
             }
-            if (c.lua_type(state, idx) != c.LUA_TTABLE) return null;
-            const alloc = allocator orelse return null;
+            if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " must be table for allocation");
+            const alloc = allocator orelse return .Err(name ++ " require allocator");
             const abs = luaAbsIndex(state, idx);
             const len = c.lua_rawlen(state, abs);
-            const result = alloc.alloc(ptr.child, len) catch return null;
+            const result = alloc.alloc(ptr.child, len) catch return .Err("oom");
             for (result, 0..) |*item, i| {
                 _ = c.lua_rawgeti(state, abs, @intCast(i + 1));
                 defer c.lua_pop(state, 1);
-                item.* = readAnyValueAlloc(ptr.child, state, -1, allocator) orelse return null;
+
+                const res = readAnyValueAlloc(ptr.child, state, @typeName(ptr.child), -1, allocator);
+                switch (res) {
+                    .ok => |v| item.* = v,
+                    .err => |msg| return .Err(msg),
+                }
             }
-            return result;
+            return .Ok(result);
         },
         .int, .comptime_int => {
-            if (c.lua_type(state, idx) != c.LUA_TNUMBER) return null;
+            if (c.lua_type(state, idx) != c.LUA_TNUMBER) return .Err(name ++ " not a number");
             const n = c.lua_tointegerx(state, idx, null);
             if (T != comptime_int) {
-                if (@typeInfo(T).int.signedness == .unsigned and n < 0) return null;
-                if (n < std.math.minInt(T) or n > std.math.maxInt(T)) return null;
+                if (@typeInfo(T).int.signedness == .unsigned and n < 0) return .Err(name ++ " is unsigned");
+                if (n < std.math.minInt(T) or n > std.math.maxInt(T)) return .Err(name ++ " integer overflow");
             }
-            return @as(T, @intCast(n));
+            return .Ok(@as(T, @intCast(n)));
         },
         .float, .comptime_float => {
-            if (c.lua_type(state, idx) != c.LUA_TNUMBER) return null;
-            return @as(T, @floatCast(c.lua_tonumberx(state, idx, null)));
+            if (c.lua_type(state, idx) != c.LUA_TNUMBER) return .Err(name ++ " not a float");
+            return .Ok(@as(T, @floatCast(c.lua_tonumberx(state, idx, null))));
         },
         .bool => {
-            if (c.lua_type(state, idx) != c.LUA_TBOOLEAN) return null;
-            return c.lua_toboolean(state, idx) != 0;
+            if (c.lua_type(state, idx) != c.LUA_TBOOLEAN) return .Err(name ++ " not a bool");
+            return .Ok(c.lua_toboolean(state, idx) != 0);
         },
         .@"enum" => {
-            if (c.lua_type(state, idx) != c.LUA_TNUMBER) return null;
+            if (c.lua_type(state, idx) != c.LUA_TNUMBER) return .Err(name ++ " not a number");
             const n = c.lua_tointegerx(state, idx, null);
             const tag_type = @typeInfo(T).@"enum".tag_type;
-            if (n < 0 or n > std.math.maxInt(tag_type)) return null;
-            return @enumFromInt(@as(tag_type, @intCast(n)));
+            if (n < 0 or n > std.math.maxInt(tag_type)) return .Err(name ++ " overflow");
+            return .Ok(@enumFromInt(@as(tag_type, @intCast(n))));
         },
         .array => |arr| {
-            if (c.lua_type(state, idx) != c.LUA_TTABLE) return null;
+            if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " not a table");
             const abs = luaAbsIndex(state, idx);
-            if (c.lua_rawlen(state, abs) != arr.len) return null;
+            if (c.lua_rawlen(state, abs) != arr.len) return .Err(name ++ " array length mismatch");
             var result: T = undefined;
             for (&result, 0..) |*item, i| {
                 _ = c.lua_rawgeti(state, abs, @intCast(i + 1));
                 defer c.lua_pop(state, 1);
-                item.* = readAnyValueAlloc(arr.child, state, -1, allocator) orelse return null;
+
+                const res = readAnyFieldAlloc(arr.child, state, -1, allocator);
+                switch (res) {
+                    .ok => |val| item.* = val,
+                    .err => |msg| return .Err(msg),
+                }
             }
-            return result;
+            return .Ok(result);
         },
         .@"struct" => |str| {
-            if (c.lua_type(state, idx) != c.LUA_TTABLE) return null;
+            if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " is not a table");
             var result: T = undefined;
             inline for (str.fields) |field| {
                 if (@typeInfo(field.type) == .optional) {
-                    @field(result, field.name) = readAnyFieldAlloc(field.type, state, idx, field.name, allocator) orelse null;
+                    const res = readAnyValueAlloc(field.type, state, field.name, idx, allocator);
+                    switch (res) {
+                        .ok => |val| @field(result, field.name) = val,
+                        .err => |msg| return .Err(msg),
+                    }
                 } else {
-                    @field(result, field.name) = readAnyFieldAlloc(field.type, state, idx, field.name, allocator) orelse return null;
+                    const res = readAnyFieldAlloc(field.type, state, field.name, idx, allocator);
+                    switch (res) {
+                        .ok => |val| @field(result, field.name) = val,
+                        .err => |msg| return .Err(msg),
+                    }
                 }
             }
-            return result;
+            return .Ok(result);
         },
         .optional => |opt| {
-            return readAnyValueAlloc(opt.child, state, idx, allocator);
+            const res = readAnyValueAlloc(opt.child, state, name, idx, allocator);
+            switch (res) {
+                .ok => |val| return .Ok(val),
+                .err => return .Ok(null),
+            }
         },
         else => @compileError("readAnyValue: unsupported type " ++ @typeName(T)),
     }
 }
 
-fn readAnyFieldAlloc(comptime T: type, state: *c.lua_State, table_idx: c_int, comptime field: []const u8, allocator: ?Allocator) ?T {
+fn readAnyFieldAlloc(comptime T: type, state: *c.lua_State, comptime field: []const u8, table_idx: c_int, allocator: ?Allocator) ReadResult(T) {
     const abs = luaAbsIndex(state, table_idx);
     _ = c.lua_getfield(state, abs, fieldName(field));
     defer c.lua_pop(state, 1);
-    return readAnyValueAlloc(T, state, -1, allocator);
+    return readAnyValueAlloc(T, state, field, -1, allocator);
 }
 
 fn getStringField(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8, dest: []u8) ?usize {
@@ -3166,14 +3284,21 @@ fn readAgentIdArg(state: *c.lua_State, comptime fname: []const u8, idx: c_int) r
         _ = c.luaL_error(state, fname ++ ": agent_id must be a table {index, generation}");
         return .{ .index = 0, .generation = 0 };
     }
-    const index = readAnyFieldAlloc(u16, state, idx, "index", null) orelse {
-        _ = c.luaL_error(state, fname ++ ": agent_id.index must be a number");
-        return .{ .index = 0, .generation = 0 };
+
+    const index = switch (readAnyFieldAlloc(u16, state, "index", idx, null)) {
+        .ok => |v| v,
+        .err => {
+            _ = c.luaL_error(state, fname ++ ": agent_id.index must be a number");
+            return .{ .index = 0, .generation = 0 };
+        },
     };
 
-    const generation = readAnyFieldAlloc(u16, state, idx, "generation", null) orelse {
-        _ = c.luaL_error(state, fname ++ ": agent_id.generation must be a number");
-        return .{ .index = 0, .generation = 0 };
+    const generation = switch (readAnyFieldAlloc(u16, state, "generation", idx, null)) {
+        .ok => |v| v,
+        .err => {
+            _ = c.luaL_error(state, fname ++ ": agent_id.generation must be a number");
+            return .{ .index = 0, .generation = 0 };
+        },
     };
 
     return .{
