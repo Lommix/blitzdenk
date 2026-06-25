@@ -28,6 +28,10 @@ const LuaFnRef = struct {
     idx: c_int,
 };
 
+const LuaTableRef = struct {
+    idx: c_int,
+};
+
 /// Comptime Helper to convert zig function to lua
 pub fn LuaFnBind(
     comptime func: anytype,
@@ -276,11 +280,45 @@ pub const Blitz = LuaType{
             .{
                 .name = "register_tool",
                 .desc = "Register a tool.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{.{ .name = "def", .ty = ToolDef }},
-                    .ret = &LuaString,
-                    .fn_ptr = luaRegisterTool,
-                } },
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{.{ .name = "def", .ty = ToolDef }},
+                        .ret = &LuaString,
+                        .fn_ptr = LuaFnBind((struct {
+                            fn luafn(a: *r.app.App, state: *c.lua_State, def: LuaTableRef) ![]const u8 {
+                                const vm = &a.lua_vm;
+                                if (vm.tool_entries.items.len >= MAX_LUA_TOOLS) return error.TooManyTools;
+
+                                var entry: LuaToolEntry = .{};
+
+                                entry.name_len = getStringField(state, def.idx, "name", &entry.name) orelse return error.InvalidToolName;
+                                entry.desc_len = getStringField(state, def.idx, "description", &entry.description) orelse return error.InvalidToolDescription;
+
+                                // schema (string) OR args (table) — at least one required
+                                if (getStringField(state, def.idx, "schema", &entry.schema)) |len| {
+                                    entry.schema_len = len;
+                                } else {
+                                    _ = c.lua_getfield(state, def.idx, "args");
+                                    defer c.lua_pop(state, 1);
+                                    if (c.lua_type(state, -1) != c.LUA_TTABLE) return error.SchemaOrArgsRequired;
+                                    const json = try argsTableToJsonSchema(state, -1, &entry.schema);
+                                    entry.schema_len = json.len;
+                                }
+
+                                entry.L = state;
+                                _ = c.lua_getfield(state, def.idx, "func");
+                                if (c.lua_type(state, -1) != c.LUA_TFUNCTION) return error.InvalidToolFunc;
+                                entry.func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+
+                                c.lua_newtable(state);
+                                entry.state_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+
+                                vm.tool_entries.appendAssumeCapacity(entry);
+                                return vm.tool_entries.items[vm.tool_entries.items.len - 1].nameSlice();
+                            }
+                        }).luafn, "register_tool"),
+                    },
+                },
             },
             .{
                 .name = "add_tool",
@@ -631,75 +669,6 @@ const BlitzMcp = LuaType{ .table_def = .{ .name = "BlitzMcp", .fields = &.{
         },
     },
 } } };
-
-fn luaRegisterTool(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-        _ = c.luaL_error(state, "register_tool: expected table argument");
-        return 0;
-    }
-
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "register_tool: vm not initialized");
-        return 0;
-    };
-    const vm = &a.lua_vm;
-    if (vm.tool_entries.items.len >= MAX_LUA_TOOLS) {
-        _ = c.luaL_error(state, "register_tool: max tools reached (%d)", @as(c_int, MAX_LUA_TOOLS));
-        return 0;
-    }
-
-    var entry: LuaToolEntry = .{};
-    entry.L = state;
-
-    // name (required)
-    entry.name_len = getStringField(state, 1, "name", &entry.name) orelse {
-        _ = c.luaL_error(state, "register_tool: 'name' must be a string (max %d)", @as(c_int, entry.name.len));
-        return 0;
-    };
-
-    // description (required)
-    entry.desc_len = getStringField(state, 1, "description", &entry.description) orelse {
-        _ = c.luaL_error(state, "register_tool: 'description' must be a string (max %d)", @as(c_int, entry.description.len));
-        return 0;
-    };
-
-    // schema (string) OR args (table) — at least one required
-    if (getStringField(state, 1, "schema", &entry.schema)) |len| {
-        entry.schema_len = len;
-    } else {
-        _ = c.lua_getfield(state, 1, "args");
-        if (c.lua_type(state, -1) == c.LUA_TTABLE) {
-            const json = argsTableToJsonSchema(state, -1, &entry.schema) catch {
-                _ = c.luaL_error(state, "register_tool: failed to convert args to schema");
-                return 0;
-            };
-            entry.schema_len = json.len;
-            c.lua_pop(state, 1);
-        } else {
-            _ = c.luaL_error(state, "register_tool: 'schema' (string) or 'args' (table) required");
-            return 0;
-        }
-    }
-
-    // func (required)
-    _ = c.lua_getfield(state, 1, "func");
-    if (c.lua_type(state, -1) != c.LUA_TFUNCTION) {
-        _ = c.luaL_error(state, "register_tool: 'func' must be a function");
-        return 0;
-    }
-    entry.func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-    // persistent state table
-    c.lua_newtable(state);
-    entry.state_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-    vm.tool_entries.appendAssumeCapacity(entry);
-
-    pushAny(state, entry.name[0..entry.name_len]);
-    return 1;
-}
 
 fn luaAddTool(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
@@ -2109,6 +2078,11 @@ fn readAnyValueAlloc(comptime T: type, state: *c.lua_State, idx: c_int, allocato
         if (c.lua_type(state, idx) != c.LUA_TFUNCTION) return null;
         c.lua_pushvalue(state, idx);
         return .{ .idx = c.luaL_ref(state, c.LUA_REGISTRYINDEX) };
+    }
+
+    if (T == LuaTableRef) {
+        if (c.lua_type(state, idx) != c.LUA_TTABLE) return null;
+        return .{ .idx = luaAbsIndex(state, idx) };
     }
 
     switch (@typeInfo(T)) {
