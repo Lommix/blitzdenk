@@ -323,15 +323,25 @@ pub const Blitz = LuaType{
             .{
                 .name = "add_tool",
                 .desc = "Add a single tool from the tool pool to an agent type's tool set.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_name", .ty = LuaType.string } },
-                    .fn_ptr = luaAddTool,
-                } },
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_name", .ty = LuaType.string } },
+                        .fn_ptr = LuaFnBind((struct {
+                            fn lua_fn(a: *r.app.App, agent_type_id: u32, tool_name: []const u8) !void {
+                                try a.cmd_queue.append(a.swarm.pool.io, .{ .add_tool = .{
+                                    .agent_type = @enumFromInt(agent_type_id),
+                                    .tool_name = tool_name,
+                                } });
+                            }
+                        }).lua_fn, "add_tool"),
+                    },
+                },
             },
-            .{ .name = "get_main_agent", .desc = "Return the main agent, if a session is running.", .ty = LuaType{ .function = .{
-                .fn_ptr = luaGetMainAgent,
-                .ret = &AgentIdOrNilDef,
-            } } },
+            .{ .name = "get_main_agent", .desc = "Return the main agent, if a session is running.", .ty = LuaType{ .function = .{ .ret = &AgentIdOrNilDef, .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App) !?r.prv.Swarm.AgentId {
+                    return a.main_agent_id;
+                }
+            }).lua_fn, "get_main_agent") } } },
             .{
                 .name = "ok",
                 .desc = "Return success with content.",
@@ -362,11 +372,71 @@ pub const Blitz = LuaType{
             .{
                 .name = "add_provider",
                 .desc = "Register a provider.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{.{ .name = "def", .ty = ProviderDef }},
-                    .ret = &LuaInteger,
-                    .fn_ptr = luaAddProvider,
-                } },
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{.{ .name = "def", .ty = ProviderDef }},
+                        .ret = &LuaInteger,
+                        .fn_ptr = LuaFnBind((struct {
+                            const Arg = struct {
+                                type: []const u8,
+                                url: []const u8,
+                                key_envar: []const u8,
+                                effort: ?[]const u8 = null,
+                                temperature: ?f32 = null,
+                                max_tokens: ?u32 = null,
+                                max_completion_tokens: ?u32 = null,
+                                top_p: ?f32 = null,
+                                top_k: ?u32 = null,
+                                frequency_penalty: ?f32 = null,
+                                presence_penalty: ?f32 = null,
+                                enable_thinking: ?bool = true,
+                                thinking: ?r.prv.adapter.Thinking = null,
+                            };
+
+                            fn lua_fn(a: *r.app.App, args: Arg) !r.prv.config.ProviderHandle {
+                                const slot = a.config.reserveProvider(args.url, args.key_envar) orelse return error.MaxProviderReached;
+
+                                if (args.effort) |eff| {
+                                    slot.reasoning_effort = prv.config.parseReasoningEffort(eff) orelse return error.UnknownEffortValue;
+                                }
+
+                                const ptype: prv.adapter.Provider = blk: {
+                                    if (std.mem.eql(u8, args.type, "openai")) break :blk .openai;
+                                    if (std.mem.eql(u8, args.type, "anthropic")) break :blk .anthropic;
+                                    if (std.mem.eql(u8, args.type, "ollama")) break :blk .ollama;
+                                    return error.UnknownProviderType;
+                                };
+
+                                slot.provider_config = switch (ptype) {
+                                    .openai => .{ .openai = .{
+                                        .temperature = args.temperature,
+                                        .max_tokens = args.max_tokens orelse 32000,
+                                        .max_completion_tokens = args.max_completion_tokens,
+                                        .enable_thinking = args.enable_thinking,
+                                        .top_p = args.top_p,
+                                        .frequency_penalty = args.frequency_penalty,
+                                        .presence_penalty = args.presence_penalty,
+                                    } },
+                                    .anthropic => .{ .anthropic = .{
+                                        .max_tokens = args.max_tokens orelse 32000,
+                                        .thinking = args.thinking,
+                                        .temperature = args.temperature,
+                                        .top_p = args.top_p,
+                                        .top_k = args.top_k,
+                                    } },
+                                    .ollama => .{ .ollama = .{
+                                        .temperature = args.temperature,
+                                        .max_tokens = args.max_tokens orelse 32000,
+                                        .top_p = args.top_p,
+                                        .top_k = args.top_k,
+                                    } },
+                                };
+
+                                return a.config.commitProvider();
+                            }
+                        }).lua_fn, "add_provider"),
+                    },
+                },
             },
             .{
                 .name = "add_agent",
@@ -670,51 +740,6 @@ const BlitzMcp = LuaType{ .table_def = .{ .name = "BlitzMcp", .fields = &.{
     },
 } } };
 
-fn luaAddTool(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
-        _ = c.luaL_error(state, "add_tool: arg 1 must be a number (blitz.AGENT_*)");
-        return 0;
-    }
-    const ty_int = c.lua_tointegerx(state, 1, null);
-    if (ty_int < 0 or ty_int > std.math.maxInt(u6)) {
-        _ = c.luaL_error(state, "add_tool: agent type out of range");
-        return 0;
-    }
-    const agent_type: r.ContextFactory.AgentType = @enumFromInt(@as(u6, @intCast(ty_int)));
-
-    const tool_name = readAnyArg([]const u8, state, "add_tool", 2) orelse return 0;
-
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "add_tool: app not initialized");
-        return 0;
-    };
-
-    appQueueEnqueue(state, "add_tool", a, .{ .add_tool = .{
-        .agent_type = agent_type,
-        .tool_name = tool_name,
-    } });
-
-    return 0;
-}
-
-fn luaGetMainAgent(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "Add Tool: failed to access app");
-        return 0;
-    };
-
-    if (a.main_agent_id) |id| {
-        pushAny(state, id);
-    } else {
-        c.lua_pushnil(state);
-    }
-
-    return 1;
-}
-
 fn luaOk(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
     pushStatusTable(state, lua.RET_OK, "");
@@ -730,46 +755,6 @@ fn luaErr(L: ?*c.lua_State) callconv(.c) c_int {
 fn luaExitLoop(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
     pushStatusTable(state, lua.RET_EXIT_LOOP, "");
-    return 1;
-}
-
-fn luaAddProvider(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    const cfg = getCfgFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "add_provider: config not initialized");
-        return 0;
-    };
-
-    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-        _ = c.luaL_error(state, "add_provider: expected a single table argument");
-        return 0;
-    }
-
-    const type_str = requireStringFieldOnStack(state, 1, "type");
-    const ptype = parseProviderType(state, type_str);
-    c.lua_pop(state, 1);
-
-    // Both url and key_envar slices must remain valid until reserveProvider
-    // has copied them into the slot buffers. Keep both fields on the stack
-    // simultaneously, then pop them together.
-    const url = requireStringFieldOnStack(state, 1, "url");
-    const key_envar = requireStringFieldOnStack(state, 1, "key_envar");
-    const slot = cfg.reserveProvider(url, key_envar) orelse {
-        _ = c.luaL_error(state, "add_provider: failed (max %d providers or url/key too long)", @as(c_int, prv.config.MAX_PROVIDERS));
-        return 0;
-    };
-    c.lua_pop(state, 2);
-
-    slot.reasoning_effort = readReasoningEffort(state, 1);
-    slot.provider_config = switch (ptype) {
-        .openai => .{ .openai = readOpenAiConfig(state, 1) },
-        .anthropic => .{ .anthropic = readAnthropicConfig(state, 1, slot) },
-        .ollama => .{ .ollama = readOllamaConfig(state, 1) },
-    };
-
-    const handle = cfg.commitProvider();
-    c.lua_pushinteger(state, @intCast(@intFromEnum(handle)));
     return 1;
 }
 
@@ -2144,13 +2129,18 @@ fn readAnyValueAlloc(comptime T: type, state: *c.lua_State, idx: c_int, allocato
         },
         .@"struct" => |str| {
             if (c.lua_type(state, idx) != c.LUA_TTABLE) return null;
-            var result: T = .{};
+            var result: T = undefined;
             inline for (str.fields) |field| {
-                if (readAnyFieldAlloc(field.type, state, idx, field.name, allocator)) |val| {
-                    @field(result, field.name) = val;
+                if (@typeInfo(field.type) == .optional) {
+                    @field(result, field.name) = readAnyFieldAlloc(field.type, state, idx, field.name, allocator) orelse null;
+                } else {
+                    @field(result, field.name) = readAnyFieldAlloc(field.type, state, idx, field.name, allocator) orelse return null;
                 }
             }
             return result;
+        },
+        .optional => |opt| {
+            return readAnyValueAlloc(opt.child, state, idx, allocator);
         },
         else => @compileError("readAnyValue: unsupported type " ++ @typeName(T)),
     }
