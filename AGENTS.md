@@ -1,11 +1,9 @@
 ## Project Blitzdenk
 
-Coding and research Harness. Zero external dependencies. Extendable via Lua.
+A coding and research Harness written in zig with vendored Lua.
 Zig version: 0.16
 
-User config: '/home/lommix/.config/blitzdenk/blitz.lua'
-
-Modules:
+Important modules:
 
 - `src/main.zig` control flow
 - `src/app.zig` main tui state and render
@@ -13,3 +11,5 @@ Modules:
 - `src/tools` agent tool definitions
 - `src/provider` core agent framework
 - `src/lua.zig` the lua bindings, big file
+- `src/mcp.zig` the mcp api and tools.
+- `src/lsp.zig` the lsp api and tools.
