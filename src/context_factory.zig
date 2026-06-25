@@ -551,7 +551,11 @@ pub fn build_system_prompt(
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         var header_buf: [4096]u8 = undefined;
 
-        _ = try w.write("<available-skills>\n");
+        _ = try w.write(
+            \\
+            \\# Available skills:
+            \\
+        );
 
         while (try it.next(self.io)) |entry| {
             if (entry.kind != .file) continue;
@@ -566,29 +570,28 @@ pub fn build_system_prompt(
             };
 
             try w.print(
-                \\<skill>
-                \\<name>{s}</name>
-                \\<description>{s}</description>
-                \\</skill>
+                \\
+                \\## Skill: "{s}"
+                \\
+                \\{s}
                 \\
             , .{ skill.name, skill.description });
         }
-
-        _ = try w.write("</available-skills>\n");
     }
+    _ = try w.write(
+        \\
+        \\# User Instructions:
+        \\
+    );
 
     // global context
     if (self.config_dir) |dir| {
         inline for (CONTEXT_FILES) |context_file| {
             var buf: [255]u8 = undefined;
-            const path_len = try dir.realPath(self.io, &buf);
-
             if (dir.openFile(self.io, context_file, .{})) |user_ctx_file| {
-                try w.print("<instruction-content from=\"{s}/{s}\">\n", .{ buf[0..path_len], context_file });
-                try w.writeAll("<instruction-content>");
                 var filer_reader = user_ctx_file.reader(self.io, &buf);
                 _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-                try w.writeAll("</instruction-content>");
+                try w.writeAll("\n\n");
             } else |_| {}
         }
     }
@@ -599,12 +602,9 @@ pub fn build_system_prompt(
     inline for (CONTEXT_FILES) |context_file| {
         if (std.Io.Dir.cwd().openFile(self.io, context_file, .{})) |user_ctx_file| {
             var buf: [100]u8 = undefined;
-            try w.print("<instruction-content from=\"./{s}\">\n", .{context_file});
-
-            try w.writeAll("<instruction-content>");
             var filer_reader = user_ctx_file.reader(self.io, &buf);
             _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-            try w.writeAll("</instruction-content>");
+            try w.writeAll("\n\n");
         } else |_| {}
     }
 
@@ -786,4 +786,18 @@ test "agent defaults can be replaced with an empty tool list" {
     try factory.setAgentTools(.general, &.{});
     try factory.build_toolset(.general, &tools);
     try std.testing.expectEqual(@as(u32, 0), tools.len);
+}
+
+test "system_prompt" {
+    var arean = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arean.deinit();
+    const alloc = arean.allocator();
+
+    var factory = try Self.init(alloc, std.testing.io, "/home/lommix");
+    defer factory.prompt_arena.deinit();
+
+    var cfg = r.prv.config.BlitzdenkCfg{};
+
+    const prompt = try factory.build_system_prompt(alloc, &cfg, .general);
+    std.debug.print("{s}", .{prompt});
 }
