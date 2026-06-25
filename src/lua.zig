@@ -448,18 +448,6 @@ pub const Blitz = LuaType{
                     },
                 },
             },
-
-            // const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
-            //     .{ .name = "name", .ty = LuaType.string },
-            //     .{ .name = "description", .ty = LuaType.string },
-            //     .{ .name = "prompt", .ty = LuaType.string },
-            //     .{ .name = "tools", .ty = StringListDef },
-            //     .{ .name = "model", .ty = LuaType.string },
-            //     .{ .name = "effort", .ty = LuaType.string },
-            //     .{ .name = "provider", .ty = LuaType.integer },
-            //     .{ .name = "in_agent_tool", .ty = LuaType.boolean, .optional = true },
-            // } } };
-
             .{
                 .name = "add_agent",
                 .desc = "Register a complete agent configuration.",
@@ -504,64 +492,6 @@ pub const Blitz = LuaType{
                     },
                 },
             },
-
-            // fn luaAddAgent(L: ?*c.lua_State) callconv(.c) c_int {
-            //     const state = L.?;
-            //
-            //     const a = getAppFromRegistry(state) orelse {
-            //         _ = c.luaL_error(state, "add_agent: app not initialized");
-            //         return 0;
-            //     };
-            //
-            //     const vm = &a.lua_vm;
-            //     const def = readAnyValueAlloc(LuaAgentEntry, state, 1, vm.luaArena()) orelse {
-            //         _ = c.luaL_error(state, "add_agent: expected an agent definition table");
-            //         return 0;
-            //     };
-            //
-            //     if (def.name.len == 0 or def.description.len == 0 or def.prompt.len == 0 or def.model.len == 0 or def.effort.len == 0) {
-            //         _ = c.luaL_error(state, "add_agent: name, description, prompt, model, and effort are required");
-            //         return 0;
-            //     }
-            //
-            //     const effort = r.prv.config.parseReasoningEffort(def.effort) orelse {
-            //         _ = c.luaL_error(state, "add_agent: unknown effort (expected none/low/medium/high/xhigh/max)");
-            //         return 0;
-            //     };
-            //     const tools = readAnyFieldAlloc([]const []const u8, state, 1, "tools", vm.luaArena()) orelse {
-            //         _ = c.luaL_error(state, "add_agent: tools must be an array of names");
-            //         return 0;
-            //     };
-            //     const provider = readAnyFieldAlloc(r.prv.config.ProviderHandle, state, 1, "provider", null) orelse {
-            //         _ = c.luaL_error(state, "add_agent: provider handle is required");
-            //         return 0;
-            //     };
-            //     const provider_idx = @intFromEnum(provider);
-            //     if (provider_idx >= a.config.provider_count or !a.config.providers[provider_idx].active) {
-            //         _ = c.luaL_error(state, "add_agent: invalid provider handle");
-            //         return 0;
-            //     }
-            //
-            //     const agent_type = a.context_factory.addAgent(.{
-            //         .name = def.name,
-            //         .description = def.description,
-            //         .prompt = def.prompt,
-            //         .in_agent_tool = def.in_agent_tool,
-            //         .tools = tools,
-            //         .model = .{
-            //             .name = def.model,
-            //             .effort = effort,
-            //             .provider = provider,
-            //         },
-            //     }) catch {
-            //         _ = c.luaL_error(state, "add_agent: too many agents, invalid tools, or out of memory");
-            //         return 0;
-            //     };
-            //
-            //     pushAny(state, agent_type);
-            //     return 1;
-            // }
-
             .{
                 .name = "set_model",
                 .desc = "Set the default model.",
@@ -570,45 +500,93 @@ pub const Blitz = LuaType{
                         .{ .name = "model", .ty = LuaType.string },
                         .{ .name = "handle", .ty = LuaType.integer },
                     },
-                    .fn_ptr = luaSetModel,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, model: []const u8, handle: u32) !void {
+                            if (!a.config.setModel(model, @enumFromInt(handle))) {
+                                return error.ModelStringTooLong;
+                            }
+                        }
+                    }).lua_fn, "set_model"),
                 } },
             },
             .{
                 .name = "set_model_agent",
                 .desc = "Set the model config for a specific agent.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{
-                        .{ .name = "agent_type", .ty = LuaType.integer },
-                        .{ .name = "model", .ty = LuaType.string },
-                        .{ .name = "effort", .ty = LuaType.string },
-                        .{ .name = "handle", .ty = LuaType.integer },
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{
+                            .{ .name = "agent_type", .ty = LuaType.integer },
+                            .{ .name = "model", .ty = LuaType.string },
+                            .{ .name = "effort", .ty = LuaType.string },
+                            .{ .name = "handle", .ty = LuaType.integer },
+                        },
+                        .fn_ptr = LuaFnBind((struct {
+                            fn lua_fn(a: *r.app.App, agent_type_id: u32, model: []const u8, effort: []const u8, handle: u32) !void {
+                                const agent_type: r.ContextFactory.AgentType = @enumFromInt(agent_type_id);
+                                const eff = r.prv.config.parseReasoningEffort(effort) orelse return error.UnknownEffort;
+                                try a.context_factory.setAgentModel(agent_type, model, eff, @enumFromInt(handle));
+                            }
+                        }).lua_fn, "set_model_agent"),
                     },
-                    .fn_ptr = luaSetModelAgent,
-                } },
+                },
             },
             .{
                 .name = "token_usage",
                 .desc = "Return token usage currently shown by the statusbar.",
-                .ty = LuaType{ .function = .{
-                    .ret = &TokenUsageDef,
-                    .fn_ptr = luaTokenUsage,
-                } },
+                .ty = LuaType{
+                    .function = .{
+                        .ret = &TokenUsageDef,
+                        .fn_ptr = LuaFnBind((struct {
+                            const Ret = struct {
+                                input: u64,
+                                output: u64,
+                                cache: u64,
+                                cache_creation: u64,
+                            };
+
+                            fn lua_fn(a: *r.app.App) !Ret {
+                                const useage = a.swarm.usage();
+                                return .{
+                                    .input = useage.input_tokens,
+                                    .output = useage.output_tokens,
+                                    .cache = useage.cached_tokens,
+                                    .cache_creation = useage.cache_creation_tokens,
+                                };
+                            }
+                        }).lua_fn, "token_usage"),
+                    },
+                },
             },
             .{
                 .name = "context_percent",
                 .desc = "Return main-agent context fill percentage currently shown by the statusbar.",
                 .ty = LuaType{ .function = .{
                     .ret = &LuaNumber,
-                    .fn_ptr = luaContextPercent,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App) !f32 {
+                            return a.contextPercent();
+                        }
+                    }).lua_fn, "context_percent"),
                 } },
             },
             .{
                 .name = "set_compact_edge",
                 .desc = "Set the default context edge, in tokens, used for statusbar percentage and auto-compaction.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{.{ .name = "tokens", .ty = LuaType.integer }},
-                    .fn_ptr = luaSetCompactEdge,
-                } },
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{.{ .name = "tokens", .ty = LuaType.integer }},
+                        .fn_ptr = LuaFnBind((struct {
+                            fn lua_fn(a: *r.app.App, limit: u32) !void {
+                                a.default_context_limit = limit;
+                                for (&a.swarm.slots) |*slot| {
+                                    const slot_state = slot.state.load(.acquire);
+                                    if (slot_state == .free or slot_state == .reserved) continue;
+                                    slot.agent.context_limit = limit;
+                                }
+                            }
+                        }).lua_fn, "set_compact_edge"),
+                    },
+                },
             },
             .{
                 .name = "bind",
@@ -616,10 +594,21 @@ pub const Blitz = LuaType{
                 \\Bind a vim-style key combo to a Lua callback.
                 \\Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
                 ,
-                .ty = LuaType{ .function = .{
-                    .args = &.{ .{ .name = "key", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
-                    .fn_ptr = luaBind,
-                } },
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{ .{ .name = "key", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
+                        .fn_ptr = LuaFnBind((struct {
+                            fn lua_fn(a: *r.app.App, state: *c.lua_State, key: []const u8, func: LuaFnRef) !void {
+                                const parsed = keys.parseKeyString(key) orelse return error.InvalidKeyCombo;
+                                a.lua_vm.bind_entries.appendAssumeCapacity(.{
+                                    .key = parsed,
+                                    .func_ref = func.idx,
+                                    .L = state,
+                                });
+                            }
+                        }).lua_fn, "bind"),
+                    },
+                },
             },
             .{
                 .name = "html_to_markdown",
@@ -879,155 +868,6 @@ fn luaExitLoop(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
     pushStatusTable(state, lua.RET_EXIT_LOOP, "");
     return 1;
-}
-
-fn luaSetModel(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    const cfg = getCfgFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "set_model: config not initialized");
-        return 0;
-    };
-
-    const model = readAnyArg([]const u8, state, "set_model", 1) orelse return 0;
-    const handle: prv.config.ProviderHandle = @enumFromInt(readAnyArg(u32, state, "set_model", 2) orelse return 0);
-
-    if (!cfg.setModel(model, handle)) {
-        _ = c.luaL_error(state, "set_model: invalid provider handle or model name too long");
-        return 0;
-    }
-
-    return 0;
-}
-
-fn luaSetModelAgent(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "app not initialized");
-        return 0;
-    };
-
-    const func_name = "set_model_agent";
-
-    const agent_type_idx = readAnyArg(r.ContextFactory.AgentType, state, func_name, 1) orelse {
-        _ = c.luaL_error(state, "model must be string");
-        return 0;
-    };
-
-    const model = readAnyArg([]const u8, state, func_name, 2) orelse {
-        _ = c.luaL_error(state, "model must be string");
-        return 0;
-    };
-    const effort_str = readAnyArg([]const u8, state, func_name, 3) orelse {
-        _ = c.luaL_error(state, "effort must be string");
-        return 0;
-    };
-
-    const effort = r.prv.config.parseReasoningEffort(effort_str) orelse {
-        _ = c.luaL_error(state, "unknown effort (expected none/low/medium/high/xhigh/max) ");
-        return 0;
-    };
-
-    const provider = readAnyArg(r.prv.config.ProviderHandle, state, func_name, 4) orelse {
-        _ = c.luaL_error(state, "provider handles are int!");
-        return 0;
-    };
-
-    a.context_factory.setAgentModel(agent_type_idx, model, effort, provider) catch {
-        _ = c.luaL_error(state, "set_model_agent: unknown agent or out of memory");
-        return 0;
-    };
-
-    return 0;
-}
-
-fn luaTokenUsage(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "token_usage: app not initialized");
-        return 0;
-    };
-    const usage = a.swarm.usage();
-
-    c.lua_createtable(state, 0, 4);
-    setFieldAny(state, -2, "input", usage.input_tokens);
-    setFieldAny(state, -2, "output", usage.output_tokens);
-    setFieldAny(state, -2, "cache", usage.cached_tokens);
-    setFieldAny(state, -2, "cache_creation", usage.cache_creation_tokens);
-    return 1;
-}
-
-fn luaContextPercent(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "context_percent: app not initialized");
-        return 0;
-    };
-    c.lua_pushnumber(state, @floatCast(a.contextPercent()));
-    return 1;
-}
-
-fn luaSetCompactEdge(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "set_compact_edge: app not initialized");
-        return 0;
-    };
-    if (c.lua_type(state, 1) != c.LUA_TNUMBER) {
-        _ = c.luaL_error(state, "set_compact_edge: arg 1 (tokens) must be a number");
-        return 0;
-    }
-    const raw = c.lua_tointegerx(state, 1, null);
-    if (raw <= 0 or raw > std.math.maxInt(u32)) {
-        _ = c.luaL_error(state, "set_compact_edge: token count out of range");
-        return 0;
-    }
-    const limit: u32 = @intCast(raw);
-    a.default_context_limit = limit;
-    for (&a.swarm.slots) |*slot| {
-        const slot_state = slot.state.load(.acquire);
-        if (slot_state == .free or slot_state == .reserved) continue;
-        slot.agent.context_limit = limit;
-    }
-    a.dirty = true;
-    return 0;
-}
-
-fn luaBind(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-
-    if (c.lua_type(state, 2) != c.LUA_TFUNCTION) {
-        _ = c.luaL_error(state, "bind: arg 2 (func) must be a function");
-        return 0;
-    }
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "bind: vm not initialized");
-        return 0;
-    };
-    const vm = &a.lua_vm;
-    if (vm.bind_entries.items.len >= MAX_LUA_BINDS) {
-        _ = c.luaL_error(state, "bind: max binds reached (%d)", @as(c_int, MAX_LUA_BINDS));
-        return 0;
-    }
-
-    const key_str = readAnyArg([]const u8, state, "bind", 1) orelse return 0;
-
-    const parsed = keys.parseKeyString(key_str) orelse {
-        _ = c.luaL_error(state, "bind: invalid key string");
-        return 0;
-    };
-
-    // ref the function (pops it from stack — push a copy first so order doesn't matter)
-    c.lua_pushvalue(state, 2);
-    const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
-
-    vm.bind_entries.appendAssumeCapacity(.{
-        .key = parsed,
-        .func_ref = func_ref,
-        .L = state,
-    });
-    return 0;
 }
 
 fn luaHtmlToMarkdown(L: ?*c.lua_State) callconv(.c) c_int {
