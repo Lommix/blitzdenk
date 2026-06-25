@@ -13,6 +13,19 @@
 ---Enable an MCP server for an agent type. Defaults to blitz.AGENT_GENERAL.
 ---@field enable fun(mcp_id: integer, agent_type?: integer)
 
+---@class BlitzLspServerDef
+---@field alias string
+---@field command string
+---@field args? string[]
+---@field root? string
+---@field language_id? string
+
+---@class BlitzLsp
+---Register an LSP stdio server. Disabled until explicitly enabled.
+---@field add fun(def: BlitzLspServerDef): integer
+---Enable an LSP server for an agent type. Defaults to blitz.AGENT_GENERAL.
+---@field enable fun(lsp_id: integer, agent_type?: integer)
+
 ---@class BlitzJson
 ---Encode a Lua value as JSON.
 ---Supports nil, booleans, numbers, strings, and tables.
@@ -79,6 +92,7 @@
 ---@field CANCEL_AGENT string
 ---@field RIPGREP string
 ---@field LOADSKILL string
+---@field LSP string
 ---remove test function
 ---@field remove fun(value: string)
 
@@ -196,6 +210,7 @@
 
 ---@class Blitz
 ---@field mcp BlitzMcp
+---@field lsp BlitzLsp
 ---@field json BlitzJson
 ---@field queue BlitzQueue
 ---@field tools BlitzToolDef

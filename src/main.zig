@@ -311,11 +311,17 @@ pub fn run(
     const mcp_servers = try app.lua_vm.getEnabledMcpServers(arena);
     app.mcp_manager.loadServers(mcp_servers);
     var mcp_tools = app.mcp_manager.registeredTools();
+    const lsp_servers = try app.lua_vm.getEnabledLspServers(arena);
+    app.lsp_manager.loadServers(lsp_servers);
+    var lsp_tools = app.lsp_manager.registeredTools();
 
     for (lua_tools) |tool| {
         try context_factory.add(arena, tool, .all);
     }
     for (mcp_tools) |tool| {
+        try context_factory.add(arena, tool.tool, tool.flags);
+    }
+    for (lsp_tools) |tool| {
         try context_factory.add(arena, tool.tool, tool.flags);
     }
 
@@ -471,6 +477,14 @@ pub fn run(
                 app.mcp_manager.loadServers(reloaded_mcp_servers);
                 mcp_tools = app.mcp_manager.registeredTools();
                 for (mcp_tools) |tool| try context_factory.add(arena, tool.tool, tool.flags);
+
+                const reloaded_lsp_servers = app.lua_vm.getEnabledLspServers(arena) catch |err| {
+                    std.log.scoped(.lsp).err("failed to load LSP server defs {any}", .{err});
+                    break :blk;
+                };
+                app.lsp_manager.loadServers(reloaded_lsp_servers);
+                lsp_tools = app.lsp_manager.registeredTools();
+                for (lsp_tools) |tool| try context_factory.add(arena, tool.tool, tool.flags);
 
                 lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
                 app.keymap.custom.clearRetainingCapacity();

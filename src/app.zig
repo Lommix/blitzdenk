@@ -274,6 +274,7 @@ pub const App = struct {
     lua_status_bar_cache: [512]u8 = undefined,
     lua_status_bar_cache_len: usize = 0,
     mcp_manager: r.mcp.Manager,
+    lsp_manager: r.lsp.Manager,
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
     injection_hooks: r.inject.InjectionsHooks = .{},
@@ -300,6 +301,7 @@ pub const App = struct {
             .cmd_queue = try r.cmd.CommandQueue.init(app_arena),
             .lua_vm = lua_vm,
             .mcp_manager = r.mcp.Manager.init(app_arena, agent_factory.io),
+            .lsp_manager = r.lsp.Manager.init(app_arena, agent_factory.io),
             .injection_hooks = try r.inject.InjectionsHooks.init(app_arena),
             .permission_queue = .{
                 .value = try .initCapacity(app_arena, 16),
@@ -321,6 +323,7 @@ pub const App = struct {
             for (g.ptr.list.items) |e| self.swarm.exec.cancel(e.handle);
         }
 
+        self.lsp_manager.deinit();
         self.mcp_manager.deinit();
         self.arena_streaming_preview.deinit();
         self.lua_vm.deinit();
@@ -532,6 +535,33 @@ pub const App = struct {
         }
 
         self.event_bus.emit(self, .mcp_tools_reloaded) catch {};
+        self.dirty = true;
+    }
+
+    pub fn reloadLspTools(self: *App) !void {
+        const alloc = self.sessionAlloc();
+
+        self.lua_vm.vm_mu.lockUncancelable(self.swarm.pool.io);
+        defer self.lua_vm.vm_mu.unlock(self.swarm.pool.io);
+
+        const old_tools = self.lsp_manager.registeredTools();
+        for (old_tools) |entry| self.context_factory.remove(entry.tool.def.name);
+
+        const servers = try self.lua_vm.getEnabledLspServers(alloc);
+        self.lsp_manager.loadServers(servers);
+
+        const new_tools = self.lsp_manager.registeredTools();
+        for (new_tools) |entry| try self.context_factory.add(alloc, entry.tool, entry.flags);
+
+        for (&self.swarm.slots) |*slot| {
+            const state = slot.state.load(.acquire);
+            if (state == .free or state == .reserved) continue;
+
+            var set = r.ContextFactory.ToolSet{};
+            self.context_factory.build_toolset(@enumFromInt(slot.agent.type_idx), &set) catch continue;
+            try slot.agent.setTools(set.slice());
+        }
+
         self.dirty = true;
     }
 

@@ -10,6 +10,7 @@ pub const keys = @import("keys.zig");
 pub const events = @import("events.zig");
 pub const lua = @import("lua.zig");
 pub const mcp = @import("mcp.zig");
+pub const lsp = @import("lsp.zig");
 pub const tools = @import("tools/root.zig");
 pub const tui = @import("tui/root.zig");
 pub const cmd = @import("commands.zig");

@@ -255,6 +255,13 @@ const McpServerDef = LuaType{ .table_def = .{ .name = "BlitzMcpServerDef", .fiel
     .{ .name = "args", .ty = StringListDef, .optional = true },
     .{ .name = "tools_prefix", .ty = LuaType.string, .optional = true },
 } } };
+const LspServerDef = LuaType{ .table_def = .{ .name = "BlitzLspServerDef", .fields = &.{
+    .{ .name = "alias", .ty = LuaType.string },
+    .{ .name = "command", .ty = LuaType.string },
+    .{ .name = "args", .ty = StringListDef, .optional = true },
+    .{ .name = "root", .ty = LuaType.string, .optional = true },
+    .{ .name = "language_id", .ty = LuaType.string, .optional = true },
+} } };
 const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fields = &.{
     .{ .name = "parent_id", .ty = AgentIdDef, .optional = true },
     .{ .name = "prompt", .ty = LuaType.string },
@@ -267,6 +274,7 @@ pub const Blitz = LuaType{
         .name = "Blitz",
         .fields = &.{
             .{ .name = "mcp", .ty = BlitzMcp },
+            .{ .name = "lsp", .ty = BlitzLsp },
             .{ .name = "json", .ty = BlitzJson },
             .{ .name = "queue", .ty = BlitzQueue },
             .{ .name = "tools", .ty = BlitzToolDef },
@@ -869,6 +877,7 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "CANCEL_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.CancelAgent.def.name } },
             .{ .name = "RIPGREP", .ty = LuaType.string, .value = .{ .string = tl.rg.RipGrepTool.def.name } },
             .{ .name = "LOADSKILL", .ty = LuaType.string, .value = .{ .string = tl.skill.LoadSkillTool.def.name } },
+            .{ .name = "LSP", .ty = LuaType.string, .value = .{ .string = r.lsp.TOOL_NAME } },
             .{
                 .name = "remove",
                 .desc = "remove test function",
@@ -1046,6 +1055,110 @@ const BlitzMcp = LuaType{ .table_def = .{ .name = "BlitzMcp", .fields = &.{
                         try a.cmd_queue.append(a.io, .reload_mcp);
                     }
                 }).lua_fn, "mcp.enable"),
+            },
+        },
+    },
+} } };
+
+const BlitzLsp = LuaType{ .table_def = .{ .name = "BlitzLsp", .fields = &.{
+    .{
+        .name = "add",
+        .desc = "Register an LSP stdio server. Disabled until explicitly enabled.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "def", .ty = LspServerDef }},
+            .ret = &LuaInteger,
+            .fn_ptr = (struct {
+                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                    const state = L.?;
+                    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
+                        _ = c.luaL_error(state, "lsp.add: expected table argument");
+                        return 0;
+                    }
+
+                    const a = getAppFromRegistry(state) orelse {
+                        _ = c.luaL_error(state, "lsp.add: vm not initialized");
+                        return 0;
+                    };
+                    const vm = &a.lua_vm;
+                    if (vm.lsp_entries.items.len >= MAX_LUA_LSP_SERVERS) {
+                        _ = c.luaL_error(state, "lsp.add: max servers reached (%d)", @as(c_int, MAX_LUA_LSP_SERVERS));
+                        return 0;
+                    }
+
+                    var entry: LuaLspServerEntry = .{};
+                    entry.alias_len = getStringField(state, 1, "alias", &entry.alias) orelse {
+                        _ = c.luaL_error(state, "lsp.add: 'alias' must be a string (max %d)", @as(c_int, entry.alias.len));
+                        return 0;
+                    };
+                    entry.command_len = getStringField(state, 1, "command", &entry.command) orelse {
+                        _ = c.luaL_error(state, "lsp.add: 'command' must be a string (max %d)", @as(c_int, entry.command.len));
+                        return 0;
+                    };
+                    entry.root_len = getStringField(state, 1, "root", &entry.root) orelse blk: {
+                        entry.root[0] = '.';
+                        break :blk 1;
+                    };
+                    entry.language_id_len = getStringField(state, 1, "language_id", &entry.language_id) orelse blk: {
+                        const fallback = "plaintext";
+                        @memcpy(entry.language_id[0..fallback.len], fallback);
+                        break :blk fallback.len;
+                    };
+
+                    _ = c.lua_getfield(state, 1, "args");
+                    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
+                        const len = c.lua_rawlen(state, -1);
+                        if (len > MAX_LUA_LSP_ARGS) {
+                            c.lua_pop(state, 1);
+                            _ = c.luaL_error(state, "lsp.add: too many args (max %d)", @as(c_int, MAX_LUA_LSP_ARGS));
+                            return 0;
+                        }
+                        for (1..len + 1) |i| {
+                            _ = c.lua_rawgeti(state, -1, @intCast(i));
+                            if (c.lua_type(state, -1) != c.LUA_TSTRING) {
+                                c.lua_pop(state, 2);
+                                _ = c.luaL_error(state, "lsp.add: args[%d] must be a string", @as(c_int, @intCast(i)));
+                                return 0;
+                            }
+                            var arg_len: usize = 0;
+                            const arg_ptr = c.lua_tolstring(state, -1, &arg_len);
+                            if (arg_len > entry.args[i - 1].len) {
+                                c.lua_pop(state, 2);
+                                _ = c.luaL_error(state, "lsp.add: args[%d] too long", @as(c_int, @intCast(i)));
+                                return 0;
+                            }
+                            @memcpy(entry.args[i - 1][0..arg_len], arg_ptr[0..arg_len]);
+                            entry.arg_lens[i - 1] = @intCast(arg_len);
+                            entry.args_len += 1;
+                            c.lua_pop(state, 1);
+                        }
+                    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
+                        c.lua_pop(state, 1);
+                        _ = c.luaL_error(state, "lsp.add: 'args' must be a table of strings");
+                        return 0;
+                    }
+                    c.lua_pop(state, 1);
+
+                    vm.lsp_entries.appendAssumeCapacity(entry);
+                    c.lua_pushinteger(state, @intCast(vm.lsp_entries.items.len));
+                    return 1;
+                }
+            }).lua_fn,
+        } },
+    },
+    .{
+        .name = "enable",
+        .desc = "Enable an LSP server for an agent type. Defaults to blitz.AGENT_GENERAL.",
+        .ty = LuaType{
+            .function = .{
+                .args = &.{ .{ .name = "lsp_id", .ty = LuaType.integer }, .{ .name = "agent_type", .ty = LuaType.integer, .optional = true } },
+                .fn_ptr = LuaFnBind((struct {
+                    fn lua_fn(a: *r.app.App, lsp_id: u32, agent_type: ?r.ContextFactory.AgentType) !void {
+                        const vm = &a.lua_vm;
+                        if (lsp_id == 0 or lsp_id > vm.lsp_entries.items.len) return error.InvalidLspId;
+                        vm.lsp_entries.items[lsp_id - 1].enabled_agents.insert(agent_type orelse .general);
+                        try a.cmd_queue.append(a.io, .reload_lsp);
+                    }
+                }).lua_fn, "lsp.enable"),
             },
         },
     },
@@ -1833,6 +1946,8 @@ const MAX_LUA_BINDS = 64;
 const MAX_LUA_COMMANDS = 64;
 const MAX_LUA_MCP_SERVERS = 16;
 const MAX_LUA_MCP_ARGS = 32;
+const MAX_LUA_LSP_SERVERS = 16;
+const MAX_LUA_LSP_ARGS = 32;
 const STDOUT_BUF_CAP = 1024 * 1024 * 16;
 
 pub const LuaMcpServerEntry = struct {
@@ -1861,6 +1976,37 @@ pub const LuaMcpServerEntry = struct {
     }
 };
 
+pub const LuaLspServerEntry = struct {
+    alias: [128]u8 = undefined,
+    alias_len: usize = 0,
+    command: [512]u8 = undefined,
+    command_len: usize = 0,
+    args: [MAX_LUA_LSP_ARGS][256]u8 = undefined,
+    arg_lens: [MAX_LUA_LSP_ARGS]u16 = @splat(0),
+    args_len: usize = 0,
+    root: [512]u8 = undefined,
+    root_len: usize = 0,
+    language_id: [64]u8 = undefined,
+    language_id_len: usize = 0,
+    enabled_agents: r.ContextFactory.AgentType.Set = .initEmpty(),
+
+    pub fn aliasSlice(self: *const LuaLspServerEntry) []const u8 {
+        return self.alias[0..self.alias_len];
+    }
+    pub fn commandSlice(self: *const LuaLspServerEntry) []const u8 {
+        return self.command[0..self.command_len];
+    }
+    pub fn argSlice(self: *const LuaLspServerEntry, i: usize) []const u8 {
+        return self.args[i][0..self.arg_lens[i]];
+    }
+    pub fn rootSlice(self: *const LuaLspServerEntry) []const u8 {
+        return self.root[0..self.root_len];
+    }
+    pub fn languageIdSlice(self: *const LuaLspServerEntry) []const u8 {
+        return self.language_id[0..self.language_id_len];
+    }
+};
+
 pub const LuaVm = struct {
     L: *c.lua_State,
     app: ?*app.App = null,
@@ -1869,6 +2015,7 @@ pub const LuaVm = struct {
     bind_entries: std.ArrayList(LuaBindEntry) = .empty,
     command_entries: std.ArrayList(LuaCommandEntry) = .empty,
     mcp_entries: std.ArrayList(LuaMcpServerEntry) = .empty,
+    lsp_entries: std.ArrayList(LuaLspServerEntry) = .empty,
     stdout_buf: std.ArrayList(u8) = .empty,
     last_error: [512]u8 = undefined,
     last_error_len: usize = 0,
@@ -1904,6 +2051,7 @@ pub const LuaVm = struct {
         try self.bind_entries.ensureTotalCapacity(arena, MAX_LUA_BINDS);
         try self.command_entries.ensureTotalCapacity(arena, MAX_LUA_COMMANDS);
         try self.mcp_entries.ensureTotalCapacity(arena, MAX_LUA_MCP_SERVERS);
+        try self.lsp_entries.ensureTotalCapacity(arena, MAX_LUA_LSP_SERVERS);
         try self.stdout_buf.ensureTotalCapacity(arena, STDOUT_BUF_CAP);
     }
 
@@ -2013,12 +2161,14 @@ pub const LuaVm = struct {
         self.bind_entries = .empty;
         self.command_entries = .empty;
         self.mcp_entries = .empty;
+        self.lsp_entries = .empty;
         self.stdout_buf = .empty;
         self.prepareArenaLists() catch return error.LuaInitFailed;
         self.tool_entries.clearRetainingCapacity();
         self.bind_entries.clearRetainingCapacity();
         self.command_entries.clearRetainingCapacity();
         self.mcp_entries.clearRetainingCapacity();
+        self.lsp_entries.clearRetainingCapacity();
         self.stdout_buf.clearRetainingCapacity();
         // Refs were tied to the closed lua_State; drop them before re-init.
         self.failed_ref = c.LUA_NOREF;
@@ -2113,8 +2263,39 @@ pub const LuaVm = struct {
         return out;
     }
 
+    pub fn getEnabledLspServers(self: *LuaVm, alloc: Allocator) ![]@import("lsp.zig").ServerConfig {
+        if (self.lsp_entries.items.len == 0) return &.{};
+        var count: usize = 0;
+        for (self.lsp_entries.items) |*entry| {
+            if (entry.enabled_agents.count() > 0) count += 1;
+        }
+        if (count == 0) return &.{};
+
+        const out = try alloc.alloc(@import("lsp.zig").ServerConfig, count);
+        var out_i: usize = 0;
+        for (self.lsp_entries.items) |*entry| {
+            if (entry.enabled_agents.count() == 0) continue;
+            const args = try alloc.alloc([]const u8, entry.args_len);
+            for (0..entry.args_len) |j| args[j] = entry.argSlice(j);
+            out[out_i] = .{
+                .alias = entry.aliasSlice(),
+                .command = entry.commandSlice(),
+                .args = args,
+                .root = entry.rootSlice(),
+                .language_id = entry.languageIdSlice(),
+                .enabled_agents = entry.enabled_agents,
+            };
+            out_i += 1;
+        }
+        return out;
+    }
+
     pub fn disableAllMcp(self: *LuaVm) void {
         for (self.mcp_entries.items) |*entry| entry.enabled_agents = .initEmpty();
+    }
+
+    pub fn disableAllLsp(self: *LuaVm) void {
+        for (self.lsp_entries.items) |*entry| entry.enabled_agents = .initEmpty();
     }
 
     /// Invoke a previously bound lua callback by its registry ref.

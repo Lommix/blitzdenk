@@ -64,6 +64,7 @@ pub const Command = union(enum) {
     scroll_down: usize,
     compact,
     reload_mcp,
+    reload_lsp,
     custom: CustomCmd,
     load_session: []const u8,
     save_session: []const u8,
@@ -183,6 +184,9 @@ pub const Command = union(enum) {
             },
             .reload_mcp => {
                 try app.reloadMcpTools();
+            },
+            .reload_lsp => {
+                try app.reloadLspTools();
             },
             .spawn_agent => |arg| {
                 if (arg.fork) {
