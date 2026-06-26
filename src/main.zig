@@ -263,11 +263,12 @@ pub fn run(
         .build_config = (struct {
             fn func(ptr: *anyopaque, agent_type_idx: u8) anyerror!r.prv.adapter.Config {
                 const a: *App = @ptrCast(@alignCast(ptr));
-                return a.context_factory.buildAgentApiConfig(
+                const config = a.context_factory.buildAgentApiConfig(
                     @enumFromInt(agent_type_idx),
                     &a.config,
                     a.swarm.exec.env,
                 ) orelse return error.FailedToBuildAgent;
+                return try r.prv.adapter.cloneConfig(a.appAlloc(), config);
             }
         }).func,
         .cwd = (struct {
@@ -306,6 +307,7 @@ pub fn run(
     }
     if (!lua_load_failed) app.lua_vm.clearLastError();
     app.lua_vm.readConfigFields();
+    try app.lua_vm.publishAvailableSystems(&context_factory);
     var lua_tools = try app.lua_vm.getRegisteredTools(arena);
     var lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
     const mcp_servers = try app.lua_vm.getEnabledMcpServers(arena);
@@ -458,6 +460,7 @@ pub fn run(
                 }
                 if (!lua_reload_failed) app.lua_vm.clearLastError();
                 app.lua_vm.readConfigFields();
+                try app.lua_vm.publishAvailableSystems(&context_factory);
                 app.dirty = true;
 
                 context_factory.clearTools();
@@ -494,9 +497,7 @@ pub fn run(
 
                 if (app.main_agent_id) |id| {
                     if (swarm.getAgent(id)) |agent| {
-                        var set = reg.ToolSet{};
-                        context_factory.build_toolset(.general, &set) catch {};
-                        try agent.setTools(set.slice());
+                        try context_factory.refreshAgentTools(agent);
                     }
                 }
             }

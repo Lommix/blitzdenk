@@ -9,12 +9,11 @@ pub const MAX_BODY = 8 * 1024 * 1024;
 pub const TOOL_NAME = "lsp";
 
 pub const ServerConfig = struct {
-    alias: []const u8,
+    name: []const u8,
     command: []const u8,
     args: []const []const u8 = &.{},
     root: []const u8 = ".",
     language_id: []const u8 = "plaintext",
-    enabled_agents: r.ContextFactory.AgentType.Set,
 };
 
 pub const RegisteredTool = struct {
@@ -23,7 +22,7 @@ pub const RegisteredTool = struct {
 };
 
 const Binding = struct {
-    alias: []const u8,
+    name: []const u8,
     client_index: usize,
 };
 
@@ -48,7 +47,7 @@ pub const Manager = struct {
 
     pub fn clear(self: *Manager) void {
         for (self.clients.items) |*client| client.deinit();
-        for (self.bindings.items) |binding| self.alloc.free(binding.alias);
+        for (self.bindings.items) |binding| self.alloc.free(binding.name);
         self.clients.clearRetainingCapacity();
         self.bindings.clearRetainingCapacity();
         self.tools.clearRetainingCapacity();
@@ -58,13 +57,11 @@ pub const Manager = struct {
         self.clear();
         active_manager = self;
 
-        var allowed = r.ContextFactory.AgentType.Set.initEmpty();
         for (configs) |cfg| {
             self.addServer(cfg) catch |err| {
-                log.warn("failed to load LSP server '{s}': {s}", .{ cfg.alias, @errorName(err) });
+                log.warn("failed to load LSP server '{s}': {s}", .{ cfg.name, @errorName(err) });
                 continue;
             };
-            allowed.setUnion(cfg.enabled_agents);
         }
 
         if (self.clients.items.len > 0) {
@@ -81,7 +78,7 @@ pub const Manager = struct {
                         \\{
                         \\  "type": "object",
                         \\  "properties": {
-                        \\    "server": {"type": "string", "description": "Configured LSP alias. Optional when only one LSP server is enabled."},
+                        \\    "server": {"type": "string", "description": "Configured LSP name. Optional when only one LSP server is enabled."},
                         \\    "op": {"type": "string", "enum": ["hover", "definition", "references", "document_symbols", "workspace_symbols"]},
                         \\    "path": {"type": "string", "description": "File path for textDocument operations"},
                         \\    "line": {"type": "number", "description": "1-based line for hover/definition/references"},
@@ -96,7 +93,7 @@ pub const Manager = struct {
                     .func = &toolTrampoline,
                 },
                 .flags = .{
-                    .allowed_agents = allowed,
+                    .allowed_agents = .initFull(),
                     .add_to_agents = true,
                 },
             }) catch {};
@@ -115,31 +112,31 @@ pub const Manager = struct {
         const client_index = self.clients.items.len;
         try self.clients.append(self.alloc, client);
         try self.bindings.append(self.alloc, .{
-            .alias = try self.alloc.dupe(u8, cfg.alias),
+            .name = try self.alloc.dupe(u8, cfg.name),
             .client_index = client_index,
         });
     }
 
-    fn findBinding(self: *Manager, alias: ?[]const u8) ?Binding {
-        if (alias) |name| {
+    fn findBinding(self: *Manager, server_name: ?[]const u8) ?Binding {
+        if (server_name) |name| {
             for (self.bindings.items) |binding| {
-                if (std.mem.eql(u8, binding.alias, name)) return binding;
+                if (std.mem.eql(u8, binding.name, name)) return binding;
             }
         }
         if (self.bindings.items.len == 1) return self.bindings.items[0];
         return null;
     }
 
-    fn aliasesText(self: *Manager, alloc: std.mem.Allocator) []const u8 {
+    fn namesText(self: *Manager, alloc: std.mem.Allocator) []const u8 {
         if (self.bindings.items.len == 0) return "no LSP servers are loaded";
         var out = std.Io.Writer.Allocating.init(alloc);
         errdefer out.deinit();
-        out.writer.writeAll("valid LSP aliases: ") catch return "unknown LSP server alias";
+        out.writer.writeAll("valid LSP names: ") catch return "unknown LSP server name";
         for (self.bindings.items, 0..) |binding, i| {
-            if (i > 0) out.writer.writeAll(", ") catch return "unknown LSP server alias";
-            out.writer.writeAll(binding.alias) catch return "unknown LSP server alias";
+            if (i > 0) out.writer.writeAll(", ") catch return "unknown LSP server name";
+            out.writer.writeAll(binding.name) catch return "unknown LSP server name";
         }
-        return out.toOwnedSlice() catch "unknown LSP server alias";
+        return out.toOwnedSlice() catch "unknown LSP server name";
     }
 };
 
@@ -161,10 +158,10 @@ fn toolTrampoline(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.ada
     }) catch return errResult(call, "invalid JSON arguments");
 
     const manager = active_manager orelse return errResult(call, "LSP manager not initialized");
-    const binding = manager.findBinding(args.server) orelse return errResult(call, manager.aliasesText(ctx.alloc));
+    const binding = manager.findBinding(args.server) orelse return errResult(call, manager.namesText(ctx.alloc));
     if (binding.client_index >= manager.clients.items.len) return errResult(call, "LSP client missing");
 
-    r.tools.setToolStatusPrint(ctx, call, "LSP {s} {s} {s}", .{ binding.alias, args.op, args.query orelse "" });
+    r.tools.setToolStatusPrint(ctx, call, "LSP {s} {s} {s}", .{ binding.name, args.op, args.query orelse "" });
     const client = &manager.clients.items[binding.client_index];
 
     const content = runOp(ctx, client, args) catch |err| {
@@ -231,7 +228,7 @@ const OpenDoc = struct {
 const Client = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
-    alias: []const u8,
+    name: []const u8,
     argv: []const []const u8,
     root_uri: []const u8,
     language_id: []const u8,
@@ -260,7 +257,7 @@ const Client = struct {
         return .{
             .alloc = alloc,
             .io = io,
-            .alias = try alloc.dupe(u8, cfg.alias),
+            .name = try alloc.dupe(u8, cfg.name),
             .argv = argv,
             .root_uri = root_uri,
             .language_id = try alloc.dupe(u8, cfg.language_id),
@@ -272,7 +269,7 @@ const Client = struct {
         if (self.child.id != null) self.child.kill(self.io);
         for (self.open_docs.items) |doc| self.alloc.free(doc.uri);
         self.open_docs.deinit(self.alloc);
-        self.alloc.free(self.alias);
+        self.alloc.free(self.name);
         self.alloc.free(self.root_uri);
         self.alloc.free(self.language_id);
         freeArgv(self.alloc, self.argv);

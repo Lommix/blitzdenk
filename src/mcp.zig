@@ -12,7 +12,6 @@ pub const ServerConfig = struct {
     command: []const u8,
     args: []const []const u8 = &.{},
     tools_prefix: []const u8,
-    enabled_agents: r.ContextFactory.AgentType.Set,
 };
 
 pub const RegisteredTool = struct {
@@ -105,10 +104,7 @@ pub const Manager = struct {
                     },
                     .func = &toolTrampoline,
                 },
-                .flags = r.ContextFactory.ToolFlags{
-                    .allowed_agents = cfg.enabled_agents,
-                    .add_to_agents = true,
-                },
+                .flags = .{ .allowed_agents = .initFull(), .add_to_agents = true },
             });
         }
     }

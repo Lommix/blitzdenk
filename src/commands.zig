@@ -65,6 +65,8 @@ pub const Command = union(enum) {
     compact,
     reload_mcp,
     reload_lsp,
+    start_mcp: StartArgs,
+    start_lsp: StartArgs,
     custom: CustomCmd,
     load_session: []const u8,
     save_session: []const u8,
@@ -75,6 +77,10 @@ pub const Command = union(enum) {
     pub const AddToolArgs = struct {
         agent_type: r.ContextFactory.AgentType,
         tool_name: []const u8,
+    };
+
+    pub const StartArgs = struct {
+        name: []const u8,
     };
 
     pub const PlanArgs = struct {
@@ -188,6 +194,14 @@ pub const Command = union(enum) {
             .reload_lsp => {
                 try app.reloadLspTools();
             },
+            .start_mcp => |arg| {
+                if (!app.lua_vm.enableMcp(arg.name)) return;
+                try app.reloadMcpTools();
+            },
+            .start_lsp => |arg| {
+                if (!app.lua_vm.enableLsp(arg.name)) return;
+                try app.reloadLspTools();
+            },
             .spawn_agent => |arg| {
                 if (arg.fork) {
                     try app.swarm.forkAgentInSlot(arg.parent_id.?, arg.agent_id);
@@ -273,9 +287,7 @@ pub const Command = union(enum) {
                 app.context_factory.addAgentTool(arg.agent_type, arg.tool_name) catch return;
                 if (app.main_agent_id) |id| {
                     if (app.swarm.getAgent(id)) |agent| {
-                        var set = r.ContextFactory.ToolSet{};
-                        app.context_factory.build_toolset(@enumFromInt(agent.type_idx), &set) catch return;
-                        try agent.setTools(set.slice());
+                        try app.context_factory.refreshAgentTools(agent);
                     }
                 }
             },

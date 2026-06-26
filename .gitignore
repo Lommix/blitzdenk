@@ -2,4 +2,5 @@ zig-out
 .zig-cache
 *.log
 .blitz
+.playwright-mcp
 research

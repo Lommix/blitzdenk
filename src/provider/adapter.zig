@@ -93,6 +93,57 @@ pub const Config = struct {
     provider: ProviderConfig,
 };
 
+pub fn cloneConfig(alloc: Allocator, config: Config) !Config {
+    return .{
+        .api_key = try alloc.dupe(u8, config.api_key),
+        .model = try alloc.dupe(u8, config.model),
+        .base_url = try alloc.dupe(u8, config.base_url),
+        .reasoning_effort = config.reasoning_effort,
+        .provider = try cloneProviderConfig(alloc, config.provider),
+    };
+}
+
+fn cloneProviderConfig(alloc: Allocator, config: ProviderConfig) !ProviderConfig {
+    return switch (config) {
+        .ollama => |cfg| .{ .ollama = .{
+            .temperature = cfg.temperature,
+            .max_tokens = cfg.max_tokens,
+            .top_p = cfg.top_p,
+            .top_k = cfg.top_k,
+            .stop = try cloneStops(alloc, cfg.stop),
+        } },
+        .openai => |cfg| .{ .openai = .{
+            .temperature = cfg.temperature,
+            .max_tokens = cfg.max_tokens,
+            .max_completion_tokens = cfg.max_completion_tokens,
+            .enable_thinking = cfg.enable_thinking,
+            .top_p = cfg.top_p,
+            .top_k = cfg.top_k,
+            .frequency_penalty = cfg.frequency_penalty,
+            .presence_penalty = cfg.presence_penalty,
+            .stop = try cloneStops(alloc, cfg.stop),
+        } },
+        .anthropic => |cfg| .{ .anthropic = .{
+            .max_tokens = cfg.max_tokens,
+            .thinking = if (cfg.thinking) |thinking| .{
+                .type = try alloc.dupe(u8, thinking.type),
+                .budget_tokens = thinking.budget_tokens,
+            } else null,
+            .temperature = cfg.temperature,
+            .top_p = cfg.top_p,
+            .top_k = cfg.top_k,
+            .stop = try cloneStops(alloc, cfg.stop),
+        } },
+    };
+}
+
+fn cloneStops(alloc: Allocator, stops: ?[]const []const u8) !?[]const []const u8 {
+    const src = stops orelse return null;
+    const out = try alloc.alloc([]const u8, src.len);
+    for (src, 0..) |stop, i| out[i] = try alloc.dupe(u8, stop);
+    return out;
+}
+
 pub const ImageContent = struct {
     media_type: []const u8,
     data: []const u8,

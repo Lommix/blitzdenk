@@ -525,15 +525,7 @@ pub const App = struct {
         const new_tools = self.mcp_manager.registeredTools();
         for (new_tools) |entry| try self.context_factory.add(alloc, entry.tool, entry.flags);
 
-        for (&self.swarm.slots) |*slot| {
-            const state = slot.state.load(.acquire);
-            if (state == .free or state == .reserved) continue;
-
-            var set = r.ContextFactory.ToolSet{};
-            self.context_factory.build_toolset(@enumFromInt(slot.agent.type_idx), &set) catch continue;
-            try slot.agent.setTools(set.slice());
-        }
-
+        try self.refreshLiveAgentTools();
         self.event_bus.emit(self, .mcp_tools_reloaded) catch {};
         self.dirty = true;
     }
@@ -553,16 +545,16 @@ pub const App = struct {
         const new_tools = self.lsp_manager.registeredTools();
         for (new_tools) |entry| try self.context_factory.add(alloc, entry.tool, entry.flags);
 
+        try self.refreshLiveAgentTools();
+        self.dirty = true;
+    }
+
+    fn refreshLiveAgentTools(self: *App) !void {
         for (&self.swarm.slots) |*slot| {
             const state = slot.state.load(.acquire);
             if (state == .free or state == .reserved) continue;
-
-            var set = r.ContextFactory.ToolSet{};
-            self.context_factory.build_toolset(@enumFromInt(slot.agent.type_idx), &set) catch continue;
-            try slot.agent.setTools(set.slice());
+            try self.context_factory.refreshAgentTools(&slot.agent);
         }
-
-        self.dirty = true;
     }
 
     pub fn pushSystemMessage(self: *App, comptime fmt: []const u8, args: anytype) void {
@@ -2108,16 +2100,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
     if (app.main_agent_id) |id| {
         const slot = &app.swarm.slots[id.index];
         if (slot.state.load(.acquire) == .failed) {
-            var detail: ?[]const u8 = null;
-            if (slot.agent.chat.lastMessage()) |last| {
-                for (last.parts) |part| switch (part) {
-                    .text => |t| {
-                        detail = t;
-                        break;
-                    },
-                    else => {},
-                };
-            }
+            const detail = if (slot.agent.last_error) |err| @errorName(err) else null;
 
             var para = r.tui.Paragraph{};
             try para.appendLineSpan(alloc, &.{

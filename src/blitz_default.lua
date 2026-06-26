@@ -108,7 +108,7 @@ blitz.add_command(":browser", function()
 		return
 	end
 	blitz.queue.push_chat_entry("system", "playwright enabled")
-	blitz.mcp.enable(playmcp, blitz.AGENT_GENERAL)
+	blitz.mcp.enable(playmcp)
 	is_active = true
 end)
 ]]
@@ -129,6 +129,8 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.UPDATE_TASK_STATE,
 	blitz.tools.CREATE_TASK,
 	blitz.tools.ASK,
+	blitz.tools.START_MCP,
+	blitz.tools.START_LSP,
 	-- blitz.tools.PATCH, -- Some models(GPT) may prefer codex style patch for (edit,write,delte,move).
 	blitz.tools.WRITE,
 	blitz.tools.EDIT,

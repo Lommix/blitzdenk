@@ -7,6 +7,7 @@ const r = @import("root.zig");
 const CONFIG_DIR = @import("main.zig").DEFAULT_CONFIG_PATH;
 const CONTEXT_FILES = .{"AGENTS.md"};
 pub const MAX_AGENT_TOOLS = 64;
+const MAX_AVAILABLE_SYSTEMS = 32;
 
 pub const general_default_tool_set = .{
     r.tools.write.WriteTool,
@@ -27,6 +28,8 @@ pub const general_default_tool_set = .{
     r.tools.ssh.ExitSshMode,
     r.tools.rg.RipGrepTool,
     r.tools.skill.LoadSkillTool,
+    r.tools.start.StartMcpTool,
+    r.tools.start.StartLspTool,
 };
 
 pub const AgentDef = struct {
@@ -125,10 +128,13 @@ mode_counter: u32 = 2, // skip first 2 for interal modes
 agent_counter: u32 = 3,
 agents: std.EnumArray(AgentType, ?AgentDef) = .initFill(null),
 modes: std.EnumArray(Mode, ?ModeDef) = .initFill(null),
-
+// ---
+available_mcp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
+available_mcp_count: usize = 0,
+available_lsp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
+available_lsp_count: usize = 0,
 // Arena holds definitions set from Lua. Reset on hot-reload so the
 // factory keeps using the embedded defaults until lua re-installs them.
-
 prompt_arena: std.heap.ArenaAllocator,
 io: std.Io,
 config_dir: ?std.Io.Dir,
@@ -334,6 +340,8 @@ pub fn resetDefs(self: *Self) void {
     _ = self.prompt_arena.reset(.retain_capacity);
     self.mode_counter = 2;
     self.agent_counter = 3;
+    self.available_mcp_count = 0;
+    self.available_lsp_count = 0;
     self.agents = .initFill(null);
     self.modes = .initFill(null);
 
@@ -355,6 +363,8 @@ pub fn resetDefs(self: *Self) void {
             r.tools.tasks.UpdateTaskStateTool.def.name,
             r.tools.tasks.CreateTaskTool.def.name,
             r.tools.ask.AskTool.def.name,
+            r.tools.start.StartMcpTool.def.name,
+            r.tools.start.StartLspTool.def.name,
         }),
     });
     self.agents.set(.explore, .{
@@ -371,6 +381,8 @@ pub fn resetDefs(self: *Self) void {
             r.tools.read.ReadTool.def.name,
             r.tools.rg.RipGrepTool.def.name,
             r.tools.skill.LoadSkillTool.def.name,
+            r.tools.start.StartMcpTool.def.name,
+            r.tools.start.StartLspTool.def.name,
             r.tools.agent.SendMessageToAgent.def.name,
         }),
     });
@@ -387,11 +399,27 @@ pub fn add(self: *Self, alloc: std.mem.Allocator, tool: r.prv.tool.Tool, flags: 
     try self.loaded_tools.append(alloc, .{ .tool = tool, .flags = flags });
 }
 
+pub fn setAvailableSystems(self: *Self, mcp_names: []const []const u8, lsp_names: []const []const u8) !void {
+    const alloc = self.prompt_arena.allocator();
+    self.available_mcp_count = 0;
+    self.available_lsp_count = 0;
+
+    for (mcp_names[0..@min(mcp_names.len, MAX_AVAILABLE_SYSTEMS)]) |name| {
+        self.available_mcp_names[self.available_mcp_count] = try alloc.dupe(u8, name);
+        self.available_mcp_count += 1;
+    }
+    for (lsp_names[0..@min(lsp_names.len, MAX_AVAILABLE_SYSTEMS)]) |name| {
+        self.available_lsp_names[self.available_lsp_count] = try alloc.dupe(u8, name);
+        self.available_lsp_count += 1;
+    }
+}
+
 pub fn remove(self: *Self, tool_name: []const u8) void {
     for (0..self.loaded_tools.items.len) |i| {
-        const en = &self.loaded_tools.items[self.loaded_tools.items.len - i - 1];
+        const idx = self.loaded_tools.items.len - i - 1;
+        const en = &self.loaded_tools.items[idx];
         if (std.mem.eql(u8, en.tool.def.name, tool_name)) {
-            _ = self.loaded_tools.swapRemove(i);
+            _ = self.loaded_tools.swapRemove(idx);
             return;
         }
     }
@@ -405,6 +433,14 @@ pub fn configureAgent(
 ) !void {
     _ = config; // autofix
     agent.reset();
+    try self.refreshAgentTools(agent);
+
+    const alloc = agent.arena.allocator();
+    const prompt = try self.build_system_prompt(alloc, cwd, @enumFromInt(agent.type_idx));
+    try agent.setSystemPrompt(prompt);
+}
+
+pub fn refreshAgentTools(self: *const Self, agent: *r.prv.agent.Agent) !void {
     const alloc = agent.arena.allocator();
 
     agent.chat.tools.items.len = 0;
@@ -437,9 +473,6 @@ pub fn configureAgent(
 
         try agent.chat.addTool(alloc, tool.def);
     }
-
-    const prompt = try self.build_system_prompt(alloc, cwd, @enumFromInt(agent.type_idx));
-    try agent.setSystemPrompt(prompt);
 }
 
 fn findLoaded(self: *const Self, name: []const u8) ?r.prv.tool.Tool {
@@ -579,6 +612,29 @@ pub fn build_system_prompt(
             , .{ skill.name, skill.description });
         }
     }
+
+    if (self.available_mcp_count > 0) {
+        try w.writeAll(
+            \\
+            \\# Available MCP:
+            \\
+        );
+        for (self.available_mcp_names[0..self.available_mcp_count]) |name| {
+            try w.print("- name: {s}\n", .{name});
+        }
+    }
+
+    if (self.available_lsp_count > 0) {
+        try w.writeAll(
+            \\
+            \\# Available LSP:
+            \\
+        );
+        for (self.available_lsp_names[0..self.available_lsp_count]) |name| {
+            try w.print("- name: {s}\n", .{name});
+        }
+    }
+
     _ = try w.write(
         \\
         \\# User Instructions:
@@ -797,6 +853,28 @@ test "agent defaults can be replaced with an empty tool list" {
     try std.testing.expectEqual(@as(u32, 0), tools.len);
 }
 
+test "remove deletes the matched loaded tool" {
+    var factory = Self{
+        .prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .io = undefined,
+        .config_dir = null,
+        .skill_dir = null,
+    };
+    defer factory.prompt_arena.deinit();
+    defer factory.loaded_tools.deinit(std.testing.allocator);
+
+    factory.resetDefs();
+    try factory.add(std.testing.allocator, r.tools.read.ReadTool, .all);
+    try factory.add(std.testing.allocator, r.tools.write.WriteTool, .all);
+    try factory.add(std.testing.allocator, r.tools.rg.RipGrepTool, .all);
+
+    factory.remove(r.tools.write.WriteTool.def.name);
+
+    try std.testing.expect(factory.findLoaded(r.tools.read.ReadTool.def.name) != null);
+    try std.testing.expect(factory.findLoaded(r.tools.write.WriteTool.def.name) == null);
+    try std.testing.expect(factory.findLoaded(r.tools.rg.RipGrepTool.def.name) != null);
+}
+
 test "system_prompt" {
     var arean = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arean.deinit();
@@ -805,8 +883,7 @@ test "system_prompt" {
     var factory = try Self.init(alloc, std.testing.io, "/home/lommix");
     defer factory.prompt_arena.deinit();
 
-    var cfg = r.prv.config.BlitzdenkCfg{};
-
-    const prompt = try factory.build_system_prompt(alloc, &cfg, .general);
-    std.debug.print("{s}", .{prompt});
+    const prompt = try factory.build_system_prompt(alloc, ".", .general);
+    _ = prompt; // autofix
+    // std.debug.print("{s}", .{prompt});
 }
