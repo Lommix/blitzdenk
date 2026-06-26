@@ -229,7 +229,11 @@ fn writePartForSummary(w: *std.Io.Writer, part: apt.ContentPart) !void {
         .thinking => |thinking| try w.print("[thinking]\n{s}\n", .{thinking.text}),
         .image => |img| try w.print("[image {s}, {d} bytes]\n", .{ img.media_type, img.data.len }),
         .tool_call => |call| try w.print("[tool_call {s}]\n{s}\n", .{ call.name, call.arguments }),
-        .tool_result => |result| try w.print("[tool_result {s}{s}]\n{s}\n", .{ result.name, if (result.is_error) " error" else "", result.content }),
+        .tool_result => |result| {
+            // TODO: eval, should all result truncate?
+            const kb = result.content.len / 1024;
+            try w.print("[tool_result {s}{s}]\n<truncated tool result. original: {d} kb>\n", .{ result.name, if (result.is_error) " error" else "", kb });
+        },
     }
 }
 

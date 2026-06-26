@@ -120,8 +120,6 @@ fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.prv.age
     const tool_call_limit_reached = agent.tool_call_count >= agent.max_allowed_tool_calls;
     if (tool_call_limit_reached) {
         try w.print("[BUDGET LIMIT REACHED] Summarize your findings and report back to the user\n", .{});
-    } else {
-        try w.print("[TOOL CALLS LEFT]: {d}\n", .{agent.max_allowed_tool_calls -| agent.tool_call_count});
     }
 }
 
@@ -149,7 +147,6 @@ fn inject_task_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.age
             }
         }
     }
-    if (!has_tasks) try w.print("No active tasks yet. Consider creating one.\n", .{});
 }
 
 fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
