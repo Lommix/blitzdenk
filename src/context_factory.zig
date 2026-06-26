@@ -605,10 +605,8 @@ pub fn build_system_prompt(
 
             try w.print(
                 \\
-                \\## Skill: "{s}"
-                \\
-                \\{s}
-                \\
+                \\  - name: "{s}"
+                \\    description: "{s}"
             , .{ skill.name, skill.description });
         }
     }
@@ -616,28 +614,28 @@ pub fn build_system_prompt(
     if (self.available_mcp_count > 0) {
         try w.writeAll(
             \\
-            \\# Available MCP:
+            \\# Available mcp:
             \\
         );
         for (self.available_mcp_names[0..self.available_mcp_count]) |name| {
-            try w.print("- name: {s}\n", .{name});
+            try w.print("- name: \"{s}\"\n", .{name});
         }
     }
 
     if (self.available_lsp_count > 0) {
         try w.writeAll(
             \\
-            \\# Available LSP:
+            \\# Available lsp:
             \\
         );
         for (self.available_lsp_names[0..self.available_lsp_count]) |name| {
-            try w.print("- name: {s}\n", .{name});
+            try w.print("- name: \"{s}\"\n", .{name});
         }
     }
 
     _ = try w.write(
         \\
-        \\# User Instructions:
+        \\# User context (AGENTS.md):
         \\
     );
 
@@ -884,6 +882,5 @@ test "system_prompt" {
     defer factory.prompt_arena.deinit();
 
     const prompt = try factory.build_system_prompt(alloc, ".", .general);
-    _ = prompt; // autofix
-    // std.debug.print("{s}", .{prompt});
+    std.debug.print("{s}", .{prompt});
 }
