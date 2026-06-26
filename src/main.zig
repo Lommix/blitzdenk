@@ -695,44 +695,7 @@ pub fn run(
                                 if (app.input_buffer.items.len == 0) break;
                                 const input = swarm.arena.allocator().dupe(u8, app.inputSlice()) catch break;
 
-                                if (app.running) {
-                                    app.pushHistory(app.appAlloc(), input);
-                                    if (config_lua) |info| app.saveHistory(info.dir_path);
-                                    try app.event_bus.emit(&app, .{ .user_message_sent = input });
-                                    if (app.main_agent_id) |agent_id| {
-                                        const ag = app.swarm.getAgent(agent_id).?;
-                                        const alloc = ag.arena.allocator();
-                                        const len: usize = if (app.screenshot_buf != null) 2 else 1;
-
-                                        const parts = try alloc.alloc(prv.adapter.ContentPart, len);
-                                        parts[0] = .{ .text = input };
-
-                                        if (app.screenshot_buf) |buf| {
-                                            parts[1] = .{ .image = .{
-                                                .media_type = "image/png",
-                                                .data = buf,
-                                            } };
-                                        }
-
-                                        const chat_msg = try ChatEntry.userMessageSimple(alloc, .user, input);
-                                        try app.cmd_queue.append(io, .{ .queue_agent_message = .{
-                                            .agent_id = agent_id,
-                                            .parts = parts,
-                                            .chat_entry = chat_msg,
-                                        } });
-                                    }
-
-                                    try app.cmd_queue.append(io, .{ .scroll_down = 999999 });
-                                    app.screenshot_buf = null;
-                                    app.input_buffer.clearRetainingCapacity();
-                                    continue;
-                                }
-
-                                app.pushHistory(app.appAlloc(), app.inputSlice());
-                                if (config_lua) |info| app.saveHistory(info.dir_path);
-                                try app.event_bus.emit(&app, .{ .user_message_sent = app.inputSlice() });
-
-                                // -- user commands
+                                // -- user commands (processed even while a session is running)
                                 if (input[0] == ':' or input[0] == '/') {
                                     if (app.lua_vm.vm_mu.tryLock()) {
                                         defer app.lua_vm.vm_mu.unlock(io);
@@ -773,6 +736,43 @@ pub fn run(
 
                                     break;
                                 }
+
+                                if (app.running) {
+                                    app.pushHistory(app.appAlloc(), input);
+                                    if (config_lua) |info| app.saveHistory(info.dir_path);
+                                    try app.event_bus.emit(&app, .{ .user_message_sent = input });
+                                    if (app.main_agent_id) |agent_id| {
+                                        const ag = app.swarm.getAgent(agent_id).?;
+                                        const alloc = ag.arena.allocator();
+                                        const len: usize = if (app.screenshot_buf != null) 2 else 1;
+
+                                        const parts = try alloc.alloc(prv.adapter.ContentPart, len);
+                                        parts[0] = .{ .text = input };
+
+                                        if (app.screenshot_buf) |buf| {
+                                            parts[1] = .{ .image = .{
+                                                .media_type = "image/png",
+                                                .data = buf,
+                                            } };
+                                        }
+
+                                        const chat_msg = try ChatEntry.userMessageSimple(alloc, .user, input);
+                                        try app.cmd_queue.append(io, .{ .queue_agent_message = .{
+                                            .agent_id = agent_id,
+                                            .parts = parts,
+                                            .chat_entry = chat_msg,
+                                        } });
+                                    }
+
+                                    try app.cmd_queue.append(io, .{ .scroll_down = 999999 });
+                                    app.screenshot_buf = null;
+                                    app.input_buffer.clearRetainingCapacity();
+                                    continue;
+                                }
+
+                                app.pushHistory(app.appAlloc(), app.inputSlice());
+                                if (config_lua) |info| app.saveHistory(info.dir_path);
+                                try app.event_bus.emit(&app, .{ .user_message_sent = app.inputSlice() });
                                 // state.pushChatMessage(.user, input);
 
                                 const alloc = swarm.arena.allocator();
