@@ -224,7 +224,7 @@ pub fn run(
     errdefer term.deinit();
     defer term.deinit();
 
-    var app = try App.init(arena, io, gpa, &context_factory, cwd);
+    var app = try App.init(io, gpa, &context_factory, cwd);
     const swarm = try gpa.create(prv.Swarm);
     defer {
         swarm.deinit();

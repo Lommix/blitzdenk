@@ -281,33 +281,32 @@ pub const App = struct {
 
     // TODO: cleanup io
     pub fn init(
-        app_arena: std.mem.Allocator,
         io: std.Io,
-        gpa_allocator: std.mem.Allocator,
+        gpa: std.mem.Allocator,
         agent_factory: *r.ContextFactory,
         cwd: []const u8,
     ) !App {
-        var lua_vm = try r.lua.LuaVm.init(gpa_allocator);
+        var lua_vm = try r.lua.LuaVm.init(gpa);
         errdefer lua_vm.deinit();
 
         return App{
-            .arena_app = .init(app_arena, io),
-            .arena_session = .init(app_arena, io),
-            .arena_streaming_preview = .init(gpa_allocator, io),
-            .arena_frame = .init(gpa_allocator),
+            .arena_app = .init(gpa, io),
+            .arena_session = .init(gpa, io),
+            .arena_streaming_preview = .init(gpa, io),
+            .arena_frame = .init(gpa),
             .context_factory = agent_factory,
             .io = io,
             .cwd = cwd,
-            .cmd_queue = try r.cmd.CommandQueue.init(app_arena),
+            .cmd_queue = try r.cmd.CommandQueue.init(gpa),
             .lua_vm = lua_vm,
-            .mcp_manager = r.mcp.Manager.init(app_arena, agent_factory.io),
-            .lsp_manager = r.lsp.Manager.init(app_arena, agent_factory.io),
-            .injection_hooks = try r.inject.InjectionsHooks.init(app_arena),
+            .mcp_manager = r.mcp.Manager.init(gpa, agent_factory.io),
+            .lsp_manager = r.lsp.Manager.init(gpa, agent_factory.io),
+            .injection_hooks = try r.inject.InjectionsHooks.init(gpa),
             .permission_queue = .{
-                .value = try .initCapacity(app_arena, 16),
+                .value = try .initCapacity(gpa, 16),
             },
             .broadcast_queue = .{
-                .value = try .initCapacity(app_arena, 255),
+                .value = try .initCapacity(gpa, 255),
             },
         };
     }
