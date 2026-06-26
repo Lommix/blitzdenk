@@ -124,8 +124,8 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
         var l = r.tui.Line{};
         try l.pushSpan(alloc, .{ .content = "├[context:  ", .style = .{ .fg = app.theme.muted } });
         try l.pushSpanPrint(alloc, "skills: {}", .{skill_count}, .{ .fg = app.theme.info });
-        try l.pushSpanPrint(alloc, "  mcp: {}", .{app.mcp_manager.clients.items.len}, .{ .fg = app.theme.info });
-        try l.pushSpanPrint(alloc, "  lsp: {}", .{app.lsp_manager.clients.items.len}, .{ .fg = app.theme.info });
+        try l.pushSpanPrint(alloc, "  mcp: {}", .{app.lua_vm.mcp_entries.items.len}, .{ .fg = app.theme.info });
+        try l.pushSpanPrint(alloc, "  lsp: {}", .{app.lua_vm.lsp_entries.items.len}, .{ .fg = app.theme.info });
         try out.append(alloc, l);
     }
 
