@@ -42,7 +42,6 @@
 ---@field parent_id? BlitzAgentId
 ---@field prompt string
 ---@field agent_type? integer
----@field tool_budget? integer
 ---@field fork? boolean
 
 ---@class BlitzQueue

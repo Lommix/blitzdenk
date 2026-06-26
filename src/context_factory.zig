@@ -39,6 +39,7 @@ pub const AgentDef = struct {
     in_agent_tool: bool = true,
     tools: AgentTools = .{},
     model: ?AgentModelConfig = null,
+    default_tool_call_budget: u32 = 1024,
 };
 
 pub const ModeDef = struct {
@@ -385,6 +386,7 @@ pub fn resetDefs(self: *Self) void {
             r.tools.start.StartLspTool.def.name,
             r.tools.agent.SendMessageToAgent.def.name,
         }),
+        .default_tool_call_budget = 30,
     });
 
     self.modes.set(.exec, .{
@@ -589,6 +591,13 @@ pub fn build_system_prompt(
             \\
             \\# Available skills:
             \\
+            \\Load a skill when the task matches its trigger rules.
+            \\Skills provide specialized tooling, domain knowledge, and behavioral guidance.
+            \\The trigger rules are absolute — load the skill if the user asks about anything in its domain.
+            \\Each skill below lists its name and trigger description.
+            \\
+            \\To load: use the `load_skill` tool with the skill name.
+            \\
         );
 
         while (try it.next(self.io)) |entry| {
@@ -604,9 +613,10 @@ pub fn build_system_prompt(
             };
 
             try w.print(
-                \\
                 \\  - name: "{s}"
-                \\    description: "{s}"
+                \\    description and trigger rules: "{s}"
+                \\
+                \\
             , .{ skill.name, skill.description });
         }
     }

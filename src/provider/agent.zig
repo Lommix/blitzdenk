@@ -309,7 +309,6 @@ pub const Agent = struct {
         self.tool_call_runs = .{};
         self.tool_call_done = .{};
         self.tool_call_count = 0;
-        self.max_allowed_tool_calls = 64;
         self.loop_guard = .{};
         _ = self.arena.reset(.free_all);
     }

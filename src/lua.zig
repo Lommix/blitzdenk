@@ -266,7 +266,6 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "parent_id", .ty = AgentIdDef, .optional = true },
     .{ .name = "prompt", .ty = LuaType.string },
     .{ .name = "agent_type", .ty = LuaType.integer, .optional = true },
-    .{ .name = "tool_budget", .ty = LuaType.integer, .optional = true },
     .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
 } } };
 pub const Blitz = LuaType{
@@ -1359,7 +1358,6 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                         }
                         args.agent_type = @intCast(t);
                     }
-                    if (getOptionalU32(state, 1, "tool_budget")) |b| args.tool_budget = b;
                     if (getOptionalBool(state, 1, "fork")) |f| args.fork = f;
                     c.lua_pop(state, 1);
 

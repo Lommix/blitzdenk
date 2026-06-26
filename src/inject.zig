@@ -117,9 +117,16 @@ fn inject_bg_agents_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.pr
 }
 
 fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.prv.agent.Agent) !void {
+    const under_half = (agent.max_allowed_tool_calls / 2) < agent.tool_call_count;
     const tool_call_limit_reached = agent.tool_call_count >= agent.max_allowed_tool_calls;
+
     if (tool_call_limit_reached) {
-        try w.print("[BUDGET LIMIT REACHED] Summarize your findings and report back to the user\n", .{});
+        try w.print("[BUDGET] Tool call limit reached. Summarize your findings and report back to the user\n", .{});
+        return;
+    }
+
+    if (under_half) {
+        try w.print("[BUDGET] Half of your tool call budget is used up. Consider Summarizing your findings\n", .{});
     }
 }
 

@@ -232,7 +232,7 @@ pub fn run(
         gpa.destroy(swarm);
     }
 
-    try swarm.init(arena, gpa, io, .{
+    try swarm.init(gpa, io, .{
         .ptr = &app,
         .broadcast = (struct {
             fn func(ptr: *anyopaque, en: prv.Swarm.BroadcastEntry) void {
@@ -693,7 +693,7 @@ pub fn run(
                             },
                             .text => {
                                 if (app.input_buffer.items.len == 0) break;
-                                const input = swarm.arena.allocator().dupe(u8, app.inputSlice()) catch break;
+                                const input = gpa.dupe(u8, app.inputSlice()) catch break;
 
                                 // -- user commands (processed even while a session is running)
                                 if (input[0] == ':' or input[0] == '/') {
@@ -775,7 +775,7 @@ pub fn run(
                                 try app.event_bus.emit(&app, .{ .user_message_sent = app.inputSlice() });
                                 // state.pushChatMessage(.user, input);
 
-                                const alloc = swarm.arena.allocator();
+                                const alloc = gpa;
                                 const parts: []const prv.adapter.ContentPart = if (app.screenshot_buf) |img_data|
                                     alloc.dupe(prv.adapter.ContentPart, &.{
                                         .{ .text = input },
@@ -800,7 +800,6 @@ pub fn run(
                                             .agent_id = id,
                                             .agent_type = @intFromEnum(reg.AgentType.general),
                                             .prompt = parts,
-                                            .tool_budget = 1024,
                                             .chat_entry = chat_entry,
                                         },
                                     });

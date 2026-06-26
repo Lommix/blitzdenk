@@ -58,8 +58,7 @@ pub const SwarmContextV = struct {
 };
 
 // ----------------------------------
-arena: std.heap.ArenaAllocator,
-stream_allocator: std.mem.Allocator,
+gpa: std.mem.Allocator,
 slots: [MAX_AGENTS]AgentSlot = [_]AgentSlot{.{}} ** MAX_AGENTS,
 
 // let it own
@@ -151,14 +150,12 @@ pub const PlanApprovalPayload = struct {
 pub fn init(
     self: *Self,
     alloc: std.mem.Allocator,
-    stream_allocator: std.mem.Allocator,
     io: std.Io,
     context: SwarmContextV,
     env: *const std.process.Environ.Map,
 ) !void {
     self.* = .{
-        .arena = std.heap.ArenaAllocator.init(alloc),
-        .stream_allocator = stream_allocator,
+        .gpa = alloc,
         .pool = .{},
         .exec = r.exec.CmdPool.init(alloc, io, env),
         .context = context,
@@ -176,7 +173,6 @@ pub fn reset(self: *Self) void {
         slot.agent.deinit();
         slot.* = .{};
     }
-    _ = self.arena.reset(.free_all);
 }
 
 pub fn deinit(self: *Self) void {
@@ -187,7 +183,6 @@ pub fn deinit(self: *Self) void {
             slot.* = .{};
         }
     }
-    self.arena.deinit();
     self.pool.deinit();
     self.exec.deinit();
 }
@@ -217,8 +212,8 @@ pub fn forkAgent(
     slot.agent = Agent.new(
         parent_slot.agent.config,
         parent_slot.agent.pool,
-        self.arena.allocator(),
-        self.stream_allocator,
+        self.gpa,
+        self.gpa,
         parent_slot.agent.type_idx,
         parent_slot.agent.mode_idx,
     );
@@ -260,8 +255,8 @@ pub fn forkAgentInSlot(
     slot.agent = Agent.new(
         parent_slot.agent.config,
         parent_slot.agent.pool,
-        self.arena.allocator(),
-        self.stream_allocator,
+        self.gpa,
+        self.gpa,
         parent_slot.agent.type_idx,
         parent_slot.agent.mode_idx,
     );
@@ -305,8 +300,8 @@ pub fn newAgent(
     slot.agent = Agent.new(
         config,
         &self.pool,
-        self.arena.allocator(),
-        self.stream_allocator,
+        self.gpa,
+        self.gpa,
         agent_type_idx,
         mode_type_idx,
     );
@@ -339,8 +334,8 @@ pub fn newAgentInSlot(
     slot.agent = Agent.new(
         config,
         &self.pool,
-        self.arena.allocator(),
-        self.stream_allocator,
+        self.gpa,
+        self.gpa,
         agent_type_idx,
         mode_type_idx,
     );

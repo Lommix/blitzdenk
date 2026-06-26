@@ -92,7 +92,6 @@ pub const Command = union(enum) {
         agent_id: r.prv.Swarm.AgentId,
         prompt: []const r.prv.adapter.ContentPart,
         agent_type: u8 = @intFromEnum(r.ContextFactory.AgentType.general),
-        tool_budget: u32 = 1024,
         fork: bool = false,
         chat_entry: ?ChatEntry = null,
     };
@@ -216,7 +215,9 @@ pub const Command = union(enum) {
                 const agent = app.swarm.getAgent(arg.agent_id).?;
                 try app.configureAgent(agent);
 
-                agent.max_allowed_tool_calls = arg.tool_budget;
+                if (app.context_factory.agents.get(@enumFromInt(arg.agent_type))) |meta| {
+                    agent.max_allowed_tool_calls = meta.default_tool_call_budget;
+                }
 
                 try app.event_bus.emit(app, .{
                     .agent_created = .{ .id = arg.agent_id, .type_idx = agent.type_idx, .depth = agent.depth },
