@@ -226,7 +226,7 @@ pub const Agent = struct {
     /// high-throughput streams.
     arena: r.ThreadSafeArena,
     stream_arena: r.ThreadSafeArena,
-    stream_allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     chat: apt.Chat = .{},
     pool: *http.RequestPool,
     config: apt.Config,
@@ -270,7 +270,6 @@ pub const Agent = struct {
         config: apt.Config,
         pool: *http.RequestPool,
         gpa: std.mem.Allocator,
-        stream_allocator: std.mem.Allocator,
         agent_type_idx: u8,
         mode_type_idx: u8,
     ) Agent {
@@ -279,8 +278,8 @@ pub const Agent = struct {
 
         return Agent{
             .arena = r.ThreadSafeArena.init(gpa, pool.io),
-            .stream_arena = r.ThreadSafeArena.init(stream_allocator, pool.io),
-            .stream_allocator = stream_allocator,
+            .stream_arena = r.ThreadSafeArena.init(gpa, pool.io),
+            .gpa = gpa,
             .pool = pool,
             .config = config,
             .session_id = std.fmt.bytesToHex(sid_bytes, .lower),
@@ -617,7 +616,7 @@ pub const Agent = struct {
     }
 
     fn pumpStream(self: *Agent, ctx: Swarm.SwarmContextV) !TickResult {
-        const arena = self.stream_allocator;
+        const arena = self.gpa;
         if (self.stream == null) return error.NoStream;
         const stream = &self.stream.?;
         const msg_idx = self.chat.messages.items.len - 1;
@@ -680,7 +679,7 @@ pub const Agent = struct {
 
         const result = try stream.finalize(arena);
         const final_parts = filterEmptyTextParts(result.message.parts);
-        self.chat.finalizeStreamingMessage(self.stream_allocator, msg_idx, final_parts);
+        self.chat.finalizeStreamingMessage(self.gpa, msg_idx, final_parts);
 
         if (self.swarm) |swarm| {
             // Prefer finalize's authoritative usage; fall back to last in-flight
@@ -727,7 +726,7 @@ pub const Agent = struct {
         self.stream = null;
         if (self.state == .streaming_response and self.chat.messages.items.len > 0) {
             var msg = self.chat.messages.pop().?;
-            msg.freeParts(self.stream_allocator);
+            msg.freeParts(self.gpa);
         }
         _ = self.stream_arena.reset(.free_all);
     }

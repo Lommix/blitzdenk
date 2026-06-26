@@ -256,7 +256,6 @@ pub fn forkAgentInSlot(
         parent_slot.agent.config,
         parent_slot.agent.pool,
         self.gpa,
-        self.gpa,
         parent_slot.agent.type_idx,
         parent_slot.agent.mode_idx,
     );
@@ -301,7 +300,6 @@ pub fn newAgent(
         config,
         &self.pool,
         self.gpa,
-        self.gpa,
         agent_type_idx,
         mode_type_idx,
     );
@@ -334,7 +332,6 @@ pub fn newAgentInSlot(
     slot.agent = Agent.new(
         config,
         &self.pool,
-        self.gpa,
         self.gpa,
         agent_type_idx,
         mode_type_idx,
