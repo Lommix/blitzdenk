@@ -7,5 +7,6 @@ Site {
     .assets_dir_path = "assets",
     .static_assets = [
         "Temml.woff2",
+        "screen.jpg",
     ],
 }

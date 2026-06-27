@@ -6,6 +6,8 @@
 .draft = false,
 ---
 
+![Blitzdenk screenshot](/screen.jpg)
+
 Blitzdenk is a coding and research harness for POSIX systems. It is configured
 and extended from Lua: providers, models, tools, agents, modes, commands,
 keybinds, MCP servers, LSP servers, event listeners, and status UI all live in

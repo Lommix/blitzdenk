@@ -5,12 +5,15 @@
 		<meta name="viewport" content="initial-scale=1">
 		<title>Blitzdenk Pages</title>
 		<link type="text/css" rel="stylesheet" href="/blitzdenk/style.css">
-		<link type="text/css" rel="stylesheet" href="/blitzdenk/highlight.css">
+		<link type="text/css" rel="stylesheet" href="/blitzdenk/highlight-github-dark.min.css">
 		<!-- mathtex -->
 		<link type="text/css" rel="stylesheet" href="/blitzdenk/Temml-Local.css">
 		<script defer src="/blitzdenk/temml.min.js"></script>
 		<script defer src="/blitzdenk/render-mathtex.js"></script>
 		<!-- /mathtex -->
+		<script defer src="/blitzdenk/highlight.min.js"></script>
+		<script defer src="/blitzdenk/highlight-lua.min.js"></script>
+		<script defer>document.addEventListener("DOMContentLoaded", () => { hljs.configure({ ignoreUnescapedHTML: true }); hljs.highlightAll(); });</script>
 		
 
 	</head>
@@ -29,13 +32,15 @@
 		</nav>
 		
 	<h1>Getting Started</h1>
-	<div><p>Blitzdenk targets Zig <code>0.16</code> and POSIX systems.</p><h2>Download</h2><p>Download pre-built binaries from the release page:</p><p><a href="https://github.com/Lommix/blitzdenk/releases" target="_blank">https://github.com/Lommix/blitzdenk/releases</a></p><h2>Compile</h2><pre><code>zig build --release=small
-cp zig-out/bin/blitz ~/.local/bin/blitz
-</code></pre><h2>Run</h2><pre><code>blitz
-blitz /path/to/project
-blitz prompt &quot;summarize this repository&quot;
-blitz help
-</code></pre><p>The default command starts the TUI in the current directory. Passing a path starts it in that directory. <code>prompt</code> starts the TUI with initial input.</p><h2>Flags</h2><table><tr><th>Flag</th><th>Effect</th></tr><tr><td><code>--log</code></td><td>writes <code>.blitz/debug.log</code> in the working directory</td></tr><tr><td><code>--strict</code></td><td>requests permissions instead of using the relaxed default</td></tr></table><h2>Config files</h2><p>On first run, Blitzdenk creates:</p><table><tr><th>File</th><th>Purpose</th></tr><tr><td><code>~/.config/blitzdenk/blitz.lua</code></td><td>user config loaded at startup</td></tr><tr><td><code>~/.config/blitzdenk/meta.lua</code></td><td>generated Lua type hints</td></tr><tr><td><code>./blitz.lua</code></td><td>optional project-local config, loaded when present</td></tr></table><p>The global config is where providers, tools, agents, keybinds, commands, MCP servers, and LSP servers are configured. A project-local <code>blitz.lua</code> is useful for repository-specific prompts or tools.</p><h2>SSH mode</h2><p>Inside the TUI, use:</p><pre><code>:ssh username@host:/path/to/cwd
+	<div><p>Blitzdenk targets Zig <code>0.16</code> and POSIX systems.</p><h2>Download</h2><p>Download pre-built binaries from the release page:</p><p><a href="https://github.com/Lommix/blitzdenk/releases" target="_blank">https://github.com/Lommix/blitzdenk/releases</a></p><h2>Compile</h2><pre><code class="bash"><span class="constant function">zig</span> <span class="constant">build</span> <span class="constant">--release=small</span>
+<span class="constant function">cp</span> <span class="constant">zig-out/bin/blitz</span> <span class="constant">~/.local/bin/blitz</span>
+</code></pre>
+<h2>Run</h2><pre><code class="bash"><span class="constant function">blitz</span>
+<span class="constant function">blitz</span> <span class="constant">/path/to/project</span>
+<span class="constant function">blitz</span> <span class="constant">prompt</span> <span class="string constant">&quot;summarize this repository&quot;</span>
+<span class="constant function">blitz</span> <span class="constant">help</span>
+</code></pre>
+<p>The default command starts the TUI in the current directory. Passing a path starts it in that directory. <code>prompt</code> starts the TUI with initial input.</p><h2>Flags</h2><table><tr><th>Flag</th><th>Effect</th></tr><tr><td><code>--log</code></td><td>writes <code>.blitz/debug.log</code> in the working directory</td></tr><tr><td><code>--strict</code></td><td>requests permissions instead of using the relaxed default</td></tr></table><h2>Config files</h2><p>On first run, Blitzdenk creates:</p><table><tr><th>File</th><th>Purpose</th></tr><tr><td><code>~/.config/blitzdenk/blitz.lua</code></td><td>user config loaded at startup</td></tr><tr><td><code>~/.config/blitzdenk/meta.lua</code></td><td>generated Lua type hints</td></tr><tr><td><code>./blitz.lua</code></td><td>optional project-local config, loaded when present</td></tr></table><p>The global config is where providers, tools, agents, keybinds, commands, MCP servers, and LSP servers are configured. A project-local <code>blitz.lua</code> is useful for repository-specific prompts or tools.</p><h2>SSH mode</h2><p>Inside the TUI, use:</p><pre><code>:ssh username@host:/path/to/cwd
 </code></pre><p>SSH mode makes <code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>, <code>patch</code>, and <code>ripgrep</code> operate against the remote target through the command layer. <code>exit_ssh</code> returns to local execution.</p></div>
 
 		<footer>

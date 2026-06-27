@@ -16,14 +16,14 @@ https://github.com/Lommix/blitzdenk/releases
 
 ## Compile
 
-```
+```bash
 zig build --release=small
 cp zig-out/bin/blitz ~/.local/bin/blitz
 ```
 
 ## Run
 
-```
+```bash
 blitz
 blitz /path/to/project
 blitz prompt "summarize this repository"

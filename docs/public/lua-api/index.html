@@ -5,12 +5,15 @@
 		<meta name="viewport" content="initial-scale=1">
 		<title>Blitzdenk Pages</title>
 		<link type="text/css" rel="stylesheet" href="/blitzdenk/style.css">
-		<link type="text/css" rel="stylesheet" href="/blitzdenk/highlight.css">
+		<link type="text/css" rel="stylesheet" href="/blitzdenk/highlight-github-dark.min.css">
 		<!-- mathtex -->
 		<link type="text/css" rel="stylesheet" href="/blitzdenk/Temml-Local.css">
 		<script defer src="/blitzdenk/temml.min.js"></script>
 		<script defer src="/blitzdenk/render-mathtex.js"></script>
 		<!-- /mathtex -->
+		<script defer src="/blitzdenk/highlight.min.js"></script>
+		<script defer src="/blitzdenk/highlight-lua.min.js"></script>
+		<script defer>document.addEventListener("DOMContentLoaded", () => { hljs.configure({ ignoreUnescapedHTML: true }); hljs.highlightAll(); });</script>
 		
 
 	</head>
@@ -29,26 +32,27 @@
 		</nav>
 		
 	<h1>Lua API</h1>
-	<div><p>Lua config is loaded from <code>~/.config/blitzdenk/blitz.lua</code> and optionally from <code>./blitz.lua</code>.</p><p>The global API table is <code>blitz</code>.</p><p>The generated meta file is the source of truth for function signatures and descriptions:</p><ul><li>Local generated copy: <code>~/.config/blitzdenk/meta.lua</code></li><li>Source file: <a href="https://github.com/Lommix/blitzdenk/blob/master/src/blitz_defs.lua" target="_blank"><code>src/blitz_defs.lua</code></a></li></ul><p>Use that file in your editor for completion and inline docs. The website does not duplicate the full API list because it would drift.</p><h2>Shape of a config</h2><pre><code>local tools = require(&quot;tools&quot;)
+	<div><p>Lua config is loaded from <code>~/.config/blitzdenk/blitz.lua</code> and optionally from <code>./blitz.lua</code>.</p><p>The global API table is <code>blitz</code>.</p><p>The generated meta file is the source of truth for function signatures and descriptions:</p><ul><li>Local generated copy: <code>~/.config/blitzdenk/meta.lua</code></li><li>Source file: <a href="https://github.com/Lommix/blitzdenk/blob/master/src/blitz_defs.lua" target="_blank"><code>src/blitz_defs.lua</code></a></li></ul><p>Use that file in your editor for completion and inline docs. The website does not duplicate the full API list because it would drift.</p><h2>Shape of a config</h2><pre><code class="lua"><span class="keyword">local</span> <span class="variable_builtin constant variable">tools</span> <span class="operator">=</span> <span class="function_builtin variable_builtin function_call variable constant">require</span><span class="punctuation_bracket">(</span><span class="string">&quot;tools&quot;</span><span class="punctuation_bracket">)</span>
 
-local provider = blitz.add_provider({
-	type = &quot;openai&quot;,
-	url = &quot;https://api.openai.com/v1&quot;,
-	key_envar = &quot;OPENAI_API_KEY&quot;,
-})
+<span class="keyword">local</span> <span class="variable_builtin constant variable">provider</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add_provider</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin field constant variable">type</span> <span class="operator">=</span> <span class="string">&quot;openai&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">url</span> <span class="operator">=</span> <span class="string">&quot;https://api.openai.com/v1&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">key_envar</span> <span class="operator">=</span> <span class="string">&quot;OPENAI_API_KEY&quot;</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
 
-blitz.set_model(&quot;gpt-5.4-mini&quot;, provider)
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">set_model</span><span class="punctuation_bracket">(</span><span class="string">&quot;gpt-5.4-mini&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">provider</span><span class="punctuation_bracket">)</span>
 
-blitz.set_agent_tools(blitz.AGENT_GENERAL, {
-	blitz.tools.BASH,
-	blitz.tools.READ,
-	blitz.tools.WRITE,
-	blitz.tools.EDIT,
-	blitz.tools.RIPGREP,
-	tools.web_fetch,
-	tools.web_search,
-})
-</code></pre><h2>Common API areas</h2><table><tr><th>Area</th><th>What to look for in <code>meta.lua</code></th></tr><tr><td>Providers</td><td><code>blitz.add_provider</code>, <code>blitz.set_model</code>, <code>blitz.set_model_agent</code></td></tr><tr><td>Tools</td><td><code>blitz.register_tool</code>, <code>blitz.add_tool</code>, <code>blitz.set_agent_tools</code>, <code>blitz.tools</code></td></tr><tr><td>Agents</td><td><code>blitz.add_agent</code>, <code>blitz.AGENT_GENERAL</code>, <code>blitz.AGENT_EXPLORE</code></td></tr><tr><td>Commands</td><td><code>blitz.add_command</code>, <code>blitz.queue.*</code></td></tr><tr><td>Keybinds</td><td><code>blitz.bind</code></td></tr><tr><td>Modes</td><td><code>blitz.add_mode</code>, <code>blitz.set_mode</code>, mode prompt setters</td></tr><tr><td>Events</td><td><code>blitz.events.add_listener</code>, <code>blitz.events.*</code></td></tr><tr><td>MCP</td><td><code>blitz.mcp.add</code>, <code>blitz.mcp.enable</code></td></tr><tr><td>LSP</td><td><code>blitz.lsp.add</code>, <code>blitz.lsp.enable</code></td></tr><tr><td>JSON and shell</td><td><code>blitz.json.encode</code>, <code>blitz.json.decode</code>, <code>blitz.shell</code></td></tr><tr><td>UI</td><td><code>blitz.push_notification</code>, <code>blitz.status_bar_render</code>, flags</td></tr></table><p>See <a href="/blitzdenk/examples/">Examples</a> for real configuration snippets.</p></div>
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">set_agent_tools</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">AGENT_GENERAL</span><span class="punctuation_delimiter">,</span> <span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">BASH</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">READ</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">WRITE</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">EDIT</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">RIPGREP</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">web_fetch</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">web_search</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
+</code></pre>
+<h2>Common API areas</h2><table><tr><th>Area</th><th>What to look for in <code>meta.lua</code></th></tr><tr><td>Providers</td><td><code>blitz.add_provider</code>, <code>blitz.set_model</code>, <code>blitz.set_model_agent</code></td></tr><tr><td>Tools</td><td><code>blitz.register_tool</code>, <code>blitz.add_tool</code>, <code>blitz.set_agent_tools</code>, <code>blitz.tools</code></td></tr><tr><td>Agents</td><td><code>blitz.add_agent</code>, <code>blitz.AGENT_GENERAL</code>, <code>blitz.AGENT_EXPLORE</code></td></tr><tr><td>Commands</td><td><code>blitz.add_command</code>, <code>blitz.queue.*</code></td></tr><tr><td>Keybinds</td><td><code>blitz.bind</code></td></tr><tr><td>Modes</td><td><code>blitz.add_mode</code>, <code>blitz.set_mode</code>, mode prompt setters</td></tr><tr><td>Events</td><td><code>blitz.events.add_listener</code>, <code>blitz.events.*</code></td></tr><tr><td>MCP</td><td><code>blitz.mcp.add</code>, <code>blitz.mcp.enable</code></td></tr><tr><td>LSP</td><td><code>blitz.lsp.add</code>, <code>blitz.lsp.enable</code></td></tr><tr><td>JSON and shell</td><td><code>blitz.json.encode</code>, <code>blitz.json.decode</code>, <code>blitz.shell</code></td></tr><tr><td>UI</td><td><code>blitz.push_notification</code>, <code>blitz.status_bar_render</code>, flags</td></tr></table><p>See <a href="/blitzdenk/examples/">Examples</a> for real configuration snippets.</p></div>
 
 		<footer>
 			<hr>

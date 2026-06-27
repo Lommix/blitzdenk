@@ -11,7 +11,7 @@ only where needed.
 
 ## Providers and model selection
 
-```
+```lua
 local llama = blitz.add_provider({
 	type = "openai",
 	url = "http://127.0.0.1:8118",
@@ -35,7 +35,7 @@ blitz.set_model_agent(blitz.AGENT_EXPLORE, model, "low", novita)
 
 ## Agent tools
 
-```
+```lua
 local tools = require("tools")
 
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
@@ -67,7 +67,7 @@ blitz.set_agent_tools(blitz.AGENT_EXPLORE, {
 
 ## MCP and LSP
 
-```
+```lua
 blitz.mcp.add({
 	name = "playwright",
 	command = "npx",
@@ -93,7 +93,7 @@ blitz.lsp.add({
 
 A super simplified web fetch using an headless chromium and some unholy tricks.
 
-```
+```lua
 M.web_fetch = blitz.register_tool({
 	name = "lua_webfetch",
 	description = "performs a web fetch and returns the content as markdown",
@@ -131,7 +131,7 @@ M.web_fetch = blitz.register_tool({
 
 Websearch via local searXNG docker instance
 
-```
+```lua
 M.web_search = blitz.register_tool({
 	name = "lua_web_search",
 	description = "Search the web via a local SearXNG instance",
@@ -189,7 +189,7 @@ M.web_search = blitz.register_tool({
 
 ## Commands
 
-```
+```lua
 blitz.add_command(":plan", function(rem)
 	blitz.queue.reset_session()
 	blitz.queue.spawn_agent({
@@ -209,7 +209,7 @@ end)
 Goals are loops, which forces the agent to validate against the instruction before handing control back to the user.
 Simplified: An 'I completetd the goal' tool, some additional instructions and an event listener with some shared state:
 
-```
+```lua
 local goal_finished = false
 
 local goal_tool = blitz.register_tool({
@@ -265,7 +265,7 @@ end)
 
 ## Keybinds and status bar
 
-```
+```lua
 -- Quickly capture and pass through a screenshot
 blitz.bind("<C-s>", function()
 	local png, ok = blitz.shell('grim -g "$(slurp)" -t png -')
@@ -293,7 +293,7 @@ end
 
 ## Session save and load
 
-```
+```lua
 blitz.add_command(":save", function()
 	blitz.queue.save_session(".blitz/blitz_save.json")
 end)

@@ -22,7 +22,7 @@ not duplicate the full API list because it would drift.
 
 ## Shape of a config
 
-```
+```lua
 local tools = require("tools")
 
 local provider = blitz.add_provider({

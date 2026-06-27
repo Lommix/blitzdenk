@@ -5,12 +5,15 @@
 		<meta name="viewport" content="initial-scale=1">
 		<title>Blitzdenk Pages</title>
 		<link type="text/css" rel="stylesheet" href="/blitzdenk/style.css">
-		<link type="text/css" rel="stylesheet" href="/blitzdenk/highlight.css">
+		<link type="text/css" rel="stylesheet" href="/blitzdenk/highlight-github-dark.min.css">
 		<!-- mathtex -->
 		<link type="text/css" rel="stylesheet" href="/blitzdenk/Temml-Local.css">
 		<script defer src="/blitzdenk/temml.min.js"></script>
 		<script defer src="/blitzdenk/render-mathtex.js"></script>
 		<!-- /mathtex -->
+		<script defer src="/blitzdenk/highlight.min.js"></script>
+		<script defer src="/blitzdenk/highlight-lua.min.js"></script>
+		<script defer>document.addEventListener("DOMContentLoaded", () => { hljs.configure({ ignoreUnescapedHTML: true }); hljs.highlightAll(); });</script>
 		
 
 	</head>
@@ -29,249 +32,258 @@
 		</nav>
 		
 	<h1>Examples</h1>
-	<div><p>These snippets are copied from a live <code>~/.config/blitzdenk</code> setup and shortened only where needed.</p><h2>Providers and model selection</h2><pre><code>local llama = blitz.add_provider({
-	type = &quot;openai&quot;,
-	url = &quot;http://127.0.0.1:8118&quot;,
-	key_envar = &quot;&quot;,
-	temperature = 1,
-})
+	<div><p>These snippets are copied from a live <code>~/.config/blitzdenk</code> setup and shortened only where needed.</p><h2>Providers and model selection</h2><pre><code class="lua"><span class="keyword">local</span> <span class="variable_builtin constant variable">llama</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add_provider</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin field constant variable">type</span> <span class="operator">=</span> <span class="string">&quot;openai&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">url</span> <span class="operator">=</span> <span class="string">&quot;http://127.0.0.1:8118&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">key_envar</span> <span class="operator">=</span> <span class="string">&quot;&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">temperature</span> <span class="operator">=</span> <span class="number">1</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
 
-local novita = blitz.add_provider({
-	type = &quot;openai&quot;,
-	url = &quot;https://api.novita.ai/openai/v1&quot;,
-	key_envar = &quot;NOVITA_API_KEY&quot;,
-	temperature = 1,
-})
+<span class="keyword">local</span> <span class="variable_builtin constant variable">novita</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add_provider</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin field constant variable">type</span> <span class="operator">=</span> <span class="string">&quot;openai&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">url</span> <span class="operator">=</span> <span class="string">&quot;https://api.novita.ai/openai/v1&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">key_envar</span> <span class="operator">=</span> <span class="string">&quot;NOVITA_API_KEY&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">temperature</span> <span class="operator">=</span> <span class="number">1</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
 
-local model = &quot;deepseek/deepseek-v4-flash&quot;
+<span class="keyword">local</span> <span class="variable_builtin constant variable">model</span> <span class="operator">=</span> <span class="string">&quot;deepseek/deepseek-v4-flash&quot;</span>
 
-blitz.set_model(model, novita)
-blitz.set_model_agent(blitz.AGENT_GENERAL, model, &quot;max&quot;, novita)
-blitz.set_model_agent(blitz.AGENT_EXPLORE, model, &quot;low&quot;, novita)
-</code></pre><h2>Agent tools</h2><pre><code>local tools = require(&quot;tools&quot;)
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">set_model</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">model</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">novita</span><span class="punctuation_bracket">)</span>
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">set_model_agent</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">AGENT_GENERAL</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">model</span><span class="punctuation_delimiter">,</span> <span class="string">&quot;max&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">novita</span><span class="punctuation_bracket">)</span>
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">set_model_agent</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">AGENT_EXPLORE</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">model</span><span class="punctuation_delimiter">,</span> <span class="string">&quot;low&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">novita</span><span class="punctuation_bracket">)</span>
+</code></pre>
+<h2>Agent tools</h2><pre><code class="lua"><span class="keyword">local</span> <span class="variable_builtin constant variable">tools</span> <span class="operator">=</span> <span class="function_builtin variable_builtin function_call variable constant">require</span><span class="punctuation_bracket">(</span><span class="string">&quot;tools&quot;</span><span class="punctuation_bracket">)</span>
 
-blitz.set_agent_tools(blitz.AGENT_GENERAL, {
-	blitz.tools.BASH,
-	blitz.tools.CANCEL_BACKGROUND,
-	blitz.tools.READ,
-	blitz.tools.WRITE,
-	blitz.tools.EDIT,
-	blitz.tools.ASK,
-	blitz.tools.AGENT,
-	blitz.tools.AWAIT_AGENT,
-	blitz.tools.CANCEL_AGENT,
-	blitz.tools.SEND_MESSAGE_TO_AGENT,
-	blitz.tools.RIPGREP,
-	blitz.tools.LOADSKILL,
-	blitz.tools.START_LSP,
-	blitz.tools.START_MCP,
-})
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">set_agent_tools</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">AGENT_GENERAL</span><span class="punctuation_delimiter">,</span> <span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">BASH</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">CANCEL_BACKGROUND</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">READ</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">WRITE</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">EDIT</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">ASK</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">AGENT</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">AWAIT_AGENT</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">CANCEL_AGENT</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">SEND_MESSAGE_TO_AGENT</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">RIPGREP</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">LOADSKILL</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">START_LSP</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">START_MCP</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
 
-blitz.set_agent_tools(blitz.AGENT_EXPLORE, {
-	blitz.tools.RIPGREP,
-	blitz.tools.READ,
-	blitz.tools.SEND_MESSAGE_TO_AGENT,
-	blitz.tools.LOADSKILL,
-	tools.web_fetch,
-	tools.web_search,
-})
-</code></pre><h2>MCP and LSP</h2><pre><code>blitz.mcp.add({
-	name = &quot;playwright&quot;,
-	command = &quot;npx&quot;,
-	args = {
-		&quot;-y&quot;,
-		&quot;@playwright/mcp@latest&quot;,
-		&quot;--browser=chromium&quot;,
-		&quot;--executable-path=/usr/bin/chromium&quot;,
-	},
-	tools_prefix = &quot;pw_&quot;,
-})
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">set_agent_tools</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">AGENT_EXPLORE</span><span class="punctuation_delimiter">,</span> <span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">RIPGREP</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">READ</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">SEND_MESSAGE_TO_AGENT</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">LOADSKILL</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">web_fetch</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin constant variable">tools</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">web_search</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
+</code></pre>
+<h2>MCP and LSP</h2><pre><code class="lua"><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">mcp</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin field constant variable">name</span> <span class="operator">=</span> <span class="string">&quot;playwright&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">command</span> <span class="operator">=</span> <span class="string">&quot;npx&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">args</span> <span class="operator">=</span> <span class="punctuation_bracket constructor">{</span>
+		<span class="string">&quot;-y&quot;</span><span class="punctuation_delimiter">,</span>
+		<span class="string">&quot;@playwright/mcp@latest&quot;</span><span class="punctuation_delimiter">,</span>
+		<span class="string">&quot;--browser=chromium&quot;</span><span class="punctuation_delimiter">,</span>
+		<span class="string">&quot;--executable-path=/usr/bin/chromium&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="punctuation_bracket constructor">}</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">tools_prefix</span> <span class="operator">=</span> <span class="string">&quot;pw_&quot;</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
 
-blitz.lsp.add({
-	name = &quot;zig&quot;,
-	command = &quot;zls&quot;,
-	root = &quot;.&quot;,
-	language_id = &quot;zig&quot;,
-	args = {},
-})
-</code></pre><h2>Web fetch tool</h2><p>A super simplified web fetch using an headless chromium and some unholy tricks.</p><pre><code>M.web_fetch = blitz.register_tool({
-	name = &quot;lua_webfetch&quot;,
-	description = &quot;performs a web fetch and returns the content as markdown&quot;,
-	args = {
-		url = { type = &quot;string&quot;, description = &quot;the url to fetch&quot;, required = true },
-	},
-	func = function(ctx, call)
-		local url = call.arguments.url
-		if type(url) ~= &quot;string&quot; or url == &quot;&quot; then
-			return blitz.err(&quot;url is required&quot;)
-		end
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">lsp</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin field constant variable">name</span> <span class="operator">=</span> <span class="string">&quot;zig&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">command</span> <span class="operator">=</span> <span class="string">&quot;zls&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">root</span> <span class="operator">=</span> <span class="string">&quot;.&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">language_id</span> <span class="operator">=</span> <span class="string">&quot;zig&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">args</span> <span class="operator">=</span> <span class="punctuation_bracket constructor">{</span><span class="punctuation_bracket constructor">}</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
+</code></pre>
+<h2>Web fetch tool</h2><p>A super simplified web fetch using an headless chromium and some unholy tricks.</p><pre><code class="lua"><span class="variable_builtin constant variable">M</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">web_fetch</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">register_tool</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin field constant variable">name</span> <span class="operator">=</span> <span class="string">&quot;lua_webfetch&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">description</span> <span class="operator">=</span> <span class="string">&quot;performs a web fetch and returns the content as markdown&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">args</span> <span class="operator">=</span> <span class="punctuation_bracket constructor">{</span>
+		<span class="variable_builtin field constant variable">url</span> <span class="operator">=</span> <span class="punctuation_bracket constructor">{</span> <span class="variable_builtin field constant variable">type</span> <span class="operator">=</span> <span class="string">&quot;string&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin field constant variable">description</span> <span class="operator">=</span> <span class="string">&quot;the url to fetch&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin field constant variable">required</span> <span class="operator">=</span> <span class="boolean">true</span> <span class="punctuation_bracket constructor">}</span><span class="punctuation_delimiter">,</span>
+	<span class="punctuation_bracket constructor">}</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable function">func</span> <span class="operator">=</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="parameter variable_builtin constant variable">ctx</span><span class="punctuation_delimiter">,</span> <span class="parameter variable_builtin constant variable">call</span><span class="punctuation_bracket">)</span>
+		<span class="keyword">local</span> <span class="variable_builtin constant variable">url</span> <span class="operator">=</span> <span class="variable_builtin constant variable">call</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">arguments</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">url</span>
+		<span class="conditional">if</span> <span class="function_builtin variable_builtin function_call variable constant">type</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">url</span><span class="punctuation_bracket">)</span> <span class="operator">~=</span> <span class="string">&quot;string&quot;</span> <span class="keyword_operator">or</span> <span class="variable_builtin constant variable">url</span> <span class="operator">==</span> <span class="string">&quot;&quot;</span> <span class="conditional">then</span>
+			<span class="keyword_return">return</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">err</span><span class="punctuation_bracket">(</span><span class="string">&quot;url is required&quot;</span><span class="punctuation_bracket">)</span>
+		<span class="conditional">end</span>
 
-		ctx:set_status(&quot;fetch &quot; .. url)
+		<span class="variable_builtin constant variable">ctx</span><span class="punctuation_delimiter">:</span><span class="variable_builtin constant method_call variable">set_status</span><span class="punctuation_bracket">(</span><span class="string">&quot;fetch &quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">url</span><span class="punctuation_bracket">)</span>
 
-		local content, ok = blitz.shell(
-			&quot;chromium --headless=new --disable-gpu --no-sandbox &quot;
-				.. &quot;--disable-blink-features=AutomationControlled &quot;
-				.. &quot;--window-size=1920,1080 &quot;
-				.. &quot;--virtual-time-budget=5000 &quot;
-				.. &apos;--print-to-pdf=/dev/stdout --no-margins &quot;&apos;
-				.. url
-				.. &apos;&quot; | pdftotext - -&apos;
-		)
+		<span class="keyword">local</span> <span class="variable_builtin constant variable">content</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">ok</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">shell</span><span class="punctuation_bracket">(</span>
+			<span class="string">&quot;chromium --headless=new --disable-gpu --no-sandbox &quot;</span>
+				<span class="operator">..</span> <span class="string">&quot;--disable-blink-features=AutomationControlled &quot;</span>
+				<span class="operator">..</span> <span class="string">&quot;--window-size=1920,1080 &quot;</span>
+				<span class="operator">..</span> <span class="string">&quot;--virtual-time-budget=5000 &quot;</span>
+				<span class="operator">..</span> <span class="string">&apos;--print-to-pdf=/dev/stdout --no-margins &quot;&apos;</span>
+				<span class="operator">..</span> <span class="variable_builtin constant variable">url</span>
+				<span class="operator">..</span> <span class="string">&apos;&quot; | pdftotext - -&apos;</span>
+		<span class="punctuation_bracket">)</span>
 
-		if not ok or content == nil or content == &quot;&quot; then
-			return blitz.err(&quot;chromium returned no output&quot;)
-		end
+		<span class="conditional">if</span> <span class="keyword_operator">not</span> <span class="variable_builtin constant variable">ok</span> <span class="keyword_operator">or</span> <span class="variable_builtin constant variable">content</span> <span class="operator">==</span> <span class="constant_builtin">nil</span> <span class="keyword_operator">or</span> <span class="variable_builtin constant variable">content</span> <span class="operator">==</span> <span class="string">&quot;&quot;</span> <span class="conditional">then</span>
+			<span class="keyword_return">return</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">err</span><span class="punctuation_bracket">(</span><span class="string">&quot;chromium returned no output&quot;</span><span class="punctuation_bracket">)</span>
+		<span class="conditional">end</span>
 
-		return blitz.ok(content)
-	end,
-})
-</code></pre><h2>Web search tool</h2><p>Websearch via local searXNG docker instance</p><pre><code>M.web_search = blitz.register_tool({
-	name = &quot;lua_web_search&quot;,
-	description = &quot;Search the web via a local SearXNG instance&quot;,
-	args = {
-		searchQuery = { type = &quot;string&quot;, description = &quot;the search query&quot;, required = true },
-		max_results = { type = &quot;number&quot;, description = &quot;maximum results to return (default 10, max 20)&quot; },
-	},
-	func = function(ctx, call)
-		local query = call.arguments.searchQuery
-		if type(query) ~= &quot;string&quot; or query == &quot;&quot; then
-			return blitz.err(&quot;searchQuery is required&quot;)
-		end
+		<span class="keyword_return">return</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">ok</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">content</span><span class="punctuation_bracket">)</span>
+	<span class="keyword_function">end</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
+</code></pre>
+<h2>Web search tool</h2><p>Websearch via local searXNG docker instance</p><pre><code class="lua"><span class="variable_builtin constant variable">M</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">web_search</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">register_tool</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin field constant variable">name</span> <span class="operator">=</span> <span class="string">&quot;lua_web_search&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">description</span> <span class="operator">=</span> <span class="string">&quot;Search the web via a local SearXNG instance&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">args</span> <span class="operator">=</span> <span class="punctuation_bracket constructor">{</span>
+		<span class="variable_builtin field constant variable">searchQuery</span> <span class="operator">=</span> <span class="punctuation_bracket constructor">{</span> <span class="variable_builtin field constant variable">type</span> <span class="operator">=</span> <span class="string">&quot;string&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin field constant variable">description</span> <span class="operator">=</span> <span class="string">&quot;the search query&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin field constant variable">required</span> <span class="operator">=</span> <span class="boolean">true</span> <span class="punctuation_bracket constructor">}</span><span class="punctuation_delimiter">,</span>
+		<span class="variable_builtin field constant variable">max_results</span> <span class="operator">=</span> <span class="punctuation_bracket constructor">{</span> <span class="variable_builtin field constant variable">type</span> <span class="operator">=</span> <span class="string">&quot;number&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin field constant variable">description</span> <span class="operator">=</span> <span class="string">&quot;maximum results to return (default 10, max 20)&quot;</span> <span class="punctuation_bracket constructor">}</span><span class="punctuation_delimiter">,</span>
+	<span class="punctuation_bracket constructor">}</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable function">func</span> <span class="operator">=</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="parameter variable_builtin constant variable">ctx</span><span class="punctuation_delimiter">,</span> <span class="parameter variable_builtin constant variable">call</span><span class="punctuation_bracket">)</span>
+		<span class="keyword">local</span> <span class="variable_builtin constant variable">query</span> <span class="operator">=</span> <span class="variable_builtin constant variable">call</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">arguments</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">searchQuery</span>
+		<span class="conditional">if</span> <span class="function_builtin variable_builtin function_call variable constant">type</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">query</span><span class="punctuation_bracket">)</span> <span class="operator">~=</span> <span class="string">&quot;string&quot;</span> <span class="keyword_operator">or</span> <span class="variable_builtin constant variable">query</span> <span class="operator">==</span> <span class="string">&quot;&quot;</span> <span class="conditional">then</span>
+			<span class="keyword_return">return</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">err</span><span class="punctuation_bracket">(</span><span class="string">&quot;searchQuery is required&quot;</span><span class="punctuation_bracket">)</span>
+		<span class="conditional">end</span>
 
-		ctx:set_status(&quot;search &quot; .. query)
+		<span class="variable_builtin constant variable">ctx</span><span class="punctuation_delimiter">:</span><span class="variable_builtin constant method_call variable">set_status</span><span class="punctuation_bracket">(</span><span class="string">&quot;search &quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">query</span><span class="punctuation_bracket">)</span>
 
-		local function urlencode(s)
-			s = (s:gsub(&quot;[%c]&quot;, &quot; &quot;))
-			return (s:gsub(&quot;([^%w%-_%.~])&quot;, function(c)
-				return string.format(&quot;%%%02X&quot;, string.byte(c))
-			end))
-		end
+		<span class="keyword">local</span> <span class="keyword_function">function</span> <span class="variable_builtin constant variable function">urlencode</span><span class="punctuation_bracket">(</span><span class="parameter variable_builtin constant variable">s</span><span class="punctuation_bracket">)</span>
+			<span class="variable_builtin constant variable">s</span> <span class="operator">=</span> <span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">s</span><span class="punctuation_delimiter">:</span><span class="variable_builtin constant method_call variable">gsub</span><span class="punctuation_bracket">(</span><span class="string">&quot;[%c]&quot;</span><span class="punctuation_delimiter">,</span> <span class="string">&quot; &quot;</span><span class="punctuation_bracket">)</span><span class="punctuation_bracket">)</span>
+			<span class="keyword_return">return</span> <span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">s</span><span class="punctuation_delimiter">:</span><span class="variable_builtin constant method_call variable">gsub</span><span class="punctuation_bracket">(</span><span class="string">&quot;([^%w%-_%.~])&quot;</span><span class="punctuation_delimiter">,</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="parameter variable_builtin constant variable">c</span><span class="punctuation_bracket">)</span>
+				<span class="keyword_return">return</span> <span class="variable_builtin constant variable">string</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">format</span><span class="punctuation_bracket">(</span><span class="string">&quot;%%%02X&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">string</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">byte</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">c</span><span class="punctuation_bracket">)</span><span class="punctuation_bracket">)</span>
+			<span class="keyword_function">end</span><span class="punctuation_bracket">)</span><span class="punctuation_bracket">)</span>
+		<span class="keyword_function">end</span>
 
-		local search_url = &quot;http://127.0.0.1:8080/search?q=&quot; .. urlencode(query) .. &quot;&amp;format=json&quot;
-		local body, ok = blitz.shell(&quot;curl -sS --max-time 15 &apos;&quot; .. search_url .. &quot;&apos;&quot;)
-		if not ok then
-			return blitz.err(&quot;searxng request failed&quot;)
-		end
+		<span class="keyword">local</span> <span class="variable_builtin constant variable">search_url</span> <span class="operator">=</span> <span class="string">&quot;http://127.0.0.1:8080/search?q=&quot;</span> <span class="operator">..</span> <span class="function_builtin variable_builtin function_call variable constant">urlencode</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">query</span><span class="punctuation_bracket">)</span> <span class="operator">..</span> <span class="string">&quot;&amp;format=json&quot;</span>
+		<span class="keyword">local</span> <span class="variable_builtin constant variable">body</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">ok</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">shell</span><span class="punctuation_bracket">(</span><span class="string">&quot;curl -sS --max-time 15 &apos;&quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">search_url</span> <span class="operator">..</span> <span class="string">&quot;&apos;&quot;</span><span class="punctuation_bracket">)</span>
+		<span class="conditional">if</span> <span class="keyword_operator">not</span> <span class="variable_builtin constant variable">ok</span> <span class="conditional">then</span>
+			<span class="keyword_return">return</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">err</span><span class="punctuation_bracket">(</span><span class="string">&quot;searxng request failed&quot;</span><span class="punctuation_bracket">)</span>
+		<span class="conditional">end</span>
 
-		local val, decoded = blitz.json.decode(body)
-		if decoded == false then
-			return blitz.err(&quot;failed to parse searxng json response&quot;)
-		end
+		<span class="keyword">local</span> <span class="variable_builtin constant variable">val</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">decoded</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">json</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">decode</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">body</span><span class="punctuation_bracket">)</span>
+		<span class="conditional">if</span> <span class="variable_builtin constant variable">decoded</span> <span class="operator">==</span> <span class="boolean">false</span> <span class="conditional">then</span>
+			<span class="keyword_return">return</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">err</span><span class="punctuation_bracket">(</span><span class="string">&quot;failed to parse searxng json response&quot;</span><span class="punctuation_bracket">)</span>
+		<span class="conditional">end</span>
 
-		local results = type(val) == &quot;table&quot; and val.results or nil
-		if type(results) ~= &quot;table&quot; or #results == 0 then
-			return blitz.ok(&quot;No results for: &quot; .. query)
-		end
+		<span class="keyword">local</span> <span class="variable_builtin constant variable">results</span> <span class="operator">=</span> <span class="function_builtin variable_builtin function_call variable constant">type</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">val</span><span class="punctuation_bracket">)</span> <span class="operator">==</span> <span class="string">&quot;table&quot;</span> <span class="keyword_operator">and</span> <span class="variable_builtin constant variable">val</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">results</span> <span class="keyword_operator">or</span> <span class="constant_builtin">nil</span>
+		<span class="conditional">if</span> <span class="function_builtin variable_builtin function_call variable constant">type</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">results</span><span class="punctuation_bracket">)</span> <span class="operator">~=</span> <span class="string">&quot;table&quot;</span> <span class="keyword_operator">or</span> <span class="operator">#</span><span class="variable_builtin constant variable">results</span> <span class="operator">==</span> <span class="number">0</span> <span class="conditional">then</span>
+			<span class="keyword_return">return</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">ok</span><span class="punctuation_bracket">(</span><span class="string">&quot;No results for: &quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">query</span><span class="punctuation_bracket">)</span>
+		<span class="conditional">end</span>
 
-		local max = tonumber(call.arguments.max_results) or 10
-		max = math.min(math.max(max, 1), math.min(20, #results))
+		<span class="keyword">local</span> <span class="variable_builtin constant variable">max</span> <span class="operator">=</span> <span class="function_builtin variable_builtin function_call variable constant">tonumber</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">call</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">arguments</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">max_results</span><span class="punctuation_bracket">)</span> <span class="keyword_operator">or</span> <span class="number">10</span>
+		<span class="variable_builtin constant variable">max</span> <span class="operator">=</span> <span class="variable_builtin constant variable">math</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">min</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">math</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">max</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">max</span><span class="punctuation_delimiter">,</span> <span class="number">1</span><span class="punctuation_bracket">)</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">math</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">min</span><span class="punctuation_bracket">(</span><span class="number">20</span><span class="punctuation_delimiter">,</span> <span class="operator">#</span><span class="variable_builtin constant variable">results</span><span class="punctuation_bracket">)</span><span class="punctuation_bracket">)</span>
 
-		local lines = { &quot;Search results for: &quot; .. query, &quot;&quot; }
-		for idx = 1, max do
-			local r = results[idx]
-			lines[#lines + 1] = string.format(&quot;[%d] %s&quot;, idx, r.title or &quot;(no title)&quot;)
-			lines[#lines + 1] = &quot;    &quot; .. (r.url or &quot;&quot;)
-			lines[#lines + 1] = &quot;    &quot; .. (r.content or &quot;&quot;)
-			lines[#lines + 1] = &quot;&quot;
-		end
+		<span class="keyword">local</span> <span class="variable_builtin constant variable">lines</span> <span class="operator">=</span> <span class="punctuation_bracket constructor">{</span> <span class="string">&quot;Search results for: &quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">query</span><span class="punctuation_delimiter">,</span> <span class="string">&quot;&quot;</span> <span class="punctuation_bracket constructor">}</span>
+		<span class="repeat">for</span> <span class="variable_builtin constant variable">idx</span> <span class="operator">=</span> <span class="number">1</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">max</span> <span class="repeat">do</span>
+			<span class="keyword">local</span> <span class="variable_builtin constant variable">r</span> <span class="operator">=</span> <span class="variable_builtin constant variable">results</span><span class="punctuation_bracket">[</span><span class="variable_builtin constant variable">idx</span><span class="punctuation_bracket">]</span>
+			<span class="variable_builtin constant variable">lines</span><span class="punctuation_bracket">[</span><span class="operator">#</span><span class="variable_builtin constant variable">lines</span> <span class="operator">+</span> <span class="number">1</span><span class="punctuation_bracket">]</span> <span class="operator">=</span> <span class="variable_builtin constant variable">string</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">format</span><span class="punctuation_bracket">(</span><span class="string">&quot;[%d] %s&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">idx</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">r</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">title</span> <span class="keyword_operator">or</span> <span class="string">&quot;(no title)&quot;</span><span class="punctuation_bracket">)</span>
+			<span class="variable_builtin constant variable">lines</span><span class="punctuation_bracket">[</span><span class="operator">#</span><span class="variable_builtin constant variable">lines</span> <span class="operator">+</span> <span class="number">1</span><span class="punctuation_bracket">]</span> <span class="operator">=</span> <span class="string">&quot;    &quot;</span> <span class="operator">..</span> <span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">r</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">url</span> <span class="keyword_operator">or</span> <span class="string">&quot;&quot;</span><span class="punctuation_bracket">)</span>
+			<span class="variable_builtin constant variable">lines</span><span class="punctuation_bracket">[</span><span class="operator">#</span><span class="variable_builtin constant variable">lines</span> <span class="operator">+</span> <span class="number">1</span><span class="punctuation_bracket">]</span> <span class="operator">=</span> <span class="string">&quot;    &quot;</span> <span class="operator">..</span> <span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">r</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">content</span> <span class="keyword_operator">or</span> <span class="string">&quot;&quot;</span><span class="punctuation_bracket">)</span>
+			<span class="variable_builtin constant variable">lines</span><span class="punctuation_bracket">[</span><span class="operator">#</span><span class="variable_builtin constant variable">lines</span> <span class="operator">+</span> <span class="number">1</span><span class="punctuation_bracket">]</span> <span class="operator">=</span> <span class="string">&quot;&quot;</span>
+		<span class="repeat">end</span>
 
-		return blitz.ok(table.concat(lines, &quot;\n&quot;))
-	end,
-})
-</code></pre><h2>Commands</h2><pre><code>blitz.add_command(&quot;:plan&quot;, function(rem)
-	blitz.queue.reset_session()
-	blitz.queue.spawn_agent({
-		agent_type = blitz.AGENT_GENERAL,
-		prompt = [[
+		<span class="keyword_return">return</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">ok</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">table</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">concat</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">lines</span><span class="punctuation_delimiter">,</span> <span class="string">&quot;</span><span class="string string_escape">\n</span><span class="string">&quot;</span><span class="punctuation_bracket">)</span><span class="punctuation_bracket">)</span>
+	<span class="keyword_function">end</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
+</code></pre>
+<h2>Commands</h2><pre><code class="lua"><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add_command</span><span class="punctuation_bracket">(</span><span class="string">&quot;:plan&quot;</span><span class="punctuation_delimiter">,</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="parameter variable_builtin constant variable">rem</span><span class="punctuation_bracket">)</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">reset_session</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">spawn_agent</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket constructor">{</span>
+		<span class="variable_builtin field constant variable">agent_type</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">AGENT_GENERAL</span><span class="punctuation_delimiter">,</span>
+		<span class="variable_builtin field constant variable">prompt</span> <span class="operator">=</span> <span class="string">[[
             Before making ANY edits, explain your implementation plan to the user and await his go.
             This is the request:
-            ]] .. rem,
-	})
-	blitz.queue.push_chat_entry(&quot;user&quot;, &quot;[PLAN]: &quot; .. rem)
-end)
+            ]]</span> <span class="operator">..</span> <span class="variable_builtin constant variable">rem</span><span class="punctuation_delimiter">,</span>
+	<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">push_chat_entry</span><span class="punctuation_bracket">(</span><span class="string">&quot;user&quot;</span><span class="punctuation_delimiter">,</span> <span class="string">&quot;[PLAN]: &quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">rem</span><span class="punctuation_bracket">)</span>
+<span class="keyword_function">end</span><span class="punctuation_bracket">)</span>
 
-</code></pre><h2>Goal command</h2><p>Goals are loops, which forces the agent to validate against the instruction before handing control back to the user. Simplified: An ‘I completetd the goal’ tool, some additional instructions and an event listener with some shared state:</p><pre><code>local goal_finished = false
+</code></pre>
+<h2>Goal command</h2><p>Goals are loops, which forces the agent to validate against the instruction before handing control back to the user. Simplified: An ‘I completetd the goal’ tool, some additional instructions and an event listener with some shared state:</p><pre><code class="lua"><span class="keyword">local</span> <span class="variable_builtin constant variable">goal_finished</span> <span class="operator">=</span> <span class="boolean">false</span>
 
-local goal_tool = blitz.register_tool({
-	name = &quot;goal_completed&quot;,
-	description = &quot;Only call this tool, when your goal is completed&quot;,
-	args = {
-		goal_message = {
-			type = &quot;string&quot;,
-			description = &quot;Structured goal status report&quot;,
-			required = true,
-		},
-	},
-	func = function(ctx, call)
-		ctx:set_status(&quot;Goal completed!&quot;)
-		blitz.queue.push_chat_entry(&quot;agent&quot;, call.arguments.goal_message)
-		goal_finished = true
-		return blitz.exit_loop(&quot;Goaling completed!&quot;)
-	end,
-})
+<span class="keyword">local</span> <span class="variable_builtin constant variable">goal_tool</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">register_tool</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket constructor">{</span>
+	<span class="variable_builtin field constant variable">name</span> <span class="operator">=</span> <span class="string">&quot;goal_completed&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">description</span> <span class="operator">=</span> <span class="string">&quot;Only call this tool, when your goal is completed&quot;</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable">args</span> <span class="operator">=</span> <span class="punctuation_bracket constructor">{</span>
+		<span class="variable_builtin field constant variable">goal_message</span> <span class="operator">=</span> <span class="punctuation_bracket constructor">{</span>
+			<span class="variable_builtin field constant variable">type</span> <span class="operator">=</span> <span class="string">&quot;string&quot;</span><span class="punctuation_delimiter">,</span>
+			<span class="variable_builtin field constant variable">description</span> <span class="operator">=</span> <span class="string">&quot;Structured goal status report&quot;</span><span class="punctuation_delimiter">,</span>
+			<span class="variable_builtin field constant variable">required</span> <span class="operator">=</span> <span class="boolean">true</span><span class="punctuation_delimiter">,</span>
+		<span class="punctuation_bracket constructor">}</span><span class="punctuation_delimiter">,</span>
+	<span class="punctuation_bracket constructor">}</span><span class="punctuation_delimiter">,</span>
+	<span class="variable_builtin field constant variable function">func</span> <span class="operator">=</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="parameter variable_builtin constant variable">ctx</span><span class="punctuation_delimiter">,</span> <span class="parameter variable_builtin constant variable">call</span><span class="punctuation_bracket">)</span>
+		<span class="variable_builtin constant variable">ctx</span><span class="punctuation_delimiter">:</span><span class="variable_builtin constant method_call variable">set_status</span><span class="punctuation_bracket">(</span><span class="string">&quot;Goal completed!&quot;</span><span class="punctuation_bracket">)</span>
+		<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">push_chat_entry</span><span class="punctuation_bracket">(</span><span class="string">&quot;agent&quot;</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">call</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">arguments</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">goal_message</span><span class="punctuation_bracket">)</span>
+		<span class="variable_builtin constant variable">goal_finished</span> <span class="operator">=</span> <span class="boolean">true</span>
+		<span class="keyword_return">return</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">exit_loop</span><span class="punctuation_bracket">(</span><span class="string">&quot;Goaling completed!&quot;</span><span class="punctuation_bracket">)</span>
+	<span class="keyword_function">end</span><span class="punctuation_delimiter">,</span>
+<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
 
-blitz.add_command(&quot;/goal&quot;, function(prompt)
-	blitz.events.add_listener(blitz.events.AGENT_COMPLETE, function(agent_id)
-		if blitz.get_main_agent().index ~= agent_id.index then
-			return
-		end
-		if goal_finished then
-			return
-		end
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add_command</span><span class="punctuation_bracket">(</span><span class="string">&quot;/goal&quot;</span><span class="punctuation_delimiter">,</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="parameter variable_builtin constant variable">prompt</span><span class="punctuation_bracket">)</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">events</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add_listener</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">events</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">AGENT_COMPLETE</span><span class="punctuation_delimiter">,</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="parameter variable_builtin constant variable">agent_id</span><span class="punctuation_bracket">)</span>
+		<span class="conditional">if</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">get_main_agent</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">index</span> <span class="operator">~=</span> <span class="variable_builtin constant variable">agent_id</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">index</span> <span class="conditional">then</span>
+			<span class="keyword_return">return</span>
+		<span class="conditional">end</span>
+		<span class="conditional">if</span> <span class="variable_builtin constant variable">goal_finished</span> <span class="conditional">then</span>
+			<span class="keyword_return">return</span>
+		<span class="conditional">end</span>
 
-		blitz.queue.queue_agent_message(agent_id, [[
+		<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">queue_agent_message</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">agent_id</span><span class="punctuation_delimiter">,</span> <span class="string">[[
             Your goal is unfinished. Validate the current state. If the goal is complete, call `goal_completed`.
             Original goal instructions:
-            ]] .. prompt
-        )
-	end)
+            ]]</span> <span class="operator">..</span> <span class="variable_builtin constant variable">prompt</span>
+        <span class="punctuation_bracket">)</span>
+	<span class="keyword_function">end</span><span class="punctuation_bracket">)</span>
 
-	blitz.add_tool(blitz.AGENT_GENERAL, goal_tool)
-	goal_finished = false
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add_tool</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">AGENT_GENERAL</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">goal_tool</span><span class="punctuation_bracket">)</span>
+	<span class="variable_builtin constant variable">goal_finished</span> <span class="operator">=</span> <span class="boolean">false</span>
 
-	local main_agent_id = blitz.get_main_agent()
-	blitz.queue.push_chat_entry(&quot;user&quot;, &quot;Goal: &quot; .. prompt)
+	<span class="keyword">local</span> <span class="variable_builtin constant variable">main_agent_id</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">get_main_agent</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">push_chat_entry</span><span class="punctuation_bracket">(</span><span class="string">&quot;user&quot;</span><span class="punctuation_delimiter">,</span> <span class="string">&quot;Goal: &quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">prompt</span><span class="punctuation_bracket">)</span>
 
-	if main_agent_id ~= nil then
-		blitz.queue.queue_agent_message(main_agent_id, &quot;Complete the goal: &quot; .. prompt)
-	else
-		blitz.queue.spawn_agent({
-			prompt = &quot;Complete the following goal and track progress in goal.md:\n&quot; .. prompt,
-			tool_budget = 1024,
-		})
-	end
-end)
-</code></pre><h2>Keybinds and status bar</h2><pre><code>-- Quickly capture and pass through a screenshot
-blitz.bind(&quot;&lt;C-s&gt;&quot;, function()
-	local png, ok = blitz.shell(&apos;grim -g &quot;$(slurp)&quot; -t png -&apos;)
-	if ok and png and #png &gt; 0 then
-		blitz.queue.attach_screenshot(png, &quot;image/png&quot;)
-	end
-end)
+	<span class="conditional">if</span> <span class="variable_builtin constant variable">main_agent_id</span> <span class="operator">~=</span> <span class="constant_builtin">nil</span> <span class="conditional">then</span>
+		<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">queue_agent_message</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">main_agent_id</span><span class="punctuation_delimiter">,</span> <span class="string">&quot;Complete the goal: &quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">prompt</span><span class="punctuation_bracket">)</span>
+	<span class="conditional">else</span>
+		<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">spawn_agent</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket constructor">{</span>
+			<span class="variable_builtin field constant variable">prompt</span> <span class="operator">=</span> <span class="string">&quot;Complete the following goal and track progress in goal.md:</span><span class="string string_escape">\n</span><span class="string">&quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">prompt</span><span class="punctuation_delimiter">,</span>
+			<span class="variable_builtin field constant variable">tool_budget</span> <span class="operator">=</span> <span class="number">1024</span><span class="punctuation_delimiter">,</span>
+		<span class="punctuation_bracket constructor">}</span><span class="punctuation_bracket">)</span>
+	<span class="conditional">end</span>
+<span class="keyword_function">end</span><span class="punctuation_bracket">)</span>
+</code></pre>
+<h2>Keybinds and status bar</h2><pre><code class="lua"><span class="comment">-- Quickly capture and pass through a screenshot</span>
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">bind</span><span class="punctuation_bracket">(</span><span class="string">&quot;&lt;C-s&gt;&quot;</span><span class="punctuation_delimiter">,</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span>
+	<span class="keyword">local</span> <span class="variable_builtin constant variable">png</span><span class="punctuation_delimiter">,</span> <span class="variable_builtin constant variable">ok</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">shell</span><span class="punctuation_bracket">(</span><span class="string">&apos;grim -g &quot;$(slurp)&quot; -t png -&apos;</span><span class="punctuation_bracket">)</span>
+	<span class="conditional">if</span> <span class="variable_builtin constant variable">ok</span> <span class="keyword_operator">and</span> <span class="variable_builtin constant variable">png</span> <span class="keyword_operator">and</span> <span class="operator">#</span><span class="variable_builtin constant variable">png</span> <span class="operator">&gt;</span> <span class="number">0</span> <span class="conditional">then</span>
+		<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">attach_screenshot</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">png</span><span class="punctuation_delimiter">,</span> <span class="string">&quot;image/png&quot;</span><span class="punctuation_bracket">)</span>
+	<span class="conditional">end</span>
+<span class="keyword_function">end</span><span class="punctuation_bracket">)</span>
 
--- Bind anything
-blitz.bind(&quot;&lt;C-t&gt;&quot;, function()
-	local f = blitz.get_flags()
-	f.show_thinking = not f.show_thinking
-	blitz.set_flags(f)
-end)
+<span class="comment">-- Bind anything</span>
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">bind</span><span class="punctuation_bracket">(</span><span class="string">&quot;&lt;C-t&gt;&quot;</span><span class="punctuation_delimiter">,</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span>
+	<span class="keyword">local</span> <span class="variable_builtin constant variable">f</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">get_flags</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span>
+	<span class="variable_builtin constant variable">f</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">show_thinking</span> <span class="operator">=</span> <span class="keyword_operator">not</span> <span class="variable_builtin constant variable">f</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">show_thinking</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">set_flags</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">f</span><span class="punctuation_bracket">)</span>
+<span class="keyword_function">end</span><span class="punctuation_bracket">)</span>
 
--- Overwrite statusbar render
-blitz.status_bar_render = function()
-	local use = blitz.token_usage()
-	return &quot;Cache:&quot; .. use.cache
-		.. &quot; | In:&quot; .. use.input
-		.. &quot; | Out:&quot; .. use.output
-		.. &quot; | Ctx:&quot; .. math.floor(blitz.context_percent()) .. &quot;%&quot;
-end
-</code></pre><h2>Session save and load</h2><pre><code>blitz.add_command(&quot;:save&quot;, function()
-	blitz.queue.save_session(&quot;.blitz/blitz_save.json&quot;)
-end)
+<span class="comment">-- Overwrite statusbar render</span>
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable function">status_bar_render</span> <span class="operator">=</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span>
+	<span class="keyword">local</span> <span class="variable_builtin constant variable">use</span> <span class="operator">=</span> <span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">token_usage</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span>
+	<span class="keyword_return">return</span> <span class="string">&quot;Cache:&quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">use</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">cache</span>
+		<span class="operator">..</span> <span class="string">&quot; | In:&quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">use</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">input</span>
+		<span class="operator">..</span> <span class="string">&quot; | Out:&quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">use</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">output</span>
+		<span class="operator">..</span> <span class="string">&quot; | Ctx:&quot;</span> <span class="operator">..</span> <span class="variable_builtin constant variable">math</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">floor</span><span class="punctuation_bracket">(</span><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">context_percent</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span><span class="punctuation_bracket">)</span> <span class="operator">..</span> <span class="string">&quot;%&quot;</span>
+<span class="keyword_function">end</span>
+</code></pre>
+<h2>Session save and load</h2><pre><code class="lua"><span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add_command</span><span class="punctuation_bracket">(</span><span class="string">&quot;:save&quot;</span><span class="punctuation_delimiter">,</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">save_session</span><span class="punctuation_bracket">(</span><span class="string">&quot;.blitz/blitz_save.json&quot;</span><span class="punctuation_bracket">)</span>
+<span class="keyword_function">end</span><span class="punctuation_bracket">)</span>
 
-blitz.add_command(&quot;:load&quot;, function()
-	blitz.queue.load_session(&quot;.blitz/blitz_save.json&quot;)
-end)
-</code></pre></div>
+<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">add_command</span><span class="punctuation_bracket">(</span><span class="string">&quot;:load&quot;</span><span class="punctuation_delimiter">,</span> <span class="keyword_function">function</span><span class="punctuation_bracket">(</span><span class="punctuation_bracket">)</span>
+	<span class="variable_builtin constant variable">blitz</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field constant variable">queue</span><span class="punctuation_delimiter">.</span><span class="variable_builtin field function_call variable constant">load_session</span><span class="punctuation_bracket">(</span><span class="string">&quot;.blitz/blitz_save.json&quot;</span><span class="punctuation_bracket">)</span>
+<span class="keyword_function">end</span><span class="punctuation_bracket">)</span>
+</code></pre>
+</div>
 
 		<footer>
 			<hr>
