@@ -1,6 +1,7 @@
 Site {
     .title = "Blitzdenk Pages",
-    .host_url = "https://example.com",
+    .host_url = "https://lommix.github.io",
+    .url_path_prefix = "blitzdenk",
     .content_dir_path = "content",
     .layouts_dir_path = "layouts",
     .assets_dir_path = "assets",
