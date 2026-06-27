@@ -23,6 +23,8 @@
 			<a href="$site.page('lua-api').link()">Lua API</a>
 			&nbsp; • &nbsp;
 			<a href="$site.page('examples').link()">Examples</a>
+			&nbsp; • &nbsp;
+			<a href="https://github.com/Lommix/blitzdenk" target="_blank">Github</a>
 		</nav>
 		<super>
 		<footer>
