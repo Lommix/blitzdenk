@@ -3,7 +3,7 @@
 Coding and research harness for posix systems. No dependencies, just Zig and vendored Lua.
 Configure, override and extend in Lua.
 
-![screenshot](docs/screen.jpg)
+![screenshot](docs/assets/screen.jpg)
 
 ## Core features and patterns
 

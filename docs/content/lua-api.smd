@@ -1,0 +1,63 @@
+---
+.title = "Lua API",
+.date = @date("1990-01-01T00:00:00"),
+.author = "Lorenz Mielke",
+.layout = "index.shtml",
+.draft = false,
+---
+
+Lua config is loaded from `~/.config/blitzdenk/blitz.lua` and optionally from
+`./blitz.lua`.
+
+The global API table is `blitz`.
+
+The generated meta file is the source of truth for function signatures and
+descriptions:
+
+- Local generated copy: `~/.config/blitzdenk/meta.lua`
+- Source file: [`src/blitz_defs.lua`](https://github.com/Lommix/blitzdenk/blob/master/src/blitz_defs.lua)
+
+Use that file in your editor for completion and inline docs. The website does
+not duplicate the full API list because it would drift.
+
+## Shape of a config
+
+```
+local tools = require("tools")
+
+local provider = blitz.add_provider({
+	type = "openai",
+	url = "https://api.openai.com/v1",
+	key_envar = "OPENAI_API_KEY",
+})
+
+blitz.set_model("gpt-5.4-mini", provider)
+
+blitz.set_agent_tools(blitz.AGENT_GENERAL, {
+	blitz.tools.BASH,
+	blitz.tools.READ,
+	blitz.tools.WRITE,
+	blitz.tools.EDIT,
+	blitz.tools.RIPGREP,
+	tools.web_fetch,
+	tools.web_search,
+})
+```
+
+## Common API areas
+
+| Area | What to look for in `meta.lua` |
+| --- | --- |
+| Providers | `blitz.add_provider`, `blitz.set_model`, `blitz.set_model_agent` |
+| Tools | `blitz.register_tool`, `blitz.add_tool`, `blitz.set_agent_tools`, `blitz.tools` |
+| Agents | `blitz.add_agent`, `blitz.AGENT_GENERAL`, `blitz.AGENT_EXPLORE` |
+| Commands | `blitz.add_command`, `blitz.queue.*` |
+| Keybinds | `blitz.bind` |
+| Modes | `blitz.add_mode`, `blitz.set_mode`, mode prompt setters |
+| Events | `blitz.events.add_listener`, `blitz.events.*` |
+| MCP | `blitz.mcp.add`, `blitz.mcp.enable` |
+| LSP | `blitz.lsp.add`, `blitz.lsp.enable` |
+| JSON and shell | `blitz.json.encode`, `blitz.json.decode`, `blitz.shell` |
+| UI | `blitz.push_notification`, `blitz.status_bar_render`, flags |
+
+See [Examples](/examples/) for real configuration snippets.

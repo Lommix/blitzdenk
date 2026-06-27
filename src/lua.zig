@@ -104,6 +104,17 @@ pub fn LuaFnBind(
                                 }
                                 return 1;
                             },
+                            .@"struct" => |str| {
+                                if (str.is_tuple) {
+                                    inline for (value) |s| {
+                                        pushAny(state, s);
+                                    }
+                                    return value.len;
+                                }
+
+                                pushAny(state, value);
+                                return 1;
+                            },
                             else => {
                                 pushAny(state, value);
                                 return 1;
@@ -879,26 +890,6 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "START_MCP", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },
             .{ .name = "START_LSP", .ty = LuaType.string, .value = .{ .string = tl.start.StartLspTool.def.name } },
             .{ .name = "LSP", .ty = LuaType.string, .value = .{ .string = r.lsp.TOOL_NAME } },
-            .{
-                .name = "remove",
-                .desc = "remove test function",
-                .ty = LuaType{
-                    .function = .{
-                        .args = &.{
-                            .{ .name = "value", .ty = .string, .desc = "print this test" },
-                        },
-
-                        .fn_ptr = LuaFnBind((struct {
-                            fn t(a: *r.app.App, val: []const u8) !?[]const u8 {
-                                std.log.debug("val {s}", .{val});
-                                try a.cmd_queue.append(a.io, .{ .push_notification = "hello world" });
-                                // return null;
-                                return error.LolFAILED;
-                            }
-                        }).t, "remove"),
-                    },
-                },
-            },
         },
     },
 };

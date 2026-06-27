@@ -1,0 +1,67 @@
+---
+.title = "Getting Started",
+.date = @date("1990-01-01T00:00:00"),
+.author = "Lorenz Mielke",
+.layout = "index.shtml",
+.draft = false,
+---
+
+Blitzdenk targets Zig `0.16` and POSIX systems.
+
+## Download
+
+Download pre-built binaries from the release page:
+
+https://github.com/Lommix/blitzdenk/releases
+
+## Compile
+
+```
+zig build --release=small
+cp zig-out/bin/blitz ~/.local/bin/blitz
+```
+
+## Run
+
+```
+blitz
+blitz /path/to/project
+blitz prompt "summarize this repository"
+blitz help
+```
+
+The default command starts the TUI in the current directory. Passing a path
+starts it in that directory. `prompt` starts the TUI with initial input.
+
+## Flags
+
+| Flag | Effect |
+| --- | --- |
+| `--log` | writes `.blitz/debug.log` in the working directory |
+| `--strict` | requests permissions instead of using the relaxed default |
+
+## Config files
+
+On first run, Blitzdenk creates:
+
+| File | Purpose |
+| --- | --- |
+| `~/.config/blitzdenk/blitz.lua` | user config loaded at startup |
+| `~/.config/blitzdenk/meta.lua` | generated Lua type hints |
+| `./blitz.lua` | optional project-local config, loaded when present |
+
+The global config is where providers, tools, agents, keybinds, commands, MCP
+servers, and LSP servers are configured. A project-local `blitz.lua` is useful
+for repository-specific prompts or tools.
+
+## SSH mode
+
+Inside the TUI, use:
+
+```
+:ssh username@host:/path/to/cwd
+```
+
+SSH mode makes `read`, `write`, `edit`, `bash`, `patch`, and `ripgrep` operate
+against the remote target through the command layer. `exit_ssh` returns to local
+execution.
