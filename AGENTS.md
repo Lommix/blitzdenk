@@ -14,3 +14,6 @@ Important modules:
 - `src/lua.zig` the lua bindings, big file
 - `src/mcp.zig` the mcp api and tools.
 - `src/lsp.zig` the lsp api and tools.
+- `src/context_factory.zig` agent and prompt configuration
+- `src/commands.zig` async command queue.
+- `src/inject.zig` agent status injections.
