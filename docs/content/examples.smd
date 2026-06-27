@@ -16,8 +16,6 @@ local llama = blitz.add_provider({
 	type = "openai",
 	url = "http://127.0.0.1:8118",
 	key_envar = "",
-	max_tokens = 32000,
-	effort = "max",
 	temperature = 1,
 })
 
@@ -25,8 +23,7 @@ local novita = blitz.add_provider({
 	type = "openai",
 	url = "https://api.novita.ai/openai/v1",
 	key_envar = "NOVITA_API_KEY",
-	temperature = 0,
-	max_tokens = 32000,
+	temperature = 1,
 })
 
 local model = "deepseek/deepseek-v4-flash"
@@ -94,6 +91,8 @@ blitz.lsp.add({
 
 ## Web fetch tool
 
+A super simplified web fetch using an headless chromium and some unholy tricks.
+
 ```
 M.web_fetch = blitz.register_tool({
 	name = "lua_webfetch",
@@ -129,6 +128,8 @@ M.web_fetch = blitz.register_tool({
 ```
 
 ## Web search tool
+
+Websearch via local searXNG docker instance
 
 ```
 M.web_search = blitz.register_tool({
@@ -194,29 +195,19 @@ blitz.add_command(":plan", function(rem)
 	blitz.queue.spawn_agent({
 		agent_type = blitz.AGENT_GENERAL,
 		prompt = [[
-Before making ANY edits, explain your implementation plan to the user and await his go.
-
-This is the request:
-]] .. rem,
+            Before making ANY edits, explain your implementation plan to the user and await his go.
+            This is the request:
+            ]] .. rem,
 	})
 	blitz.queue.push_chat_entry("user", "[PLAN]: " .. rem)
 end)
 
-blitz.add_command(":debug", function(rem)
-	blitz.queue.reset_session()
-	blitz.queue.spawn_agent({
-		agent_type = blitz.AGENT_GENERAL,
-		prompt = [[
-You and your harness are now in debug mode. You are looking at your own codebase.
-
-This is your debug request:
-]] .. rem,
-	})
-	blitz.queue.push_chat_entry("user", "[DEBUG]: " .. rem)
-end)
 ```
 
 ## Goal command
+
+Goals are loops, which forces the agent to validate against the instruction before handing control back to the user.
+Simplified: An 'I completetd the goal' tool, some additional instructions and an event listener with some shared state:
 
 ```
 local goal_finished = false
@@ -249,10 +240,10 @@ blitz.add_command("/goal", function(prompt)
 		end
 
 		blitz.queue.queue_agent_message(agent_id, [[
-Your goal is unfinished. Validate the current state. If the goal is complete, call `goal_completed`.
-
-Original goal instructions:
-]] .. prompt)
+            Your goal is unfinished. Validate the current state. If the goal is complete, call `goal_completed`.
+            Original goal instructions:
+            ]] .. prompt
+        )
 	end)
 
 	blitz.add_tool(blitz.AGENT_GENERAL, goal_tool)
@@ -275,6 +266,7 @@ end)
 ## Keybinds and status bar
 
 ```
+-- Quickly capture and pass through a screenshot
 blitz.bind("<C-s>", function()
 	local png, ok = blitz.shell('grim -g "$(slurp)" -t png -')
 	if ok and png and #png > 0 then
@@ -282,12 +274,14 @@ blitz.bind("<C-s>", function()
 	end
 end)
 
+-- Bind anything
 blitz.bind("<C-t>", function()
 	local f = blitz.get_flags()
 	f.show_thinking = not f.show_thinking
 	blitz.set_flags(f)
 end)
 
+-- Overwrite statusbar render
 blitz.status_bar_render = function()
 	local use = blitz.token_usage()
 	return "Cache:" .. use.cache

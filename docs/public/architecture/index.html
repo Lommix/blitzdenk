@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+	<head id="head">
+		<meta charset="utf-8">
+		<meta name="viewport" content="initial-scale=1">
+		<title>Blitzdenk</title>
+		<link type="text/css" rel="stylesheet" href="/style.css">
+		<link type="text/css" rel="stylesheet" href="/highlight.css">
+		<!-- mathtex -->
+		<link type="text/css" rel="stylesheet" href="/Temml-Local.css">
+		<script defer src="/temml.min.js"></script>
+		<script defer src="/render-mathtex.js"></script>
+		<!-- /mathtex -->
+		
+
+	</head>
+	<body id="body">
+		<h1 class="site-title">Blitzdenk</h1>
+		<nav>
+			<a href="/">Home</a>
+			&nbsp; • &nbsp;
+			<a href="/getting-started/">Getting Started</a>
+			&nbsp; • &nbsp;
+			<a href="/features/">Features</a>
+			&nbsp; • &nbsp;
+			<a href="/lua-api/">Lua API</a>
+			&nbsp; • &nbsp;
+			<a href="/tools/">Tools</a>
+			&nbsp; • &nbsp;
+			<a href="/architecture/">Architecture</a>
+			&nbsp; • &nbsp;
+			<a href="/zig-api/">Zig API</a>
+			&nbsp; • &nbsp;
+			<a href="/about/">About</a>
+		</nav>
+		
+	<h1>Architecture</h1>
+	<div><h1>Architecture</h1><h2>Startup flow</h2><ol><li><code>main.zig</code> splits CLI flags and positional commands.</li><li>Config files are created when missing.</li><li><code>ContextFactory</code> loads default tools, agents, modes, and available skills.</li><li>The terminal and <code>App</code> are initialized.</li><li>A <code>Swarm</code> is created and wired to app callbacks for broadcasts and permissions.</li><li>Lua config is loaded, then project-local Lua is loaded when present.</li><li>The TUI loop ticks the app, agents, tools, providers, MCP, and LSP.</li></ol><h2>Main modules</h2><table><tr><th>Module</th><th>Responsibility</th></tr><tr><td><code>main.zig</code></td><td>CLI, startup, config bootstrapping, debug commands, run loop</td></tr><tr><td><code>app.zig</code></td><td>stateful TUI, chat display, input, permissions, command queue</td></tr><tr><td><code>context_factory.zig</code></td><td>agent/mode/tool registry and prompt construction</td></tr><tr><td><code>lua.zig</code></td><td>Lua VM, bindings, user-defined tools, commands, listeners</td></tr><tr><td><code>events.zig</code></td><td>event bus from app/swarm/tool activity to Lua listeners</td></tr><tr><td><code>session.zig</code></td><td>session save/load</td></tr><tr><td><code>keys.zig</code></td><td>key binding parse and dispatch</td></tr><tr><td><code>dashboard.zig</code></td><td>header and info panel content</td></tr></table><h2>Provider layer</h2><table><tr><th>Module</th><th>Responsibility</th></tr><tr><td><code>adapter.zig</code></td><td>common chat, content, tool, stream, usage, and provider types</td></tr><tr><td><code>agent.zig</code></td><td>one agent state machine</td></tr><tr><td><code>swarm.zig</code></td><td>many agents, permissions, broadcasts, shared exec/http state</td></tr><tr><td><code>http.zig</code></td><td>request pool and streaming HTTP body handling</td></tr><tr><td><code>exec.zig</code></td><td>command pool, SSH target, process lifecycle</td></tr><tr><td><code>compact.zig</code></td><td>context compaction</td></tr><tr><td><code>arena.zig</code></td><td>thread-safe arena wrapper</td></tr><tr><td><code>openai.zig</code></td><td>OpenAI-compatible provider</td></tr><tr><td><code>anthropic.zig</code></td><td>Anthropic-compatible provider</td></tr><tr><td><code>config.zig</code></td><td>provider and model config</td></tr></table><h2>TUI layer</h2><table><tr><th>Module</th><th>Responsibility</th></tr><tr><td><code>tui/terminal.zig</code></td><td>terminal setup and input/output</td></tr><tr><td><code>tui/buffer.zig</code></td><td>drawable terminal buffer</td></tr><tr><td><code>tui/cell.zig</code></td><td>character cell, color, style</td></tr><tr><td><code>tui/rect.zig</code></td><td>layout rectangles</td></tr><tr><td><code>tui/widgets.zig</code></td><td>paragraphs, blocks, lists, gauges, UI pieces</td></tr><tr><td><code>tui/markdown.zig</code></td><td>Markdown rendering into TUI lines</td></tr><tr><td><code>tui/text_utils.zig</code></td><td>wrapping and width helpers</td></tr><tr><td><code>tui/icon.zig</code></td><td>icons used by the UI</td></tr></table><h2>Tool execution flow</h2><ol><li>A provider returns tool calls in a response or stream.</li><li><code>Agent.tick</code> starts and tracks tool calls.</li><li>The tool receives a <code>ToolContext</code> and <code>ToolCall</code>.</li><li>The tool may request permission, update visible status, run commands, spawn child agents, or return immediately.</li><li>The result is appended to chat and streamed back into the provider loop.</li></ol><h2>Extension flow</h2><p>Lua calls into <code>ContextFactory</code> and the app:</p><ul><li>register a provider with <code>blitz.add_provider</code></li><li>set models with <code>blitz.set_model</code> or <code>blitz.set_model_agent</code></li><li>register tools with <code>blitz.register_tool</code></li><li>attach tools to agents with <code>blitz.add_tool</code> or <code>blitz.set_agent_tools</code></li><li>add agents with <code>blitz.add_agent</code></li><li>add modes with <code>blitz.add_mode</code></li><li>register commands, key binds, event listeners, MCP servers, and LSP servers</li></ul><p>The factory resets Lua-installed definitions on reload and keeps embedded defaults available.</p></div>
+
+		<footer>
+			<hr>
+			<h5>SITE UNDER CONSTRUCTION</h5>
+			<img src="/under-construction.gif" width="90">
+		</footer>
+	</body>
+</html>

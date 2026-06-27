@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+	<head id="head">
+		<meta charset="utf-8">
+		<meta name="viewport" content="initial-scale=1">
+		<title>Blitzdenk</title>
+		<link type="text/css" rel="stylesheet" href="/style.css">
+		<link type="text/css" rel="stylesheet" href="/highlight.css">
+		<!-- mathtex -->
+		<link type="text/css" rel="stylesheet" href="/Temml-Local.css">
+		<script defer src="/temml.min.js"></script>
+		<script defer src="/render-mathtex.js"></script>
+		<!-- /mathtex -->
+		
+
+	</head>
+	<body id="body">
+		<h1 class="site-title">Blitzdenk</h1>
+		<nav>
+			<a href="/">Home</a>
+			&nbsp; • &nbsp;
+			<a href="/getting-started/">Getting Started</a>
+			&nbsp; • &nbsp;
+			<a href="/features/">Features</a>
+			&nbsp; • &nbsp;
+			<a href="/lua-api/">Lua API</a>
+			&nbsp; • &nbsp;
+			<a href="/tools/">Tools</a>
+			&nbsp; • &nbsp;
+			<a href="/architecture/">Architecture</a>
+			&nbsp; • &nbsp;
+			<a href="/zig-api/">Zig API</a>
+			&nbsp; • &nbsp;
+			<a href="/about/">About</a>
+		</nav>
+		
+	<h1>Features</h1>
+	<div><h1>Features</h1><h2>Terminal UI</h2><p><code>src/app.zig</code> owns the TUI state: chat history, input editing, command palette, status bar, notifications, permission modals, passphrase prompts, tool previews, diff rendering, and streaming responses.</p><h2>Agents and swarms</h2><p><code>src/provider/agent.zig</code> runs one agent. <code>src/provider/swarm.zig</code> manages many agents, permissions, broadcasts, active slots, cancellation, retries, and shared execution state.</p><p>Built-in agent types:</p><table><tr><th>Agent</th><th>Purpose</th></tr><tr><td><code>general</code></td><td>main coding agent with write/edit/bash/read/tasks/ask/subagent tools</td></tr><tr><td><code>explore</code></td><td>search and research agent with read/rg/skill/MCP/LSP/subagent tools</td></tr></table><p>Lua can register more agent definitions with <code>blitz.add_agent</code>.</p><h2>Providers</h2><p>Provider-neutral chat and streaming types live in <code>src/provider/adapter.zig</code>. Provider implementations live in:</p><table><tr><th>Module</th><th>Purpose</th></tr><tr><td><code>openai.zig</code></td><td>OpenAI-compatible request serialization, completion, streaming parse</td></tr><tr><td><code>anthropic.zig</code></td><td>Anthropic request serialization, completion, streaming parse</td></tr><tr><td><code>config.zig</code></td><td>model/provider config, key env vars, reasoning effort</td></tr><tr><td><code>http.zig</code></td><td>async request pool used by provider calls</td></tr></table><p>Supported provider kinds are <code>openai</code>, <code>anthropic</code>, and <code>ollama</code>.</p><h2>Lua extension</h2><p>Lua config can add tools, providers, agents, modes, commands, key binds, MCP servers, LSP servers, listeners, notifications, and queue actions.</p><p>See <a href="/lua-api/">Lua API</a>.</p><h2>Tools</h2><p>Built-in tools cover file read/write/edit, patch application, shell commands, ripgrep search, user questions, task tracking, subagents, SSH mode, skills, MCP, and LSP.</p><p>See <a href="/tools/">Tools</a>.</p><h2>Permissions</h2><p>Tools request permission through <code>ToolContext.requestPerm</code>. Permission payloads include shell commands, tool calls, ask prompts, and plan approvals. The app renders active permission requests and resolves them back into the swarm.</p><h2>Compaction</h2><p><code>src/provider/compact.zig</code> estimates context size, starts summarization before the context limit is exceeded, polls compaction progress, and installs compacted history after completion.</p><h2>Sessions and history</h2><p><code>src/session.zig</code> saves and loads session state. <code>src/app.zig</code> stores prompt history in <code>prompt_history.json</code>, keeps recent chat entries, and can queue messages for agents from Lua.</p><h2>MCP and LSP</h2><p>MCP servers are started from Lua config and their remote tools become Blitzdenk tools. LSP servers are also started from Lua and exposed through one <code>lsp</code> tool with operations for hover, definitions, references, document symbols, and workspace symbols.</p></div>
+
+		<footer>
+			<hr>
+			<h5>SITE UNDER CONSTRUCTION</h5>
+			<img src="/under-construction.gif" width="90">
+		</footer>
+	</body>
+</html>
