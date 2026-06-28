@@ -934,228 +934,114 @@ pub const BlitzEventDef = LuaType{
     },
 };
 
-const BlitzMcp = LuaType{ .table_def = .{ .name = "BlitzMcp", .fields = &.{
-    .{
-        .name = "add",
-        .desc = "Register an MCP stdio server. Disabled until explicitly enabled.",
-        .ty = LuaType{ .function = .{
-            .args = &.{.{ .name = "def", .ty = McpServerDef }},
-            .ret = &LuaInteger,
-            .fn_ptr = (struct {
-                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
-                    const state = L.?;
-                    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-                        _ = c.luaL_error(state, "mcp.add: expected table argument");
-                        return 0;
-                    }
+const BlitzMcp = LuaType{
+    .table_def = .{
+        .name = "BlitzMcp",
+        .fields = &.{
+            .{
+                .name = "add",
+                .desc = "Register an MCP stdio server. Disabled until explicitly enabled.",
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{.{ .name = "def", .ty = McpServerDef }},
+                        .ret = &LuaInteger,
+                        .fn_ptr = LuaFnBind((struct {
+                            const Args = struct {
+                                name: []const u8,
+                                command: []const u8,
+                                args: [][]const u8,
+                                tools_prefix: []const u8,
+                            };
 
-                    const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "mcp.add: vm not initialized");
-                        return 0;
-                    };
-                    const vm = &a.lua_vm;
-                    if (vm.mcp_entries.items.len >= MAX_LUA_MCP_SERVERS) {
-                        _ = c.luaL_error(state, "mcp.add: max servers reached (%d)", @as(c_int, MAX_LUA_MCP_SERVERS));
-                        return 0;
-                    }
+                            fn lua_fn(a: *r.app.App, args: Args) !u32 {
+                                try a.lua_vm.mcp_entries.appendBounded(LuaMcpServerEntry{
+                                    .name = args.name,
+                                    .command = args.command,
+                                    .args = args.args,
+                                    .tools_prefix = args.tools_prefix,
+                                });
 
-                    var entry: LuaMcpServerEntry = .{};
-                    entry.name_len = getStringField(state, 1, "name", &entry.name) orelse {
-                        _ = c.luaL_error(state, "mcp.add: 'name' must be a string (max %d)", @as(c_int, entry.name.len));
-                        return 0;
-                    };
-                    entry.command_len = getStringField(state, 1, "command", &entry.command) orelse {
-                        _ = c.luaL_error(state, "mcp.add: 'command' must be a string (max %d)", @as(c_int, entry.command.len));
-                        return 0;
-                    };
-
-                    _ = c.lua_getfield(state, 1, "transport");
-                    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
-                        var len: usize = 0;
-                        const ptr = c.lua_tolstring(state, -1, &len);
-                        if (!std.mem.eql(u8, ptr[0..len], "stdio")) {
-                            c.lua_pop(state, 1);
-                            _ = c.luaL_error(state, "mcp.add: only transport='stdio' is supported");
-                            return 0;
-                        }
-                    }
-                    c.lua_pop(state, 1);
-
-                    if (getStringField(state, 1, "tools_prefix", &entry.tools_prefix)) |len| {
-                        entry.tools_prefix_len = len;
-                    } else {
-                        var w = std.Io.Writer.fixed(&entry.tools_prefix);
-                        w.print("mcp_{s}_", .{entry.nameSlice()}) catch {
-                            _ = c.luaL_error(state, "mcp.add: generated tools_prefix too long");
-                            return 0;
-                        };
-                        entry.tools_prefix_len = w.end;
-                    }
-
-                    _ = c.lua_getfield(state, 1, "args");
-                    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
-                        const len = c.lua_rawlen(state, -1);
-                        if (len > MAX_LUA_MCP_ARGS) {
-                            c.lua_pop(state, 1);
-                            _ = c.luaL_error(state, "mcp.add: too many args (max %d)", @as(c_int, MAX_LUA_MCP_ARGS));
-                            return 0;
-                        }
-                        for (1..len + 1) |i| {
-                            _ = c.lua_rawgeti(state, -1, @intCast(i));
-                            if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-                                c.lua_pop(state, 2);
-                                _ = c.luaL_error(state, "mcp.add: args[%d] must be a string", @as(c_int, @intCast(i)));
-                                return 0;
+                                return @intCast(a.lua_vm.mcp_entries.items.len);
                             }
-                            var arg_len: usize = 0;
-                            const arg_ptr = c.lua_tolstring(state, -1, &arg_len);
-                            if (arg_len > entry.args[i - 1].len) {
-                                c.lua_pop(state, 2);
-                                _ = c.luaL_error(state, "mcp.add: args[%d] too long", @as(c_int, @intCast(i)));
-                                return 0;
+                        }).lua_fn, "add"),
+                    },
+                },
+            },
+            .{
+                .name = "enable",
+                .desc = "Enable an MCP server for this session.",
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{.{ .name = "mcp_id", .ty = LuaType.integer }},
+                        .fn_ptr = LuaFnBind((struct {
+                            fn lua_fn(a: *r.app.App, mcp_id: u32) !void {
+                                const vm = &a.lua_vm;
+                                if (mcp_id == 0 or mcp_id > vm.mcp_entries.items.len) return error.InvalidMcpId;
+                                vm.mcp_entries.items[mcp_id - 1].enabled = true;
+                                try a.cmd_queue.append(a.io, .reload_mcp);
                             }
-                            @memcpy(entry.args[i - 1][0..arg_len], arg_ptr[0..arg_len]);
-                            entry.arg_lens[i - 1] = @intCast(arg_len);
-                            entry.args_len += 1;
-                            c.lua_pop(state, 1);
-                        }
-                    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
-                        c.lua_pop(state, 1);
-                        _ = c.luaL_error(state, "mcp.add: 'args' must be a table of strings");
-                        return 0;
-                    }
-                    c.lua_pop(state, 1);
-
-                    vm.mcp_entries.appendAssumeCapacity(entry);
-                    c.lua_pushinteger(state, @intCast(vm.mcp_entries.items.len));
-                    return 1;
-                }
-            }).lua_fn,
-        } },
-    },
-    .{
-        .name = "enable",
-        .desc = "Enable an MCP server for this session.",
-        .ty = LuaType{
-            .function = .{
-                .args = &.{.{ .name = "mcp_id", .ty = LuaType.integer }},
-                .fn_ptr = LuaFnBind((struct {
-                    fn lua_fn(a: *r.app.App, mcp_id: u32) !void {
-                        const vm = &a.lua_vm;
-                        if (mcp_id == 0 or mcp_id > vm.mcp_entries.items.len) return error.InvalidMcpId;
-                        vm.mcp_entries.items[mcp_id - 1].enabled = true;
-                        try a.cmd_queue.append(a.io, .reload_mcp);
-                    }
-                }).lua_fn, "mcp.enable"),
+                        }).lua_fn, "mcp.enable"),
+                    },
+                },
             },
         },
     },
-} } };
+};
 
-const BlitzLsp = LuaType{ .table_def = .{ .name = "BlitzLsp", .fields = &.{
-    .{
-        .name = "add",
-        .desc = "Register an LSP stdio server. Disabled until explicitly enabled.",
-        .ty = LuaType{ .function = .{
-            .args = &.{.{ .name = "def", .ty = LspServerDef }},
-            .ret = &LuaInteger,
-            .fn_ptr = (struct {
-                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
-                    const state = L.?;
-                    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-                        _ = c.luaL_error(state, "lsp.add: expected table argument");
-                        return 0;
-                    }
+const BlitzLsp = LuaType{
+    .table_def = .{
+        .name = "BlitzLsp",
+        .fields = &.{
+            .{
+                .name = "add",
+                .desc = "Register an LSP stdio server. Disabled until explicitly enabled.",
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{.{ .name = "def", .ty = LspServerDef }},
+                        .ret = &LuaInteger,
+                        .fn_ptr = LuaFnBind((struct {
+                            const Args = struct {
+                                name: []const u8,
+                                command: []const u8,
+                                args: ?[][]const u8,
+                                language_id: ?[]const u8,
+                                root: ?[]const u8,
+                            };
+                            fn lua_fn(a: *r.app.App, args: Args) !u32 {
+                                try a.lua_vm.lsp_entries.appendBounded(.{
+                                    .name = args.name,
+                                    .args = args.args orelse &.{},
+                                    .root = args.root orelse "",
+                                    .language_id = args.language_id orelse "",
+                                    .command = args.command,
+                                });
 
-                    const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "lsp.add: vm not initialized");
-                        return 0;
-                    };
-                    const vm = &a.lua_vm;
-                    if (vm.lsp_entries.items.len >= MAX_LUA_LSP_SERVERS) {
-                        _ = c.luaL_error(state, "lsp.add: max servers reached (%d)", @as(c_int, MAX_LUA_LSP_SERVERS));
-                        return 0;
-                    }
-
-                    var entry: LuaLspServerEntry = .{};
-                    entry.name_len = getStringField(state, 1, "name", &entry.name) orelse blk: {
-                        if (getStringField(state, 1, "alias", &entry.name)) |len| break :blk len;
-                        _ = c.luaL_error(state, "lsp.add: 'name' must be a string (max %d)", @as(c_int, entry.name.len));
-                        return 0;
-                    };
-                    entry.command_len = getStringField(state, 1, "command", &entry.command) orelse {
-                        _ = c.luaL_error(state, "lsp.add: 'command' must be a string (max %d)", @as(c_int, entry.command.len));
-                        return 0;
-                    };
-                    entry.root_len = getStringField(state, 1, "root", &entry.root) orelse blk: {
-                        entry.root[0] = '.';
-                        break :blk 1;
-                    };
-                    entry.language_id_len = getStringField(state, 1, "language_id", &entry.language_id) orelse blk: {
-                        const fallback = "plaintext";
-                        @memcpy(entry.language_id[0..fallback.len], fallback);
-                        break :blk fallback.len;
-                    };
-
-                    _ = c.lua_getfield(state, 1, "args");
-                    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
-                        const len = c.lua_rawlen(state, -1);
-                        if (len > MAX_LUA_LSP_ARGS) {
-                            c.lua_pop(state, 1);
-                            _ = c.luaL_error(state, "lsp.add: too many args (max %d)", @as(c_int, MAX_LUA_LSP_ARGS));
-                            return 0;
-                        }
-                        for (1..len + 1) |i| {
-                            _ = c.lua_rawgeti(state, -1, @intCast(i));
-                            if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-                                c.lua_pop(state, 2);
-                                _ = c.luaL_error(state, "lsp.add: args[%d] must be a string", @as(c_int, @intCast(i)));
-                                return 0;
+                                return @intCast(a.lua_vm.lsp_entries.items.len);
                             }
-                            var arg_len: usize = 0;
-                            const arg_ptr = c.lua_tolstring(state, -1, &arg_len);
-                            if (arg_len > entry.args[i - 1].len) {
-                                c.lua_pop(state, 2);
-                                _ = c.luaL_error(state, "lsp.add: args[%d] too long", @as(c_int, @intCast(i)));
-                                return 0;
+                        }).lua_fn, "add"),
+                    },
+                },
+            },
+            .{
+                .name = "enable",
+                .desc = "Enable an LSP server for this session.",
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{.{ .name = "lsp_id", .ty = LuaType.integer }},
+                        .fn_ptr = LuaFnBind((struct {
+                            fn lua_fn(a: *r.app.App, lsp_id: u32) !void {
+                                const vm = &a.lua_vm;
+                                if (lsp_id == 0 or lsp_id > vm.lsp_entries.items.len) return error.InvalidLspId;
+                                vm.lsp_entries.items[lsp_id - 1].enabled = true;
+                                try a.cmd_queue.append(a.io, .reload_lsp);
                             }
-                            @memcpy(entry.args[i - 1][0..arg_len], arg_ptr[0..arg_len]);
-                            entry.arg_lens[i - 1] = @intCast(arg_len);
-                            entry.args_len += 1;
-                            c.lua_pop(state, 1);
-                        }
-                    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
-                        c.lua_pop(state, 1);
-                        _ = c.luaL_error(state, "lsp.add: 'args' must be a table of strings");
-                        return 0;
-                    }
-                    c.lua_pop(state, 1);
-
-                    vm.lsp_entries.appendAssumeCapacity(entry);
-                    c.lua_pushinteger(state, @intCast(vm.lsp_entries.items.len));
-                    return 1;
-                }
-            }).lua_fn,
-        } },
-    },
-    .{
-        .name = "enable",
-        .desc = "Enable an LSP server for this session.",
-        .ty = LuaType{
-            .function = .{
-                .args = &.{.{ .name = "lsp_id", .ty = LuaType.integer }},
-                .fn_ptr = LuaFnBind((struct {
-                    fn lua_fn(a: *r.app.App, lsp_id: u32) !void {
-                        const vm = &a.lua_vm;
-                        if (lsp_id == 0 or lsp_id > vm.lsp_entries.items.len) return error.InvalidLspId;
-                        vm.lsp_entries.items[lsp_id - 1].enabled = true;
-                        try a.cmd_queue.append(a.io, .reload_lsp);
-                    }
-                }).lua_fn, "lsp.enable"),
+                        }).lua_fn, "lsp.enable"),
+                    },
+                },
             },
         },
     },
-} } };
+};
 
 const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
     .{
@@ -1943,60 +1829,20 @@ const MAX_LUA_LSP_ARGS = 32;
 const STDOUT_BUF_CAP = 1024 * 1024 * 16;
 
 pub const LuaMcpServerEntry = struct {
-    name: [128]u8 = undefined,
-    name_len: usize = 0,
-    command: [512]u8 = undefined,
-    command_len: usize = 0,
-    args: [MAX_LUA_MCP_ARGS][256]u8 = undefined,
-    arg_lens: [MAX_LUA_MCP_ARGS]u16 = @splat(0),
-    args_len: usize = 0,
-    tools_prefix: [128]u8 = undefined,
-    tools_prefix_len: usize = 0,
+    name: []const u8,
+    command: []const u8,
+    args: [][]const u8,
+    tools_prefix: []const u8,
     enabled: bool = false,
-
-    pub fn nameSlice(self: *const LuaMcpServerEntry) []const u8 {
-        return self.name[0..self.name_len];
-    }
-    pub fn commandSlice(self: *const LuaMcpServerEntry) []const u8 {
-        return self.command[0..self.command_len];
-    }
-    pub fn argSlice(self: *const LuaMcpServerEntry, i: usize) []const u8 {
-        return self.args[i][0..self.arg_lens[i]];
-    }
-    pub fn toolsPrefixSlice(self: *const LuaMcpServerEntry) []const u8 {
-        return self.tools_prefix[0..self.tools_prefix_len];
-    }
 };
 
 pub const LuaLspServerEntry = struct {
-    name: [128]u8 = undefined,
-    name_len: usize = 0,
-    command: [512]u8 = undefined,
-    command_len: usize = 0,
-    args: [MAX_LUA_LSP_ARGS][256]u8 = undefined,
-    arg_lens: [MAX_LUA_LSP_ARGS]u16 = @splat(0),
-    args_len: usize = 0,
-    root: [512]u8 = undefined,
-    root_len: usize = 0,
-    language_id: [64]u8 = undefined,
-    language_id_len: usize = 0,
+    name: []const u8,
+    command: []const u8,
+    args: [][]const u8,
+    root: []const u8,
+    language_id: []const u8,
     enabled: bool = false,
-
-    pub fn nameSlice(self: *const LuaLspServerEntry) []const u8 {
-        return self.name[0..self.name_len];
-    }
-    pub fn commandSlice(self: *const LuaLspServerEntry) []const u8 {
-        return self.command[0..self.command_len];
-    }
-    pub fn argSlice(self: *const LuaLspServerEntry, i: usize) []const u8 {
-        return self.args[i][0..self.arg_lens[i]];
-    }
-    pub fn rootSlice(self: *const LuaLspServerEntry) []const u8 {
-        return self.root[0..self.root_len];
-    }
-    pub fn languageIdSlice(self: *const LuaLspServerEntry) []const u8 {
-        return self.language_id[0..self.language_id_len];
-    }
 };
 
 pub const LuaVm = struct {
@@ -2241,13 +2087,11 @@ pub const LuaVm = struct {
         var out_i: usize = 0;
         for (self.mcp_entries.items) |*entry| {
             if (!entry.enabled) continue;
-            const args = try alloc.alloc([]const u8, entry.args_len);
-            for (0..entry.args_len) |j| args[j] = entry.argSlice(j);
             out[out_i] = .{
-                .name = entry.nameSlice(),
-                .command = entry.commandSlice(),
-                .args = args,
-                .tools_prefix = entry.toolsPrefixSlice(),
+                .name = entry.name,
+                .command = entry.command,
+                .args = entry.args,
+                .tools_prefix = entry.tools_prefix,
             };
             out_i += 1;
         }
@@ -2266,14 +2110,12 @@ pub const LuaVm = struct {
         var out_i: usize = 0;
         for (self.lsp_entries.items) |*entry| {
             if (!entry.enabled) continue;
-            const args = try alloc.alloc([]const u8, entry.args_len);
-            for (0..entry.args_len) |j| args[j] = entry.argSlice(j);
             out[out_i] = .{
-                .name = entry.nameSlice(),
-                .command = entry.commandSlice(),
-                .args = args,
-                .root = entry.rootSlice(),
-                .language_id = entry.languageIdSlice(),
+                .name = entry.name,
+                .command = entry.command,
+                .args = entry.args,
+                .root = entry.root,
+                .language_id = entry.language_id,
             };
             out_i += 1;
         }
@@ -2312,22 +2154,22 @@ pub const LuaVm = struct {
         var mcp_names: [MAX_LUA_MCP_SERVERS][]const u8 = undefined;
         var lsp_names: [MAX_LUA_LSP_SERVERS][]const u8 = undefined;
 
-        for (self.mcp_entries.items, 0..) |*entry, i| mcp_names[i] = entry.nameSlice();
-        for (self.lsp_entries.items, 0..) |*entry, i| lsp_names[i] = entry.nameSlice();
+        for (self.mcp_entries.items, 0..) |*entry, i| mcp_names[i] = entry.name;
+        for (self.lsp_entries.items, 0..) |*entry, i| lsp_names[i] = entry.name;
 
         try factory.setAvailableSystems(mcp_names[0..self.mcp_entries.items.len], lsp_names[0..self.lsp_entries.items.len]);
     }
 
     fn findMcp(self: *LuaVm, name: []const u8) ?*LuaMcpServerEntry {
         for (self.mcp_entries.items) |*entry| {
-            if (std.mem.eql(u8, entry.nameSlice(), name)) return entry;
+            if (std.mem.eql(u8, entry.name, name)) return entry;
         }
         return null;
     }
 
     fn findLsp(self: *LuaVm, name: []const u8) ?*LuaLspServerEntry {
         for (self.lsp_entries.items) |*entry| {
-            if (std.mem.eql(u8, entry.nameSlice(), name)) return entry;
+            if (std.mem.eql(u8, entry.name, name)) return entry;
         }
         return null;
     }
