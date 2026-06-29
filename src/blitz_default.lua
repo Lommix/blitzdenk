@@ -1,7 +1,7 @@
 -- Blitzdenk Default CFG HOTRELOAD active
 
 -- Context edge used for CTX:% in the statusbar and auto-compaction.
-blitz.set_compact_edge(128000)
+blitz.set_compact_edge(200000)
 
 -- Optional custom statusbar renderer. The UI calls this only when Lua is free
 -- and otherwise renders the last returned value.
@@ -53,7 +53,7 @@ blitz.set_model_agent(blitz.AGENT_EXPLORE, model, "low", novita)
 -----------------------------------------------------------------------------
 --- smart mode
 blitz.bind("<C-u>", function()
-	blitz.set_model("deepseek/deepseek-v4-pro", novita)
+	blitz.set_model_agent(blitz.AGENT_GENERAL, "deepseek/deepseek-v4-pro", "max", novita)
 end)
 
 -- Add custom bindings, using vim style keybind strings
@@ -73,17 +73,21 @@ blitz.bind("<C-l>", function()
 end)
 
 -- Add custom commands, args is the remaining input string
-blitz.add_command(":greet", function(args)
+blitz.add_command(":plan", function(rem)
 	blitz.queue.reset_session()
 	blitz.queue.spawn_agent({
-		prompt = "Your job is the to greet " .. args,
+		prompt = [[
+        Before making ANY edits, explain your implementation plan to the user and await his go. If the a plan
+        requires a unexpected structural change the user may have overlooked use your ask tool with options on how to handle
+        this case.
+
+        This is the request: "
+
+        ]] .. rem,
 	})
 end)
 
 --- Skills: just create a `skills` dir in this at this CWD. Put your markdown skills there
---- Docs and skills:
-
--- blitz.add_doc("zig std", "zig std lib source code", "/usr/lib/zig/std")
 
 --- MCP support
 --- register first. On enable, MCP tools are added to your current session
@@ -102,7 +106,7 @@ local playmcp = blitz.mcp.add({
 
 local is_active = false
 
--- -- custom chat command
+-- Agents can enable MCP servers with the `start_mcp` tool, or you can make it manually
 blitz.add_command(":browser", function()
 	if is_active == true then
 		return
@@ -114,33 +118,10 @@ end)
 ]]
 --
 
--- compact after 128k context size
-blitz.set_compact_edge(128000)
-
--- Per-agent tool overrides (full replace). Omit a call to keep defaults.
--- You need to overwrite this, if you want to add your custom tools
-blitz.set_agent_tools(blitz.AGENT_GENERAL, {
-	blitz.tools.BASH,
-	blitz.tools.CANCEL_AGENT,
-	blitz.tools.AWAIT_AGENT,
-	blitz.tools.SEND_MESSAGE_TO_AGENT,
-	blitz.tools.READ,
-	blitz.tools.LIST_TASKS,
-	blitz.tools.UPDATE_TASK_STATE,
-	blitz.tools.CREATE_TASK,
-	blitz.tools.ASK,
-	blitz.tools.START_MCP,
-	blitz.tools.START_LSP,
-	-- blitz.tools.PATCH, -- Some models(GPT) may prefer codex style patch for (edit,write,delte,move).
-	blitz.tools.WRITE,
-	blitz.tools.EDIT,
-	"lua_repl", -- your tool by name
-})
-
 -- CUSTOM TOOLS
 -----------------------------------------------------------------------------
 -- Example Toole: lua repl tool
-blitz.register_tool({
+local lua_repl = blitz.register_tool({
 	name = "lua_repl",
 	description = "Execute arbitrary Lua code and return the result. Use this tool for any math calculations",
 	args = {
@@ -161,6 +142,28 @@ blitz.register_tool({
 
 		return blitz.ok(tostring(result or "nil"))
 	end,
+})
+
+-- Per-agent tool overrides (full replace). Omit a call to keep defaults.
+blitz.set_agent_tools(blitz.AGENT_GENERAL, {
+	blitz.tools.BASH,
+	blitz.tools.CANCEL_BACKGROUND,
+	blitz.tools.READ,
+	blitz.tools.WRITE,
+	blitz.tools.EDIT,
+	blitz.tools.LIST_TASKS,
+	blitz.tools.UPDATE_TASK_STATE,
+	blitz.tools.CREATE_TASK,
+	blitz.tools.ASK,
+	blitz.tools.AGENT,
+	blitz.tools.AWAIT_AGENT,
+	blitz.tools.CANCEL_AGENT,
+	blitz.tools.SEND_MESSAGE_TO_AGENT,
+	blitz.tools.RIPGREP,
+	blitz.tools.LOADSKILL,
+	blitz.tools.START_LSP,
+	blitz.tools.START_MCP,
+	lua_repl,
 })
 
 -- CUSTOM RENDER
