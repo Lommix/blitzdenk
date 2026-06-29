@@ -45,7 +45,7 @@ pub fn LuaFnBind(
 
     return struct {
         fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
-            const state = L.?;
+            const state = L orelse @panic("lua vm gone? What happened");
 
             var args: Args = undefined;
             var offset: c_int = 1;

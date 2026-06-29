@@ -94,8 +94,6 @@
 ---@field START_MCP string
 ---@field START_LSP string
 ---@field LSP string
----remove test function
----@field remove fun(value: string)
 
 ---@class BlitzEventDef
 ---Emitted after the active session is reset.

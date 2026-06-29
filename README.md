@@ -28,3 +28,8 @@ cp zig-out/bin/blitz ~/.local/bin/blitz
 [checkout the examples](https://lommix.github.io/blitzdenk/)
 
 [or my configuration](https://github.com/Lommix/dotfiles/blob/master/config/blitzdenk/blitz.lua).
+
+## Contribution
+
+No issue no merge. Open source, closed contribution. Simple bug fixes are welcome. In a world of slop, I don't have the time
+to look at yours. This project is mostly hand coded. I find read only agents far more useful than code generation.

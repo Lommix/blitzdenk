@@ -200,6 +200,12 @@ pub const Role = enum { system, user, agent };
 pub const Message = struct {
     role: Role,
     parts: []ContentPart,
+    flags: Flags = .{},
+
+    pub const Flags = packed struct(u8) {
+        allow_export: bool = true,
+        _pad: u7 = 0,
+    };
 
     pub fn clone(self: *const Message, gpa: std.mem.Allocator) !Message {
         var msg: Message = undefined;
