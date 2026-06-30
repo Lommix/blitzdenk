@@ -5,9 +5,17 @@ const app = @import("app.zig");
 const prv = @import("provider");
 const util = @import("util.zig");
 
-pub fn genSessionId(buf: []u8) !void {
-    _ = buf; // autofix
-}
+pub const Session = struct {
+    agent_id: prv.Swarm.AgentId,
+    chat: std.ArrayList(app.ChatEntry) = .empty,
+    // tool status
+    scroll_offset: usize = 0,
+    flags: Flags = .{},
+
+    pub const Flags = packed struct {
+        auto_scroll: bool = true,
+    };
+};
 
 pub const SaveState = struct {
     chat: []const prv.adapter.Message,

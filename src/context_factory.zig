@@ -892,5 +892,6 @@ test "system_prompt" {
     defer factory.prompt_arena.deinit();
 
     const prompt = try factory.build_system_prompt(alloc, ".", .general);
-    std.debug.print("{s}", .{prompt});
+    _ = prompt; // autofix
+    // std.debug.print("{s}", .{prompt});
 }

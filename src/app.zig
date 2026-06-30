@@ -8,7 +8,7 @@ pub const FULL_MODE_REMINDER_AFTER_USER_MSG_COUNT = 4;
 pub const PROMPT_HISTORY_FILENAME = "prompt_history.json";
 pub const MAX_HISTORY = 32;
 pub const CONTEXT_LIMIT = 124 * 1024;
-const COMMAND_COMPLETION_ROWS = 4;
+const COMMAND_COMPLETION_ROWS = 8;
 
 const builtin_command_completions: []const []const u8 = &.{
     ":clear",
@@ -720,6 +720,33 @@ pub const App = struct {
 
         // Statusbar
         renderStatusBar(app, _status_area, buf);
+
+        // command completion
+        if (app.input_buffer.items.len > 0) {
+            const completions = commandCompletions(app, app.input_buffer.items, app.input_cursor);
+            var p = r.tui.Paragraph{};
+            p.border = .single;
+            p.style.bg = app.theme.overlay_dark;
+
+            for (completions) |cmp| {
+                if (cmp.len > 0) {
+                    p.appendText(frame_alloc, cmp, .{ .modifier = .{ .bold = true } }) catch {};
+                }
+            }
+
+            const height: u16 = @intCast(p.lines.items.len + 2);
+
+            if (p.lines.items.len > 0) {
+                const completion_area = r.tui.Rect{
+                    .x = _input_area.x + 1,
+                    .y = _input_area.y -| height + 1,
+                    .width = 32,
+                    .height = height,
+                };
+
+                p.renderSimple(frame_alloc, completion_area, buf);
+            }
+        }
     }
 
     /// Set the swarm-side state for a permission. Tools poll this state to
@@ -1364,11 +1391,6 @@ fn commandCompletions(app: *App, input: []const u8, cursor: u32) [COMMAND_COMPLE
     const prefix = commandCompletionPrefix(input, cursor);
     appendBuiltinCommandCompletions(prefix, &matches, &count);
     appendLuaCommandCompletions(app, prefix, &matches, &count);
-
-    if (count == 0 and prefix.len > 1) {
-        appendBuiltinCommandCompletions(":", &matches, &count);
-        appendLuaCommandCompletions(app, ":", &matches, &count);
-    }
 
     var rows: [COMMAND_COMPLETION_ROWS][]const u8 = [_][]const u8{""} ** COMMAND_COMPLETION_ROWS;
     for (&rows, 0..) |*row, i| row.* = matches[i] orelse "";

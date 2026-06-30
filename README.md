@@ -31,5 +31,4 @@ cp zig-out/bin/blitz ~/.local/bin/blitz
 
 ## Contribution
 
-No issue no merge. Open source, closed contribution. Simple bug fixes are welcome. In a world of slop, I don't have the time
-to look at yours. This project is mostly hand coded, even though it's about automating code.
+No issue no merge. Open source, restricted contribution. Simple bug fixes are welcome.
