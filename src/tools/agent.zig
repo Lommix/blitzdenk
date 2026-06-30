@@ -139,7 +139,13 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         "Agent spawned. Agent id: {d}",
         .{child_id.pack()},
     ) catch return r.errResult(call, "oom");
-    return r.okResult(call, text);
+
+    return .{
+        .call_id = call.id,
+        .content = text,
+        .name = call.name,
+        .comp_strat = .keep,
+    };
 }
 
 pub const SendMessageToAgent = prv.tool.Tool{

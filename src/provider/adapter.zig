@@ -13,12 +13,19 @@ pub const ToolCall = struct {
     arguments: []const u8,
 };
 
+pub const CompactionStrategy = enum {
+    truncate,
+    keep,
+    summarize,
+};
+
 pub const ToolResult = struct {
     call_id: []const u8,
     name: []const u8,
     content: []const u8,
     is_error: bool = false,
     exit_loop: bool = false,
+    comp_strat: CompactionStrategy = .truncate,
 };
 
 pub const ToolDef = struct {
