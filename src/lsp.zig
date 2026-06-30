@@ -72,7 +72,7 @@ pub const Manager = struct {
                         .description =
                         \\Query a configured language server. Use this for precise code navigation when available.
                         \\Supported ops: hover, definition, references, document_symbols, workspace_symbols.
-                        \\Lines and columns are 1-based.
+                        \\Lines are 1-based. For hover/definition/references, pass the target word on that line.
                         ,
                         .parameters_schema =
                         \\{
@@ -82,7 +82,7 @@ pub const Manager = struct {
                         \\    "op": {"type": "string", "enum": ["hover", "definition", "references", "document_symbols", "workspace_symbols"]},
                         \\    "path": {"type": "string", "description": "File path for textDocument operations"},
                         \\    "line": {"type": "number", "description": "1-based line for hover/definition/references"},
-                        \\    "column": {"type": "number", "description": "1-based column for hover/definition/references"},
+                        \\    "symbol": {"type": "string", "description": "the symbol to check for hover/definition/reference"},
                         \\    "query": {"type": "string", "description": "Workspace symbol query"},
                         \\    "include_declaration": {"type": "boolean", "default": false}
                         \\  },
@@ -142,17 +142,17 @@ pub const Manager = struct {
 
 var active_manager: ?*Manager = null;
 
-fn toolTrampoline(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
-    const Args = struct {
-        server: ?[]const u8 = null,
-        op: []const u8,
-        path: ?[]const u8 = null,
-        line: ?u32 = null,
-        column: ?u32 = null,
-        query: ?[]const u8 = null,
-        include_declaration: bool = false,
-    };
+const Args = struct {
+    server: ?[]const u8 = null,
+    op: []const u8,
+    path: ?[]const u8 = null,
+    line: ?u32 = null,
+    symbol: ?[]const u8 = null,
+    query: ?[]const u8 = null,
+    include_declaration: bool = false,
+};
 
+fn toolTrampoline(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
     const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
         .ignore_unknown_fields = true,
     }) catch return errResult(call, "invalid JSON arguments");
@@ -171,7 +171,7 @@ fn toolTrampoline(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.ada
     return r.tools.okResult(call, r.tools.truncateOutputToOwned(ctx.alloc, content, r.tools.MAX_DISPLAY_BYTES, r.tools.MAX_DISPLAY_LINES));
 }
 
-fn runOp(ctx: prv.tool.ToolContext, client: *Client, args: anytype) ![]const u8 {
+fn runOp(ctx: prv.tool.ToolContext, client: *Client, args: Args) ![]const u8 {
     if (std.mem.eql(u8, args.op, "workspace_symbols")) {
         return client.workspaceSymbols(ctx.alloc, args.query orelse "");
     }
@@ -188,7 +188,8 @@ fn runOp(ctx: prv.tool.ToolContext, client: *Client, args: anytype) ![]const u8 
     }
 
     const line = args.line orelse return error.LineRequired;
-    const column = args.column orelse 1;
+    const column = try getWordColumnOffset(ctx.alloc, &ctx.swarm.exec, resolved, line, args.symbol orelse return error.WordRequired);
+
     const pos = Position{
         .line = if (line > 0) line - 1 else 0,
         .character = if (column > 0) column - 1 else 0,
@@ -698,6 +699,70 @@ fn intField(value: *const std.json.Value, key: []const u8) ?i64 {
     };
 }
 
+fn getWordColumnOffset(alloc: std.mem.Allocator, exec: *prv.exec.CmdPool, path: []const u8, line: u32, word: []const u8) !u32 {
+    const quoted_path = try shellQuote(alloc, path);
+    defer alloc.free(quoted_path);
+    const quoted_word = try shellQuote(alloc, word);
+    defer alloc.free(quoted_word);
+
+    const command = try std.fmt.allocPrint(
+        alloc,
+        "sed -n '{d}p' {s} | grep -F -b -o -m1 -- {s} | cut -d: -f1 | awk '{{print $1 + 1}}'",
+        .{ line, quoted_path, quoted_word },
+    );
+    defer alloc.free(command);
+
+    const res = try exec.runAndWait(.{
+        .argv = &.{ "/bin/sh", "-c", command },
+        .force_local = true,
+    });
+    defer exec.alloc.free(res.stdout);
+    defer exec.alloc.free(res.stderr);
+
+    if (res.ty != .success) return error.WordColumnCommandFailed;
+    const out = std.mem.trim(u8, res.stdout, " \t\r\n");
+    if (out.len == 0) return error.WordNotFound;
+    return std.fmt.parseInt(u32, out, 10);
+}
+
+fn shellQuote(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+
+    try out.append(alloc, '\'');
+    for (s) |c| {
+        if (c == '\'') {
+            try out.appendSlice(alloc, "'\\''");
+        } else {
+            try out.append(alloc, c);
+        }
+    }
+    try out.append(alloc, '\'');
+    return out.toOwnedSlice(alloc);
+}
+
 test "parse content length" {
     try std.testing.expectEqual(@as(?usize, 12), parseContentLength("Content-Length: 12\r\n\r\n"));
+}
+
+test "word offset" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(std.testing.io, "sample.zig", .{});
+    defer file.close(std.testing.io);
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.File.Writer = .init(file, std.testing.io, &buf);
+    try writer.interface.writeAll("alpha beta\nconst needle = 1;\n");
+    try writer.interface.flush();
+
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/sample.zig", .{&tmp.sub_path});
+    defer std.testing.allocator.free(path);
+
+    var en = std.process.Environ.Map.init(std.testing.allocator);
+    defer en.deinit();
+    var pool = prv.exec.CmdPool.init(std.testing.allocator, std.testing.io, &en);
+    defer pool.deinit();
+
+    try std.testing.expectEqual(@as(u32, 7), try getWordColumnOffset(std.testing.allocator, &pool, path, 2, "needle"));
 }
