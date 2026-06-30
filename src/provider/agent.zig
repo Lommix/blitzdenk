@@ -235,6 +235,7 @@ pub const Agent = struct {
     type_idx: u8 = 0,
     state: State = .idle,
     pending_handle: ?http.RequestPool.RequestHandle = null,
+    request_start_ms: ?i64 = null,
     stream: ?apt.Stream = null,
     iteration: u32 = 0,
     max_iterations: u32 = 100,
@@ -418,6 +419,7 @@ pub const Agent = struct {
                     return .pending;
                 }
 
+                const request_start_ms = http.nowMs(self.pool.io);
                 self.pending_handle = apt.complete(
                     self.pool,
                     self.arena.allocator(),
@@ -432,12 +434,14 @@ pub const Agent = struct {
                     // Pool is full — this is backpressure, not failure. Wait
                     // and retry without consuming a retry budget.
                     error.PoolExhausted => {
+                        self.request_start_ms = null;
                         self.state = .awaiting_pool_slot;
                         self.timeout = 0;
                         return .pending;
                     },
                     else => return self.fail(err),
                 };
+                self.request_start_ms = request_start_ms;
                 self.state = .waiting_response;
                 return .pending;
             },
@@ -458,6 +462,7 @@ pub const Agent = struct {
                         self.pool.cancel(h);
                         self.pending_handle = null;
                     }
+                    self.request_start_ms = null;
                     if (self.retry_count < MAX_RETRIES) {
                         self.retry_count += 1;
                         self.last_error = err;
@@ -578,6 +583,7 @@ pub const Agent = struct {
             self.chat.addMessage(alloc, .user, &.{.{ .text = msg }}) catch {};
             self.pool.cancel(handle);
             self.pending_handle = null;
+            self.request_start_ms = null;
             return err;
         };
         const status_code: u16 = @intFromEnum(status);
@@ -592,6 +598,7 @@ pub const Agent = struct {
             self.chat.addMessage(alloc, .user, &.{.{ .text = msg }}) catch {};
             self.pool.cancel(handle);
             self.pending_handle = null;
+            self.request_start_ms = null;
             return error.EmptyResponse;
         }
 
@@ -680,6 +687,9 @@ pub const Agent = struct {
         const result = try stream.finalize(arena);
         const final_parts = filterEmptyTextParts(result.message.parts);
         self.chat.finalizeStreamingMessage(self.gpa, msg_idx, final_parts);
+        if (self.request_start_ms) |start_ms| {
+            self.chat.messages.items[msg_idx].time_ms = @max(0, http.nowMs(self.pool.io) - start_ms);
+        }
 
         if (self.swarm) |swarm| {
             // Prefer finalize's authoritative usage; fall back to last in-flight
@@ -699,6 +709,7 @@ pub const Agent = struct {
             self.pool.cancel(h);
             self.pending_handle = null;
         }
+        self.request_start_ms = null;
 
         var has_tool_calls = false;
         for (final_parts) |part| {
@@ -724,6 +735,7 @@ pub const Agent = struct {
 
     fn dropStream(self: *Agent) void {
         self.stream = null;
+        self.request_start_ms = null;
         if (self.state == .streaming_response and self.chat.messages.items.len > 0) {
             var msg = self.chat.messages.pop().?;
             msg.freeParts(self.gpa);

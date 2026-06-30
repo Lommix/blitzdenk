@@ -201,6 +201,7 @@ pub const Message = struct {
     role: Role,
     parts: []ContentPart,
     flags: Flags = .{},
+    time_ms: i64 = 0,
 
     pub const Flags = packed struct(u8) {
         allow_export: bool = true,
@@ -211,6 +212,8 @@ pub const Message = struct {
         var msg: Message = undefined;
 
         msg.role = self.role;
+        msg.flags = self.flags;
+        msg.time_ms = self.time_ms;
         var parts = try gpa.alloc(ContentPart, self.parts.len);
 
         for (0..self.parts.len) |i| {

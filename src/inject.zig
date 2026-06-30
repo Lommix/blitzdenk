@@ -65,7 +65,12 @@ pub const InjectionsHooks = struct {
 
         var parts = try alloc.alloc(r.prv.adapter.ContentPart, 1);
         parts[0] = .{ .text = w.toArrayList().items };
-        try agent.chat.addMessage(alloc, .user, parts);
+
+        try agent.chat.messages.append(alloc, .{
+            .role = .user,
+            .parts = parts,
+            .flags = .{ .allow_export = false },
+        });
     }
 };
 
