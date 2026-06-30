@@ -219,6 +219,7 @@ const ToolStatusStore = struct {
 };
 
 pub const App = struct {
+    gpa: std.mem.Allocator,
     /// app arena,
     arena_app: prv.ThreadSafeArena,
     /// session arena,
@@ -290,6 +291,7 @@ pub const App = struct {
         errdefer lua_vm.deinit();
 
         return App{
+            .gpa = gpa,
             .arena_app = .init(gpa, io),
             .arena_session = .init(gpa, io),
             .arena_streaming_preview = .init(gpa, io),

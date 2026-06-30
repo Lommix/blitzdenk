@@ -24,8 +24,17 @@ pub const SaveState = struct {
 
 pub fn saveSession(a: *const app.App, w: *std.Io.Writer) !void {
     const agent = a.mainAgent() orelse return error.NoActiveSessionToSave;
+
+    var out = std.ArrayList(prv.adapter.Message).empty;
+    defer out.deinit(a.gpa);
+
+    for (agent.chat.messages.items) |msg| {
+        if (!msg.flags.allow_export) continue;
+        try out.append(a.gpa, msg);
+    }
+
     const save = SaveState{
-        .chat = agent.chat.messages.items[0..],
+        .chat = out.items[0..],
         .chat_render = a.chat_entries.items,
     };
 
