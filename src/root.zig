@@ -1,4 +1,4 @@
-pub const VERSION = "0.2.2";
+pub const VERSION = "0.3.1";
 
 pub const app = @import("app.zig");
 pub const prv = @import("provider");
