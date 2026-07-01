@@ -19,7 +19,7 @@ pub const InjectionsHooks = struct {
 
         inline for (.{
             &inject_mode_information,
-            &inject_task_information,
+            &inject_todo_information,
             &inject_budget_information,
             &inject_processes_information,
             &inject_bg_agents_information,
@@ -135,25 +135,25 @@ fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.prv.age
     }
 }
 
-fn inject_task_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
-    var has_tasks: bool = false;
-    if (agent.task_list.tryLock(app.swarm.pool.io)) |g| {
+fn inject_todo_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
+    var has_todos: bool = false;
+    if (agent.todo_list.tryLock(app.swarm.pool.io)) |g| {
         defer g.unlock();
         var unfinished: u32 = 0;
 
-        for (g.ptr.tasks[0..g.ptr.count]) |t| {
+        for (g.ptr.todos[0..g.ptr.count]) |t| {
             if (t.state != .done) unfinished += 1;
         }
 
-        for (g.ptr.tasks[0..g.ptr.count]) |t| {
+        for (g.ptr.todos[0..g.ptr.count]) |t| {
             switch (t.state) {
                 .in_progress => {
                     try w.print("[ACTIVE TODO] id:{d} subject: {s}\n{s}\n", .{ t.id, t.subject, t.description });
-                    has_tasks = true;
+                    has_todos = true;
                 },
                 .pending => {
                     try w.print("[PENDING TODO] id:{d} subject: {s}\n", .{ t.id, t.subject });
-                    has_tasks = true;
+                    has_todos = true;
                 },
                 else => {},
             }

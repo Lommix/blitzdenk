@@ -80,9 +80,9 @@
 ---@field EDIT string
 ---@field PATCH string
 ---@field AGENT string
----@field LIST_TASKS string
----@field UPDATE_TASK_STATE string
----@field CREATE_TASK string
+---@field LIST_TODOS string
+---@field UPDATE_TODO_STATE string
+---@field CREATE_TODO string
 ---@field ASK string
 ---@field ENTER_SSH string
 ---@field EXIT_SSH string

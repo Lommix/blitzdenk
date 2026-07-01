@@ -54,19 +54,19 @@ pub const BackgroundAgentList = struct {
     list: std.ArrayList(BackgroundAgent) = .empty,
 };
 
-pub const TaskState = enum {
+pub const TodoState = enum {
     pending,
     in_progress,
     done,
 
-    pub fn fromString(s: []const u8) ?TaskState {
+    pub fn fromString(s: []const u8) ?TodoState {
         if (std.mem.eql(u8, s, "pending")) return .pending;
         if (std.mem.eql(u8, s, "in_progress")) return .in_progress;
         if (std.mem.eql(u8, s, "done")) return .done;
         return null;
     }
 
-    pub fn toString(self: TaskState) []const u8 {
+    pub fn toString(self: TodoState) []const u8 {
         return switch (self) {
             .pending => "pending",
             .in_progress => "in_progress",
@@ -74,7 +74,7 @@ pub const TaskState = enum {
         };
     }
 
-    pub fn icon(self: TaskState) []const u8 {
+    pub fn icon(self: TodoState) []const u8 {
         return switch (self) {
             .pending => "[ ]",
             .in_progress => "[~]",
@@ -83,21 +83,21 @@ pub const TaskState = enum {
     }
 };
 
-pub const Task = struct {
+pub const Todo = struct {
     id: u32,
     subject: []const u8,
     description: []const u8,
-    state: TaskState,
+    state: TodoState,
 };
 
-pub const TaskList = struct {
-    pub const max_tasks = 64;
-    tasks: [max_tasks]Task = undefined,
+pub const TodoList = struct {
+    pub const max_todos = 64;
+    todos: [max_todos]Todo = undefined,
     count: usize = 0,
     next_id: u32 = 1,
 
-    pub fn findById(self: *TaskList, id: u32) ?*Task {
-        for (self.tasks[0..self.count]) |*t| {
+    pub fn findById(self: *TodoList, id: u32) ?*Todo {
+        for (self.todos[0..self.count]) |*t| {
             if (t.id == id) return t;
         }
         return null;
@@ -246,7 +246,7 @@ pub const Agent = struct {
     file_stats: Locked(FileStats) = .{},
     bg_tasks: Locked(BackgroundTaskList) = .{},
     bg_agents: Locked(BackgroundAgentList) = .{},
-    task_list: Locked(TaskList) = .{},
+    todo_list: Locked(TodoList) = .{},
     retry_count: u32 = 0,
     timeout: f32 = 0,
     session_id: [32]u8,
@@ -300,7 +300,7 @@ pub const Agent = struct {
         self.file_stats = .{};
         self.bg_tasks = .{};
         self.bg_agents = .{};
-        self.task_list = .{};
+        self.todo_list = .{};
         self.retry_count = 0;
         self.timeout = 0;
         self.last_input_context_size = 0;
