@@ -1438,7 +1438,7 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
 
     const text = app.inputSlice();
     const cursor: usize = app.input_cursor;
-    const cursor_style: r.tui.Style = .{ .fg = .black, .bg = border_color };
+    const cursor_style: r.tui.Style = .{ .fg = app.theme.text, .bg = border_color };
 
     var cursor_visual_row: usize = 0;
     var accumulated_rows: usize = 0;
@@ -1511,7 +1511,7 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
     buf.set(area.x + 1, area.y + 1, .{ .char = '❯' });
     if (app.screenshot_buf != null) {
         buf.set(area.x + 1, area.y, .{});
-        buf.setString(area.x, area.y, r.tui.icon.eye, .{ .fg = .green });
+        buf.setString(area.x, area.y, r.tui.icon.eye, .{ .fg = app.theme.ok });
     }
 }
 
@@ -1810,12 +1810,12 @@ fn buildToolGroupParagraph(
         const result_opt: ?prv.adapter.ToolResult = findToolResult(agent, call.call_id) orelse agent.tool_call_done.get(call.call_id);
         if (result_opt) |result| {
             if (result.is_error) {
-                try line.pushSpan(arena, .{ .content = r.tui.icon.fail, .style = .{ .fg = .red, .modifier = .{ .bold = true } } });
+                try line.pushSpan(arena, .{ .content = r.tui.icon.fail, .style = .{ .fg = app.theme.err, .modifier = .{ .bold = true } } });
             } else {
-                try line.pushSpan(arena, .{ .content = r.tui.icon.ok, .style = .{ .fg = .green, .modifier = .{ .bold = true } } });
+                try line.pushSpan(arena, .{ .content = r.tui.icon.ok, .style = .{ .fg = app.theme.ok, .modifier = .{ .bold = true } } });
             }
         } else {
-            try line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = .white } });
+            try line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = app.theme.text } });
         }
 
         const status_agent = &statuses.ptr.agents[call.agent_id.index];
@@ -1897,8 +1897,8 @@ fn buildCompactionIndicatorParagraph(arena: std.mem.Allocator, app: *App) r.tui.
     };
 
     var line = r.tui.Line{};
-    line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = .white } }) catch {};
-    line.pushText(arena, " compacting context", .{ .fg = Theme.default.muted, .modifier = .{ .bold = true } }) catch {};
+    line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = app.theme.text } }) catch {};
+    line.pushText(arena, " compacting context", .{ .fg = app.theme.muted, .modifier = .{ .bold = true } }) catch {};
     p.lines.append(arena, line) catch {};
 
     return p;
@@ -2004,7 +2004,7 @@ fn buildDiffParagraph(arena: std.mem.Allocator, d: ChatPart.DiffEntry) r.tui.Par
         const dl_info: struct { prefix: []const u8, fg: r.tui.Color, bg: r.tui.Color } = switch (dl.kind) {
             .deletion => .{ .prefix = "- ", .fg = theme.diff_remove, .bg = theme.diff_surface },
             .addition => .{ .prefix = "+ ", .fg = theme.diff_add, .bg = theme.diff_surface },
-            .context => .{ .prefix = "  ", .fg = .reset, .bg = theme.diff_surface },
+            .context => .{ .prefix = "  ", .fg = theme.text, .bg = theme.diff_surface },
             .header => .{ .prefix = "@ ", .fg = theme.info, .bg = .reset },
         };
         const num_str = if (dl.line_number) |n|
@@ -2272,7 +2272,7 @@ fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: 
     };
 
     var l = r.tui.Line{};
-    l.pushText(alloc, line, .{ .fg = .cyan }) catch {};
+    l.pushText(alloc, line, .{ .fg = app.theme.info }) catch {};
     para.lines.append(alloc, l) catch {};
     para.render(alloc, area, area, buf);
 }
