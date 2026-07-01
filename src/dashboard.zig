@@ -106,7 +106,14 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
 
     var line = r.tui.Line{};
     try line.pushSpan(alloc, .{ .content = "├[cwd: ", .style = .{ .fg = app.theme.muted } });
-    try line.pushSpanPrint(alloc, "{s}", .{app.cwd}, .{ .fg = app.theme.info, .modifier = .{ .bold = true } });
+
+    if (app.swarm.exec.ssh_target) |tar| {
+        try line.pushSpan(alloc, .{ .content = "SSH", .style = .{ .fg = app.theme.warn, .modifier = .{ .bold = true } } });
+        try line.pushSpanPrint(alloc, " {s}@{s}:{s}", .{ tar.user, tar.host, tar.cwd }, .{ .fg = app.theme.info, .modifier = .{ .bold = true } });
+    } else {
+        try line.pushSpanPrint(alloc, "{s}", .{app.cwd}, .{ .fg = app.theme.info, .modifier = .{ .bold = true } });
+    }
+
     try out.append(alloc, line);
 
     {

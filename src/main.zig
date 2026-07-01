@@ -728,7 +728,7 @@ pub fn run(
                                             },
                                             .ssh_off => {
                                                 app.swarm.exec.clearSsh();
-                                                app.pushSystemMessage("ssh mode disabled", .{});
+                                                app.notifications.append(app.arena_app.allocator(), "SSH mode disabled", .{}) catch {};
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
                                         }
@@ -868,7 +868,7 @@ fn handleSshCommand(
             state.pushSystemMessage("ssh: failed to allocate target", .{});
             return;
         };
-        state.pushSystemMessage("ssh mode enabled: {s}@{s}:{s}", .{ args.user, args.host, args.cwd });
+        state.notifications.append(state.arena_app.allocator(), "SSH mode enabled: {s}@{s}", .{ args.user, args.host }) catch {};
         state.remote_cwd = args.cwd;
     } else {
         state.enterPassphrase(args.user, args.host, args.cwd);
@@ -1003,7 +1003,7 @@ fn handleSshUnlock(state: *App, cmd_pool: *prv.exec.CmdPool, gpa: std.mem.Alloca
         state.pushSystemMessage("ssh: failed to allocate target", .{});
         return;
     };
-    state.pushSystemMessage("ssh mode enabled: {s}@{s}:{s}", .{ user, host, cwd });
+    state.notifications.append(state.arena_app.allocator(), "SSH mode enabled: {s}@{s}", .{ user, host }) catch {};
 }
 
 pub const AppCommand = union(enum) {

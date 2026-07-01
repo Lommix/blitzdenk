@@ -2173,7 +2173,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
         i -= 1;
         const entry = app.chat_entries.items[i];
 
-        if (maybe_agent == null) continue;
+        if (maybe_agent == null and entry.role != .system) continue;
 
         const block_height = try buildChatEntryParagraph(alloc, &stack, maybe_agent, app, entry, false, inner_w);
         total += block_height;
