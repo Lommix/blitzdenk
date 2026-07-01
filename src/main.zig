@@ -566,6 +566,13 @@ pub fn run(
                                 continue;
                             },
                             .noop => {},
+                            .complete => {
+                                if (app.completion_suggestion) |sug| {
+                                    app.input_buffer.clearRetainingCapacity();
+                                    try app.input_buffer.appendSlice(app.sessionAlloc(), sug);
+                                    app.input_cursor = @intCast(sug.len);
+                                }
+                            },
                         }
                     }
                     switch (k.code) {

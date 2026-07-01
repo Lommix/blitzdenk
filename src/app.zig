@@ -279,6 +279,7 @@ pub const App = struct {
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
     injection_hooks: r.inject.InjectionsHooks = .{},
+    completion_suggestion: ?[]const u8 = null,
 
     // TODO: cleanup io
     pub fn init(
@@ -733,6 +734,7 @@ pub const App = struct {
             for (completions) |cmp| {
                 if (cmp.len > 0) {
                     p.appendText(frame_alloc, cmp, .{ .modifier = .{ .bold = true } }) catch {};
+                    app.completion_suggestion = cmp;
                 }
             }
 
@@ -747,6 +749,8 @@ pub const App = struct {
                 };
 
                 p.renderSimple(frame_alloc, completion_area, buf);
+            } else {
+                app.completion_suggestion = null;
             }
         }
     }

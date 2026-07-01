@@ -15,6 +15,7 @@ pub const Action = union(enum) {
     cursor_up,
     cursor_down,
     toggle_skip,
+    complete,
     lua: c_int,
 };
 
@@ -23,6 +24,7 @@ pub const KeyMap = struct {
     custom: std.ArrayList(KeyBind) = .empty,
 
     pub const defaults: []const KeyBind = &.{
+        KeyBind{ .key = .{ .code = .tab }, .action = .complete },
         KeyBind{ .key = .{ .code = .arrow_left }, .action = .cursor_left },
         KeyBind{ .key = .{ .code = .arrow_right }, .action = .cursor_right },
         KeyBind{ .key = .{ .code = .arrow_up }, .action = .cursor_up },
