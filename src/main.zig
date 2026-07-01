@@ -723,7 +723,13 @@ pub fn run(
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
                                             .cd => |path| {
-                                                app.cwd = try app.appAlloc().dupe(u8, path);
+                                                const new_cwd = try app.appAlloc().dupe(u8, path);
+
+                                                if (app.swarm.exec.ssh_target) |*tar| {
+                                                    tar.cwd = new_cwd;
+                                                } else {
+                                                    app.cwd = new_cwd;
+                                                }
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
                                             .ssh_off => {
