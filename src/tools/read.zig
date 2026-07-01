@@ -2,6 +2,9 @@ const prv = @import("provider");
 const r = @import("root.zig");
 const std = @import("std");
 
+/// Bad models always read to little or cut at bad lines. Padding the read scope helps
+const READ_PADDING = 5;
+
 pub const ReadTool = prv.tool.Tool{
     .def = .{
         .name = "read",
@@ -35,9 +38,17 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         limit: ?u64 = null,
     };
 
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+    var args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\"}");
+
+    if (args.offset) |off| {
+        args.offset = off -| READ_PADDING;
+    }
+
+    if (args.limit) |off| {
+        args.limit = off + READ_PADDING;
+    }
 
     if (args.path.len == 0) return r.errResult(call, "path is empty");
 
