@@ -207,6 +207,20 @@
 ---@field ssh_agent_control? boolean
 ---@field skip_permissions? boolean
 
+---@class BlitzTheme
+---@field bg? string
+---@field overlay_dark? string
+---@field overlay? string
+---@field muted? string
+---@field text? string
+---@field ok? string
+---@field info? string
+---@field warn? string
+---@field err? string
+---@field diff_surface? string
+---@field diff_add? string
+---@field diff_remove? string
+
 ---@class Blitz
 ---@field mcp BlitzMcp
 ---@field lsp BlitzLsp
@@ -283,6 +297,10 @@
 ---@field get_flags fun(): BlitzAppFlags
 ---Set the app flags from a table. Missing fields are set to their default values.
 ---@field set_flags fun(flags: BlitzAppFlags)
+---Return the current theme as a table of hex color strings.
+---@field get_theme fun(): BlitzTheme
+---Set the theme from a table of hex color strings. Missing fields keep their current value.
+---@field set_theme fun(theme: BlitzTheme)
 ---Write a debug log line.
 ---@field log fun(msg: string)
 ---Execute a shell command.

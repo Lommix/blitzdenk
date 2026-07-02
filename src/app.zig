@@ -1523,7 +1523,7 @@ fn renderPermMessage(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const pm = &app.input_mode.perm_message;
     const input_widget: r.tui.Input = .{
         .text = pm.buf[0..pm.len],
-        .border_style = .{ .fg = Theme.default.warn },
+        .border_style = .{ .fg = app.theme.warn },
         .has_screenshot = app.screenshot_buf != null,
     };
     input_widget.render(area, buf);
@@ -1771,7 +1771,7 @@ fn buildChatEntryParagraph(
                 _ = p;
             },
             .diff => |diff| {
-                const p = buildDiffParagraph(arena, diff);
+                const p = buildDiffParagraph(arena, app, diff);
                 const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
@@ -1988,8 +1988,8 @@ fn buildPlanParagraph(arena: std.mem.Allocator, plan: ChatEntry.PlanEntry) r.tui
     return p;
 }
 
-fn buildDiffParagraph(arena: std.mem.Allocator, d: ChatPart.DiffEntry) r.tui.Paragraph {
-    const theme = Theme.default;
+fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: ChatPart.DiffEntry) r.tui.Paragraph {
+    const theme = app.theme;
     var p: r.tui.Paragraph = .{
         .border = .single,
         .sides = .left_only,
@@ -2290,7 +2290,7 @@ fn str_replace(buf: []u8, from: []const u8, to: []const u8, input: []const u8) [
 
 fn renderPermissionWidget(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const block: r.tui.Block = .{
-        .style = .{ .fg = Theme.default.warn },
+        .style = .{ .fg = app.theme.warn },
         .borders = .{ .bottom = true, .left = true, .right = true },
     };
 
@@ -2324,7 +2324,7 @@ fn renderPermissionWidget(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void 
         },
         .ask => unreachable,
     };
-    buf.setStringMax(inner.x + 1, inner.y, header_line, .{ .fg = Theme.default.warn }, inner.width -| 1);
+    buf.setStringMax(inner.x + 1, inner.y, header_line, .{ .fg = app.theme.warn }, inner.width -| 1);
 
     const labels = [3][]const u8{ "allow?  yes", "        no", "        enter message" };
     const labels_sel = [3][]const u8{ "allow? >yes", "       >no", "       >enter message" };
@@ -2370,7 +2370,7 @@ fn renderAskWidget(app: *App, req: *prv.Swarm.PermissionReq, inner: r.tui.Rect, 
     // Line 0: "[header] question"
     var header_buf: [256]u8 = undefined;
     const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ args.header, args.question }) catch args.question;
-    buf.setStringMax(inner.x + 1, inner.y, header_line, .{ .fg = Theme.default.info }, inner.width -| 1);
+    buf.setStringMax(inner.x + 1, inner.y, header_line, .{ .fg = app.theme.info }, inner.width -| 1);
 
     // Options and "enter message" tail.
     var row: usize = 0;

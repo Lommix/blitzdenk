@@ -95,6 +95,44 @@ pub const Color = union(enum) {
             else => true,
         };
     }
+
+    pub fn toHexStr(self: Color) [7]u8 {
+        const Rgb = @FieldType(Color, "rgb");
+        const rgb: Rgb = switch (self) {
+            .rgb => |c| c,
+            .reset => Rgb{ .r = 0, .g = 0, .b = 0 },
+            .black => Rgb{ .r = 0, .g = 0, .b = 0 },
+            .red => Rgb{ .r = 0x80, .g = 0, .b = 0 },
+            .green => Rgb{ .r = 0, .g = 0x80, .b = 0 },
+            .yellow => Rgb{ .r = 0x80, .g = 0x80, .b = 0 },
+            .blue => Rgb{ .r = 0, .g = 0, .b = 0x80 },
+            .magenta => Rgb{ .r = 0x80, .g = 0, .b = 0x80 },
+            .cyan => Rgb{ .r = 0, .g = 0x80, .b = 0x80 },
+            .white => Rgb{ .r = 0xC0, .g = 0xC0, .b = 0xC0 },
+            .bright_black => Rgb{ .r = 0x80, .g = 0x80, .b = 0x80 },
+            .bright_red => Rgb{ .r = 0xFF, .g = 0, .b = 0 },
+            .bright_green => Rgb{ .r = 0, .g = 0xFF, .b = 0 },
+            .bright_yellow => Rgb{ .r = 0xFF, .g = 0xFF, .b = 0 },
+            .bright_blue => Rgb{ .r = 0, .g = 0, .b = 0xFF },
+            .bright_magenta => Rgb{ .r = 0xFF, .g = 0, .b = 0xFF },
+            .bright_cyan => Rgb{ .r = 0, .g = 0xFF, .b = 0xFF },
+            .bright_white => Rgb{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
+            .indexed => |i| Rgb{ .r = i, .g = i, .b = i },
+        };
+        return .{
+            '#',
+            hexDigit(rgb.r >> 4),
+            hexDigit(rgb.r & 0xF),
+            hexDigit(rgb.g >> 4),
+            hexDigit(rgb.g & 0xF),
+            hexDigit(rgb.b >> 4),
+            hexDigit(rgb.b & 0xF),
+        };
+    }
+
+    fn hexDigit(n: u8) u8 {
+        return if (n < 10) '0' + n else 'a' + (n - 10);
+    }
 };
 
 pub const Modifier = packed struct {

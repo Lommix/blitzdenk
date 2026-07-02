@@ -232,6 +232,55 @@ const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields
     .{ .name = "enable_thinking", .ty = LuaType.boolean, .optional = true },
     .{ .name = "thinking", .ty = ThinkingDef, .optional = true },
 } } };
+
+const ThemeDef = LuaType{ .table_def = .{ .name = "BlitzTheme", .fields = &.{
+    .{ .name = "bg", .ty = LuaType.string, .optional = true },
+    .{ .name = "overlay_dark", .ty = LuaType.string, .optional = true },
+    .{ .name = "overlay", .ty = LuaType.string, .optional = true },
+    .{ .name = "muted", .ty = LuaType.string, .optional = true },
+    .{ .name = "text", .ty = LuaType.string, .optional = true },
+    .{ .name = "ok", .ty = LuaType.string, .optional = true },
+    .{ .name = "info", .ty = LuaType.string, .optional = true },
+    .{ .name = "warn", .ty = LuaType.string, .optional = true },
+    .{ .name = "err", .ty = LuaType.string, .optional = true },
+    .{ .name = "diff_surface", .ty = LuaType.string, .optional = true },
+    .{ .name = "diff_add", .ty = LuaType.string, .optional = true },
+    .{ .name = "diff_remove", .ty = LuaType.string, .optional = true },
+} } };
+
+const ThemeArg = struct {
+    bg: ?[]const u8 = null,
+    overlay_dark: ?[]const u8 = null,
+    overlay: ?[]const u8 = null,
+    muted: ?[]const u8 = null,
+    text: ?[]const u8 = null,
+    ok: ?[]const u8 = null,
+    info: ?[]const u8 = null,
+    warn: ?[]const u8 = null,
+    err: ?[]const u8 = null,
+    diff_surface: ?[]const u8 = null,
+    diff_add: ?[]const u8 = null,
+    diff_remove: ?[]const u8 = null,
+};
+
+fn applyTheme(a: *r.app.App, theme: ThemeArg) !void {
+    const C = r.tui.Color;
+    const t = &a.theme;
+    if (theme.bg) |v| t.bg = try C.parseStrHex(v);
+    if (theme.overlay_dark) |v| t.overlay_dark = try C.parseStrHex(v);
+    if (theme.overlay) |v| t.overlay = try C.parseStrHex(v);
+    if (theme.muted) |v| t.muted = try C.parseStrHex(v);
+    if (theme.text) |v| t.text = try C.parseStrHex(v);
+    if (theme.ok) |v| t.ok = try C.parseStrHex(v);
+    if (theme.info) |v| t.info = try C.parseStrHex(v);
+    if (theme.warn) |v| t.warn = try C.parseStrHex(v);
+    if (theme.err) |v| t.err = try C.parseStrHex(v);
+    if (theme.diff_surface) |v| t.diff_surface = try C.parseStrHex(v);
+    if (theme.diff_add) |v| t.diff_add = try C.parseStrHex(v);
+    if (theme.diff_remove) |v| t.diff_remove = try C.parseStrHex(v);
+    a.dirty = true;
+}
+
 const ToolArgsDef = LuaType{ .raw_refs = .{ .text = "table<string, BlitzArgDef>", .refs = &.{ToolArgDef} } };
 const ToolDef = LuaType{ .table_def = .{ .name = "ToolDef", .fields = &.{
     .{ .name = "name", .ty = LuaType.string },
@@ -801,6 +850,58 @@ pub const Blitz = LuaType{
                             a.dirty = true;
                         }
                     }).lua_fn, "set_flags"),
+                } },
+            },
+            .{
+                .name = "get_theme",
+                .desc = "Return the current theme as a table of hex color strings.",
+                .ty = LuaType{ .function = .{
+                    .ret = &ThemeDef,
+                    .fn_ptr = LuaFnBind((struct {
+                        const Ret = struct {
+                            bg: [7]u8,
+                            overlay_dark: [7]u8,
+                            overlay: [7]u8,
+                            muted: [7]u8,
+                            text: [7]u8,
+                            ok: [7]u8,
+                            info: [7]u8,
+                            warn: [7]u8,
+                            err: [7]u8,
+                            diff_surface: [7]u8,
+                            diff_add: [7]u8,
+                            diff_remove: [7]u8,
+                        };
+                        fn lua_fn(a: *r.app.App) !Ret {
+                            const t = a.theme;
+                            return .{
+                                .bg = t.bg.toHexStr(),
+                                .overlay_dark = t.overlay_dark.toHexStr(),
+                                .overlay = t.overlay.toHexStr(),
+                                .muted = t.muted.toHexStr(),
+                                .text = t.text.toHexStr(),
+                                .ok = t.ok.toHexStr(),
+                                .info = t.info.toHexStr(),
+                                .warn = t.warn.toHexStr(),
+                                .err = t.err.toHexStr(),
+                                .diff_surface = t.diff_surface.toHexStr(),
+                                .diff_add = t.diff_add.toHexStr(),
+                                .diff_remove = t.diff_remove.toHexStr(),
+                            };
+                        }
+                    }).lua_fn, "get_theme"),
+                } },
+            },
+            .{
+                .name = "set_theme",
+                .desc = "Set the theme from a table of hex color strings. Missing fields keep their current value.",
+                .ty = LuaType{ .function = .{
+                    .args = &.{.{ .name = "theme", .ty = ThemeDef }},
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, theme: ThemeArg) !void {
+                            try applyTheme(a, theme);
+                        }
+                    }).lua_fn, "set_theme"),
                 } },
             },
             .{
@@ -1709,18 +1810,10 @@ fn readAnyValueAlloc(
             if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " is not a table");
             var result: T = undefined;
             inline for (str.fields) |field| {
-                if (@typeInfo(field.type) == .optional) {
-                    const res = readAnyValueAlloc(field.type, state, field.name, idx, allocator);
-                    switch (res) {
-                        .ok => |val| @field(result, field.name) = val,
-                        .err => |msg| return .Err(msg),
-                    }
-                } else {
-                    const res = readAnyFieldAlloc(field.type, state, field.name, idx, allocator);
-                    switch (res) {
-                        .ok => |val| @field(result, field.name) = val,
-                        .err => |msg| return .Err(msg),
-                    }
+                const res = readAnyFieldAlloc(field.type, state, field.name, idx, allocator);
+                switch (res) {
+                    .ok => |val| @field(result, field.name) = val,
+                    .err => |msg| return .Err(msg),
                 }
             }
             return .Ok(result);
@@ -2272,6 +2365,17 @@ pub const LuaVm = struct {
         // blitz.status_bar_render = function() return "..." end
         _ = c.lua_getfield(L, -1, "status_bar_render");
         a.lua_status_bar_enabled = c.lua_type(L, -1) == c.LUA_TFUNCTION;
+        c.lua_pop(L, 1);
+
+        _ = c.lua_getfield(L, -1, "theme");
+        if (c.lua_type(L, -1) == c.LUA_TTABLE) {
+            switch (readAnyValueAlloc(ThemeArg, L, "blitz.theme", -1, self.luaArena())) {
+                .ok => |theme| applyTheme(a, theme) catch |err| {
+                    log.err("invalid blitz.theme: {s}", .{@errorName(err)});
+                },
+                .err => |msg| log.err("invalid blitz.theme: {s}", .{msg}),
+            }
+        }
         c.lua_pop(L, 1);
 
         c.lua_pop(L, 1); // pop blitz table
