@@ -199,6 +199,7 @@ pub fn main(init: std.process.Init) !void {
                 \\Flags:
                 \\  --log              write debug.log in path
                 \\  --strict           request permissions
+                \\  --clean            skip local user context
                 \\
             , .{});
         },
