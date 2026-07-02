@@ -123,6 +123,11 @@ pub const AgentMeta = struct {
     description: []const u8 = "",
 };
 
+pub const Flags = packed struct(u8) {
+    skip_local_context_file: bool = false,
+    _pad: u7 = 0,
+};
+
 // -------------------------------------------------------------------------------
 loaded_tools: std.ArrayList(ToolEntry) = .empty,
 mode_counter: u32 = 2, // skip first 2 for interal modes
@@ -140,6 +145,7 @@ prompt_arena: std.heap.ArenaAllocator,
 io: std.Io,
 config_dir: ?std.Io.Dir,
 skill_dir: ?std.Io.Dir,
+flags: Flags = .{},
 // -------------------------------------------------------------------------------
 
 pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !Self {
@@ -664,13 +670,15 @@ pub fn build_system_prompt(
     try w.writeAll("\n\n");
 
     // local context
-    inline for (CONTEXT_FILES) |context_file| {
-        if (std.Io.Dir.cwd().openFile(self.io, context_file, .{})) |user_ctx_file| {
-            var buf: [100]u8 = undefined;
-            var filer_reader = user_ctx_file.reader(self.io, &buf);
-            _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-            try w.writeAll("\n\n");
-        } else |_| {}
+    if (!self.flags.skip_local_context_file) {
+        inline for (CONTEXT_FILES) |context_file| {
+            if (std.Io.Dir.cwd().openFile(self.io, context_file, .{})) |user_ctx_file| {
+                var buf: [100]u8 = undefined;
+                var filer_reader = user_ctx_file.reader(self.io, &buf);
+                _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
+                try w.writeAll("\n\n");
+            } else |_| {}
+        }
     }
 
     _ = try w.print(

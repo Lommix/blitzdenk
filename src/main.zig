@@ -219,6 +219,7 @@ pub fn run(
 
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
     var context_factory = try r.ContextFactory.init(arena, io, HOME);
+    context_factory.flags.skip_local_context_file = flags.no_context;
 
     var term = try tui.Terminal.init(arena, io);
     errdefer term.deinit();
@@ -1065,7 +1066,10 @@ pub const AppCommand = union(enum) {
 pub const CliFlags = packed struct {
     /// enable debug log writing
     debug_log: bool = false,
+    /// permission required
     strict_mode: bool = false,
+    /// don't load AGENTS.md
+    no_context: bool = false,
 
     fn applyToken(self: *CliFlags, tok: []const u8) bool {
         if (std.mem.eql(u8, tok, "--log")) {
@@ -1074,6 +1078,11 @@ pub const CliFlags = packed struct {
         }
 
         if (std.mem.eql(u8, tok, "--strict")) {
+            self.strict_mode = true;
+            return true;
+        }
+
+        if (std.mem.eql(u8, tok, "--clean")) {
             self.strict_mode = true;
             return true;
         }
