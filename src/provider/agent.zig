@@ -687,6 +687,7 @@ pub const Agent = struct {
         const result = try stream.finalize(arena);
         const final_parts = filterEmptyTextParts(result.message.parts);
         self.chat.finalizeStreamingMessage(self.gpa, msg_idx, final_parts);
+        self.chat.messages.items[msg_idx].provider_items = result.message.provider_items;
         if (self.request_start_ms) |start_ms| {
             self.chat.messages.items[msg_idx].time_ms = @max(0, http.nowMs(self.pool.io) - start_ms);
         }

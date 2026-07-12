@@ -218,13 +218,14 @@ const ThinkingDef = LuaType{ .table_def = .{ .name = "BlitzThinking", .fields = 
     .{ .name = "budget_tokens", .ty = LuaType.integer, .optional = true },
 } } };
 const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields = &.{
-    .{ .name = "type", .ty = LuaType.string, .desc = "'openai' | 'anthropic' | 'ollama'" },
+    .{ .name = "type", .ty = LuaType.string, .desc = "'openai' | 'response' | 'anthropic' | 'ollama'" },
     .{ .name = "url", .ty = LuaType.string, .desc = "the endpoint url" },
     .{ .name = "key_envar", .ty = LuaType.string, .desc = "the ENVAR holding the api key (not the key itself!)" },
     .{ .name = "effort", .ty = LuaType.string, .optional = true },
     .{ .name = "temperature", .ty = LuaType.number, .optional = true },
     .{ .name = "max_tokens", .ty = LuaType.integer, .optional = true },
     .{ .name = "max_completion_tokens", .ty = LuaType.integer, .optional = true },
+    .{ .name = "max_output_tokens", .ty = LuaType.integer, .optional = true },
     .{ .name = "top_p", .ty = LuaType.number, .optional = true },
     .{ .name = "top_k", .ty = LuaType.integer, .optional = true },
     .{ .name = "frequency_penalty", .ty = LuaType.number, .optional = true },
@@ -477,6 +478,7 @@ pub const Blitz = LuaType{
                                 temperature: ?f32 = null,
                                 max_tokens: ?u32 = null,
                                 max_completion_tokens: ?u32 = null,
+                                max_output_tokens: ?u32 = null,
                                 top_p: ?f32 = null,
                                 top_k: ?u32 = null,
                                 frequency_penalty: ?f32 = null,
@@ -494,6 +496,7 @@ pub const Blitz = LuaType{
 
                                 const ptype: prv.adapter.Provider = blk: {
                                     if (std.mem.eql(u8, args.type, "openai")) break :blk .openai;
+                                    if (std.mem.eql(u8, args.type, "response")) break :blk .response;
                                     if (std.mem.eql(u8, args.type, "anthropic")) break :blk .anthropic;
                                     if (std.mem.eql(u8, args.type, "ollama")) break :blk .ollama;
                                     return error.UnknownProviderType;
@@ -509,6 +512,11 @@ pub const Blitz = LuaType{
                                         .top_k = args.top_k,
                                         .frequency_penalty = args.frequency_penalty,
                                         .presence_penalty = args.presence_penalty,
+                                    } },
+                                    .response => .{ .response = .{
+                                        .temperature = args.temperature,
+                                        .max_output_tokens = args.max_output_tokens orelse args.max_tokens orelse 32000,
+                                        .top_p = args.top_p,
                                     } },
                                     .anthropic => .{ .anthropic = .{
                                         .max_tokens = args.max_tokens orelse 32000,
@@ -2479,9 +2487,10 @@ fn requireStringFieldOnStack(state: *c.lua_State, table_idx: c_int, field: [*:0]
 
 fn parseProviderType(state: *c.lua_State, type_str: []const u8) prv.adapter.Provider {
     if (std.mem.eql(u8, type_str, "openai")) return .openai;
+    if (std.mem.eql(u8, type_str, "response")) return .response;
     if (std.mem.eql(u8, type_str, "anthropic")) return .anthropic;
     if (std.mem.eql(u8, type_str, "ollama")) return .ollama;
-    _ = c.luaL_error(state, "add_provider: unknown type (expected openai/anthropic/ollama)");
+    _ = c.luaL_error(state, "add_provider: unknown type (expected openai/response/anthropic/ollama)");
     return .openai; // unreachable; luaL_error longjmps
 }
 

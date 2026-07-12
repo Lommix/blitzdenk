@@ -136,14 +136,18 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
         try out.append(alloc, l);
     }
 
-    try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
-    try out.append(alloc, try r.tui.Line.new(alloc, "│ Agents", .{}, .{ .fg = app.theme.muted }));
+    var header_shown = false;
 
     for (0..app.context_factory.agent_counter) |agent_idx| {
         const ag_type: r.ContextFactory.AgentType = @enumFromInt(agent_idx);
         const def = app.context_factory.agents.get(ag_type) orelse continue;
-
         const model = def.model orelse continue;
+
+        if (!header_shown) {
+            try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
+            try out.append(alloc, try r.tui.Line.new(alloc, "│ Agents", .{}, .{ .fg = app.theme.muted }));
+            header_shown = true;
+        }
 
         var l = r.tui.Line{};
         try l.pushSpan(alloc, .{ .content = "├[", .style = .{ .fg = app.theme.muted } });

@@ -3,6 +3,7 @@ const r = @import("root.zig");
 const Agent = r.agent.Agent;
 const apt = r.adapter;
 const http = r.http;
+const responses = r.responses;
 
 const log = std.log.scoped(.compact);
 
@@ -67,20 +68,19 @@ pub fn maybeStart(self: *Agent) !bool {
     if (!self.compaction.requested) self.compaction.continue_after = true;
 
     const arena = self.arena.allocator();
-    var compact_chat = try buildCompactPrompt(arena, &self.chat);
-    compact_chat.tools = .empty;
-
-    self.compaction.pending_handle = apt.complete(
-        self.pool,
-        arena,
-        &compact_chat,
-        self.config,
-        .{
-            .mode = .blocking,
-            .session_id = &self.session_id,
-            .timeout_ms = COMPACTION_TIMEOUT_MS,
+    const options: apt.CompletionOptions = .{
+        .mode = .blocking,
+        .session_id = &self.session_id,
+        .timeout_ms = COMPACTION_TIMEOUT_MS,
+    };
+    self.compaction.pending_handle = switch (self.config.provider) {
+        .response => responses.compact(self.pool, arena, &self.chat, self.config, options),
+        else => blk: {
+            var compact_chat = try buildCompactPrompt(arena, &self.chat);
+            compact_chat.tools = .empty;
+            break :blk apt.complete(self.pool, arena, &compact_chat, self.config, options);
         },
-    ) catch |err| switch (err) {
+    } catch |err| switch (err) {
         error.PoolExhausted => {
             self.state = .awaiting_pool_slot;
             self.timeout = 0;
@@ -117,18 +117,34 @@ pub fn poll(self: *Agent) !bool {
         return error.CompactionRequestFailed;
     }
 
-    const result = try apt.parseCompletion(arena, self.config, body);
-    const summary = try extractSummaryText(arena, result.message.parts);
+    var usage: ?apt.TokenUsage = null;
+    var response_items: ?[]const []const u8 = null;
+    var summary: ?[]const u8 = null;
+    switch (self.config.provider) {
+        .response => {
+            const result = try responses.parseCompactResponse(arena, body);
+            usage = result.usage;
+            response_items = result.items;
+        },
+        else => {
+            const result = try apt.parseCompletion(arena, self.config, body);
+            usage = result.usage;
+            summary = try extractSummaryText(arena, result.message.parts);
+        },
+    }
 
-    if (result.usage) |usage| {
-        self.total_usage.add(usage);
-        if (self.swarm) |swarm| swarm.token_stats.add(usage);
+    if (usage) |value| {
+        self.total_usage.add(value);
+        if (self.swarm) |swarm| swarm.token_stats.add(value);
     }
 
     self.pool.release(handle);
     handle_released = true;
     self.compaction.pending_handle = null;
-    try installCompactedHistory(self, summary);
+    if (response_items) |items|
+        try installResponseHistory(self, items)
+    else
+        try installCompactedHistory(self, summary.?);
 
     const estimate = estimateNextRequestTokens(self);
     self.last_input_context_size = @intCast(@min(estimate, std.math.maxInt(u32)));
@@ -172,6 +188,7 @@ pub fn estimateNextRequestTokens(self: *const Agent) u64 {
 
     for (self.chat.messages.items) |msg| {
         bytes += @tagName(msg.role).len + 8;
+        for (msg.provider_items) |item| bytes += item.len;
         for (msg.parts) |part| bytes += partBytes(part);
     }
 
@@ -281,6 +298,50 @@ fn installCompactedHistory(self: *Agent, summary: []const u8) !void {
 
     const summary_text = try std.fmt.allocPrint(alloc, "{s}\n{s}", .{ SUMMARY_PREFIX, summary });
     try next.addMessage(alloc, .user, &.{.{ .text = summary_text }});
+
+    const next_tools = try self.tools.clone(alloc);
+    const next_todos = try cloneTodos(self, alloc);
+    const next_bg_tasks = try cloneBackgroundTasks(self, alloc);
+    const next_bg_agents = try cloneBackgroundAgents(self, alloc);
+
+    var old_arena = self.arena;
+    self.arena = next_arena;
+    self.chat = next;
+    self.tools = next_tools;
+    self.todo_list.value = next_todos;
+    self.bg_tasks.value = next_bg_tasks;
+    self.bg_agents.value = next_bg_agents;
+    self.tool_display.value = .{};
+    self.tool_call_runs = .{};
+    self.tool_call_done = .{};
+    self.loop_guard = .{};
+    old_arena.deinit();
+
+    const file_stats = self.file_stats.lock(self.pool.io);
+    defer file_stats.unlock();
+    file_stats.ptr.* = .{};
+}
+
+fn installResponseHistory(self: *Agent, items: []const []const u8) !void {
+    var next_arena = r.ThreadSafeArena.init(self.gpa, self.pool.io);
+    errdefer next_arena.deinit();
+    const alloc = next_arena.allocator();
+    var next: apt.Chat = .{};
+
+    for (self.chat.tools.items) |tool| try next.tools.append(alloc, .{
+        .name = try alloc.dupe(u8, tool.name),
+        .description = try alloc.dupe(u8, tool.description),
+        .parameters_schema = try alloc.dupe(u8, tool.parameters_schema),
+    });
+    if (findSystemMessage(&self.chat)) |system| try appendClonedMessage(&next, alloc, system);
+
+    const cloned = try alloc.alloc([]const u8, items.len);
+    for (items, 0..) |item, i| cloned[i] = try alloc.dupe(u8, item);
+    try next.messages.append(alloc, .{
+        .role = .agent,
+        .parts = &.{},
+        .provider_items = cloned,
+    });
 
     const next_tools = try self.tools.clone(alloc);
     const next_todos = try cloneTodos(self, alloc);
@@ -456,4 +517,36 @@ test "auto compaction ignores maximum output tokens" {
 
     try testing.expect(!shouldStart(&agent, 89_999));
     try testing.expect(shouldStart(&agent, 90_000));
+}
+
+test "responses compaction installs canonical output and rotates arena" {
+    const testing = std.testing;
+    var gpa: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    defer testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+
+    var pool: http.RequestPool = .{};
+    try pool.init(gpa.allocator(), testing.io);
+    defer pool.deinit();
+    var agent = Agent.new(.{
+        .api_key = "test",
+        .model = "test",
+        .base_url = "https://example.test",
+        .provider = .{ .response = .{} },
+    }, &pool, gpa.allocator(), 0, 0);
+    defer agent.deinit();
+
+    const alloc = agent.arena.allocator();
+    try agent.chat.addMessage(alloc, .system, &.{.{ .text = "system" }});
+    _ = try alloc.alloc(u8, 1024 * 1024);
+    const before = gpa.total_requested_bytes;
+    try installResponseHistory(&agent, &.{
+        "{\"type\":\"message\",\"role\":\"user\",\"content\":\"retained\"}",
+        "{\"type\":\"compaction\",\"encrypted_content\":\"opaque\"}",
+    });
+
+    try testing.expect(gpa.total_requested_bytes < before);
+    try testing.expectEqual(@as(usize, 2), agent.chat.messages.items.len);
+    try testing.expectEqualStrings("system", agent.chat.messages.items[0].parts[0].text);
+    try testing.expectEqual(@as(usize, 2), agent.chat.messages.items[1].provider_items.len);
+    try testing.expect(std.mem.indexOf(u8, agent.chat.messages.items[1].provider_items[1], "opaque") != null);
 }

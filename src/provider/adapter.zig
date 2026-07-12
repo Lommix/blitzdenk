@@ -4,6 +4,7 @@
 const std = @import("std");
 const http = @import("http.zig");
 const openai = @import("openai.zig");
+const responses = @import("responses.zig");
 const anthropic = @import("anthropic.zig");
 const Allocator = std.mem.Allocator;
 
@@ -53,7 +54,7 @@ pub const Thinking = struct {
     budget_tokens: ?u32 = null, // required when type="enabled", min 1024
 };
 
-pub const Provider = enum { ollama, openai, anthropic };
+pub const Provider = enum { ollama, openai, response, anthropic };
 
 pub const OllamaConfig = struct {
     temperature: ?f32 = null,
@@ -75,6 +76,12 @@ pub const OpenAiConfig = struct {
     stop: ?[]const []const u8 = null,
 };
 
+pub const ResponseConfig = struct {
+    temperature: ?f32 = null,
+    max_output_tokens: ?u32 = null,
+    top_p: ?f32 = null,
+};
+
 pub const AnthropicConfig = struct {
     max_tokens: u32 = 8192 * 2,
     thinking: ?Thinking = null,
@@ -89,6 +96,7 @@ pub const ReasoningEffort = enum { none, low, medium, high, xhigh, max };
 pub const ProviderConfig = union(Provider) {
     ollama: OllamaConfig,
     openai: OpenAiConfig,
+    response: ResponseConfig,
     anthropic: AnthropicConfig,
 };
 
@@ -130,6 +138,7 @@ fn cloneProviderConfig(alloc: Allocator, config: ProviderConfig) !ProviderConfig
             .presence_penalty = cfg.presence_penalty,
             .stop = try cloneStops(alloc, cfg.stop),
         } },
+        .response => |cfg| .{ .response = cfg },
         .anthropic => |cfg| .{ .anthropic = .{
             .max_tokens = cfg.max_tokens,
             .thinking = if (cfg.thinking) |thinking| .{
@@ -207,6 +216,9 @@ pub const Role = enum { system, user, agent };
 pub const Message = struct {
     role: Role,
     parts: []ContentPart,
+    /// Canonical, opaque Responses API output items. When present the
+    /// Responses adapter replays these instead of reconstructing this message.
+    provider_items: []const []const u8 = &.{},
     flags: Flags = .{},
     time_ms: i64 = 0,
 
@@ -221,6 +233,9 @@ pub const Message = struct {
         msg.role = self.role;
         msg.flags = self.flags;
         msg.time_ms = self.time_ms;
+        const provider_items = try gpa.alloc([]const u8, self.provider_items.len);
+        for (self.provider_items, 0..) |item, i| provider_items[i] = try gpa.dupe(u8, item);
+        msg.provider_items = provider_items;
         var parts = try gpa.alloc(ContentPart, self.parts.len);
 
         for (0..self.parts.len) |i| {
@@ -255,7 +270,10 @@ pub const Message = struct {
             },
         };
         if (self.parts.len > 0) alloc.free(self.parts);
+        for (self.provider_items) |item| alloc.free(item);
+        if (self.provider_items.len > 0) alloc.free(self.provider_items);
         self.parts = &.{};
+        self.provider_items = &.{};
     }
 };
 
@@ -293,6 +311,7 @@ pub const Stream = struct {
     pub const Impl = union(Provider) {
         ollama: openai.StreamState,
         openai: openai.StreamState,
+        response: responses.StreamState,
         anthropic: anthropic.StreamState,
     };
 
@@ -300,6 +319,7 @@ pub const Stream = struct {
         return switch (self.impl) {
             .ollama => |*s| s.next(self.pool, self.handle, self.arena, .ollama),
             .openai => |*s| s.next(self.pool, self.handle, self.arena, .openai),
+            .response => |*s| s.next(self.pool, self.handle, self.arena),
             .anthropic => |*s| s.next(self.pool, self.handle, self.arena),
         };
     }
@@ -307,6 +327,7 @@ pub const Stream = struct {
     pub fn finalize(self: *Stream, alloc: Allocator) !ResponseResult {
         return switch (self.impl) {
             .ollama, .openai => |*s| s.finalize(alloc),
+            .response => |*s| s.finalize(alloc),
             .anthropic => |*s| s.finalize(alloc),
         };
     }
@@ -325,6 +346,7 @@ pub fn openStream(
         .impl = switch (provider) {
             .ollama => .{ .ollama = openai.StreamState.init(arena) },
             .openai => .{ .openai = openai.StreamState.init(arena) },
+            .response => .{ .response = responses.StreamState.init(arena) },
             .anthropic => .{ .anthropic = anthropic.StreamState.init(arena) },
         },
     };
@@ -453,6 +475,7 @@ pub fn complete(
 ) !http.RequestPool.RequestHandle {
     return switch (cfg.provider) {
         .openai, .ollama => openai.complete(pool, scratch, chat, cfg, options),
+        .response => responses.complete(pool, scratch, chat, cfg, options),
         .anthropic => anthropic.complete(pool, scratch, chat, cfg, options),
     };
 }
@@ -464,6 +487,7 @@ pub fn parseCompletion(
 ) !ResponseResult {
     return switch (cfg.provider) {
         .openai, .ollama => openai.parseResponse(arena, body),
+        .response => responses.parseResponse(arena, body),
         .anthropic => anthropic.parseResponse(arena, body),
     };
 }

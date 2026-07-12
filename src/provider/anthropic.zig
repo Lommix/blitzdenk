@@ -341,7 +341,7 @@ pub fn complete(
     const payload = try serializeRequest(scratch, chat, config, options.mode);
     defer scratch.free(payload);
 
-    const url = try std.fmt.allocPrint(scratch, "{s}/v1/messages", .{config.base_url});
+    const url = try std.fmt.allocPrint(scratch, "{s}/messages", .{config.base_url});
     defer scratch.free(url);
 
     return pool.fetch(url, .POST, payload, &.{

@@ -168,7 +168,7 @@
 ---@field budget_tokens? integer
 
 ---@class BlitzProviderDef
----'openai' | 'anthropic' | 'ollama'
+---'openai' | 'response' | 'anthropic' | 'ollama'
 ---@field type string
 ---the endpoint url
 ---@field url string
@@ -178,6 +178,7 @@
 ---@field temperature? number
 ---@field max_tokens? integer
 ---@field max_completion_tokens? integer
+---@field max_output_tokens? integer
 ---@field top_p? number
 ---@field top_k? integer
 ---@field frequency_penalty? number

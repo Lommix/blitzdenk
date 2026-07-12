@@ -324,7 +324,7 @@ pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config:
             .top_k = oc.top_k,
             .stop = oc.stop,
         },
-        .anthropic => return error.NotImplemented,
+        .response, .anthropic => return error.NotImplemented,
     };
 
     var buf: std.Io.Writer.Allocating = .init(allocator);
