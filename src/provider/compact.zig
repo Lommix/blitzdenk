@@ -7,7 +7,7 @@ const http = r.http;
 const log = std.log.scoped(.compact);
 
 const PROMPT =
-    \\You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+    \\You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another agent that will resume the task.
     \\
     \\Include:
     \\- Current progress and key decisions made
@@ -15,7 +15,7 @@ const PROMPT =
     \\- What remains to be done (clear next steps)
     \\- Any critical data, examples, or references needed to continue
     \\
-    \\Be concise, structured, and focused on helping the next LLM seamlessly continue the work.
+    \\Be concise, structured, and focused on helping the next agent seamlessly continue the work.
     \\
 ;
 
@@ -101,7 +101,8 @@ pub fn poll(self: *Agent) !bool {
     if (!self.pool.isDone(handle)) return false;
 
     defer self.compaction.resetInFlight();
-    defer self.pool.release(handle);
+    var handle_released = false;
+    defer if (!handle_released) self.pool.release(handle);
 
     if (self.pool.timedOut(handle)) return error.TimeoutReached;
 
@@ -118,12 +119,16 @@ pub fn poll(self: *Agent) !bool {
 
     const result = try apt.parseCompletion(arena, self.config, body);
     const summary = try extractSummaryText(arena, result.message.parts);
-    try installCompactedHistory(self, summary);
 
     if (result.usage) |usage| {
         self.total_usage.add(usage);
         if (self.swarm) |swarm| swarm.token_stats.add(usage);
     }
+
+    self.pool.release(handle);
+    handle_released = true;
+    self.compaction.pending_handle = null;
+    try installCompactedHistory(self, summary);
 
     const estimate = estimateNextRequestTokens(self);
     self.last_input_context_size = @intCast(@min(estimate, std.math.maxInt(u32)));
@@ -244,11 +249,15 @@ fn writePartForSummary(w: *std.Io.Writer, part: apt.ContentPart) !void {
 }
 
 fn installCompactedHistory(self: *Agent, summary: []const u8) !void {
-    const alloc = self.arena.allocator();
-    var next: apt.Chat = .{ .tools = self.chat.tools };
+    var next_arena = r.ThreadSafeArena.init(self.gpa, self.pool.io);
+    errdefer next_arena.deinit();
+    const alloc = next_arena.allocator();
+    var next: apt.Chat = .{};
+
+    for (self.chat.tools.items) |tool| try next.tools.append(alloc, tool);
 
     if (findSystemMessage(&self.chat)) |system| {
-        try next.addMessage(alloc, .system, system.parts);
+        try appendClonedMessage(&next, alloc, system);
     }
 
     var recent = std.ArrayList([]const u8).empty;
@@ -260,7 +269,7 @@ fn installCompactedHistory(self: *Agent, summary: []const u8) !void {
         i -= 1;
         const msg = self.chat.messages.items[i];
         if (msg.role != .user) continue;
-        const text = try userMessageText(alloc, msg);
+        const text = try userMessageText(self.arena.allocator(), msg);
         if (text.len == 0 or isSummaryMessage(text)) continue;
         const tokens = approxTokens(text.len);
         if (recent_tokens + tokens > RECENT_USER_MAX_TOKENS) break;
@@ -271,17 +280,73 @@ fn installCompactedHistory(self: *Agent, summary: []const u8) !void {
     i = recent.items.len;
     while (i > 0) {
         i -= 1;
-        try next.addMessage(alloc, .user, &.{.{ .text = recent.items[i] }});
+        try next.addMessage(alloc, .user, &.{.{ .text = try alloc.dupe(u8, recent.items[i]) }});
     }
 
     const summary_text = try std.fmt.allocPrint(alloc, "{s}\n{s}", .{ SUMMARY_PREFIX, summary });
     try next.addMessage(alloc, .user, &.{.{ .text = summary_text }});
 
+    const next_tools = try self.tools.clone(alloc);
+    const next_todos = try cloneTodos(self, alloc);
+    const next_bg_tasks = try cloneBackgroundTasks(self, alloc);
+    const next_bg_agents = try cloneBackgroundAgents(self, alloc);
+
+    var old_arena = self.arena;
+    self.arena = next_arena;
     self.chat = next;
+    self.tools = next_tools;
+    self.todo_list.value = next_todos;
+    self.bg_tasks.value = next_bg_tasks;
+    self.bg_agents.value = next_bg_agents;
+    self.tool_display.value = .{};
+    self.tool_call_runs = .{};
+    self.tool_call_done = .{};
+    self.loop_guard = .{};
+    old_arena.deinit();
 
     const file_stats = self.file_stats.lock(self.pool.io);
     defer file_stats.unlock();
     file_stats.ptr.* = .{};
+}
+
+fn appendClonedMessage(chat: *apt.Chat, alloc: std.mem.Allocator, message: apt.Message) !void {
+    const cloned = try message.clone(alloc);
+    try chat.messages.append(alloc, cloned);
+}
+
+fn cloneTodos(self: *Agent, alloc: std.mem.Allocator) !r.agent.TodoList {
+    const guard = self.todo_list.lock(self.pool.io);
+    defer guard.unlock();
+    var next = guard.ptr.*;
+    for (next.todos[0..next.count]) |*todo| {
+        todo.subject = try alloc.dupe(u8, todo.subject);
+        todo.description = try alloc.dupe(u8, todo.description);
+    }
+    return next;
+}
+
+fn cloneBackgroundTasks(self: *Agent, alloc: std.mem.Allocator) !r.agent.BackgroundTaskList {
+    const guard = self.bg_tasks.lock(self.pool.io);
+    defer guard.unlock();
+    var next: r.agent.BackgroundTaskList = .{};
+    for (guard.ptr.list.items) |task| try next.list.append(alloc, .{
+        .handle = task.handle,
+        .command = try alloc.dupe(u8, task.command),
+        .path = try alloc.dupe(u8, task.path),
+    });
+    return next;
+}
+
+fn cloneBackgroundAgents(self: *Agent, alloc: std.mem.Allocator) !r.agent.BackgroundAgentList {
+    const guard = self.bg_agents.lock(self.pool.io);
+    defer guard.unlock();
+    var next: r.agent.BackgroundAgentList = .{};
+    for (guard.ptr.list.items) |agent| try next.list.append(alloc, .{
+        .agent_id = agent.agent_id,
+        .description = try alloc.dupe(u8, agent.description),
+        .status = agent.status,
+    });
+    return next;
 }
 
 fn extractSummaryText(alloc: std.mem.Allocator, parts: []const apt.ContentPart) ![]const u8 {
@@ -329,4 +394,36 @@ fn findSystemMessage(chat: *const apt.Chat) ?apt.Message {
         if (msg.role == .system) return msg;
     }
     return null;
+}
+
+test "compaction rotates the agent arena without an API request" {
+    const testing = std.testing;
+    var gpa: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    defer testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+
+    var pool: http.RequestPool = .{};
+    try pool.init(gpa.allocator(), testing.io);
+    defer pool.deinit();
+
+    var agent = Agent.new(.{
+        .api_key = "test",
+        .model = "test",
+        .base_url = "https://example.test",
+        .provider = .{ .openai = .{} },
+    }, &pool, gpa.allocator(), 0, 0);
+    defer agent.deinit();
+
+    const old_alloc = agent.arena.allocator();
+    try agent.chat.addMessage(old_alloc, .system, &.{.{ .text = "system" }});
+    try agent.chat.addMessage(old_alloc, .user, &.{.{ .text = "keep me" }});
+    _ = try old_alloc.alloc(u8, 1024 * 1024);
+    const before = gpa.total_requested_bytes;
+
+    try installCompactedHistory(&agent, "summary");
+
+    try testing.expect(gpa.total_requested_bytes < before);
+    try testing.expectEqual(@as(usize, 3), agent.chat.messages.items.len);
+    try testing.expectEqualStrings("system", agent.chat.messages.items[0].parts[0].text);
+    try testing.expectEqualStrings("keep me", agent.chat.messages.items[1].parts[0].text);
+    try testing.expect(std.mem.endsWith(u8, agent.chat.messages.items[2].parts[0].text, "summary"));
 }

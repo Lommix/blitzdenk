@@ -17,3 +17,7 @@ Important modules:
 - `src/context_factory.zig` agent and prompt configuration
 - `src/commands.zig` async command queue.
 - `src/inject.zig` agent status injections.
+
+## Commands
+
+- `zig build gen` generate the lua meta file `src/blitz_defs.lua`
