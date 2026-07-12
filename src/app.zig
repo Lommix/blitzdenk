@@ -202,6 +202,7 @@ const Locked = r.prv.agent.Locked;
 const ToolStatusEntry = struct {
     lines: std.ArrayList(r.tui.Line) = .empty,
     child_id: ?prv.Swarm.AgentId = null,
+    is_error: ?bool = null,
 };
 
 pub const ToolStatusLineInput = struct {
@@ -216,6 +217,18 @@ const ToolStatusAgent = struct {
 
 const ToolStatusStore = struct {
     agents: [prv.Swarm.MAX_AGENTS]ToolStatusAgent = [_]ToolStatusAgent{.{}} ** prv.Swarm.MAX_AGENTS,
+
+    fn setResult(self: *ToolStatusStore, alloc: std.mem.Allocator, agent_id: prv.Swarm.AgentId, result: prv.adapter.ToolResult) !void {
+        const agent = &self.agents[agent_id.index];
+        if (agent.generation != agent_id.generation) agent.* = .{ .generation = agent_id.generation };
+
+        const entry = try agent.entries.getOrPut(alloc, result.call_id);
+        if (!entry.found_existing) {
+            entry.key_ptr.* = try alloc.dupe(u8, result.call_id);
+            entry.value_ptr.* = .{};
+        }
+        entry.value_ptr.is_error = result.is_error;
+    }
 };
 
 pub const App = struct {
@@ -407,6 +420,13 @@ pub const App = struct {
             res.value_ptr.* = .{};
         }
         res.value_ptr.child_id = child_id;
+    }
+
+    pub fn setToolResult(self: *App, agent_id: prv.Swarm.AgentId, result: prv.adapter.ToolResult) !void {
+        if (agent_id.index >= prv.Swarm.MAX_AGENTS) return error.InvalidAgent;
+        const g = self.tool_status_entries.lock(self.io);
+        defer g.unlock();
+        try g.ptr.setResult(self.sessionAlloc(), agent_id, result);
     }
 
     /// App-scoped allocator. Survives session resets.
@@ -1811,9 +1831,15 @@ fn buildToolGroupParagraph(
         const agent = app.swarm.getAgent(call.agent_id) orelse continue;
         var line = r.tui.Line{};
 
-        const result_opt: ?prv.adapter.ToolResult = findToolResult(agent, call.call_id) orelse agent.tool_call_done.get(call.call_id);
-        if (result_opt) |result| {
-            if (result.is_error) {
+        const status_agent = &statuses.ptr.agents[call.agent_id.index];
+        const status = if (status_agent.generation == call.agent_id.generation)
+            status_agent.entries.getPtr(call.call_id)
+        else
+            null;
+        const live_result: ?prv.adapter.ToolResult = findToolResult(agent, call.call_id) orelse agent.tool_call_done.get(call.call_id);
+        const is_error = if (live_result) |result| result.is_error else if (status) |entry| entry.is_error else null;
+        if (is_error) |failed| {
+            if (failed) {
                 try line.pushSpan(arena, .{ .content = r.tui.icon.fail, .style = .{ .fg = app.theme.err, .modifier = .{ .bold = true } } });
             } else {
                 try line.pushSpan(arena, .{ .content = r.tui.icon.ok, .style = .{ .fg = app.theme.ok, .modifier = .{ .bold = true } } });
@@ -1822,11 +1848,6 @@ fn buildToolGroupParagraph(
             try line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = app.theme.text } });
         }
 
-        const status_agent = &statuses.ptr.agents[call.agent_id.index];
-        const status = if (status_agent.generation == call.agent_id.generation)
-            status_agent.entries.getPtr(call.call_id)
-        else
-            null;
         try line.pushSpan(arena, .{ .content = " " });
         if (status) |entry| {
             if (entry.lines.items.len > 0) {
@@ -2543,4 +2564,22 @@ test "renderableParts keeps streamed final parts together" {
     try std.testing.expectEqualStrings("call_1", rendered[2].tool_call.call_id);
     try std.testing.expectEqualStrings("bash", rendered[2].tool_call.tool_name);
     try std.testing.expectEqual(agent_id, rendered[2].tool_call.agent_id);
+}
+
+test "ToolStatusStore retains terminal tool result" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var store: ToolStatusStore = .{};
+    const agent_id: prv.Swarm.AgentId = .{ .index = 1, .generation = 2 };
+    try store.setResult(arena.allocator(), agent_id, .{
+        .call_id = "call_1",
+        .name = "bash",
+        .content = "failed",
+        .is_error = true,
+    });
+
+    const agent = &store.agents[agent_id.index];
+    try std.testing.expectEqual(agent_id.generation, agent.generation);
+    try std.testing.expect(agent.entries.get("call_1").?.is_error.?);
 }

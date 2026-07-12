@@ -241,7 +241,13 @@ pub fn run(
                 const a: *App = @ptrCast(@alignCast(ptr));
 
                 if (en.agent_id != a.main_agent_id) return;
-                if (en.role == .user) return;
+                if (en.role == .user) {
+                    for (en.parts) |part| switch (part) {
+                        .tool_result => |result| a.setToolResult(en.agent_id, result) catch {},
+                        else => {},
+                    };
+                    return;
+                }
                 if (en.role == .system) return;
 
                 const g = a.broadcast_queue.lock(a.io);

@@ -153,19 +153,11 @@ fn shouldStart(self: *const Agent, estimate: u64) bool {
     {
         return false;
     }
-    return estimate + maxCompletionTokens(self) >= autoCompactLimit(self);
+    return estimate >= autoCompactLimit(self);
 }
 
 fn autoCompactLimit(self: *const Agent) u64 {
     return (@as(u64, self.context_limit) * AUTO_COMPACT_NUMERATOR) / AUTO_COMPACT_DENOMINATOR;
-}
-
-fn maxCompletionTokens(self: *const Agent) u64 {
-    return switch (self.config.provider) {
-        .anthropic => |cfg| cfg.max_tokens,
-        .openai => |cfg| cfg.max_completion_tokens orelse cfg.max_tokens orelse 8192,
-        .ollama => |cfg| cfg.max_tokens orelse 8192,
-    };
 }
 
 pub fn estimateNextRequestTokens(self: *const Agent) u64 {
@@ -254,7 +246,11 @@ fn installCompactedHistory(self: *Agent, summary: []const u8) !void {
     const alloc = next_arena.allocator();
     var next: apt.Chat = .{};
 
-    for (self.chat.tools.items) |tool| try next.tools.append(alloc, tool);
+    for (self.chat.tools.items) |tool| try next.tools.append(alloc, .{
+        .name = try alloc.dupe(u8, tool.name),
+        .description = try alloc.dupe(u8, tool.description),
+        .parameters_schema = try alloc.dupe(u8, tool.parameters_schema),
+    });
 
     if (findSystemMessage(&self.chat)) |system| {
         try appendClonedMessage(&next, alloc, system);
@@ -416,6 +412,11 @@ test "compaction rotates the agent arena without an API request" {
     const old_alloc = agent.arena.allocator();
     try agent.chat.addMessage(old_alloc, .system, &.{.{ .text = "system" }});
     try agent.chat.addMessage(old_alloc, .user, &.{.{ .text = "keep me" }});
+    try agent.chat.addTool(old_alloc, .{
+        .name = try old_alloc.dupe(u8, "dynamic"),
+        .description = try old_alloc.dupe(u8, "dynamic tool"),
+        .parameters_schema = try old_alloc.dupe(u8, "{\"type\":\"object\"}"),
+    });
     _ = try old_alloc.alloc(u8, 1024 * 1024);
     const before = gpa.total_requested_bytes;
 
@@ -426,4 +427,33 @@ test "compaction rotates the agent arena without an API request" {
     try testing.expectEqualStrings("system", agent.chat.messages.items[0].parts[0].text);
     try testing.expectEqualStrings("keep me", agent.chat.messages.items[1].parts[0].text);
     try testing.expect(std.mem.endsWith(u8, agent.chat.messages.items[2].parts[0].text, "summary"));
+    const schema = try std.json.parseFromSlice(
+        std.json.Value,
+        testing.allocator,
+        agent.chat.tools.items[0].parameters_schema,
+        .{},
+    );
+    defer schema.deinit();
+}
+
+test "auto compaction ignores maximum output tokens" {
+    const testing = std.testing;
+    var pool: http.RequestPool = .{};
+    try pool.init(testing.allocator, testing.io);
+    defer pool.deinit();
+
+    var agent = Agent.new(.{
+        .api_key = "test",
+        .model = "test",
+        .base_url = "https://example.test",
+        .provider = .{ .openai = .{ .max_tokens = 32_000 } },
+    }, &pool, testing.allocator, 0, 0);
+    defer agent.deinit();
+
+    const alloc = agent.arena.allocator();
+    for (0..4) |_| try agent.chat.addMessage(alloc, .user, &.{.{ .text = "" }});
+    agent.context_limit = 100_000;
+
+    try testing.expect(!shouldStart(&agent, 89_999));
+    try testing.expect(shouldStart(&agent, 90_000));
 }
