@@ -8,10 +8,10 @@ Configure, override and extend in Lua. Single binary, no supply chain, bare meta
 ## Core features and patterns
 
 - All IO goes through GNU core utils (ls, tee, cat, etc.)
-- Optional SSH layer: Since all IO goes through core utils, slapping SSH in front is free.
+- Optional SSH layer: Since IO is core utils, slapping SSH in front is free.
 - Small: 5MB native binary, less than 200MB ram usage.
 - MCP, LSP and Skill support.
-- Multi-provider: Any OpenAI or Anthropic chat schema supported, including local AI.
+- Multi-provider: Any OpenAI or Anthropic chat/response schema supported, including local AI.
 - LuaApi: Code your own tools, system prompts, modes, commands and loops.
 
 ## Install
@@ -26,7 +26,7 @@ cp zig-out/bin/blitz ~/.local/bin/blitz
 ## Minimal configuration
 
 Open the blitz.lua configuration at `~/.config/blitzdenk/blitz.lua`
-Setup at least on provider
+Setup at least on provider. The **key_envar** is not the API key! It's the environment var holding your key.
 
 ```lua
 local anthropic = blitz.add_provider({
@@ -92,3 +92,8 @@ blitz.set_model_agent(blitz.AGENT_GENERAL, "deepseek/deepseek-v4-pro", "max", no
 ## Contribution
 
 No issue no merge. Open source, restricted contribution. Simple bug fixes are welcome.
+
+## Note
+
+I am too poor to afford the good stuff. So this harness is hardened using cheap/dumb models, mostly deepseek flash and local.
+The idea: If the dumb model can do it, a smart one will exceed expectation.
