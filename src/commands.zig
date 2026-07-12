@@ -202,6 +202,35 @@ pub const Command = union(enum) {
                 try app.reloadLspTools();
             },
             .spawn_agent => |arg| {
+                if (!arg.fork) {
+                    switch (app.context_factory.buildAgentApiConfig(
+                        @enumFromInt(arg.agent_type),
+                        &app.config,
+                        app.swarm.exec.env,
+                    )) {
+                        .config => {},
+                        .diagnostic => |diagnostic| {
+                            app.swarm.releaseReservation(arg.agent_id);
+                            if (arg.chat_entry) |en| {
+                                const entry = try r.util.deepClone(ChatEntry, en, alloc);
+                                try app.chat_entries.append(alloc, entry);
+                            }
+                            showProviderOnboarding(app, diagnostic);
+                            app.running = app.swarm.countActive() > 0;
+                            app.auto_scroll = true;
+                            app.scroll_offset = 0;
+                            app.dirty = true;
+                            return;
+                        },
+                    }
+                }
+
+                var constructed = false;
+                errdefer if (constructed)
+                    app.swarm.releaseAgent(arg.agent_id)
+                else
+                    app.swarm.releaseReservation(arg.agent_id);
+
                 if (arg.fork) {
                     try app.swarm.forkAgentInSlot(arg.parent_id.?, arg.agent_id);
                 } else {
@@ -212,6 +241,7 @@ pub const Command = union(enum) {
                         @intFromEnum(app.mode),
                     );
                 }
+                constructed = true;
                 const agent = app.swarm.getAgent(arg.agent_id).?;
                 try app.configureAgent(agent);
 
@@ -295,3 +325,129 @@ pub const Command = union(enum) {
         }
     }
 };
+
+fn showProviderOnboarding(app: *App, diagnostic: r.ContextFactory.AgentConfigDiagnostic) void {
+    const config_path = "~/.config/blitzdenk/blitz.lua";
+    const example =
+        \\local provider = blitz.add_provider({
+        \\    type = "openai",
+        \\    url = "https://api.openai.com/v1",
+        \\    key_envar = "OPENAI_API_KEY",
+        \\})
+        \\blitz.set_model("gpt-5.4-mini", provider)
+        \\
+        \\Then set the key before launching Blitzdenk:
+        \\export OPENAI_API_KEY=...
+        \\Restart Blitzdenk after changing its launch environment, then resend your message from history.
+    ;
+
+    switch (diagnostic) {
+        .no_default_model => {
+            app.pushSystemMessage(
+                "No default model/provider is configured. Edit {s} and choose a provider URL, model, and API-key environment variable.\n\n{s}",
+                .{ config_path, example },
+            );
+            app.notifications.append(app.appAlloc(), "Configure a default provider/model in {s}", .{config_path}) catch {};
+        },
+        .invalid_provider => {
+            app.pushSystemMessage(
+                "The configured provider is invalid or inactive. Check its handle and model binding in {s}.\n\n{s}",
+                .{ config_path, example },
+            );
+            app.notifications.append(app.appAlloc(), "Configured provider is invalid or inactive", .{}) catch {};
+        },
+        .missing_api_key => |name| {
+            app.pushSystemMessage(
+                "Provider configuration is missing the required environment variable `{s}`. Set it in the environment that launches Blitzdenk. Configuration lives at {s}.\n\n{s}",
+                .{ name, config_path, example },
+            );
+            app.notifications.append(app.appAlloc(), "Missing required environment variable: {s}", .{name}) catch {};
+        },
+    }
+}
+
+test "handled spawn configuration failure keeps processing queued commands" {
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+    const test_alloc = test_arena.allocator();
+
+    var factory = r.ContextFactory{
+        .prompt_arena = std.heap.ArenaAllocator.init(test_alloc),
+        .io = std.testing.io,
+        .config_dir = null,
+        .skill_dir = null,
+    };
+    defer factory.prompt_arena.deinit();
+    defer factory.loaded_tools.deinit(test_alloc);
+    factory.resetDefs();
+
+    var app = try App.init(std.testing.io, test_alloc, &factory, ".");
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    var swarm: r.prv.Swarm = undefined;
+    try swarm.init(test_alloc, std.testing.io, .{
+        .ptr = &app,
+        .broadcast = (struct {
+            fn call(_: *anyopaque, _: r.prv.Swarm.BroadcastEntry) void {}
+        }).call,
+        .permission = (struct {
+            fn call(_: *anyopaque, _: *r.prv.Swarm.PermissionReq) void {}
+        }).call,
+        .cwd = (struct {
+            fn call(_: *anyopaque) []const u8 {
+                return ".";
+            }
+        }).call,
+        .build_config = (struct {
+            fn call(_: *anyopaque, _: u8) anyerror!r.prv.adapter.Config {
+                return error.UnexpectedConfigBuild;
+            }
+        }).call,
+        .gen_system_reminders = (struct {
+            fn call(_: *anyopaque, _: *r.prv.agent.Agent) void {}
+        }).call,
+        .pop_queued_message = (struct {
+            fn call(_: *anyopaque, _: r.prv.Swarm.AgentId, _: std.mem.Allocator) ?[]const r.prv.adapter.ContentPart {
+                return null;
+            }
+        }).call,
+    }, &env);
+    app.swarm = &swarm;
+    app.lua_vm.setApp(&app);
+    defer {
+        swarm.deinit();
+        app.deinit();
+    }
+
+    const id = swarm.reserveFreeSlot().?;
+    const entry = try ChatEntry.userMessageSimple(app.sessionAlloc(), .user, "hello");
+    try app.cmd_queue.append(std.testing.io, .{ .spawn_agent = .{
+        .agent_id = id,
+        .prompt = &.{.{ .text = "hello" }},
+        .chat_entry = entry,
+    } });
+
+    var later_command_ran = false;
+    try app.cmd_queue.append(std.testing.io, .{ .custom = .{
+        .ptr = &later_command_ran,
+        .func = (struct {
+            fn call(ptr: *anyopaque, _: *App) !void {
+                const ran: *bool = @ptrCast(@alignCast(ptr));
+                ran.* = true;
+            }
+        }).call,
+    } });
+
+    try app.cmd_queue.apply(std.testing.io, &app);
+
+    try std.testing.expect(later_command_ran);
+    try std.testing.expectEqual(@as(?r.prv.Swarm.AgentId, null), app.main_agent_id);
+    try std.testing.expectEqual(@as(?r.prv.Swarm.SlotState, null), swarm.getSlotState(id));
+    try std.testing.expect(!app.running);
+    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
+    try std.testing.expectEqual(r.prv.adapter.Role.user, app.chat_entries.items[0].role);
+    try std.testing.expectEqual(r.prv.adapter.Role.system, app.chat_entries.items[1].role);
+    try std.testing.expect(std.mem.indexOf(u8, app.chat_entries.items[1].parts[0].message, "~/.config/blitzdenk/blitz.lua") != null);
+    try std.testing.expect(app.notifications.hasVisible());
+}

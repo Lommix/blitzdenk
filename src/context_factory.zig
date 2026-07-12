@@ -109,6 +109,17 @@ pub const AgentModelConfig = struct {
     provider: r.prv.config.ProviderHandle,
 };
 
+pub const AgentConfigDiagnostic = union(enum) {
+    no_default_model,
+    invalid_provider,
+    missing_api_key: []const u8,
+};
+
+pub const AgentConfigResult = union(enum) {
+    config: r.prv.adapter.Config,
+    diagnostic: AgentConfigDiagnostic,
+};
+
 pub const NewAgentDef = struct {
     name: []const u8,
     description: []const u8,
@@ -182,30 +193,54 @@ pub fn buildAgentApiConfig(
     agent_type: AgentType,
     cfg: *r.prv.config.BlitzdenkCfg,
     env: *const std.process.Environ.Map,
-) ?r.prv.adapter.Config {
-    const def = self.getAgent(agent_type) orelse return null;
+) AgentConfigResult {
+    const def = self.getAgent(agent_type) orelse return .{ .diagnostic = .invalid_provider };
     if (def.model) |ag_cfg| {
         const provider_idx = @intFromEnum(ag_cfg.provider);
-        if (provider_idx >= cfg.provider_count) return null;
+        if (provider_idx >= cfg.provider_count) return .{ .diagnostic = .invalid_provider };
 
         const provider = &cfg.providers[provider_idx];
-        if (!provider.active) return null;
+        if (!provider.active) return .{ .diagnostic = .invalid_provider };
 
         const key = if (provider.key_len > 0)
-            env.get(provider.getKeyEnvar()) orelse return null
+            env.get(provider.getKeyEnvar()) orelse return .{
+                .diagnostic = .{ .missing_api_key = provider.getKeyEnvar() },
+            }
         else
             "";
 
-        return r.prv.adapter.Config{
+        return .{ .config = .{
             .api_key = key,
             .base_url = provider.getUrl(),
             .model = ag_cfg.name,
             .provider = provider.provider_config,
             .reasoning_effort = ag_cfg.effort,
-        };
+        } };
     }
 
-    return cfg.buildConfig(env);
+    const entry = &cfg.default_model;
+    if (!entry.bound) return .{ .diagnostic = .no_default_model };
+
+    const provider_idx = @intFromEnum(entry.provider);
+    if (provider_idx >= cfg.provider_count) return .{ .diagnostic = .invalid_provider };
+
+    const provider = &cfg.providers[provider_idx];
+    if (!provider.active) return .{ .diagnostic = .invalid_provider };
+
+    const key = if (provider.key_len > 0)
+        env.get(provider.getKeyEnvar()) orelse return .{
+            .diagnostic = .{ .missing_api_key = provider.getKeyEnvar() },
+        }
+    else
+        "";
+
+    return .{ .config = .{
+        .api_key = key,
+        .model = entry.getName(),
+        .base_url = provider.getUrl(),
+        .reasoning_effort = provider.reasoning_effort,
+        .provider = provider.provider_config,
+    } };
 }
 
 pub fn setAgentPrompt(self: *Self, agent_type: AgentType, prompt: []const u8) !void {
@@ -889,6 +924,86 @@ test "remove deletes the matched loaded tool" {
     try std.testing.expect(factory.findLoaded(r.tools.read.ReadTool.def.name) != null);
     try std.testing.expect(factory.findLoaded(r.tools.write.WriteTool.def.name) == null);
     try std.testing.expect(factory.findLoaded(r.tools.rg.RipGrepTool.def.name) != null);
+}
+
+fn initTestFactory() Self {
+    var factory = Self{
+        .prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .io = undefined,
+        .config_dir = null,
+        .skill_dir = null,
+    };
+    factory.resetDefs();
+    return factory;
+}
+
+test "agent config diagnoses an unbound default model" {
+    var factory = initTestFactory();
+    defer factory.prompt_arena.deinit();
+
+    var cfg: r.prv.config.BlitzdenkCfg = .{};
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    switch (factory.buildAgentApiConfig(.general, &cfg, &env)) {
+        .diagnostic => |diagnostic| try std.testing.expect(diagnostic == .no_default_model),
+        .config => return error.TestExpectedConfigDiagnostic,
+    }
+}
+
+test "agent config diagnoses an invalid provider" {
+    var factory = initTestFactory();
+    defer factory.prompt_arena.deinit();
+
+    var cfg: r.prv.config.BlitzdenkCfg = .{};
+    cfg.default_model.bound = true;
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    switch (factory.buildAgentApiConfig(.general, &cfg, &env)) {
+        .diagnostic => |diagnostic| try std.testing.expect(diagnostic == .invalid_provider),
+        .config => return error.TestExpectedConfigDiagnostic,
+    }
+}
+
+test "agent config reports the missing API key environment variable" {
+    var factory = initTestFactory();
+    defer factory.prompt_arena.deinit();
+
+    var cfg: r.prv.config.BlitzdenkCfg = .{};
+    _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY").?;
+    const provider = cfg.commitProvider();
+    try std.testing.expect(cfg.setModel("example-model", provider));
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    switch (factory.buildAgentApiConfig(.general, &cfg, &env)) {
+        .diagnostic => |diagnostic| switch (diagnostic) {
+            .missing_api_key => |name| try std.testing.expectEqualStrings("EXAMPLE_API_KEY", name),
+            else => return error.TestExpectedMissingApiKey,
+        },
+        .config => return error.TestExpectedConfigDiagnostic,
+    }
+}
+
+test "agent config permits keyless providers" {
+    var factory = initTestFactory();
+    defer factory.prompt_arena.deinit();
+
+    var cfg: r.prv.config.BlitzdenkCfg = .{};
+    _ = cfg.reserveProvider("http://localhost:8080/v1", "").?;
+    const provider = cfg.commitProvider();
+    try std.testing.expect(cfg.setModel("local-model", provider));
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    switch (factory.buildAgentApiConfig(.general, &cfg, &env)) {
+        .config => |config| {
+            try std.testing.expectEqualStrings("", config.api_key);
+            try std.testing.expectEqualStrings("local-model", config.model);
+        },
+        .diagnostic => return error.TestExpectedAgentConfig,
+    }
 }
 
 test "system_prompt" {

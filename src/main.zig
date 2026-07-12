@@ -271,12 +271,19 @@ pub fn run(
         .build_config = (struct {
             fn func(ptr: *anyopaque, agent_type_idx: u8) anyerror!r.prv.adapter.Config {
                 const a: *App = @ptrCast(@alignCast(ptr));
-                const config = a.context_factory.buildAgentApiConfig(
+                const result = a.context_factory.buildAgentApiConfig(
                     @enumFromInt(agent_type_idx),
                     &a.config,
                     a.swarm.exec.env,
-                ) orelse return error.FailedToBuildAgent;
-                return try r.prv.adapter.cloneConfig(a.appAlloc(), config);
+                );
+                return switch (result) {
+                    .config => |config| try r.prv.adapter.cloneConfig(a.appAlloc(), config),
+                    .diagnostic => |diagnostic| switch (diagnostic) {
+                        .no_default_model => error.NoDefaultModel,
+                        .invalid_provider => error.InvalidProvider,
+                        .missing_api_key => error.MissingApiKey,
+                    },
+                };
             }
         }).func,
         .cwd = (struct {

@@ -11,50 +11,17 @@ blitz.set_compact_edge(200000)
 -- end
 
 -----------------------------------------------------------------------------
--- Register providers configurations.
-local llamacpp = blitz.add_provider({
-	type = "openai",
-	url = "http://localhost:8080",
-	effort = "low",
-	key_envar = "",
-	temperature = 0.7,
-})
-
------------------------------------------------------------------------------
--- !!!"key_envar" IS NOT THE API KEY! iT'S THE ENVAR NAME UNDER WHICH THE KEY IS SAVED!!!
------------------------------------------------------------------------------
-
--- local novita = blitz.add_provider({
--- 	type = "anthropic",
--- 	url = "https://api.novita.ai/anthropic",
--- 	key_envar = "NOVITA_API_KEY",
--- 	thinking = { type = "enabled", budget_tokens = 1024 },
--- 	temperature = 0.7,
+-- Provider setup (OpenAI-compatible example).
+-- Choose the URL, model, and environment-variable name for your provider,
+-- then uncomment and edit this block. `key_envar` is the variable name, not
+-- the API key itself. Keyless local providers may use key_envar = "".
+--
+-- local provider = blitz.add_provider({
+-- 	type = "openai",
+-- 	url = "https://api.openai.com/v1",
+-- 	key_envar = "OPENAI_API_KEY",
 -- })
-
--- open ai schema equal:
-local novita = blitz.add_provider({
-	type = "openai",
-	url = "https://api.novita.ai/openai/v1",
-	key_envar = "NOVITA_API_KEY", -- the ENVAR string, holding the api key, directly using a api key does not work!
-	effort = "high",
-	temperature = 0.7,
-})
-
------------------------------------------------------------------------------
--- Setup default model
-local model = "deepseek/deepseek-v4-flash"
-blitz.set_model(model, novita)
-
--- set specific agent models
-blitz.set_model_agent(blitz.AGENT_GENERAL, model, "max", novita)
-blitz.set_model_agent(blitz.AGENT_EXPLORE, model, "low", novita)
-
------------------------------------------------------------------------------
---- smart mode
-blitz.bind("<C-u>", function()
-	blitz.set_model_agent(blitz.AGENT_GENERAL, "deepseek/deepseek-v4-pro", "max", novita)
-end)
+-- blitz.set_model("gpt-5.4-mini", provider)
 
 -- Add custom bindings, using vim style keybind strings
 blitz.bind("<C-s>", function()
@@ -62,14 +29,6 @@ blitz.bind("<C-s>", function()
 	if ok and png and #png > 0 then
 		blitz.queue.attach_screenshot(png, "image/png")
 	end
-end)
-
--- example: switch to local ai mode
-blitz.bind("<C-l>", function()
-	local localm = "Qwen3.6-35B-A3B"
-	blitz.set_model(localm, llamacpp)
-	blitz.set_model_agent(blitz.AGENT_GENERAL, localm, "max", novita)
-	blitz.set_model_agent(blitz.AGENT_EXPLORE, localm, "low", novita)
 end)
 
 -- Add custom commands, args is the remaining input string

@@ -122,7 +122,10 @@ pub fn finishReservation(self: *Self, id: AgentId) void {
 }
 
 pub fn releaseReservation(self: *Self, id: AgentId) void {
-    self.slots[id.index].state.store(.free, .release);
+    if (id.index >= MAX_AGENTS) return;
+    const slot = &self.slots[id.index];
+    if (slot.generation != id.generation) return;
+    _ = slot.state.cmpxchgStrong(.reserved, .free, .acq_rel, .monotonic);
 }
 
 pub const BroadcastEntry = struct {
@@ -217,6 +220,7 @@ pub fn forkAgent(
         parent_slot.agent.type_idx,
         parent_slot.agent.mode_idx,
     );
+    errdefer slot.agent.deinit();
 
     slot.agent.chat = try parent_slot.agent.chat.clone(slot.agent.arena.allocator());
     slot.agent.tools = try parent_slot.agent.tools.clone(slot.agent.arena.allocator());
@@ -259,6 +263,7 @@ pub fn forkAgentInSlot(
         parent_slot.agent.type_idx,
         parent_slot.agent.mode_idx,
     );
+    errdefer slot.agent.deinit();
 
     slot.agent.chat = try parent_slot.agent.chat.clone(slot.agent.arena.allocator());
     slot.agent.tools = try parent_slot.agent.tools.clone(slot.agent.arena.allocator());
@@ -303,6 +308,7 @@ pub fn newAgent(
         agent_type_idx,
         mode_type_idx,
     );
+    errdefer slot.agent.deinit();
 
     slot.agent.swarm = self;
     slot.agent.swarm_id = id;
@@ -336,6 +342,7 @@ pub fn newAgentInSlot(
         agent_type_idx,
         mode_type_idx,
     );
+    errdefer slot.agent.deinit();
 
     slot.agent.swarm = self;
     slot.agent.swarm_id = idx;
@@ -479,4 +486,22 @@ pub fn recordBroadcast(self: *Self, agent_id: AgentId, role: apt.Role, parts: []
 // stack allocated, breaks when agent is canceled/crash/etc
 pub fn requestPermission(self: *const Self, req: *PermissionReq) void {
     self.context.permission(self.context.ptr, req);
+}
+
+test "failed reservation is returned to the free pool" {
+    var swarm: Self = undefined;
+    swarm.slots = [_]AgentSlot{.{}} ** MAX_AGENTS;
+
+    const id = swarm.reserveFreeSlot().?;
+    try std.testing.expectEqual(SlotState.reserved, swarm.slots[id.index].state.load(.acquire));
+
+    swarm.releaseReservation(id);
+    try std.testing.expectEqual(SlotState.free, swarm.slots[id.index].state.load(.acquire));
+
+    const reused = swarm.reserveFreeSlot().?;
+    try std.testing.expectEqual(id.index, reused.index);
+    try std.testing.expect(reused.generation != id.generation);
+
+    swarm.releaseReservation(id);
+    try std.testing.expectEqual(SlotState.reserved, swarm.slots[reused.index].state.load(.acquire));
 }
