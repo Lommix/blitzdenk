@@ -597,7 +597,7 @@ pub const App = struct {
     }
 
     pub fn configureAgent(self: *const App, agent: *prv.agent.Agent) !void {
-        try self.context_factory.configureAgent(agent, &self.config, self.cwd);
+        try self.context_factory.configureAgent(agent, self.cwd);
         agent.context_limit = self.default_context_limit;
     }
 

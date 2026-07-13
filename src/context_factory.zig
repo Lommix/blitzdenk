@@ -450,10 +450,8 @@ pub fn remove(self: *Self, tool_name: []const u8) void {
 pub fn configureAgent(
     self: *const Self,
     agent: *r.prv.agent.Agent,
-    config: *const r.prv.config.BlitzdenkCfg,
     cwd: []const u8,
 ) !void {
-    _ = config; // autofix
     agent.reset();
     try self.refreshAgentTools(agent);
 
@@ -613,10 +611,6 @@ pub fn build_system_prompt(
             \\
             \\Load a skill when the task matches its trigger rules.
             \\Skills provide specialized tooling, domain knowledge, and behavioral guidance.
-            \\The trigger rules are absolute — load the skill if the user asks about anything in its domain.
-            \\Each skill below lists its name and trigger description.
-            \\
-            \\To load: use the `load_skill` tool with the skill name.
             \\
         );
 
@@ -634,7 +628,7 @@ pub fn build_system_prompt(
 
             try w.print(
                 \\  - name: "{s}"
-                \\    description and trigger rules: "{s}"
+                \\    description: "{s}"
                 \\
                 \\
             , .{ skill.name, skill.description });

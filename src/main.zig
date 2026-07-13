@@ -7,7 +7,6 @@ const r = @import("root.zig");
 const App = r.app.App;
 const BlitzdenkCfg = r.prv.config.BlitzdenkCfg;
 const ChatEntry = r.app.ChatEntry;
-const prompts = r.prompts;
 const lua = r.lua;
 const reg = r.ContextFactory;
 const keys = r.keys;
