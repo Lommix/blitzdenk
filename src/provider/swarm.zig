@@ -132,6 +132,7 @@ pub const BroadcastEntry = struct {
     agent_id: AgentId,
     role: apt.Role,
     parts: []const apt.ContentPart,
+    plain_text: bool = false,
 };
 
 pub const ToolCallPayload = struct {
@@ -480,6 +481,15 @@ pub fn recordBroadcast(self: *Self, agent_id: AgentId, role: apt.Role, parts: []
         .agent_id = agent_id,
         .role = role,
         .parts = parts,
+    });
+}
+
+pub fn recordProviderError(self: *Self, agent_id: AgentId, parts: []const apt.ContentPart) void {
+    self.context.broadcast(self.context.ptr, .{
+        .agent_id = agent_id,
+        .role = .agent,
+        .parts = parts,
+        .plain_text = true,
     });
 }
 

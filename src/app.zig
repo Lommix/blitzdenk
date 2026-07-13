@@ -482,7 +482,7 @@ pub const App = struct {
                 }
 
                 const alloc = self.sessionAlloc();
-                if (renderableParts(alloc, en.agent_id, en.parts)) |parts| {
+                if (renderableParts(alloc, en.agent_id, en.parts, en.plain_text)) |parts| {
                     try self.chat_entries.append(alloc, .{
                         .role = en.role,
                         .parts = parts,
@@ -932,7 +932,12 @@ pub const App = struct {
     /// Convert an agent message's content parts into renderable ChatEntry
     /// message parts (trim + dupe text/thinking, drop everything else).
     /// Returns null if no renderable parts remain.
-    fn renderableParts(alloc: std.mem.Allocator, agent_id: prv.Swarm.AgentId, parts: []const prv.adapter.ContentPart) ?[]ChatPart {
+    fn renderableParts(
+        alloc: std.mem.Allocator,
+        agent_id: prv.Swarm.AgentId,
+        parts: []const prv.adapter.ContentPart,
+        plain_text: bool,
+    ) ?[]ChatPart {
         var out: std.ArrayList(ChatPart) = .empty;
         for (parts) |part| {
             switch (part) {
@@ -940,7 +945,7 @@ pub const App = struct {
                     const trimmed = std.mem.trim(u8, txt, " \t\r\n");
                     if (trimmed.len == 0) continue;
                     const dup = alloc.dupe(u8, trimmed) catch continue;
-                    out.append(alloc, .{ .message = dup }) catch continue;
+                    out.append(alloc, if (plain_text) .{ .plain_text = dup } else .{ .message = dup }) catch continue;
                 },
                 .thinking => |th| {
                     const trimmed = std.mem.trim(u8, th.text, " \t\r\n");
@@ -981,7 +986,7 @@ pub const App = struct {
         _ = self.arena_streaming_preview.reset(.free_all);
         self.streaming_entry = null;
         const alloc = self.arena_streaming_preview.allocator();
-        const slice = renderableParts(alloc, main_id, msg.parts) orelse {
+        const slice = renderableParts(alloc, main_id, msg.parts, false) orelse {
             self.dropStreamingPreview();
             return;
         };
@@ -1170,6 +1175,7 @@ pub const ChatEntry = struct {
         for (self.parts) |part| {
             switch (part) {
                 .message => |slice| alloc.free(slice),
+                .plain_text => |slice| alloc.free(slice),
                 .thinking => |slice| alloc.free(slice),
                 .plan => |plan| {
                     alloc.free(plan.lines);
@@ -1199,6 +1205,7 @@ pub const ChatPart = union(enum) {
     // TODO add time tracking
     thinking: []const u8,
     message: []const u8,
+    plain_text: []const u8,
     diff: DiffEntry,
     plan: PlanEntry, // rename to proposal
     tool_call: ToolCallEntry,
@@ -1783,6 +1790,13 @@ fn buildChatEntryParagraph(
             .message => |text| {
                 var p = r.tui.Paragraph{};
                 try appendMarkdownText(&p, arena, text);
+                const h = p.totalHeightLong(inner_w);
+                try out.append(arena, .{ .p = p, .h = h });
+                total += h;
+            },
+            .plain_text => |text| {
+                var p = r.tui.Paragraph{};
+                try p.appendText(arena, text, .{});
                 const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total += h;
@@ -2557,13 +2571,24 @@ test "renderableParts keeps streamed final parts together" {
     };
 
     const agent_id: prv.Swarm.AgentId = .{ .index = 3, .generation = 7 };
-    const rendered = App.renderableParts(alloc, agent_id, &parts) orelse return error.TestUnexpectedResult;
+    const rendered = App.renderableParts(alloc, agent_id, &parts, false) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 3), rendered.len);
     try std.testing.expectEqualStrings("think", rendered[0].thinking);
     try std.testing.expectEqualStrings("answer", rendered[1].message);
     try std.testing.expectEqualStrings("call_1", rendered[2].tool_call.call_id);
     try std.testing.expectEqualStrings("bash", rendered[2].tool_call.tool_name);
     try std.testing.expectEqual(agent_id, rendered[2].tool_call.agent_id);
+}
+
+test "renderableParts preserves provider errors as plain text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const parts = [_]prv.adapter.ContentPart{.{ .text = " {\"error\":\"model unavailable\"} " }};
+    const rendered = App.renderableParts(arena.allocator(), .{ .index = 0, .generation = 0 }, &parts, true) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(usize, 1), rendered.len);
+    try std.testing.expectEqualStrings("{\"error\":\"model unavailable\"}", rendered[0].plain_text);
 }
 
 test "ToolStatusStore retains terminal tool result" {

@@ -463,6 +463,7 @@ pub const Agent = struct {
                         self.pending_handle = null;
                     }
                     self.request_start_ms = null;
+                    if (err == error.ProviderRequestFailed) return self.fail(err);
                     if (self.retry_count < MAX_RETRIES) {
                         self.retry_count += 1;
                         self.last_error = err;
@@ -481,6 +482,7 @@ pub const Agent = struct {
                         self.pending_handle = null;
                     }
                     self.dropStream();
+                    if (err == error.ProviderRequestFailed) return self.fail(err);
                     if (self.retry_count < MAX_RETRIES) {
                         self.flags.is_thinking = false;
                         self.flags.is_writing = false;
@@ -578,9 +580,6 @@ pub const Agent = struct {
     fn startStreaming(self: *Agent) !void {
         const handle = self.pending_handle.?;
         const status = self.pool.getStatus(handle) catch |err| {
-            const alloc = self.arena.allocator();
-            const msg = std.fmt.allocPrint(alloc, "Request error: {s}", .{@errorName(err)}) catch "Request error";
-            self.chat.addMessage(alloc, .user, &.{.{ .text = msg }}) catch {};
             self.pool.cancel(handle);
             self.pending_handle = null;
             self.request_start_ms = null;
@@ -594,12 +593,11 @@ pub const Agent = struct {
             const body = self.pool.collectBody(handle, alloc) catch &.{};
             const snippet = body[0..@min(body.len, 2048)];
             log.warn("http {d} from provider: {s}", .{ status_code, snippet });
-            const msg = std.fmt.allocPrint(alloc, "API Error (HTTP {d}): {s}", .{ status_code, snippet }) catch "API Error";
-            self.chat.addMessage(alloc, .user, &.{.{ .text = msg }}) catch {};
+            self.reportProviderError(status_code, body);
             self.pool.cancel(handle);
             self.pending_handle = null;
             self.request_start_ms = null;
-            return error.EmptyResponse;
+            return error.ProviderRequestFailed;
         }
 
         const arena = self.arena.allocator();
@@ -670,10 +668,34 @@ pub const Agent = struct {
                     const total = u.input_tokens + u.cached_tokens + u.cache_creation_tokens;
                     self.last_input_context_size = @intCast(@min(total, std.math.maxInt(u32)));
                 },
+                .provider_error => |body| {
+                    self.reportProviderError(null, body);
+                    return error.ProviderRequestFailed;
+                },
                 .finish => return self.finishStream(ctx),
             }
         }
         return .pending;
+    }
+
+    fn reportProviderError(self: *Agent, status_code: ?u16, body: []const u8) void {
+        const alloc = self.arena.allocator();
+        const trimmed = std.mem.trim(u8, body, " \t\r\n");
+        const message = if (status_code) |status|
+            if (trimmed.len > 0)
+                std.fmt.allocPrint(alloc, "Provider error (HTTP {d})\n{s}", .{ status, trimmed }) catch trimmed
+            else
+                std.fmt.allocPrint(alloc, "Provider error (HTTP {d}): empty response body", .{status}) catch "Provider error"
+        else if (trimmed.len > 0)
+            std.fmt.allocPrint(alloc, "Provider error\n{s}", .{trimmed}) catch trimmed
+        else
+            "Provider error: empty response body";
+
+        const parts = alloc.alloc(apt.ContentPart, 1) catch return;
+        parts[0] = .{ .text = message };
+        const swarm = self.swarm orelse return;
+        const id = self.swarm_id orelse return;
+        swarm.recordProviderError(id, parts);
     }
 
     fn finishStream(self: *Agent, _: Swarm.SwarmContextV) !TickResult {

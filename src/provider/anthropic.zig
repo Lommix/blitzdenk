@@ -530,7 +530,7 @@ pub const StreamState = struct {
         } else if (std.mem.eql(u8, name, "message_start")) {
             return try self.handleMessageStart(arena, data);
         } else if (std.mem.eql(u8, name, "error")) {
-            return error.ProviderStreamError;
+            return .{ .provider_error = try arena.dupe(u8, data) };
         }
         return null;
     }
@@ -750,4 +750,21 @@ test "anthropic request stream mode is caller selected" {
 
     const parsed = try std.json.parseFromSlice(std.json.Value, arena, payload, .{});
     try testing.expectEqual(false, parsed.value.object.get("stream").?.bool);
+}
+
+test "anthropic stream surfaces error event payload" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    try stream.event_name.appendSlice(arena, "error");
+    try stream.event_data.appendSlice(arena, "{\"type\":\"error\",\"error\":{\"message\":\"model unavailable\"}}");
+    const delta = (try stream.dispatch(arena)) orelse return error.TestUnexpectedResult;
+
+    switch (delta) {
+        .provider_error => |body| try testing.expect(std.mem.indexOf(u8, body, "model unavailable") != null),
+        else => return error.TestUnexpectedResult,
+    }
 }

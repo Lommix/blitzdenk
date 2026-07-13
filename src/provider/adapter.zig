@@ -296,6 +296,7 @@ pub const CompletionOptions = struct {
 pub const Delta = union(enum) {
     text_chunk: []const u8,
     thinking_chunk: []const u8,
+    provider_error: []const u8,
     tool_call_start: ToolCall,
     tool_input_delta: struct { call_id: []const u8, json_fragment: []const u8 },
     usage: TokenUsage,

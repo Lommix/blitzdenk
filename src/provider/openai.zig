@@ -470,6 +470,7 @@ const OaiStreamChoice = struct {
 const OaiStreamChunk = struct {
     choices: ?[]const OaiStreamChoice = null,
     usage: ?OaiUsage = null,
+    @"error": ?std.json.Value = null,
     // Ollama top-level fields:
     message: ?OaiResponseMessage = null,
     done: ?bool = null,
@@ -642,6 +643,12 @@ pub const StreamState = struct {
     }
 
     fn applyChunk(self: *StreamState, arena: Allocator, chunk: OaiStreamChunk) !?adapter.Delta {
+        if (chunk.@"error") |provider_error| {
+            var buf: std.Io.Writer.Allocating = .init(arena);
+            try std.json.Stringify.value(provider_error, .{}, &buf.writer);
+            return .{ .provider_error = try buf.toOwnedSlice() };
+        }
+
         // Ollama-style: top-level message + done flag.
         if (chunk.message) |m| {
             if (m.content) |c| {
@@ -1023,6 +1030,23 @@ test "openai stream keeps tagged reasoning as thinking across schema fields" {
     const normal_result = try normal.finalize(arena);
     try testing.expectEqualStrings("plan", normal_result.message.parts[0].thinking.text);
     try testing.expectEqualStrings("answer", normal_result.message.parts[1].text);
+}
+
+test "openai stream surfaces provider error payload" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, "{\"message\":\"model unavailable\"}", .{});
+    defer parsed.deinit();
+    var stream = StreamState.init(arena);
+    const delta = (try stream.applyChunk(arena, .{ .@"error" = parsed.value })) orelse return error.TestUnexpectedResult;
+
+    switch (delta) {
+        .provider_error => |body| try testing.expect(std.mem.indexOf(u8, body, "model unavailable") != null),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "reasoning_details round-trip: stream capture then replay in request" {

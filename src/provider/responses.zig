@@ -415,7 +415,9 @@ pub const StreamState = struct {
             self.finish_pending = true;
             return null;
         }
-        if (std.mem.eql(u8, kind, "response.failed") or std.mem.eql(u8, kind, "response.incomplete")) return error.IncompleteResponse;
+        if (std.mem.eql(u8, kind, "response.failed") or std.mem.eql(u8, kind, "response.incomplete")) {
+            return .{ .provider_error = try stringifyOwned(arena, event) };
+        }
         return null;
     }
 
@@ -456,6 +458,23 @@ test "responses request uses stateless streaming API" {
     try testing.expect(std.mem.indexOf(u8, payload, "\"store\":false") != null);
     try testing.expect(std.mem.indexOf(u8, payload, "reasoning.encrypted_content") != null);
     try testing.expect(std.mem.indexOf(u8, payload, "\"max_output_tokens\":123") != null);
+}
+
+test "responses stream surfaces failed event payload" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena, "{\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"model unavailable\"}}}", .{});
+    defer parsed.deinit();
+    var stream = StreamState.init(arena);
+    const delta = (try stream.applyEvent(arena, parsed.value)) orelse return error.TestUnexpectedResult;
+
+    switch (delta) {
+        .provider_error => |body| try testing.expect(std.mem.indexOf(u8, body, "model unavailable") != null),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "responses request replays canonical provider items" {
