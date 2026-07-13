@@ -1,7 +1,6 @@
 const prv = @import("provider");
 const r = @import("root.zig");
 const std = @import("std");
-const prompts = @import("../prompts.zig");
 
 pub const AgentTool = prv.tool.Tool{
     .def = .{

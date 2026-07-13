@@ -3,7 +3,6 @@ pub const VERSION = "0.3.1";
 pub const app = @import("app.zig");
 pub const prv = @import("provider");
 pub const ContextFactory = @import("context_factory.zig");
-pub const prompts = @import("prompts.zig");
 pub const session = @import("session.zig");
 pub const util = @import("util.zig");
 pub const keys = @import("keys.zig");

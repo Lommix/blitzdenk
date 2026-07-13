@@ -58,7 +58,6 @@ pub const Mode = enum(u6) {
 pub const AgentType = enum(u6) {
     pub const Set = std.EnumSet(AgentType);
     general,
-    explore,
     _,
 };
 
@@ -390,7 +389,7 @@ pub fn resetDefs(self: *Self) void {
     self.agents.set(.general, .{
         .name = @tagName(AgentType.general),
         .description = "General purpose agent",
-        .prompt = r.prompts.default_main_agent_prompt,
+        .prompt = @embedFile("prompts/default.md"),
         .tools = .from(&.{
             r.tools.write.WriteTool.def.name,
             r.tools.edit.EditTool.def.name,
@@ -408,26 +407,6 @@ pub fn resetDefs(self: *Self) void {
             r.tools.start.StartMcpTool.def.name,
             r.tools.start.StartLspTool.def.name,
         }),
-    });
-    self.agents.set(.explore, .{
-        .name = @tagName(AgentType.explore),
-        .description =
-        \\Search specialist for code, documentation and web. Useful for:
-        \\- Any questions against documentation
-        \\- Explore how certain parts of code work
-        \\- Doing research on the web
-        \\
-        ,
-        .prompt = r.prompts.explore_sub_agent_prompt,
-        .tools = .from(&.{
-            r.tools.read.ReadTool.def.name,
-            r.tools.rg.RipGrepTool.def.name,
-            r.tools.skill.LoadSkillTool.def.name,
-            r.tools.start.StartMcpTool.def.name,
-            r.tools.start.StartLspTool.def.name,
-            r.tools.agent.SendMessageToAgent.def.name,
-        }),
-        .default_tool_call_budget = 30,
     });
 
     self.modes.set(.exec, .{

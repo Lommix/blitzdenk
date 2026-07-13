@@ -344,7 +344,6 @@ pub const Blitz = LuaType{
             .{ .name = "RET_ERR", .ty = LuaType.integer, .value = .{ .integer = lua.RET_ERR } },
             .{ .name = "RET_EXIT_LOOP", .ty = LuaType.integer, .value = .{ .integer = lua.RET_EXIT_LOOP } },
             .{ .name = "AGENT_GENERAL", .ty = LuaType.integer, .value = .{ .integer = 0 } },
-            .{ .name = "AGENT_EXPLORE", .ty = LuaType.integer, .value = .{ .integer = 1 } },
             .{ .name = "MODE_EXEC", .ty = LuaType.integer, .value = .{ .integer = 0 } },
             .{ .name = "REQ_STATUS_PENDING", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_PENDING } },
             .{ .name = "REQ_STATUS_APPROVED", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_APPROVED } },
