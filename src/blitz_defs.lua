@@ -202,6 +202,13 @@
 ---@field cache integer
 ---@field cache_creation integer
 
+---@class BlitzModelTokenUsage
+---@field model string
+---@field input integer
+---@field output integer
+---@field cache integer
+---@field cache_creation integer
+
 ---@class BlitzAppFlags
 ---@field show_thinking? boolean
 ---@field debug_log? boolean
@@ -234,7 +241,6 @@
 ---@field RET_ERR integer
 ---@field RET_EXIT_LOOP integer
 ---@field AGENT_GENERAL integer
----@field AGENT_EXPLORE integer
 ---@field MODE_EXEC integer
 ---@field REQ_STATUS_PENDING integer
 ---@field REQ_STATUS_APPROVED integer
@@ -267,6 +273,8 @@
 ---@field set_model_agent fun(agent_type: integer, model: string, effort: string, handle: integer)
 ---Return token usage currently shown by the statusbar.
 ---@field token_usage fun(): BlitzTokenUsage
+---Return lifetime per-model token usage, insertion ordered: { { model, input, output, cache, cache_creation }, ... }.
+---@field token_usage_by_model fun(): BlitzModelTokenUsage[]
 ---Return main-agent context fill percentage currently shown by the statusbar.
 ---@field context_percent fun(): number
 ---Set the default context edge, in tokens, used for statusbar percentage and auto-compaction.

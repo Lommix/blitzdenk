@@ -213,6 +213,17 @@ const TokenUsageDef = LuaType{ .table_def = .{ .name = "BlitzTokenUsage", .field
     .{ .name = "cache", .ty = LuaType.integer },
     .{ .name = "cache_creation", .ty = LuaType.integer },
 } } };
+const ModelTokenUsageDef = LuaType{ .table_def = .{ .name = "BlitzModelTokenUsage", .fields = &.{
+    .{ .name = "model", .ty = LuaType.string },
+    .{ .name = "input", .ty = LuaType.integer },
+    .{ .name = "output", .ty = LuaType.integer },
+    .{ .name = "cache", .ty = LuaType.integer },
+    .{ .name = "cache_creation", .ty = LuaType.integer },
+} } };
+const ModelTokenUsageListDef = LuaType{ .raw_refs = .{
+    .text = "BlitzModelTokenUsage[]",
+    .refs = &.{ModelTokenUsageDef},
+} };
 const ThinkingDef = LuaType{ .table_def = .{ .name = "BlitzThinking", .fields = &.{
     .{ .name = "type", .ty = LuaType.string },
     .{ .name = "budget_tokens", .ty = LuaType.integer, .optional = true },
@@ -644,6 +655,41 @@ pub const Blitz = LuaType{
                                 };
                             }
                         }).lua_fn, "token_usage"),
+                    },
+                },
+            },
+            .{
+                .name = "token_usage_by_model",
+                .desc = "Return lifetime per-model token usage, insertion ordered: { { model, input, output, cache, cache_creation }, ... }.",
+                .ty = LuaType{
+                    .function = .{
+                        .ret = &ModelTokenUsageListDef,
+                        .fn_ptr = LuaFnBind((struct {
+                            const Entry = struct {
+                                model: []const u8,
+                                input: u64,
+                                output: u64,
+                                cache: u64,
+                                cache_creation: u64,
+                            };
+
+                            fn lua_fn(a: *r.app.App) ![]Entry {
+                                const arena = a.lua_vm.arena_state.allocator();
+                                const entries = try a.swarm.usageByModel(arena);
+                                const out = try arena.alloc(Entry, entries.len);
+                                for (entries, out) |e, *o| {
+                                    o.* = .{
+                                        .model = e.model,
+                                        .input = e.usage.input_tokens,
+                                        .output = e.usage.output_tokens,
+                                        .cache = e.usage.cached_tokens,
+                                        .cache_creation = e.usage.cache_creation_tokens,
+                                    };
+                                }
+                                arena.free(entries);
+                                return out;
+                            }
+                        }).lua_fn, "token_usage_by_model"),
                     },
                 },
             },

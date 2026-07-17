@@ -135,7 +135,7 @@ pub fn poll(self: *Agent) !bool {
 
     if (usage) |value| {
         self.total_usage.add(value);
-        if (self.swarm) |swarm| swarm.token_stats.add(value);
+        if (self.swarm) |swarm| swarm.recordUsage(self.config.model, value);
     }
 
     self.pool.release(handle);

@@ -719,7 +719,7 @@ pub const Agent = struct {
             // value if the provider didn't report it on close.
             const final_usage = result.usage orelse self.in_flight_usage;
             self.total_usage.add(final_usage);
-            swarm.token_stats.add(final_usage);
+            swarm.recordUsage(self.config.model, final_usage);
             if (self.swarm_id) |id| {
                 swarm.recordBroadcast(id, result.message.role, final_parts);
             }

@@ -67,6 +67,8 @@ exec: r.exec.CmdPool,
 context: SwarmContextV,
 last_run_timestamp: ?i64 = null,
 token_stats: apt.TokenUsage = .{},
+/// Lifetime per-model totals. Survives reset(); freed in deinit.
+model_stats: std.StringArrayHashMapUnmanaged(apt.TokenUsage) = .{},
 
 // ----------------------------------
 pub const ToolDiff = struct {
@@ -189,6 +191,23 @@ pub fn deinit(self: *Self) void {
     }
     self.pool.deinit();
     self.exec.deinit();
+    var it = self.model_stats.iterator();
+    while (it.next()) |entry| self.gpa.free(entry.key_ptr.*);
+    self.model_stats.deinit(self.gpa);
+}
+
+/// Accumulate usage globally and under the given model name.
+pub fn recordUsage(self: *Self, model: []const u8, u: apt.TokenUsage) void {
+    self.token_stats.add(u);
+    const gop = self.model_stats.getOrPut(self.gpa, model) catch return;
+    if (!gop.found_existing) {
+        gop.key_ptr.* = self.gpa.dupe(u8, model) catch {
+            _ = self.model_stats.pop();
+            return;
+        };
+        gop.value_ptr.* = .{};
+    }
+    gop.value_ptr.add(u);
 }
 
 pub fn usage(self: *const Self) apt.TokenUsage {
@@ -200,6 +219,21 @@ pub fn usage(self: *const Self) apt.TokenUsage {
     }
 
     return u;
+}
+
+pub const ModelUsageEntry = struct {
+    model: []const u8,
+    usage: apt.TokenUsage,
+};
+
+/// Lifetime per-model totals, insertion ordered. Caller owns the slice
+/// (but not the model name slices).
+pub fn usageByModel(self: Self, alloc: std.mem.Allocator) ![]ModelUsageEntry {
+    const keys = self.model_stats.keys();
+    const values = self.model_stats.values();
+    const out = try alloc.alloc(ModelUsageEntry, keys.len);
+    for (keys, values, out) |k, v, *o| o.* = .{ .model = k, .usage = v };
+    return out;
 }
 
 pub fn forkAgent(
