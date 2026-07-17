@@ -158,7 +158,9 @@ skill_dir: ?std.Io.Dir,
 flags: Flags = .{},
 // -------------------------------------------------------------------------------
 
-pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !Self {
+pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !*Self {
+    var self = try alloc.create(Self);
+
     var list = std.ArrayList(ToolEntry).empty;
     inline for (general_default_tool_set) |tool| {
         try list.append(alloc, .{ .tool = tool, .flags = .all });
@@ -175,7 +177,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !Self {
         else => return err,
     };
 
-    var self = Self{
+    self.* = Self{
         .loaded_tools = list,
         .prompt_arena = std.heap.ArenaAllocator.init(alloc),
         .io = io,

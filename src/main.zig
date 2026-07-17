@@ -219,14 +219,14 @@ pub fn run(
     const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;
 
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
-    var context_factory = try r.ContextFactory.init(arena, io, HOME);
+    const context_factory = try r.ContextFactory.init(arena, io, HOME);
     context_factory.flags.skip_local_context_file = flags.no_context;
 
     var term = try tui.Terminal.init(arena, io);
     errdefer term.deinit();
     defer term.deinit();
 
-    var app = try App.init(io, gpa, &context_factory, cwd);
+    var app = try App.init(io, gpa, context_factory, cwd);
     const swarm = try gpa.create(prv.Swarm);
     defer {
         swarm.deinit();
@@ -322,7 +322,7 @@ pub fn run(
     }
     if (!lua_load_failed) app.lua_vm.clearLastError();
     app.lua_vm.readConfigFields();
-    try app.lua_vm.publishAvailableSystems(&context_factory);
+    try app.lua_vm.publishAvailableSystems(context_factory);
     var lua_tools = try app.lua_vm.getRegisteredTools(arena);
     var lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
     const mcp_servers = try app.lua_vm.getEnabledMcpServers(arena);
@@ -475,7 +475,7 @@ pub fn run(
                 }
                 if (!lua_reload_failed) app.lua_vm.clearLastError();
                 app.lua_vm.readConfigFields();
-                try app.lua_vm.publishAvailableSystems(&context_factory);
+                try app.lua_vm.publishAvailableSystems(context_factory);
                 app.dirty = true;
 
                 context_factory.clearTools();
