@@ -31,9 +31,10 @@ test {
 
 // TUI owns stderr; Route std.log to debug.log in cwd instead. Using a raw POSIX fd with O_APPEND.
 var debug_log_fd: std.posix.fd_t = -1;
-fn openDebugLog() void {
+fn openDebugLog(io: std.Io) void {
+    util.ensureBlitzDir(std.Io.Dir.cwd(), io) catch return;
     const flags: std.posix.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true };
-    debug_log_fd = std.posix.openat(std.posix.AT.FDCWD, ".blitz/debug.log", flags, 0o644) catch -1;
+    debug_log_fd = std.posix.openat(std.posix.AT.FDCWD, util.BLITZ_DIR ++ "/debug.log", flags, 0o644) catch -1;
 }
 
 fn fileLogFn(
@@ -119,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
     const split = CliArgs.split(init.minimal.args, &pos_buf);
     const cli_flags = split.flags;
     const command_result = CliCommand.parse(split.positional);
-    if (cli_flags.debug_log) openDebugLog();
+    if (cli_flags.debug_log) openDebugLog(init.io);
 
     const cmd: CliCommand = switch (command_result) {
         .err => |txt| {

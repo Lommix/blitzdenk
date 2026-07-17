@@ -1,5 +1,12 @@
 const std = @import("std");
 
+pub const BLITZ_DIR = ".blitz";
+
+/// Ensure Blitzdenk's runtime-data directory exists below `dir`.
+pub fn ensureBlitzDir(dir: std.Io.Dir, io: std.Io) !void {
+    try dir.createDirPath(io, BLITZ_DIR);
+}
+
 ///Mostly clones `T`. passthrough for function ptr and anything opaque.
 pub fn deepClone(comptime T: type, value: T, alloc: std.mem.Allocator) !T {
     return switch (@typeInfo(T)) {
@@ -45,6 +52,17 @@ pub fn deepClone(comptime T: type, value: T, alloc: std.mem.Allocator) !T {
 
         else => @compileError("deepClone unsupported type: " ++ @typeName(T)),
     };
+}
+
+test "ensureBlitzDir creates the runtime-data directory idempotently" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try ensureBlitzDir(tmp.dir, std.testing.io);
+    try ensureBlitzDir(tmp.dir, std.testing.io);
+
+    var blitz_dir = try tmp.dir.openDir(std.testing.io, BLITZ_DIR, .{});
+    blitz_dir.close(std.testing.io);
 }
 
 test "deepClone primitives" {
