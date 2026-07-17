@@ -228,7 +228,7 @@ pub const ModelUsageEntry = struct {
 
 /// Lifetime per-model totals, insertion ordered. Caller owns the slice
 /// (but not the model name slices).
-pub fn usageByModel(self: Self, alloc: std.mem.Allocator) ![]ModelUsageEntry {
+pub fn usageByModel(self: *const Self, alloc: std.mem.Allocator) ![]ModelUsageEntry {
     const keys = self.model_stats.keys();
     const values = self.model_stats.values();
     const out = try alloc.alloc(ModelUsageEntry, keys.len);
