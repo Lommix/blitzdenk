@@ -50,7 +50,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 | --- | --- |
 | Providers | `blitz.add_provider`, `blitz.set_model`, `blitz.set_model_agent` |
 | Tools | `blitz.register_tool`, `blitz.add_tool`, `blitz.set_agent_tools`, `blitz.tools` |
-| Agents | `blitz.add_agent`, `blitz.AGENT_GENERAL`, `blitz.AGENT_EXPLORE` |
+| Agents | `blitz.add_agent`, `blitz.AGENT_GENERAL` |
 | Commands | `blitz.add_command`, `blitz.queue.*` |
 | Keybinds | `blitz.bind` |
 | Modes | `blitz.add_mode`, `blitz.set_mode`, mode prompt setters |

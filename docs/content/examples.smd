@@ -30,7 +30,6 @@ local model = "deepseek/deepseek-v4-flash"
 
 blitz.set_model(model, novita)
 blitz.set_model_agent(blitz.AGENT_GENERAL, model, "max", novita)
-blitz.set_model_agent(blitz.AGENT_EXPLORE, model, "low", novita)
 ```
 
 ## Agent tools
@@ -55,14 +54,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.START_MCP,
 })
 
-blitz.set_agent_tools(blitz.AGENT_EXPLORE, {
-	blitz.tools.RIPGREP,
-	blitz.tools.READ,
-	blitz.tools.SEND_MESSAGE_TO_AGENT,
-	blitz.tools.LOADSKILL,
-	tools.web_fetch,
-	tools.web_search,
-})
+
 ```
 
 ## MCP and LSP
