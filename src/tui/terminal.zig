@@ -82,10 +82,10 @@ pub const Terminal = struct {
         current.clear();
         previous.clear();
 
-        // Enter alternate screen + hide cursor
+        // Enter alternate screen + hide cursor + enable bracketed paste
         var buf: [64]u8 = undefined;
         var w = stdout.writerStreaming(io, &buf);
-        w.interface.writeAll("\x1b[?1049h\x1b[?25l\x1b[2J") catch {};
+        w.interface.writeAll("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?2004h") catch {};
         w.interface.flush() catch {};
 
         return .{
@@ -100,10 +100,10 @@ pub const Terminal = struct {
     }
 
     pub fn deinit(self: *Terminal) void {
-        // Show cursor + leave alternate screen
+        // Show cursor + leave alternate screen + disable bracketed paste
         var buf: [64]u8 = undefined;
         var w = self.stdout.writerStreaming(self.io, &buf);
-        w.interface.writeAll("\x1b[?25h\x1b[?1049l") catch {};
+        w.interface.writeAll("\x1b[?2004l\x1b[?25h\x1b[?1049l") catch {};
         w.interface.flush() catch {};
 
         // Restore original termios
@@ -233,7 +233,7 @@ pub const Terminal = struct {
     pub const Event = union(enum) {
         key: Key,
         paste: []const u8,
-        
+
         resize: Rect,
         none,
     };
@@ -286,8 +286,6 @@ pub const Terminal = struct {
             else => null,
         };
     }
-
-    var paste_buf: [1024]u8 = undefined;
 
     /// Poll stdin and enqueue all parsed events into the ring queue.
     pub fn pollAndEnqueue(self: *Terminal, timeout_ms: i32) void {
@@ -346,7 +344,7 @@ pub const Terminal = struct {
             if (i + 6 <= data.len and data[i] == 0x1B and data[i + 1] == '[' and
                 data[i + 2] == '2' and data[i + 3] == '0' and data[i + 4] == '0' and data[i + 5] == '~')
             {
-                const event = readPaste(data[i + 6 ..]);
+                const event = self.readPaste(data[i + 6 ..]);
                 self.input_queue.push(event);
                 return; // paste consumes the rest
             }
@@ -482,46 +480,34 @@ pub const Terminal = struct {
     }
 
     /// Read paste content until bracket paste end sequence ESC [ 2 0 1 ~
-    fn readPaste(initial: []const u8) Event {
+    /// Always drains stdin up to the end sequence so leftover bytes are
+    /// not re-parsed as key presses. Buffer is heap-allocated and owned
+    /// by the returned event slice.
+    fn readPaste(self: *Terminal, initial: []const u8) Event {
         const end_seq = "\x1b[201~";
-        var paste_len: usize = 0;
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(self.allocator);
 
-        for (initial) |b| {
-            if (paste_len >= paste_buf.len) break;
-            paste_buf[paste_len] = b;
-            paste_len += 1;
-        }
-
-        // Check if end sequence was already in the initial data
-        if (paste_len >= end_seq.len) {
-            if (std.mem.eql(u8, paste_buf[paste_len - end_seq.len .. paste_len], end_seq)) {
-                paste_len -= end_seq.len;
-                return .{ .paste = paste_buf[0..paste_len] };
-            }
-        }
+        buf.appendSlice(self.allocator, initial) catch return .none;
 
         const stdin_fd = std.Io.File.stdin().handle;
-        while (paste_len < paste_buf.len) {
-            var read_buf: [256]u8 = undefined;
+        while (true) {
+            if (endsWithEndSeq(buf.items, end_seq)) {
+                buf.items.len -= end_seq.len;
+                break;
+            }
+            var read_buf: [4096]u8 = undefined;
             const nr = posix.read(stdin_fd, &read_buf) catch break;
             if (nr == 0) break;
-            for (read_buf[0..nr]) |b| {
-                if (paste_len >= paste_buf.len) break;
-                paste_buf[paste_len] = b;
-                paste_len += 1;
-            }
-            if (paste_len >= end_seq.len) {
-                if (std.mem.eql(u8, paste_buf[paste_len - end_seq.len .. paste_len], end_seq)) {
-                    paste_len -= end_seq.len;
-                    return .{ .paste = paste_buf[0..paste_len] };
-                }
-            }
+            buf.appendSlice(self.allocator, read_buf[0..nr]) catch break;
         }
 
-        if (paste_len >= end_seq.len and std.mem.eql(u8, paste_buf[paste_len - end_seq.len .. paste_len], end_seq)) {
-            paste_len -= end_seq.len;
-        }
-        return .{ .paste = paste_buf[0..paste_len] };
+        return .{ .paste = buf.items };
+    }
+
+    fn endsWithEndSeq(bytes: []const u8, end_seq: []const u8) bool {
+        return bytes.len >= end_seq.len and
+            std.mem.eql(u8, bytes[bytes.len - end_seq.len ..], end_seq);
     }
 
     fn flush(self: *Terminal) !void {
