@@ -92,8 +92,3 @@ blitz.set_model_agent(blitz.AGENT_GENERAL, "deepseek/deepseek-v4-pro", "max", no
 ## Contribution
 
 No issue no merge. Open source, restricted contribution. Simple bug fixes are welcome.
-
-## Note
-
-I am too poor to afford the good stuff. So this harness is hardened using cheap/dumb models, mostly deepseek flash and local.
-The idea: If the dumb model can do it, a smart one will exceed expectation.
