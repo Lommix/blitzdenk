@@ -388,7 +388,10 @@ pub fn resetDefs(self: *Self) void {
 
     self.agents.set(.general, .{
         .name = @tagName(AgentType.general),
-        .description = "General purpose agent",
+        .description =
+        \\General purpose builder agent with full tool access.
+        \\
+        ,
         .prompt = @embedFile("prompts/default.md"),
         .tools = .from(&.{
             r.tools.write.WriteTool.def.name,
@@ -604,15 +607,7 @@ pub fn build_system_prompt(
         var it = skill_dir.iterate();
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         var header_buf: [4096]u8 = undefined;
-
-        _ = try w.write(
-            \\
-            \\# Available skills:
-            \\
-            \\Load a skill when the task matches its trigger rules.
-            \\Skills provide specialized tooling, domain knowledge, and behavioral guidance.
-            \\
-        );
+        var wrote_skill_header = false;
 
         while (try it.next(self.io)) |entry| {
             if (entry.kind != .file) continue;
@@ -625,6 +620,18 @@ pub fn build_system_prompt(
                 std.log.err("failed to load skill header for '{s}'", .{entry.name});
                 continue;
             };
+
+            if (!wrote_skill_header) {
+                _ = try w.write(
+                    \\
+                    \\# Available skills:
+                    \\
+                    \\Load a skill when the task matches its trigger rules.
+                    \\Skills provide specialized tooling, domain knowledge, and behavioral guidance.
+                    \\
+                );
+                wrote_skill_header = true;
+            }
 
             try w.print(
                 \\  - name: "{s}"
