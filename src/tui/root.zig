@@ -35,6 +35,9 @@ pub const Event = term.Terminal.Event;
 pub const Key = term.Terminal.Key;
 pub const KeyCode = term.Terminal.KeyCode;
 pub const Modifiers = term.Terminal.Modifiers;
+pub const Mouse = term.Terminal.Mouse;
+pub const MouseButton = term.Terminal.MouseButton;
+pub const MouseAction = term.Terminal.MouseAction;
 
 // Widgets
 pub const Widget = widgets.Widget;

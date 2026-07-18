@@ -44,6 +44,15 @@ pub const Terminal = struct {
     allocator: std.mem.Allocator,
     input_queue: RingQueue(Event, 64) = .{},
     last_size: Rect,
+    selection: ?Selection = null,
+
+    pub const Selection = struct {
+        anchor_x: u16,
+        anchor_y: u16,
+        end_x: u16,
+        end_y: u16,
+        dragging: bool = false,
+    };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Terminal {
         const stdout = std.Io.File.stdout();
@@ -82,10 +91,10 @@ pub const Terminal = struct {
         current.clear();
         previous.clear();
 
-        // Enter alternate screen + hide cursor + enable bracketed paste
-        var buf: [64]u8 = undefined;
+        // Enter alternate screen + hide cursor + bracketed paste + mouse (SGR + drag)
+        var buf: [80]u8 = undefined;
         var w = stdout.writerStreaming(io, &buf);
-        w.interface.writeAll("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?2004h") catch {};
+        w.interface.writeAll("\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?2004h\x1b[?1000h\x1b[?1002h\x1b[?1006h") catch {};
         w.interface.flush() catch {};
 
         return .{
@@ -100,10 +109,10 @@ pub const Terminal = struct {
     }
 
     pub fn deinit(self: *Terminal) void {
-        // Show cursor + leave alternate screen + disable bracketed paste
-        var buf: [64]u8 = undefined;
+        // Disable mouse + bracketed paste, show cursor, leave alternate screen
+        var buf: [80]u8 = undefined;
         var w = self.stdout.writerStreaming(self.io, &buf);
-        w.interface.writeAll("\x1b[?2004l\x1b[?25h\x1b[?1049l") catch {};
+        w.interface.writeAll("\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h\x1b[?1049l") catch {};
         w.interface.flush() catch {};
 
         // Restore original termios
@@ -143,6 +152,7 @@ pub const Terminal = struct {
 
         self.current.clear();
         render_fn(rect, &self.current);
+        self.applySelectionHighlight(&self.current);
         try self.flush();
 
         // Swap: copy current into previous (length-safe in case of mid-frame resize)
@@ -166,11 +176,141 @@ pub const Terminal = struct {
 
         self.current.clear();
         render_fn(ctx, rect, &self.current);
+        self.applySelectionHighlight(&self.current);
         try self.flush();
 
         // Length-safe copy in case of mid-frame resize
         const copy_len = @min(self.previous.cells.len, self.current.cells.len);
         @memcpy(self.previous.cells[0..copy_len], self.current.cells[0..copy_len]);
+    }
+
+    /// Handle mouse for selection + report wheel delta (signed rows; up = negative).
+    pub fn handleMouse(self: *Terminal, m: Mouse) i16 {
+        switch (m.button) {
+            .wheel_up => if (m.action == .press) return -3,
+            .wheel_down => if (m.action == .press) return 3,
+            .left => {
+                switch (m.action) {
+                    .press => {
+                        self.selection = .{
+                            .anchor_x = m.x,
+                            .anchor_y = m.y,
+                            .end_x = m.x,
+                            .end_y = m.y,
+                            .dragging = true,
+                        };
+                    },
+                    .move => {
+                        if (self.selection) |*sel| {
+                            if (sel.dragging) {
+                                sel.end_x = m.x;
+                                sel.end_y = m.y;
+                            }
+                        }
+                    },
+                    .release => {
+                        if (self.selection) |*sel| {
+                            sel.end_x = m.x;
+                            sel.end_y = m.y;
+                            sel.dragging = false;
+                            if (sel.anchor_x != sel.end_x or sel.anchor_y != sel.end_y) {
+                                self.copySelectionOsc52();
+                            }
+                            self.selection = null;
+                        }
+                    },
+                }
+            },
+            else => {},
+        }
+        return 0;
+    }
+
+    fn selectionOrdered(sel: Selection) struct { x1: u16, y1: u16, x2: u16, y2: u16 } {
+        const a_first = sel.anchor_y < sel.end_y or (sel.anchor_y == sel.end_y and sel.anchor_x <= sel.end_x);
+        if (a_first) {
+            return .{ .x1 = sel.anchor_x, .y1 = sel.anchor_y, .x2 = sel.end_x, .y2 = sel.end_y };
+        }
+        return .{ .x1 = sel.end_x, .y1 = sel.end_y, .x2 = sel.anchor_x, .y2 = sel.anchor_y };
+    }
+
+    fn applySelectionHighlight(self: *Terminal, buf: *Buffer) void {
+        const sel = self.selection orelse return;
+        const o = selectionOrdered(sel);
+        const w = buf.rect.width;
+        const h = buf.rect.height;
+        if (w == 0 or h == 0) return;
+
+        var y: u16 = o.y1;
+        while (y <= o.y2) : (y += 1) {
+            if (y >= h) break;
+            const x_start: u16 = if (y == o.y1) o.x1 else 0;
+            const x_end: u16 = if (y == o.y2) o.x2 else w -| 1;
+            var x: u16 = x_start;
+            while (x <= x_end) : (x += 1) {
+                if (x >= w) break;
+                const abs_x = buf.rect.x + x;
+                const abs_y = buf.rect.y + y;
+                var cell = buf.get(abs_x, abs_y);
+                cell.style.modifier.reverse = !cell.style.modifier.reverse;
+                buf.set(abs_x, abs_y, cell);
+            }
+        }
+    }
+
+    fn extractSelection(self: *Terminal, alloc: std.mem.Allocator) ![]u8 {
+        const sel = self.selection orelse return try alloc.dupe(u8, "");
+        const o = selectionOrdered(sel);
+        // Prefer last flushed frame (previous == current after draw)
+        const buf = &self.previous;
+        const w = buf.rect.width;
+        const h = buf.rect.height;
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(alloc);
+
+        var y: u16 = o.y1;
+        while (y <= o.y2) : (y += 1) {
+            if (y >= h) break;
+            if (y != o.y1) try out.append(alloc, '\n');
+            const x_start: u16 = if (y == o.y1) o.x1 else 0;
+            const x_end: u16 = if (y == o.y2) o.x2 else w -| 1;
+
+            const line_start = out.items.len;
+            var x: u16 = x_start;
+            while (x <= x_end) : (x += 1) {
+                if (x >= w) break;
+                const cell = buf.get(buf.rect.x + x, buf.rect.y + y);
+                var enc: [4]u8 = undefined;
+                const ch = if (cell.char < 0x20 or cell.char == 0x7F) @as(u21, ' ') else cell.char;
+                const n = std.unicode.utf8Encode(ch, &enc) catch continue;
+                try out.appendSlice(alloc, enc[0..n]);
+            }
+            // trim trailing spaces on the line
+            while (out.items.len > line_start and out.items[out.items.len - 1] == ' ') {
+                out.items.len -= 1;
+            }
+        }
+        return try out.toOwnedSlice(alloc);
+    }
+
+    fn copySelectionOsc52(self: *Terminal) void {
+        const text = self.extractSelection(self.allocator) catch return;
+        defer self.allocator.free(text);
+        if (text.len == 0) return;
+
+        const encoder = std.base64.standard.Encoder;
+        const b64_len = encoder.calcSize(text.len);
+        const b64 = self.allocator.alloc(u8, b64_len) catch return;
+        defer self.allocator.free(b64);
+        _ = encoder.encode(b64, text);
+
+        var write_buf: [512]u8 = undefined;
+        var w = self.stdout.writerStreaming(self.io, &write_buf);
+        w.interface.writeAll("\x1b]52;c;") catch return;
+        w.interface.writeAll(b64) catch return;
+        w.interface.writeAll("\x07") catch return;
+        w.interface.flush() catch {};
     }
 
     pub const Modifiers = packed struct(u8) {
@@ -230,10 +370,29 @@ pub const Terminal = struct {
         }
     };
 
+    pub const MouseButton = enum {
+        left,
+        middle,
+        right,
+        wheel_up,
+        wheel_down,
+        other,
+    };
+
+    pub const MouseAction = enum { press, release, move };
+
+    pub const Mouse = struct {
+        button: MouseButton,
+        action: MouseAction,
+        x: u16,
+        y: u16,
+        mods: Modifiers = .{},
+    };
+
     pub const Event = union(enum) {
         key: Key,
         paste: []const u8,
-
+        mouse: Mouse,
         resize: Rect,
         none,
     };
@@ -246,6 +405,49 @@ pub const Terminal = struct {
             .shift = (bits & 0b001) != 0,
             .alt = (bits & 0b010) != 0,
             .ctrl = (bits & 0b100) != 0,
+        };
+    }
+
+    /// Parse SGR mouse params `Cb;Cx;Cy`. final is 'M' (press) or 'm' (release).
+    fn parseSgrMouse(params: []const u8, final: u8) ?Mouse {
+        var sc = std.mem.splitScalar(u8, params, ';');
+        const cb_s = sc.next() orelse return null;
+        const cx_s = sc.next() orelse return null;
+        const cy_s = sc.next() orelse return null;
+        const cb = std.fmt.parseInt(u16, cb_s, 10) catch return null;
+        const cx = std.fmt.parseInt(u16, cx_s, 10) catch return null;
+        const cy = std.fmt.parseInt(u16, cy_s, 10) catch return null;
+
+        const mods: Modifiers = .{
+            .shift = (cb & 0b0000_0100) != 0,
+            .alt = (cb & 0b0000_1000) != 0,
+            .ctrl = (cb & 0b0001_0000) != 0,
+        };
+        const btn_bits = cb & 0b1100_0011;
+        const motion = (cb & 0b0010_0000) != 0;
+
+        const button: MouseButton = switch (btn_bits) {
+            0 => .left,
+            1 => .middle,
+            2 => .right,
+            64 => .wheel_up,
+            65 => .wheel_down,
+            else => .other,
+        };
+        const action: MouseAction = if (motion)
+            .move
+        else if (final == 'm')
+            .release
+        else
+            .press;
+
+        // Terminal coords are 1-based
+        return .{
+            .button = button,
+            .action = action,
+            .x = if (cx > 0) cx - 1 else 0,
+            .y = if (cy > 0) cy - 1 else 0,
+            .mods = mods,
         };
     }
 
@@ -352,6 +554,28 @@ pub const Terminal = struct {
             // CSI sequences: ESC [ ...
             if (i + 2 <= data.len and data[i] == 0x1B and data[i + 1] == '[') {
                 var j = i + 2;
+
+                // SGR mouse: ESC [ < Cb ; Cx ; Cy M|m
+                if (j < data.len and data[j] == '<') {
+                    j += 1;
+                    const params_start = j;
+                    while (j < data.len and ((data[j] >= '0' and data[j] <= '9') or data[j] == ';')) : (j += 1) {}
+                    if (j >= data.len) {
+                        i = data.len;
+                        continue;
+                    }
+                    const final = data[j];
+                    const params = data[params_start..j];
+                    j += 1;
+                    if (final == 'M' or final == 'm') {
+                        if (parseSgrMouse(params, final)) |mouse| {
+                            self.input_queue.push(.{ .mouse = mouse });
+                        }
+                    }
+                    i = j;
+                    continue;
+                }
+
                 // collect params: digits and ';' (no intermediates handled)
                 const params_start = j;
                 while (j < data.len and ((data[j] >= '0' and data[j] <= '9') or data[j] == ';')) : (j += 1) {}
