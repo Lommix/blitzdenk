@@ -1,6 +1,6 @@
 .{
     .name = .blitzdenk,
-    .version = "0.2.2",
+    .version = "0.3.4",
     .fingerprint = 0xf5612191cc8877dc, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
