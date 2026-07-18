@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta
+            name="viewport"
+            content="initial-scale=1"
+        />
+        <title>Blitzdenk</title>
+        <link rel="stylesheet" href="main.css" />
+        <link rel="stylesheet" href="assets/highlight-github-dark.min.css" />
+        <script defer src="assets/highlight.min.js"></script>
+        <script defer src="assets/highlight-lua.min.js"></script>
+        <script defer>
+            document.addEventListener("DOMContentLoaded", () => {
+                hljs.configure({ ignoreUnescapedHTML: true });
+                hljs.highlightAll();
+            });
+        </script>
+    </head>
+    <body>
+        <h1 class="site-title">Blitzdenk</h1>
+        <nav>
+            <a href="#home">Home</a>
+            <a href="#getting-started">Getting Started</a>
+            <a href="#lua-api">Lua API</a>
+            <a href="#examples">Examples</a>
+            <a
+                href="https://github.com/Lommix/blitzdenk"
+                target="_blank"
+            >
+                Github
+            </a>
+        </nav>
+
+        <section id="home">
+            <h1>Blitzdenk</h1>
+            <figure>
+                <img
+                    src="assets/screen.jpg"
+                    alt="Blitzdenk screenshot"
+                />
+            </figure>
+            <p>
+                Blitzdenk is a coding and research harness for POSIX systems. It is configured and extended from Lua:
+                providers, models, tools, agents, modes, commands, keybinds, MCP servers, LSP servers, event listeners,
+                and status UI all live in
+                <code>blitz.lua</code>
+                .
+            </p>
+            <p>
+                The core stays small: a native Zig binary, vendored Lua, terminal UI, and a tool loop that can run local
+                or remote work. The intended extension point is Lua, not patching Zig for every workflow.
+            </p>
+            <h2>Features</h2>
+            <ul>
+                <li>Terminal UI for coding and research sessions.</li>
+                <li>
+                    Lua-only configuration through
+                    <code>~/.config/blitzdenk/blitz.lua</code>
+                    .
+                </li>
+                <li>
+                    Optional project-local
+                    <code>./blitz.lua</code>
+                    for workspace-specific behavior.
+                </li>
+                <li>
+                    Provider setup for OpenAI-compatible APIs, Anthropic-compatible APIs, Ollama, local gateways, and
+                    hosted routers.
+                </li>
+                <li>Model assignment per agent type.</li>
+                <li>
+                    Custom Lua tools through
+                    <code>blitz.register_tool</code>
+                    .
+                </li>
+                <li>
+                    Built-in tools for shell, read, write, edit, ripgrep, patching, tasks, user questions, skills,
+                    agents, MCP, LSP, and SSH mode.
+                </li>
+                <li>Custom agents with their own prompts, tools, model, provider, and effort.</li>
+                <li>
+                    Custom commands such as
+                    <code>:plan</code>
+                    ,
+                    <code>:debug</code>
+                    ,
+                    <code>/goal</code>
+                    , or
+                    <code>/swarm</code>
+                    .
+                </li>
+                <li>
+                    Keybinds for toggling modes, switching models, attaching screenshots, or running any Lua callback.
+                </li>
+                <li>Event listeners for agent lifecycle, tool calls, permissions, compaction, and user messages.</li>
+                <li>MCP stdio servers exposed as dynamic tools.</li>
+                <li>
+                    LSP stdio servers exposed through the
+                    <code>lsp</code>
+                    tool.
+                </li>
+                <li>Session save/load and prompt history.</li>
+                <li>Context tracking, token usage display, and compaction.</li>
+                <li>Optional SSH mode that routes shell and file tools through a remote target.</li>
+            </ul>
+            <h2>Current development status</h2>
+            <p>
+                Blitzdenk is usable, but still early. The stable part is the idea: keep the binary small and push
+                workflow customization into Lua. The Lua API is the main interface and the generated meta file is the
+                source of truth for function signatures and descriptions.
+            </p>
+            <p>Known rough edges:</p>
+            <ul>
+                <li>APIs may still move while the harness is evolving.</li>
+                <li>Config examples are expected to be copied and edited.</li>
+                <li>Web search/fetch are not built in; define them in Lua if you want them.</li>
+                <li>MCP and LSP are configured from Lua and loaded per session.</li>
+                <li>The docs intentionally avoid duplicating the generated Lua API reference.</li>
+            </ul>
+        </section>
+
+        <hr />
+
+        <section id="getting-started">
+            <h1>Getting Started</h1>
+            <p>
+                Blitzdenk targets Zig
+                <code>0.16</code>
+                and POSIX systems.
+            </p>
+            <h2>Download</h2>
+            <p>Download pre-built binaries from the release page:</p>
+            <p>
+                <a
+                    href="https://github.com/Lommix/blitzdenk/releases"
+                    target="_blank"
+                >
+                    https://github.com/Lommix/blitzdenk/releases
+                </a>
+            </p>
+            <h2>Compile</h2>
+            <pre><code>zig build --release=small
+cp zig-out/bin/blitz ~/.local/bin/blitz</code></pre>
+            <h2>Run</h2>
+            <pre><code>blitz
+blitz /path/to/project
+blitz prompt "summarize this repository"
+blitz help</code></pre>
+            <p>
+                The default command starts the TUI in the current directory. Passing a path starts it in that directory.
+                <code>prompt</code>
+                starts the TUI with initial input.
+            </p>
+            <h2>Flags</h2>
+            <table>
+                <tr>
+                    <th>Flag</th>
+                    <th>Effect</th>
+                </tr>
+                <tr>
+                    <td><code>--log</code></td>
+                    <td>
+                        writes
+                        <code>.blitz/debug.log</code>
+                        in the working directory
+                    </td>
+                </tr>
+                <tr>
+                    <td><code>--strict</code></td>
+                    <td>requests permissions instead of using the relaxed default</td>
+                </tr>
+            </table>
+            <h2>Config files</h2>
+            <p>On first run, Blitzdenk creates:</p>
+            <table>
+                <tr>
+                    <th>File</th>
+                    <th>Purpose</th>
+                </tr>
+                <tr>
+                    <td><code>~/.config/blitzdenk/blitz.lua</code></td>
+                    <td>user config loaded at startup</td>
+                </tr>
+                <tr>
+                    <td><code>~/.config/blitzdenk/meta.lua</code></td>
+                    <td>generated Lua type hints</td>
+                </tr>
+                <tr>
+                    <td><code>./blitz.lua</code></td>
+                    <td>optional project-local config, loaded when present</td>
+                </tr>
+            </table>
+            <p>
+                The global config is where providers, tools, agents, keybinds, commands, MCP servers, and LSP servers
+                are configured. A project-local
+                <code>blitz.lua</code>
+                is useful for repository-specific prompts or tools.
+            </p>
+            <h2>SSH mode</h2>
+            <p>Inside the TUI, use:</p>
+            <pre><code>:ssh username@host:/path/to/cwd</code></pre>
+            <p>
+                SSH mode makes
+                <code>read</code>
+                ,
+                <code>write</code>
+                ,
+                <code>edit</code>
+                ,
+                <code>bash</code>
+                ,
+                <code>patch</code>
+                , and
+                <code>ripgrep</code>
+                operate against the remote target through the command layer.
+                <code>exit_ssh</code>
+                returns to local execution.
+            </p>
+        </section>
+
+        <hr />
+
+        <section id="lua-api">
+            <h1>Lua API</h1>
+            <p>
+                Lua config is loaded from
+                <code>~/.config/blitzdenk/blitz.lua</code>
+                and optionally from
+                <code>./blitz.lua</code>
+                .
+            </p>
+            <p>
+                The global API table is
+                <code>blitz</code>
+                .
+            </p>
+            <p>The generated meta file is the source of truth for function signatures and descriptions:</p>
+            <ul>
+                <li>
+                    Local generated copy:
+                    <code>~/.config/blitzdenk/meta.lua</code>
+                </li>
+                <li>
+                    Source file:
+                    <a
+                        href="https://github.com/Lommix/blitzdenk/blob/master/src/blitz_defs.lua"
+                        target="_blank"
+                    >
+                        <code>src/blitz_defs.lua</code>
+                    </a>
+                </li>
+            </ul>
+            <p>
+                Use that file in your editor for completion and inline docs. The website does not duplicate the full API
+                list because it would drift.
+            </p>
+            <h2>Shape of a config</h2>
+            <pre><code>local tools = require("tools")
+
+local provider = blitz.add_provider({
+    type = "openai",
+    url = "https://api.openai.com/v1",
+    key_envar = "OPENAI_API_KEY",
+})
+
+blitz.set_model("gpt-5.4-mini", provider)
+
+blitz.set_agent_tools(blitz.AGENT_GENERAL, {
+    blitz.tools.BASH,
+    blitz.tools.READ,
+    blitz.tools.WRITE,
+    blitz.tools.EDIT,
+    blitz.tools.RIPGREP,
+    tools.web_fetch,
+    tools.web_search,
+})</code></pre>
+            <h2>Common API areas</h2>
+            <table>
+                <tr>
+                    <th>Area</th>
+                    <th>
+                        What to look for in
+                        <code>meta.lua</code>
+                    </th>
+                </tr>
+                <tr>
+                    <td>Providers</td>
+                    <td>
+                        <code>blitz.add_provider</code>
+                        ,
+                        <code>blitz.set_model</code>
+                        ,
+                        <code>blitz.set_model_agent</code>
+                    </td>
+                </tr>
+                <tr>
+                    <td>Tools</td>
+                    <td>
+                        <code>blitz.register_tool</code>
+                        ,
+                        <code>blitz.add_tool</code>
+                        ,
+                        <code>blitz.set_agent_tools</code>
+                        ,
+                        <code>blitz.tools</code>
+                    </td>
+                </tr>
+                <tr>
+                    <td>Agents</td>
+                    <td>
+                        <code>blitz.add_agent</code>
+                        ,
+                        <code>blitz.AGENT_GENERAL</code>
+                    </td>
+                </tr>
+                <tr>
+                    <td>Commands</td>
+                    <td>
+                        <code>blitz.add_command</code>
+                        ,
+                        <code>blitz.queue.*</code>
+                    </td>
+                </tr>
+                <tr>
+                    <td>Keybinds</td>
+                    <td><code>blitz.bind</code></td>
+                </tr>
+                <tr>
+                    <td>Modes</td>
+                    <td>
+                        <code>blitz.add_mode</code>
+                        ,
+                        <code>blitz.set_mode</code>
+                        , mode prompt setters
+                    </td>
+                </tr>
+                <tr>
+                    <td>Events</td>
+                    <td>
+                        <code>blitz.events.add_listener</code>
+                        ,
+                        <code>blitz.events.*</code>
+                    </td>
+                </tr>
+                <tr>
+                    <td>MCP</td>
+                    <td>
+                        <code>blitz.mcp.add</code>
+                        ,
+                        <code>blitz.mcp.enable</code>
+                    </td>
+                </tr>
+                <tr>
+                    <td>LSP</td>
+                    <td>
+                        <code>blitz.lsp.add</code>
+                        ,
+                        <code>blitz.lsp.enable</code>
+                    </td>
+                </tr>
+                <tr>
+                    <td>JSON and shell</td>
+                    <td>
+                        <code>blitz.json.encode</code>
+                        ,
+                        <code>blitz.json.decode</code>
+                        ,
+                        <code>blitz.shell</code>
+                    </td>
+                </tr>
+                <tr>
+                    <td>UI</td>
+                    <td>
+                        <code>blitz.push_notification</code>
+                        ,
+                        <code>blitz.status_bar_render</code>
+                        , flags
+                    </td>
+                </tr>
+            </table>
+            <p>
+                See
+                <a href="#examples">Examples</a>
+                for real configuration snippets.
+            </p>
+        </section>
+
+        <hr />
+
+        <section id="examples">
+            <h1>Examples</h1>
+            <p>
+                These snippets are copied from a live
+                <code>~/.config/blitzdenk</code>
+                setup and shortened only where needed.
+            </p>
+            <h2>Providers and model selection</h2>
+            <pre><code>local llama = blitz.add_provider({
+    type = "openai",
+    url = "http://127.0.0.1:8118",
+    key_envar = "",
+    temperature = 1,
+})
+
+local novita = blitz.add_provider({
+    type = "openai",
+    url = "https://api.novita.ai/openai/v1",
+    key_envar = "NOVITA_API_KEY",
+    temperature = 1,
+})
+
+local model = "deepseek/deepseek-v4-flash"
+
+blitz.set_model(model, novita)
+blitz.set_model_agent(blitz.AGENT_GENERAL, model, "max", novita)</code></pre>
+            <h2>Agent tools</h2>
+            <pre><code>local tools = require("tools")
+
+blitz.set_agent_tools(blitz.AGENT_GENERAL, {
+    blitz.tools.BASH,
+    blitz.tools.CANCEL_BACKGROUND,
+    blitz.tools.READ,
+    blitz.tools.WRITE,
+    blitz.tools.EDIT,
+    blitz.tools.ASK,
+    blitz.tools.AGENT,
+    blitz.tools.AWAIT_AGENT,
+    blitz.tools.CANCEL_AGENT,
+    blitz.tools.SEND_MESSAGE_TO_AGENT,
+    blitz.tools.RIPGREP,
+    blitz.tools.LOADSKILL,
+    blitz.tools.START_LSP,
+    blitz.tools.START_MCP,
+})</code></pre>
+            <h2>MCP and LSP</h2>
+            <pre><code>blitz.mcp.add({
+    name = "playwright",
+    command = "npx",
+    args = {
+        "-y",
+        "@playwright/mcp@latest",
+        "--browser=chromium",
+        "--executable-path=/usr/bin/chromium",
+    },
+    tools_prefix = "pw_",
+})
+
+blitz.lsp.add({
+    name = "zig",
+    command = "zls",
+    root = ".",
+    language_id = "zig",
+    args = {},
+})</code></pre>
+            <h2>Web fetch tool</h2>
+            <p>A super simplified web fetch using an headless chromium and some unholy tricks.</p>
+            <pre><code>M.web_fetch = blitz.register_tool({
+    name = "lua_webfetch",
+    description = "performs a web fetch and returns the content as markdown",
+    args = {
+        url = { type = "string", description = "the url to fetch", required = true },
+    },
+    func = function(ctx, call)
+        local url = call.arguments.url
+        if type(url) ~= "string" or url == "" then
+            return blitz.err("url is required")
+        end
+
+        ctx:set_status("fetch " .. url)
+
+        local content, ok = blitz.shell(
+            "chromium --headless=new --disable-gpu --no-sandbox "
+                .. "--disable-blink-features=AutomationControlled "
+                .. "--window-size=1920,1080 "
+                .. "--virtual-time-budget=5000 "
+                .. '--print-to-pdf=/dev/stdout --no-margins "'
+                .. url
+                .. '" | pdftotext - -'
+        )
+
+        if not ok or content == nil or content == "" then
+            return blitz.err("chromium returned no output")
+        end
+
+        return blitz.ok(content)
+    end,
+})</code></pre>
+            <h2>Web search tool</h2>
+            <p>Websearch via local searXNG docker instance</p>
+            <pre><code>M.web_search = blitz.register_tool({
+    name = "lua_web_search",
+    description = "Search the web via a local SearXNG instance",
+    args = {
+        searchQuery = { type = "string", description = "the search query", required = true },
+        max_results = { type = "number", description = "maximum results to return (default 10, max 20)" },
+    },
+    func = function(ctx, call)
+        local query = call.arguments.searchQuery
+        if type(query) ~= "string" or query == "" then
+            return blitz.err("searchQuery is required")
+        end
+
+        ctx:set_status("search " .. query)
+
+        local function urlencode(s)
+            s = (s:gsub("[%c]", " "))
+            return (s:gsub("([^%w%-_%.~])", function(c)
+                return string.format("%%%02X", string.byte(c))
+            end))
+        end
+
+        local search_url = "http://127.0.0.1:8080/search?q=" .. urlencode(query) .. "&amp;format=json"
+        local body, ok = blitz.shell("curl -sS --max-time 15 '" .. search_url .. "'")
+        if not ok then
+            return blitz.err("searxng request failed")
+        end
+
+        local val, decoded = blitz.json.decode(body)
+        if decoded == false then
+            return blitz.err("failed to parse searxng json response")
+        end
+
+        local results = type(val) == "table" and val.results or nil
+        if type(results) ~= "table" or #results == 0 then
+            return blitz.ok("No results for: " .. query)
+        end
+
+        local max = tonumber(call.arguments.max_results) or 10
+        max = math.min(math.max(max, 1), math.min(20, #results))
+
+        local lines = { "Search results for: " .. query, "" }
+        for idx = 1, max do
+            local r = results[idx]
+            lines[#lines + 1] = string.format("[%d] %s", idx, r.title or "(no title)")
+            lines[#lines + 1] = "    " .. (r.url or "")
+            lines[#lines + 1] = "    " .. (r.content or "")
+            lines[#lines + 1] = ""
+        end
+
+        return blitz.ok(table.concat(lines, "\n"))
+    end,
+})</code></pre>
+            <h2>Commands</h2>
+            <pre><code>blitz.add_command(":plan", function(rem)
+    blitz.queue.reset_session()
+    blitz.queue.spawn_agent({
+        agent_type = blitz.AGENT_GENERAL,
+        prompt = [[
+            Before making ANY edits, explain your implementation plan to the user and await his go.
+            This is the request:
+            ]] .. rem,
+    })
+    blitz.queue.push_chat_entry("user", "[PLAN]: " .. rem)
+end)</code></pre>
+            <h2>Goal command</h2>
+            <p>
+                Goals are loops, which forces the agent to validate against the instruction before handing control back
+                to the user. Simplified: An 'I completed the goal' tool, some additional instructions and an event
+                listener with some shared state:
+            </p>
+            <pre><code>local goal_finished = false
+
+local goal_tool = blitz.register_tool({
+    name = "goal_completed",
+    description = "Only call this tool, when your goal is completed",
+    args = {
+        goal_message = {
+            type = "string",
+            description = "Structured goal status report",
+            required = true,
+        },
+    },
+    func = function(ctx, call)
+        ctx:set_status("Goal completed!")
+        blitz.queue.push_chat_entry("agent", call.arguments.goal_message)
+        goal_finished = true
+        return blitz.exit_loop("Goaling completed!")
+    end,
+})
+
+blitz.add_command("/goal", function(prompt)
+    blitz.events.add_listener(blitz.events.AGENT_COMPLETE, function(agent_id)
+        if blitz.get_main_agent().index ~= agent_id.index then
+            return
+        end
+        if goal_finished then
+            return
+        end
+
+        blitz.queue.queue_agent_message(agent_id, [[
+            Your goal is unfinished. Validate the current state. If the goal is complete, call `goal_completed`.
+            Original goal instructions:
+            ]] .. prompt
+        )
+    end)
+
+    blitz.add_tool(blitz.AGENT_GENERAL, goal_tool)
+    goal_finished = false
+
+    local main_agent_id = blitz.get_main_agent()
+    blitz.queue.push_chat_entry("user", "Goal: " .. prompt)
+
+    if main_agent_id ~= nil then
+        blitz.queue.queue_agent_message(main_agent_id, "Complete the goal: " .. prompt)
+    else
+        blitz.queue.spawn_agent({
+            prompt = "Complete the following goal and track progress in goal.md:\n" .. prompt,
+            tool_budget = 1024,
+        })
+    end
+end)</code></pre>
+            <h2>Keybinds and status bar</h2>
+            <pre><code>-- Quickly capture and pass through a screenshot
+blitz.bind("&lt;C-s&gt;", function()
+    local png, ok = blitz.shell('grim -g "$(slurp)" -t png -')
+    if ok and png and #png &gt; 0 then
+        blitz.queue.attach_screenshot(png, "image/png")
+    end
+end)
+
+-- Bind anything
+blitz.bind("&lt;C-t&gt;", function()
+    local f = blitz.get_flags()
+    f.show_thinking = not f.show_thinking
+    blitz.set_flags(f)
+end)
+
+-- Overwrite statusbar render
+blitz.status_bar_render = function()
+    local use = blitz.token_usage()
+    return "Cache:" .. use.cache
+        .. " | In:" .. use.input
+        .. " | Out:" .. use.output
+        .. " | Ctx:" .. math.floor(blitz.context_percent()) .. "%"
+end</code></pre>
+            <h2>Session save and load</h2>
+            <pre><code>blitz.add_command(":save", function()
+    blitz.queue.save_session(".blitz/blitz_save.json")
+end)
+
+blitz.add_command(":load", function()
+    blitz.queue.load_session(".blitz/blitz_save.json")
+end)</code></pre>
+        </section>
+
+        <footer>
+            <hr />
+            <h5>Blitzdenk Lua configuration docs</h5>
+        </footer>
+    </body>
+</html>
