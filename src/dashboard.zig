@@ -151,7 +151,7 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
 
         var l = r.tui.Line{};
         try l.pushSpan(alloc, .{ .content = "├[", .style = .{ .fg = app.theme.muted } });
-        try l.pushSpanPrint(alloc, "{s: <8} ", .{def.name}, .{ .fg = app.theme.muted, .modifier = .{ .bold = true } });
+        try l.pushSpanPrint(alloc, "{s: <12} ", .{def.name}, .{ .fg = app.theme.muted, .modifier = .{ .bold = true } });
         try l.pushSpanPrint(alloc, "{s: <28} ", .{model.name}, .{ .fg = app.theme.info });
         try l.pushSpanPrint(alloc, "@{s} ", .{@tagName(model.effort)}, .{ .fg = app.theme.text });
         try out.append(alloc, l);
