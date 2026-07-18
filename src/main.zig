@@ -20,7 +20,7 @@ const tools = r.tools;
 // ----------------------------------------------------------------
 pub const LUA_DEFAULT_FILE = @embedFile("blitz_default.lua");
 pub const LUA_META_FILE = @embedFile("blitz_defs.lua");
-pub const DEFAULT_CONFIG_PATH = ".config/blitzdunk/";
+pub const DEFAULT_CONFIG_PATH = ".config/blitzdenk/";
 pub const DEFAULT_CACHE_PATH = "cache.zon";
 pub const DEFAULT_LUA_CONFIG = "blitz.lua";
 pub const DEFAULT_LUA_META = "meta.lua";
