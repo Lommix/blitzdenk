@@ -153,17 +153,39 @@ pub fn truncateOutputToOwned(
         pos = next_line_end;
     }
 
-    if (end_byte >= output.len) return output;
+    // Mid-sequence cut makes valid UTF-8 invalid; floor to codepoint boundary.
+    end_byte = utf8Floor(output, end_byte);
 
-    const slice = output[0..end_byte];
+    const raw: []const u8 = if (end_byte >= output.len)
+        output
+    else blk: {
+        const slice = output[0..end_byte];
+        break :blk std.fmt.allocPrint(
+            alloc,
+            "<result>\n{s}\n</result>\n..<stats>showing {d} of {d} bytes, {d} of {d} lines</stats>",
+            .{ slice, end_byte, output.len, lines_collected, total_lines },
+        ) catch slice;
+    };
 
-    const out = std.fmt.allocPrint(
-        alloc,
-        "<result>\n{s}\n</result>\n..<stats>showing {d} of {d} bytes, {d} of {d} lines</stats>",
-        .{ slice, end_byte, output.len, lines_collected, total_lines },
-    ) catch slice;
+    // std.json.Stringify emits invalid UTF-8 []const u8 as a JSON number array
+    // (bytes), not a string. Provider APIs reject that on the next request.
+    // fmtUtf8(...).data is a no-op wrapper; format through {f} to replace.
+    return ensureValidUtf8(alloc, raw);
+}
 
-    return std.unicode.fmtUtf8(out).data;
+/// Walk end back so it never splits a multi-byte UTF-8 sequence.
+fn utf8Floor(s: []const u8, end: usize) usize {
+    var i = @min(end, s.len);
+    if (i == s.len) return i;
+    while (i > 0 and (s[i] & 0xC0) == 0x80) : (i -= 1) {}
+    return i;
+}
+
+/// Return `raw` if already valid UTF-8; otherwise owned lossy copy (U+FFFD).
+fn ensureValidUtf8(alloc: std.mem.Allocator, raw: []const u8) []const u8 {
+    if (std.unicode.utf8ValidateSlice(raw)) return raw;
+    return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf8(raw)}) catch
+        "(binary output; failed to sanitize utf-8)";
 }
 
 fn countLines(output: []const u8) usize {
@@ -182,4 +204,37 @@ fn countLines(output: []const u8) usize {
 
 test {
     @import("std").testing.refAllDecls(@This());
+}
+
+test "truncateOutputToOwned keeps valid utf8 as string payload" {
+    const testing = std.testing;
+    const in = "hello\nworld";
+    const out = truncateOutputToOwned(testing.allocator, in, MAX_DISPLAY_BYTES, MAX_DISPLAY_LINES);
+    try testing.expectEqualStrings(in, out);
+    try testing.expect(std.unicode.utf8ValidateSlice(out));
+}
+
+test "truncateOutputToOwned sanitizes invalid utf8" {
+    const testing = std.testing;
+    // 0xFF is never valid UTF-8 lead/cont — classic binary command output.
+    const in = "ok\xffnope";
+    const out = truncateOutputToOwned(testing.allocator, in, MAX_DISPLAY_BYTES, MAX_DISPLAY_LINES);
+    defer if (out.ptr != in.ptr) testing.allocator.free(out);
+    try testing.expect(std.unicode.utf8ValidateSlice(out));
+    // Must serialize as a JSON string, never a byte array.
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try std.json.Stringify.value(out, .{}, &w);
+    const json = w.buffered();
+    try testing.expect(json.len >= 2 and json[0] == '"');
+    try testing.expect(json[json.len - 1] == '"');
+}
+
+test "truncateOutputToOwned does not split multi-byte utf8" {
+    const testing = std.testing;
+    // "é" is c3 a9 — cut max_bytes inside the sequence.
+    const in = "ab\xc3\xa9cd";
+    const out = truncateOutputToOwned(testing.allocator, in, 3, MAX_DISPLAY_LINES);
+    defer if (out.ptr != in.ptr) testing.allocator.free(out);
+    try testing.expect(std.unicode.utf8ValidateSlice(out));
 }

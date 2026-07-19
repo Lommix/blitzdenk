@@ -837,7 +837,7 @@ pub fn run(
                                 const chat_entry = try ChatEntry.userMessageSimple(app.sessionAlloc(), .user, input);
 
                                 if (app.main_agent_id) |id| {
-                                    try app.chat_entries.append(alloc, chat_entry);
+                                    try app.chat_entries.append(app.sessionAlloc(), chat_entry);
                                     try app.swarm.runAgentWithMsg(id, parts);
                                 } else {
                                     const id = app.swarm.reserveFreeSlot().?;

@@ -1888,11 +1888,13 @@ fn buildToolGroupParagraph(
         try p.lines.append(arena, line);
 
         if (status) |entry| {
-            for (entry.lines.items[1..]) |status_line| {
-                var extra = r.tui.Line{ .style = status_line.style };
-                try extra.pushSpan(arena, .{ .content = "  " });
-                for (status_line.spans.items) |span| try extra.pushSpan(arena, span);
-                try p.lines.append(arena, extra);
+            if (entry.lines.items.len > 1) {
+                for (entry.lines.items[1..]) |status_line| {
+                    var extra = r.tui.Line{ .style = status_line.style };
+                    try extra.pushSpan(arena, .{ .content = "  " });
+                    for (status_line.spans.items) |span| try extra.pushSpan(arena, span);
+                    try p.lines.append(arena, extra);
+                }
             }
 
             const child_id = entry.child_id orelse continue;
