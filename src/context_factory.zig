@@ -654,7 +654,7 @@ pub fn build_system_prompt(
         }
     }
 
-    if (self.available_mcp_count > 0) {
+    if (self.available_mcp_count > 0 and self.agentHasTool(agent_type, r.tools.start.StartMcpTool.def.name)) {
         try w.writeAll(
             \\
             \\# Available mcp:
@@ -665,7 +665,7 @@ pub fn build_system_prompt(
         }
     }
 
-    if (self.available_lsp_count > 0) {
+    if (self.available_lsp_count > 0 and self.agentHasTool(agent_type, r.tools.start.StartLspTool.def.name)) {
         try w.writeAll(
             \\
             \\# Available lsp:

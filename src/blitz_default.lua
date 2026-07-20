@@ -132,3 +132,23 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 --     local use = blitz.token_usage()
 -- 	return "Cache:" .. use.cache .. " | In:" .. use.input .. " | Out:" .. use.output .. " | Ctx:" .. math.floor(blitz.context_percent()) .. "%"
 -- end
+
+-- CUSTOM AGENTS
+-----------------------------------------------------------------------------
+
+-- blitz.add_agent({
+-- 	name = "researcher",
+-- 	description = [[
+--     Research and exploration agent. Use when task requires: deep codebase exploration
+--     across many files, searching for patterns or definitions, web research for libraries/
+--     docs/solutions, or gathering context from multiple sources before making a decision.
+--     ]],
+-- 	prompt = "Your instruction prompt ...",
+-- 	effort = "low",
+-- 	model = "model-of-choice",
+-- 	provider = provider,
+-- 	tools = {
+-- 		blitz.tools.RIPGREP,
+-- 		blitz.tools.READ,
+-- 	},
+-- })
