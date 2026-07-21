@@ -999,11 +999,14 @@ test "agent config permits keyless providers" {
 }
 
 test "system_prompt" {
-    var arean = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arean.deinit();
-    const alloc = arean.allocator();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
 
-    var factory = try Self.init(alloc, std.testing.io, "/home/lommix");
+    const io = std.testing.io_instance;
+    const home_dir = io.environ.process_environ.getPosix("HOME") orelse "/root";
+
+    var factory = try Self.init(alloc, std.testing.io, home_dir);
     defer factory.prompt_arena.deinit();
 
     const prompt = try factory.build_system_prompt(alloc, ".", .general);
