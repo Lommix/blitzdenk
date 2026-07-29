@@ -1041,7 +1041,7 @@ pub const App = struct {
                 r.app.emitDiffLines(&lines, diff, alloc);
 
                 parts[0] = .{ .diff = .{
-                    .path = diff.path,
+                    .path = try alloc.dupe(u8, diff.path),
                     .diff_lines = try lines.toOwnedSlice(alloc),
                 } };
 
@@ -2559,6 +2559,23 @@ test "emitDiffLines owns rendered content" {
     }
     try std.testing.expect(saw_delete);
     try std.testing.expect(saw_add);
+}
+
+test "persisted diff owns path" {
+    var app: App = undefined;
+    app.arena_session = .init(std.testing.allocator, std.testing.io);
+    defer app.arena_session.deinit();
+    app.chat_entries = .empty;
+
+    const path = try std.testing.allocator.dupe(u8, "demo.txt");
+    defer std.testing.allocator.free(path);
+    try app.persist_permission_to_history(&.{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .payload = .{ .diff = .{ .path = path, .before = null, .after = "content" } },
+    });
+
+    @memset(path, 'x');
+    try std.testing.expectEqualStrings("demo.txt", app.chat_entries.items[0].parts[0].diff.path);
 }
 
 test "renderableParts keeps streamed final parts together" {
