@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const r = @import("root.zig");
 
 pub const ZigCallback = *const fn (w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) anyerror!void;
@@ -83,7 +82,21 @@ fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.prv.age
     if (res.ty != .success or res.stdout.len == 0) return;
 
     const datetime = std.mem.trimEnd(u8, res.stdout, "\n");
-    try w.print("[TIME] {s} os={s}\n", .{ datetime, @tagName(builtin.os.tag) });
+
+    const os_res = app.swarm.exec.runAndWait(.{ .argv = &.{ "uname", "-s" } }) catch null;
+    defer if (os_res) |ores| {
+        app.swarm.exec.alloc.free(ores.stdout);
+        app.swarm.exec.alloc.free(ores.stderr);
+    };
+    const os_name = if (os_res) |ores|
+        if (ores.ty == .success and ores.stdout.len > 0)
+            std.mem.trimEnd(u8, ores.stdout, "\n")
+        else
+            "unknown"
+    else
+        "unknown";
+
+    try w.print("[TIME] {s} os={s}\n", .{ datetime, os_name });
 }
 
 fn inject_processes_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
