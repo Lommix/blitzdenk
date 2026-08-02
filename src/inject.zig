@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const r = @import("root.zig");
 
 pub const ZigCallback = *const fn (w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) anyerror!void;
@@ -18,6 +19,7 @@ pub const InjectionsHooks = struct {
         var self = Self{};
 
         inline for (.{
+            &inject_datetime_information,
             &inject_mode_information,
             &inject_todo_information,
             &inject_budget_information,
@@ -73,6 +75,16 @@ pub const InjectionsHooks = struct {
         });
     }
 };
+
+fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.prv.agent.Agent) !void {
+    const res = app.swarm.exec.runAndWait(.{ .argv = &.{ "date", "+%Y-%m-%d %H:%M:%S %Z" } }) catch return;
+    defer app.swarm.exec.alloc.free(res.stdout);
+    defer app.swarm.exec.alloc.free(res.stderr);
+    if (res.ty != .success or res.stdout.len == 0) return;
+
+    const datetime = std.mem.trimEnd(u8, res.stdout, "\n");
+    try w.print("[TIME] {s} os={s}\n", .{ datetime, @tagName(builtin.os.tag) });
+}
 
 fn inject_processes_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
     if (agent.bg_tasks.tryLock(app.swarm.pool.io)) |g| blk: {
