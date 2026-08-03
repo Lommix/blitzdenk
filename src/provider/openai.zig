@@ -546,6 +546,8 @@ pub const StreamState = struct {
     tools: std.ArrayList(ToolAcc) = .empty,
     pending_text_thinking: std.ArrayList(PendingDelta) = .empty,
     pending_cursor: usize = 0,
+    pending_tool_deltas: std.ArrayList(adapter.Delta) = .empty,
+    pending_tool_cursor: usize = 0,
     usage: ?adapter.TokenUsage = null,
     pending_usage: ?adapter.TokenUsage = null,
     term: TermState = .streaming,
@@ -576,6 +578,15 @@ pub const StreamState = struct {
                     .text => .{ .text_chunk = d.data },
                     .thinking => .{ .thinking_chunk = d.data },
                 };
+            }
+            if (self.pending_tool_cursor < self.pending_tool_deltas.items.len) {
+                const d = self.pending_tool_deltas.items[self.pending_tool_cursor];
+                self.pending_tool_cursor += 1;
+                if (self.pending_tool_cursor == self.pending_tool_deltas.items.len) {
+                    self.pending_tool_deltas.clearRetainingCapacity();
+                    self.pending_tool_cursor = 0;
+                }
+                return d;
             }
             if (self.pending_usage) |u| {
                 self.pending_usage = null;
@@ -657,7 +668,7 @@ pub const StreamState = struct {
                 }
             }
             if (m.tool_calls) |calls| {
-                for (calls) |tc| if (try self.pushToolCall(arena, tc)) |d| return d;
+                for (calls) |tc| try self.pushToolCall(arena, tc);
             }
         }
 
@@ -678,7 +689,7 @@ pub const StreamState = struct {
                         if (c.len > 0) try self.pushText(arena, c);
                     }
                     if (d.tool_calls) |calls| {
-                        for (calls) |tc| if (try self.pushDeltaToolCall(arena, tc)) |out| return out;
+                        for (calls) |tc| try self.pushDeltaToolCall(arena, tc);
                     }
                 }
                 if (ch.message) |m| {
@@ -729,8 +740,8 @@ pub const StreamState = struct {
         return null;
     }
 
-    fn pushToolCall(self: *StreamState, arena: Allocator, tc: OaiResponseToolCall) !?adapter.Delta {
-        const func = tc.function orelse return null;
+    fn pushToolCall(self: *StreamState, arena: Allocator, tc: OaiResponseToolCall) !void {
+        const func = tc.function orelse return;
         const id = try arena.dupe(u8, tc.id orelse "");
         const name = try arena.dupe(u8, func.name orelse "");
         try self.tools.append(arena, .{
@@ -743,10 +754,14 @@ pub const StreamState = struct {
             },
             .started = true,
         });
-        return .{ .tool_call_start = .{ .id = id, .name = name, .arguments = "" } };
+        try self.pending_tool_deltas.append(arena, .{ .tool_call_start = .{
+            .id = id,
+            .name = name,
+            .arguments = "",
+        } });
     }
 
-    fn pushDeltaToolCall(self: *StreamState, arena: Allocator, tc: OaiDeltaToolCall) !?adapter.Delta {
+    fn pushDeltaToolCall(self: *StreamState, arena: Allocator, tc: OaiDeltaToolCall) !void {
         const idx = tc.index orelse @as(u32, @intCast(self.tools.items.len));
         while (self.tools.items.len <= idx) try self.tools.append(arena, .{});
         const slot = &self.tools.items[idx];
@@ -783,20 +798,25 @@ pub const StreamState = struct {
         }
 
         if (emit_start) {
-            return .{ .tool_call_start = .{ .id = slot.id, .name = slot.name, .arguments = "" } };
+            try self.pending_tool_deltas.append(arena, .{ .tool_call_start = .{
+                .id = slot.id,
+                .name = slot.name,
+                .arguments = "",
+            } });
+            return;
         }
 
         if (tc.function) |f| {
             if (f.arguments) |args| {
                 if (args.len > 0) {
-                    return .{ .tool_input_delta = .{
+                    try self.pending_tool_deltas.append(arena, .{ .tool_input_delta = .{
                         .call_id = slot.id,
                         .json_fragment = try arena.dupe(u8, args),
-                    } };
+                    } });
+                    return;
                 }
             }
         }
-        return null;
     }
 
     fn composeReasoningDetails(self: *StreamState, arena: Allocator) !?[]const u8 {
@@ -999,6 +1019,59 @@ test "openai request stream mode is caller selected" {
     const obj = parsed.value.object;
     try testing.expectEqual(false, obj.get("stream").?.bool);
     try testing.expect(obj.get("stream_options") == null);
+}
+
+test "openai stream assembles every parallel tool call delta" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    var starts = [_]OaiDeltaToolCall{
+        .{
+            .index = 0,
+            .id = "call_grep",
+            .function = .{ .name = "grep", .arguments = "{\"pattern\":\"" },
+        },
+        .{
+            .index = 1,
+            .id = "call_read",
+            .function = .{ .name = "read", .arguments = "{\"path\":\"" },
+        },
+    };
+    var start_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &starts } }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &start_choices }) == null);
+
+    var endings = [_]OaiDeltaToolCall{
+        .{ .index = 0, .function = .{ .arguments = "report\"}" } },
+        .{ .index = 1, .function = .{ .arguments = "src/report.zig\"}" } },
+    };
+    var ending_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &endings } }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &ending_choices }) == null);
+
+    // Both calls in both chunks must be processed before the parser yields.
+    // Previously each loop returned after index 0 and discarded index 1.
+    try testing.expectEqual(@as(usize, 4), stream.pending_tool_deltas.items.len);
+
+    const result = try stream.finalize(arena);
+    var calls: [2]adapter.ToolCall = undefined;
+    var call_count: usize = 0;
+    for (result.message.parts) |part| switch (part) {
+        .tool_call => |call| {
+            calls[call_count] = call;
+            call_count += 1;
+        },
+        else => {},
+    };
+
+    try testing.expectEqual(@as(usize, 2), call_count);
+    try testing.expectEqualStrings("call_grep", calls[0].id);
+    try testing.expectEqualStrings("grep", calls[0].name);
+    try testing.expectEqualStrings("{\"pattern\":\"report\"}", calls[0].arguments);
+    try testing.expectEqualStrings("call_read", calls[1].id);
+    try testing.expectEqualStrings("read", calls[1].name);
+    try testing.expectEqualStrings("{\"path\":\"src/report.zig\"}", calls[1].arguments);
 }
 
 test "openai stream keeps tagged reasoning as thinking across schema fields" {
