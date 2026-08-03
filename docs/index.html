@@ -76,7 +76,7 @@
                     .
                 </li>
                 <li>
-                    Built-in tools for shell, read, write, edit, ripgrep, patching, tasks, user questions, skills,
+                    Built-in tools for shell, read, write, edit, glob, grep, patching, tasks, user questions, skills,
                     agents, MCP, LSP, and SSH mode.
                 </li>
                 <li>Custom agents with their own prompts, tools, model, provider, and effort.</li>
@@ -213,7 +213,9 @@ blitz help</code></pre>
                 ,
                 <code>patch</code>
                 , and
-                <code>ripgrep</code>
+                <code>glob</code>
+                and
+                <code>grep</code>
                 operate against the remote target through the command layer.
                 <code>exit_ssh</code>
                 returns to local execution.
@@ -272,7 +274,8 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
     blitz.tools.READ,
     blitz.tools.WRITE,
     blitz.tools.EDIT,
-    blitz.tools.RIPGREP,
+    blitz.tools.GLOB,
+    blitz.tools.GREP,
     tools.web_fetch,
     tools.web_search,
 })</code></pre>
@@ -429,7 +432,8 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
     blitz.tools.AWAIT_AGENT,
     blitz.tools.CANCEL_AGENT,
     blitz.tools.SEND_MESSAGE_TO_AGENT,
-    blitz.tools.RIPGREP,
+    blitz.tools.GLOB,
+    blitz.tools.GREP,
     blitz.tools.LOADSKILL,
     blitz.tools.START_LSP,
     blitz.tools.START_MCP,

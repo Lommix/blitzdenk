@@ -118,7 +118,8 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.AWAIT_AGENT,
 	blitz.tools.CANCEL_AGENT,
 	blitz.tools.SEND_MESSAGE_TO_AGENT,
-	blitz.tools.RIPGREP,
+	blitz.tools.GLOB,
+	blitz.tools.GREP,
 	blitz.tools.LOADSKILL,
 	blitz.tools.START_LSP,
 	blitz.tools.START_MCP,
@@ -148,7 +149,8 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 -- 	model = "model-of-choice",
 -- 	provider = provider,
 -- 	tools = {
--- 		blitz.tools.RIPGREP,
+-- 		blitz.tools.GLOB,
+-- 		blitz.tools.GREP,
 -- 		blitz.tools.READ,
 -- 	},
 -- })

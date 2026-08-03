@@ -89,7 +89,8 @@
 ---@field SEND_MESSAGE_TO_AGENT string
 ---@field AWAIT_AGENT string
 ---@field CANCEL_AGENT string
----@field RIPGREP string
+---@field GLOB string
+---@field GREP string
 ---@field LOADSKILL string
 ---@field START_MCP string
 ---@field START_LSP string

@@ -39,6 +39,8 @@ pub const BashTool = prv.tool.Tool{
         \\
         \\IMPORTANT: Avoid using this tool to run cat, tee, sed commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user:
         \\Read files: Use read (NOT cat/head/tail)
+        \\Find files: Use glob (NOT find/ls/rg pipelines)
+        \\Search file contents: Use grep (NOT grep/rg pipelines)
         \\Edit files: Use edit (NOT sed/awk)
         \\Write files: Use write (NOT 'echo >..' or 'cat <<EOF')
         \\

@@ -22,6 +22,7 @@ pub const CmdSlot = struct {
     stdout: std.ArrayList(u8) = .empty,
     stderr: std.ArrayList(u8) = .empty,
     result_ty: CmdResult.ResType = .failed,
+    exit_code: ?u8 = null,
 };
 
 pub const CmdResult = struct {
@@ -29,6 +30,10 @@ pub const CmdResult = struct {
     stdout: []const u8,
     stderr: []const u8,
     ty: ResType,
+    /// Present when the child terminated normally, including non-zero exits.
+    /// Callers that assign meaning to a specific exit code must inspect this
+    /// instead of relying on the coarser `ty` field.
+    exit_code: ?u8 = null,
 
     pub fn toOwned(self: *const CmdResult, alloc: std.mem.Allocator) ![]const u8 {
         var response = try alloc.alloc(u8, self.stderr.len + self.stdout.len);
@@ -222,6 +227,7 @@ pub const CmdPool = struct {
         slot.stderr = .empty;
         slot.done.store(false, .release);
         slot.result_ty = .failed;
+        slot.exit_code = null;
 
         const final_argv = try self.maybeWrapSsh(opts.argv, opts.force_local);
         errdefer self.freeArgv(final_argv);
@@ -322,6 +328,7 @@ pub const CmdPool = struct {
             .stdout = slot.stdout.items,
             .stderr = slot.stderr.items,
             .ty = slot.result_ty,
+            .exit_code = slot.exit_code,
         };
     }
 
@@ -392,6 +399,7 @@ pub const CmdPool = struct {
             .pgid = if (kill_process_group and builtin.os.tag != .windows) 0 else null,
         }) catch {
             slot.result_ty = .failed;
+            slot.exit_code = null;
             return;
         };
         defer if (child.id != null) {
@@ -414,6 +422,7 @@ pub const CmdPool = struct {
             error.Canceled => return error.Canceled,
             else => {
                 slot.result_ty = .failed;
+                slot.exit_code = null;
                 return;
             },
         };
@@ -421,10 +430,16 @@ pub const CmdPool = struct {
             error.Canceled => return error.Canceled,
         };
 
-        slot.result_ty = switch (term) {
-            .exited => |c| if (c == 0) .success else .failed,
-            else => .failed,
-        };
+        switch (term) {
+            .exited => |code| {
+                slot.exit_code = code;
+                slot.result_ty = if (code == 0) .success else .failed;
+            },
+            else => {
+                slot.exit_code = null;
+                slot.result_ty = .failed;
+            },
+        }
     }
 
     fn writeStdin(file: std.Io.File, io: std.Io, data: []const u8) std.Io.Cancelable!void {
@@ -534,8 +549,9 @@ pub const CmdPool = struct {
         errdefer self.alloc.free(out);
         const err = try self.alloc.dupe(u8, slot.stderr.items);
         const ty = slot.result_ty;
+        const exit_code = slot.exit_code;
         self.release(handle);
-        return .{ .stdout = out, .stderr = err, .ty = ty };
+        return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code };
     }
 
     /// Run synchronously with a wall-clock deadline. On timeout, cancels the
@@ -553,8 +569,9 @@ pub const CmdPool = struct {
                 errdefer self.alloc.free(out);
                 const err = try self.alloc.dupe(u8, slot.stderr.items);
                 const ty = slot.result_ty;
+                const exit_code = slot.exit_code;
                 self.release(handle);
-                return .{ .stdout = out, .stderr = err, .ty = ty };
+                return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code };
             }
 
             if (@import("http.zig").nowMs(self.io) - start_ms > timeout_ms) {
@@ -587,6 +604,7 @@ test "runAndWaitTimeout cancels long-running command and releases slot" {
     defer pool.alloc.free(res.stderr);
 
     try testing.expectEqual(CmdResult.ResType.timeout, res.ty);
+    try testing.expectEqual(@as(?u8, null), res.exit_code);
     try testing.expectEqual(@as(usize, 0), res.stdout.len);
     try testing.expectEqual(@as(usize, 0), res.stderr.len);
     try testing.expectEqual(false, pool.slots[0].in_use.load(.acquire));
@@ -611,6 +629,24 @@ test "runAndWait drains output while writing large stdin" {
     defer pool.alloc.free(res.stderr);
 
     try testing.expectEqual(CmdResult.ResType.success, res.ty);
+    try testing.expectEqual(@as(?u8, 0), res.exit_code);
     try testing.expectEqualSlices(u8, input, res.stdout);
     try testing.expectEqual(@as(usize, 0), res.stderr.len);
+}
+
+test "runAndWait preserves non-zero child exit code" {
+    const testing = std.testing;
+
+    var pool = CmdPool.init(testing.allocator, testing.io, &testing.environ);
+    defer pool.deinit();
+
+    const res = try pool.runAndWait(.{
+        .argv = &.{ "/bin/sh", "-c", "exit 7" },
+        .force_local = true,
+    });
+    defer pool.alloc.free(res.stdout);
+    defer pool.alloc.free(res.stderr);
+
+    try testing.expectEqual(CmdResult.ResType.failed, res.ty);
+    try testing.expectEqual(@as(?u8, 7), res.exit_code);
 }

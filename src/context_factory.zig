@@ -26,7 +26,8 @@ pub const general_default_tool_set = .{
     r.tools.ask.AskTool,
     r.tools.ssh.EnterSshMode,
     r.tools.ssh.ExitSshMode,
-    r.tools.rg.RipGrepTool,
+    r.tools.search.GlobTool,
+    r.tools.search.GrepTool,
     r.tools.skill.LoadSkillTool,
     r.tools.start.StartMcpTool,
     r.tools.start.StartLspTool,
@@ -909,13 +910,15 @@ test "remove deletes the matched loaded tool" {
     factory.resetDefs();
     try factory.add(std.testing.allocator, r.tools.read.ReadTool, .all);
     try factory.add(std.testing.allocator, r.tools.write.WriteTool, .all);
-    try factory.add(std.testing.allocator, r.tools.rg.RipGrepTool, .all);
+    try factory.add(std.testing.allocator, r.tools.search.GlobTool, .all);
+    try factory.add(std.testing.allocator, r.tools.search.GrepTool, .all);
 
     factory.remove(r.tools.write.WriteTool.def.name);
 
     try std.testing.expect(factory.findLoaded(r.tools.read.ReadTool.def.name) != null);
     try std.testing.expect(factory.findLoaded(r.tools.write.WriteTool.def.name) == null);
-    try std.testing.expect(factory.findLoaded(r.tools.rg.RipGrepTool.def.name) != null);
+    try std.testing.expect(factory.findLoaded(r.tools.search.GlobTool.def.name) != null);
+    try std.testing.expect(factory.findLoaded(r.tools.search.GrepTool.def.name) != null);
 }
 
 fn initTestFactory() Self {
