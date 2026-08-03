@@ -42,17 +42,19 @@ pub const BashTool = prv.tool.Tool{
         \\Find files: Use glob (NOT find/ls/rg pipelines)
         \\Search file contents: Use grep (NOT grep/rg pipelines)
         \\Edit files: Use edit (NOT sed/awk)
-        \\Write files: Use write (NOT 'echo >..' or 'cat <<EOF')
+        \\Write files: Use write ('echo >..' or 'cat <<EOF' is FORBIDDEN!)
+        \\While the bash tool can do similar things, it’s better to use the built-in tools as they provide a better user experience and make it easier to review tool calls and give permission.
         \\
         \\Communication: Output text directly (NOT echo/printf)
-        \\The working directory persists between commands, but shell state does not. The shell environment is initialized from the user's profile (bash or zsh).
-        \\While the bash tool can do similar things, it’s better to use the built-in tools as they provide a better user experience and make it easier to review tool calls and give permission.
+        \\Each bash invocation starts in the `cwd` shown under `# Env`. The shell environment is initialized from the user's profile (bash or zsh).
+        \\Run commands for that directory directly: use `zig build`, not `cd . && zig build`.
+        \\Never prefix a command with `cd . &&`, `cd "$PWD" &&`, or an equivalent no-op.
+        \\Use `cd <different-directory> && ...` only when the command must run elsewhere. A directory change does not persist to the next invocation.
         \\
         \\# Instructions
         \\
         \\If your command will create new directories or files, first use this tool to run `ls` to verify the parent directory exists and is the correct location.
-        \\Always quote file paths that contain spaces with double quotes in your command (e.g., cd "path with spaces/file.txt")
-        \\Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it.
+        \\Always quote file paths that contain spaces with double quotes in your command.
         \\You may specify an optional timeout in milliseconds up to 60 seconds. By default, your command will timeout after 1 minute.
         \\
         \\If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. Example: if you need to run "git status" and "git diff", send a single message with two bash tool calls in parallel.
@@ -65,7 +67,7 @@ pub const BashTool = prv.tool.Tool{
         ,
         .parameters_schema =
         \\{"type": "object", "properties": {
-        \\  "command": {"type": "string", "description": "The shell command to execute"},
+        \\  "command": {"type": "string", "description": "Command to run directly in the current cwd. Example: use `zig build`, not `cd . && zig build`."},
         \\  "timout_ms": {"type": "number", "default": 30000, "description": "Cancel command after X milliseconds. Ignored by 'run_in_background'"},
         \\  "run_in_background": {"type": "boolean", "default": false, "description": "Set to true to run this command in the background. Use Read to read the output later. You MUST use this instead of '&' for background processes!"}
         \\}, "required": ["command"]}
@@ -160,12 +162,11 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     else
         args.command;
 
-
     const LIMIT = 100;
     const trunc = cleaned_command_str[0..@min(cleaned_command_str.len, LIMIT)];
     const dots = if (cleaned_command_str.len > LIMIT) ".." else "";
 
-    r.setToolStatusPrint(ctx, call, "{s}{s}", .{trunc, dots});
+    r.setToolStatusPrint(ctx, call, "{s}{s}", .{ trunc, dots });
 
     const need_perm = switch (classifyCommand(args.command)) {
         .blocked => return r.errResult(call, "command is blocked for safety"),

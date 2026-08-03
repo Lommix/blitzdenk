@@ -713,7 +713,8 @@ pub fn build_system_prompt(
         \\
         \\# Env
         \\
-        \\cwd: {s}
+        \\bash cwd: {s}
+        \\Bash commands already start here. Do not cd to this directory.
         \\
     , .{cwd});
 
