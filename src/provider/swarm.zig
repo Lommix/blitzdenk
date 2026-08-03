@@ -435,9 +435,11 @@ pub fn tickAll(self: *Self) bool {
 }
 
 pub fn cancelAll(self: *Self) void {
-    self.pool.cancelAll();
-    self.exec.cancelAll();
-
+    // Tool workers can be blocked in Future.await on requests owned by these
+    // pools. Cancel and drain the owning agent futures first: cancellation then
+    // propagates through the await chain. Canceling a child future directly
+    // while its tool worker is awaiting it races await with cancel, which is
+    // forbidden by std.Io.Future.
     for (&self.slots) |*slot| {
         if (slot.state.load(.acquire) != .active) continue;
         if (slot.agent.depth == 0) {
@@ -451,6 +453,11 @@ pub fn cancelAll(self: *Self) void {
             slot.* = .{};
         }
     }
+
+    // Sweep detached requests and background commands that are not owned by a
+    // currently running agent tool.
+    self.pool.cancelAll();
+    self.exec.cancelAll();
 }
 
 fn progress_time(self: *Self) f32 {
@@ -548,4 +555,54 @@ test "failed reservation is returned to the free pool" {
 
     swarm.releaseReservation(id);
     try std.testing.expectEqual(SlotState.reserved, swarm.slots[reused.index].state.load(.acquire));
+}
+
+test "cancelAll drains tool owners before exec futures" {
+    const testing = std.testing;
+
+    const Helper = struct {
+        fn run(exec_pool: *r.exec.CmdPool, started: *std.atomic.Value(bool)) apt.ToolResult {
+            started.store(true, .release);
+            const res = exec_pool.runAndWait(.{
+                .argv = &.{ "/bin/sh", "-c", "sleep 10" },
+                .force_local = true,
+            }) catch return .{ .call_id = "test", .name = "test", .content = "canceled" };
+            defer exec_pool.alloc.free(res.stdout);
+            defer exec_pool.alloc.free(res.stderr);
+            return .{ .call_id = "test", .name = "test", .content = "complete" };
+        }
+    };
+
+    var swarm: Self = undefined;
+    try swarm.init(testing.allocator, testing.io, undefined, &testing.environ);
+    defer swarm.deinit();
+
+    const id = swarm.reserveFreeSlot().?;
+    const slot = &swarm.slots[id.index];
+    slot.agent = Agent.new(.{
+        .api_key = "",
+        .model = "test",
+        .base_url = "",
+        .provider = .{ .ollama = .{} },
+    }, &swarm.pool, testing.allocator, 0, 0);
+    slot.agent.swarm = &swarm;
+    slot.agent.swarm_id = id;
+    swarm.finishReservation(id);
+
+    var started: std.atomic.Value(bool) = .init(false);
+    const running = try slot.agent.arena.allocator().create(tc.RunningTool);
+    running.* = .{ .fut = .{ .any_future = null, .result = undefined } };
+    running.fut = std.Io.async(testing.io, Helper.run, .{ &swarm.exec, &started });
+    try slot.agent.tool_call_runs.put(slot.agent.arena.allocator(), "test", running);
+
+    while (!started.load(.acquire) or !swarm.exec.slots[0].in_use.load(.acquire))
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .real);
+    // Let Helper enter Future.await; cancelAll must cancel Helper, not the
+    // already-awaited exec future beneath it.
+    try std.Io.sleep(testing.io, .fromMilliseconds(25), .real);
+
+    swarm.cancelAll();
+
+    try testing.expectEqual(SlotState.complete, slot.state.load(.acquire));
+    try testing.expect(!swarm.exec.slots[0].in_use.load(.acquire));
 }

@@ -402,12 +402,13 @@ pub const CmdPool = struct {
             child.kill(self.io);
         };
 
+        var stdin_future: ?std.Io.Future(std.Io.Cancelable!void) = null;
         if (stdin_data) |data| {
             const stdin = child.stdin.?;
-            std.Io.File.writeStreamingAll(stdin, self.io, data) catch {};
-            stdin.close(self.io);
             child.stdin = null;
+            stdin_future = std.Io.async(self.io, writeStdin, .{ stdin, self.io, data });
         }
+        defer if (stdin_future) |*future| future.cancel(self.io) catch {};
 
         const term = self.collectOutput(slot, &child) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
@@ -416,10 +417,21 @@ pub const CmdPool = struct {
                 return;
             },
         };
+        if (stdin_future) |*future| future.await(self.io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+        };
 
         slot.result_ty = switch (term) {
             .exited => |c| if (c == 0) .success else .failed,
             else => .failed,
+        };
+    }
+
+    fn writeStdin(file: std.Io.File, io: std.Io, data: []const u8) std.Io.Cancelable!void {
+        defer file.close(io);
+        std.Io.File.writeStreamingAll(file, io, data) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return,
         };
     }
 
@@ -578,4 +590,27 @@ test "runAndWaitTimeout cancels long-running command and releases slot" {
     try testing.expectEqual(@as(usize, 0), res.stdout.len);
     try testing.expectEqual(@as(usize, 0), res.stderr.len);
     try testing.expectEqual(false, pool.slots[0].in_use.load(.acquire));
+}
+
+test "runAndWait drains output while writing large stdin" {
+    const testing = std.testing;
+
+    var pool = CmdPool.init(testing.allocator, testing.io, &testing.environ);
+    defer pool.deinit();
+
+    const input = try testing.allocator.alloc(u8, 2 * 1024 * 1024);
+    defer testing.allocator.free(input);
+    @memset(input, 'x');
+
+    const res = try pool.runAndWaitTimeout(.{
+        .argv = &.{ "tee", "/dev/null" },
+        .stdin_data = input,
+        .force_local = true,
+    }, 2_000);
+    defer pool.alloc.free(res.stdout);
+    defer pool.alloc.free(res.stderr);
+
+    try testing.expectEqual(CmdResult.ResType.success, res.ty);
+    try testing.expectEqualSlices(u8, input, res.stdout);
+    try testing.expectEqual(@as(usize, 0), res.stderr.len);
 }
