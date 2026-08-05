@@ -260,6 +260,7 @@ pub const Command = union(enum) {
                         app.swarm.releaseAgent(ag_id);
                     }
                     app.main_agent_id = arg.agent_id;
+                    agent.max_iterations = std.math.maxInt(u32); // main agent = no limit
                 }
 
                 if (arg.chat_entry) |en| {
@@ -274,7 +275,6 @@ pub const Command = union(enum) {
             },
             .push_notification => |msg| {
                 try app.notifications.append(app.arena_app.allocator(), "{s}", .{msg});
-                // app.pushSystemMessage("{s}", .{msg});
             },
             .push_chat_entry => |en| {
                 const entry = try r.util.deepClone(ChatEntry, en, alloc);

@@ -68,7 +68,7 @@ pub const BashTool = prv.tool.Tool{
         .parameters_schema =
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Command to run directly in the current cwd. Example: use `zig build`, not `cd . && zig build`."},
-        \\  "timout_ms": {"type": "number", "default": 30000, "description": "Cancel command after X milliseconds. Ignored by 'run_in_background'"},
+        \\  "timeout_ms": {"type": "number", "default": 30000, "description": "Cancel command after X milliseconds. Ignored by 'run_in_background'"},
         \\  "run_in_background": {"type": "boolean", "default": false, "description": "Set to true to run this command in the background. Use Read to read the output later. You MUST use this instead of '&' for background processes!"}
         \\}, "required": ["command"]}
         ,
@@ -138,7 +138,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     const Args = struct {
         command: []const u8,
         run_in_background: bool = false,
-        timout_ms: i64 = 30_000,
+        timeout_ms: i64 = 30_000,
     };
 
     const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
@@ -220,7 +220,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     const res = runWithDeadline(ctx, .{
         .cwd = ctx.cwd,
         .argv = &.{ "/bin/sh", "-c", args.command },
-    }, args.timout_ms) catch |err| switch (err) {
+    }, args.timeout_ms) catch |err| switch (err) {
         error.Timeout => {
             r.setToolStatusParagraph(ctx, call, &.{
                 &.{.{ .content = cleaned_command_str[0..@min(cleaned_command_str.len, 248)] }},
