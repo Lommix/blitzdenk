@@ -77,6 +77,7 @@
 ---@field CANCEL_PROCESS string
 ---@field READ_PROCESS string
 ---@field READ string
+---@field VIEW_IMAGE string
 ---@field WRITE string
 ---@field EDIT string
 ---@field PATCH string

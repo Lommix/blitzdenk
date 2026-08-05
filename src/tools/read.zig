@@ -4,6 +4,7 @@ const std = @import("std");
 
 /// Bad models always read to little or cut at bad lines. Padding the read scope helps
 const READ_PADDING = 5;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 pub const ReadTool = prv.tool.Tool{
     .def = .{
@@ -26,6 +27,23 @@ pub const ReadTool = prv.tool.Tool{
         ,
     },
     .func = &run,
+};
+
+pub const ViewImageTool = prv.tool.Tool{
+    .def = .{
+        .name = "view_image",
+        .description = "Load an image from a local path or HTTP(S) URL into the model context. Supports PNG, JPEG, GIF, and WebP images up to 4 MB.",
+        .parameters_schema =
+        \\{
+        \\  "type": "object",
+        \\  "properties": {
+        \\      "path": {"type": "string", "description": "Local image path (relative to cwd or absolute) or HTTP(S) URL"}
+        \\  },
+        \\  "required": ["path"]
+        \\}
+        ,
+    },
+    .func = &viewImage,
 };
 
 pub const Stat = prv.agent.FileStat;
@@ -128,4 +146,146 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     const out = read_res.toOwned(ctx.alloc) catch return r.errResult(call, "oom");
     return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
+}
+
+fn viewImage(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+    const Args = struct { path: []const u8 };
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+        .ignore_unknown_fields = true,
+    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\"}");
+
+    if (args.path.len == 0) return r.errResult(call, "path is empty");
+
+    const is_url = std.mem.startsWith(u8, args.path, "http://") or
+        std.mem.startsWith(u8, args.path, "https://");
+
+    var display_buf: [512]u8 = undefined;
+    const display_path = if (!is_url and ctx.cwd.len > 0)
+        r.replaceAll(args.path, ctx.cwd, ".", &display_buf)
+    else
+        args.path;
+
+    const app = ctx.swarm.context.cast(@import("../app.zig").App);
+    r.setToolStatusSpans(ctx, call, &.{
+        .{ .content = "view image ", .style = .{ .modifier = .{ .bold = true } } },
+        .{ .content = display_path, .style = .{ .fg = app.theme.muted } },
+    }) catch {};
+
+    const raw = if (is_url)
+        loadRemoteImage(ctx, args.path) catch |err| return r.errResult(call, imageLoadError(err, true))
+    else blk: {
+        const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, args.path }) catch
+            return r.errResult(call, "failed to resolve image path");
+        break :blk loadLocalImage(ctx, resolved) catch |err| return r.errResult(call, imageLoadError(err, false));
+    };
+    defer ctx.swarm.exec.alloc.free(raw);
+
+    const media_type = detectImageMediaType(raw) orelse
+        return r.errResult(call, "unsupported image format; expected PNG, JPEG, GIF, or WebP");
+
+    const encoded_len = std.base64.standard.Encoder.calcSize(raw.len);
+    const encoded = ctx.alloc.alloc(u8, encoded_len) catch return r.errResult(call, "out of memory");
+    _ = std.base64.standard.Encoder.encode(encoded, raw);
+
+    return .{
+        .call_id = call.id,
+        .name = call.name,
+        .content = "Loaded image",
+        .image = .{ .media_type = media_type, .data = encoded },
+    };
+}
+
+const ImageLoadError = error{
+    EmptyImage,
+    ImageTooLarge,
+    ReadFailed,
+    DownloadFailed,
+    DownloadTimedOut,
+};
+
+fn imageLoadError(err: anyerror, remote: bool) []const u8 {
+    return switch (err) {
+        error.EmptyImage => "image is empty",
+        error.ImageTooLarge => "image exceeds the 4 MB limit",
+        error.DownloadTimedOut => "image download timed out",
+        error.DownloadFailed => "failed to download image",
+        error.ReadFailed => if (remote) "failed to download image" else "failed to read image",
+        else => if (remote) "failed to download image" else "failed to read image",
+    };
+}
+
+fn loadLocalImage(ctx: prv.tool.ToolContext, resolved: []const u8) ImageLoadError![]const u8 {
+    const size_res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "stat", "-c", "%s", resolved } }) catch
+        return error.ReadFailed;
+    defer ctx.swarm.exec.alloc.free(size_res.stdout);
+    defer ctx.swarm.exec.alloc.free(size_res.stderr);
+    if (size_res.ty != .success) return error.ReadFailed;
+
+    const size_text = std.mem.trim(u8, size_res.stdout, " \t\r\n");
+    const size = std.fmt.parseInt(usize, size_text, 10) catch return error.ReadFailed;
+    if (size == 0) return error.EmptyImage;
+    if (size > MAX_IMAGE_BYTES) return error.ImageTooLarge;
+
+    const read_res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "cat", "--", resolved } }) catch
+        return error.ReadFailed;
+    defer ctx.swarm.exec.alloc.free(read_res.stderr);
+    if (read_res.ty != .success) {
+        ctx.swarm.exec.alloc.free(read_res.stdout);
+        return error.ReadFailed;
+    }
+    if (read_res.stdout.len == 0) {
+        ctx.swarm.exec.alloc.free(read_res.stdout);
+        return error.EmptyImage;
+    }
+    if (read_res.stdout.len > MAX_IMAGE_BYTES) {
+        ctx.swarm.exec.alloc.free(read_res.stdout);
+        return error.ImageTooLarge;
+    }
+    return read_res.stdout;
+}
+
+fn loadRemoteImage(ctx: prv.tool.ToolContext, url: []const u8) ImageLoadError![]const u8 {
+    const result = ctx.swarm.exec.runAndWaitTimeout(.{ .argv = &.{
+        "curl",
+        "-fsSL",
+        "--max-filesize",
+        "4194304",
+        "--",
+        url,
+    } }, 30_000) catch return error.DownloadFailed;
+    defer ctx.swarm.exec.alloc.free(result.stderr);
+    if (result.ty == .timeout) {
+        ctx.swarm.exec.alloc.free(result.stdout);
+        return error.DownloadTimedOut;
+    }
+    if (result.ty != .success) {
+        ctx.swarm.exec.alloc.free(result.stdout);
+        if (result.exit_code == 63) return error.ImageTooLarge;
+        return error.DownloadFailed;
+    }
+    if (result.stdout.len == 0) {
+        ctx.swarm.exec.alloc.free(result.stdout);
+        return error.EmptyImage;
+    }
+    if (result.stdout.len > MAX_IMAGE_BYTES) {
+        ctx.swarm.exec.alloc.free(result.stdout);
+        return error.ImageTooLarge;
+    }
+    return result.stdout;
+}
+
+fn detectImageMediaType(data: []const u8) ?[]const u8 {
+    if (data.len >= 8 and std.mem.eql(u8, data[0..8], "\x89PNG\r\n\x1a\n")) return "image/png";
+    if (data.len >= 3 and std.mem.eql(u8, data[0..3], "\xff\xd8\xff")) return "image/jpeg";
+    if (data.len >= 6 and (std.mem.eql(u8, data[0..6], "GIF87a") or std.mem.eql(u8, data[0..6], "GIF89a"))) return "image/gif";
+    if (data.len >= 12 and std.mem.eql(u8, data[0..4], "RIFF") and std.mem.eql(u8, data[8..12], "WEBP")) return "image/webp";
+    return null;
+}
+
+test "detect image media type from magic bytes" {
+    try std.testing.expectEqualStrings("image/png", detectImageMediaType("\x89PNG\r\n\x1a\nrest").?);
+    try std.testing.expectEqualStrings("image/jpeg", detectImageMediaType("\xff\xd8\xffrest").?);
+    try std.testing.expectEqualStrings("image/gif", detectImageMediaType("GIF89arest").?);
+    try std.testing.expectEqualStrings("image/webp", detectImageMediaType("RIFFxxxxWEBPrest").?);
+    try std.testing.expect(detectImageMediaType("not an image") == null);
 }

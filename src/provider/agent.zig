@@ -928,13 +928,15 @@ pub const Agent = struct {
 
         const alloc = self.arena.allocator();
         for (results[0..count]) |result| {
+            if (result.image) |image| {
+                if (!try self.appendImageToOriginatingUserMessage(image)) return error.NoOriginatingUserMessage;
+            }
             try parts.append(self.arena.allocator(), .{ .tool_result = .{
                 .call_id = try alloc.dupe(u8, result.call_id),
                 .name = try alloc.dupe(u8, result.name),
                 .content = try alloc.dupe(u8, result.content),
                 .is_error = result.is_error,
             } });
-            // --
         }
 
         if (self.loopGuardWarningForResults(results[0..count])) |warn| {
@@ -960,6 +962,36 @@ pub const Agent = struct {
         }
 
         return exit_loop;
+    }
+
+    /// Put tool-loaded images on the user prompt that initiated the current
+    /// agent turn. Keeping the follow-up message tool-result-only preserves
+    /// the strict assistant(tool call) -> tool(result) provider sequence.
+    fn appendImageToOriginatingUserMessage(self: *Agent, image: apt.ImageContent) !bool {
+        var i = self.chat.messages.items.len;
+        while (i > 0) {
+            i -= 1;
+            const msg = &self.chat.messages.items[i];
+            if (msg.role != .user) continue;
+
+            var has_tool_result = false;
+            for (msg.parts) |part| switch (part) {
+                .tool_result => has_tool_result = true,
+                else => {},
+            };
+            if (has_tool_result) continue;
+
+            const alloc = self.arena.allocator();
+            const appended = try alloc.alloc(apt.ContentPart, msg.parts.len + 1);
+            @memcpy(appended[0..msg.parts.len], msg.parts);
+            appended[msg.parts.len] = .{ .image = .{
+                .media_type = try alloc.dupe(u8, image.media_type),
+                .data = try alloc.dupe(u8, image.data),
+            } };
+            msg.parts = appended;
+            return true;
+        }
+        return false;
     }
 
     fn loopGuardWarningForResults(self: *Agent, results: []const apt.ToolResult) ?[]const u8 {

@@ -24,6 +24,9 @@ pub const ToolResult = struct {
     call_id: []const u8,
     name: []const u8,
     content: []const u8,
+    /// Optional image to append to the user-side tool result message.
+    /// Providers receive it as a regular image content part.
+    image: ?ImageContent = null,
     is_error: bool = false,
     exit_loop: bool = false,
     comp_strat: CompactionStrategy = .truncate,
@@ -203,8 +206,14 @@ pub const ContentPart = union(enum) {
                 return .{ .tool_result = ToolResult{
                     .call_id = try gpa.dupe(u8, res.call_id),
                     .content = try gpa.dupe(u8, res.content),
+                    .image = if (res.image) |img| .{
+                        .data = try gpa.dupe(u8, img.data),
+                        .media_type = try gpa.dupe(u8, img.media_type),
+                    } else null,
                     .is_error = res.is_error,
                     .name = try gpa.dupe(u8, res.name),
+                    .exit_loop = res.exit_loop,
+                    .comp_strat = res.comp_strat,
                 } };
             },
         }
@@ -267,6 +276,10 @@ pub const Message = struct {
                 alloc.free(result.call_id);
                 alloc.free(result.name);
                 alloc.free(result.content);
+                if (result.image) |image| {
+                    alloc.free(image.media_type);
+                    alloc.free(image.data);
+                }
             },
         };
         if (self.parts.len > 0) alloc.free(self.parts);
