@@ -24,6 +24,7 @@ const OaiMessage = struct {
     content: ?std.json.Value = null,
     tool_calls: ?[]const OaiToolCall = null,
     tool_call_id: ?[]const u8 = null,
+    reasoning_content: ?[]const u8 = null,
     reasoning_details: ?std.json.Value = null,
 };
 
@@ -113,6 +114,7 @@ fn roleToString(role: adapter.Role) []const u8 {
 pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config: Config, mode: adapter.CompletionMode) ![]u8 {
     var messages: std.ArrayList(OaiMessage) = .empty;
     var reasoning_parsed: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
+    const is_deepseek = std.ascii.indexOfIgnoreCase(config.model, "deepseek") != null;
     defer {
         for (messages.items) |m| {
             if (m.content) |c| {
@@ -123,6 +125,7 @@ pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config:
                     else => {},
                 }
             }
+            if (m.reasoning_content) |reasoning| allocator.free(reasoning);
             if (m.tool_calls) |tcs| allocator.free(tcs);
         }
         messages.deinit(allocator);
@@ -172,6 +175,9 @@ pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config:
         var text_buf: std.ArrayList(u8) = .empty;
         defer text_buf.deinit(allocator);
 
+        var reasoning_buf: std.ArrayList(u8) = .empty;
+        defer reasoning_buf.deinit(allocator);
+
         var has_images = false;
         var content_parts: std.ArrayList(std.json.Value) = .empty;
         defer content_parts.deinit(allocator);
@@ -193,6 +199,7 @@ pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config:
                 },
                 .thinking => |th| {
                     if (msg.role != .agent) continue;
+                    if (is_deepseek) try reasoning_buf.appendSlice(allocator, th.text);
                     if (reasoning_details == null) {
                         if (th.signature) |sig| {
                             const parsed = std.json.parseFromSlice(
@@ -253,10 +260,20 @@ pub fn serializeRequest(allocator: Allocator, chat: *const adapter.Chat, config:
         // tool_results — those were already emitted above as "tool" messages.
         if (content == null and tool_calls == null) continue;
 
+        // DeepSeek requires reasoning_content on assistant messages when tools
+        // are present so it can continue the same reasoning chain after tool
+        // results. For older messages without captured thinking, preserve the
+        // field as an empty string rather than omitting it.
+        const reasoning_content: ?[]const u8 = if (is_deepseek and msg.role == .agent)
+            try allocator.dupe(u8, reasoning_buf.items)
+        else
+            null;
+
         try messages.append(allocator, .{
             .role = roleToString(msg.role),
             .content = content,
             .tool_calls = tool_calls,
+            .reasoning_content = reasoning_content,
             .reasoning_details = reasoning_details,
         });
     }
@@ -1019,6 +1036,59 @@ test "openai request stream mode is caller selected" {
     const obj = parsed.value.object;
     try testing.expectEqual(false, obj.get("stream").?.bool);
     try testing.expect(obj.get("stream_options") == null);
+}
+
+test "deepseek request replays raw reasoning_content for assistant messages" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var chat: adapter.Chat = .{};
+    try chat.addMessage(arena, .agent, &.{
+        .{ .thinking = .{ .text = "inspect " } },
+        .{ .thinking = .{ .text = "the file" } },
+        .{ .tool_call = .{ .id = "call_1", .name = "read", .arguments = "{\"path\":\"src/main.zig\"}" } },
+    });
+    try chat.addMessage(arena, .user, &.{
+        .{ .tool_result = .{ .call_id = "call_1", .name = "read", .content = "contents" } },
+    });
+    try chat.addMessage(arena, .agent, &.{.{ .text = "done" }});
+
+    const deepseek_cfg: adapter.Config = .{
+        .api_key = "test",
+        .model = "Vendor/DeepSeek-V4-Pro",
+        .base_url = "https://example.test/v1",
+        .provider = .{ .openai = .{} },
+    };
+    const deepseek_payload = try serializeRequest(testing.allocator, &chat, deepseek_cfg, .streaming);
+    defer testing.allocator.free(deepseek_payload);
+
+    const deepseek_parsed = try std.json.parseFromSlice(std.json.Value, arena, deepseek_payload, .{});
+    const deepseek_messages = deepseek_parsed.value.object.get("messages").?.array.items;
+    try testing.expectEqual(@as(usize, 3), deepseek_messages.len);
+    try testing.expectEqualStrings(
+        "inspect the file",
+        deepseek_messages[0].object.get("reasoning_content").?.string,
+    );
+    try testing.expectEqualStrings(
+        "",
+        deepseek_messages[2].object.get("reasoning_content").?.string,
+    );
+
+    const other_cfg: adapter.Config = .{
+        .api_key = "test",
+        .model = "qwen3-thinking",
+        .base_url = "https://example.test/v1",
+        .provider = .{ .openai = .{} },
+    };
+    const other_payload = try serializeRequest(testing.allocator, &chat, other_cfg, .streaming);
+    defer testing.allocator.free(other_payload);
+
+    const other_parsed = try std.json.parseFromSlice(std.json.Value, arena, other_payload, .{});
+    const other_messages = other_parsed.value.object.get("messages").?.array.items;
+    try testing.expect(other_messages[0].object.get("reasoning_content") == null);
+    try testing.expect(other_messages[2].object.get("reasoning_content") == null);
 }
 
 test "openai stream assembles every parallel tool call delta" {
