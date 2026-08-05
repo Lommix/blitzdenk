@@ -1017,10 +1017,10 @@ pub const App = struct {
                 .diff_lines = lines.items,
             } };
 
-            const block_height = try buildChatEntryParagraph(arena, &stack, self.mainAgent(), self, .{
+            const block_height = try buildChatEntryParagraph(arena, &stack, self, .{
                 .role = .agent,
                 .parts = parts,
-            }, false, inner_w);
+            }, inner_w);
 
             _ = block_height; // autofix
         }
@@ -1723,10 +1723,8 @@ const RenderParagraphItem = struct { p: r.tui.Paragraph, h: usize };
 fn buildChatEntryParagraph(
     arena: std.mem.Allocator,
     out: *std.ArrayList(RenderParagraphItem),
-    agent: ?*prv.agent.Agent,
     app: *App,
     entry: ChatEntry,
-    is_streaming: bool,
     inner_w: u16,
 ) !usize {
     // var buf: [255]u8 = undefined;
@@ -1748,29 +1746,6 @@ fn buildChatEntryParagraph(
     };
 
     try header_line.pushSpan(arena, .{ .content = role_text, .style = .{ .modifier = .{ .bold = true }, .fg = role_color } });
-
-    const flags: r.prv.agent.AgentFlags = blk: {
-        const a = agent orelse break :blk .{};
-        break :blk a.flags;
-    };
-
-    if (is_streaming and flags.is_thinking) {
-        const spinner = text_utils.spinnerDots(app.frame_count);
-        try header_line.pushSpan(arena, .{ .content = "  thinking .. ", .style = .{ .fg = app.theme.muted } });
-        try header_line.pushSpan(arena, .{ .content = spinner, .style = .{ .modifier = .{ .bold = true } } });
-    }
-
-    if (is_streaming and flags.is_writing) {
-        const spinner = text_utils.spinnerDots(app.frame_count);
-        try header_line.pushSpan(arena, .{ .content = "  writing .. ", .style = .{ .fg = app.theme.muted } });
-        try header_line.pushSpan(arena, .{ .content = spinner, .style = .{ .modifier = .{ .bold = true } } });
-    }
-
-    if (is_streaming and flags.is_calling) {
-        const spinner = text_utils.spinnerDots(app.frame_count);
-        try header_line.pushSpan(arena, .{ .content = "  calling .. ", .style = .{ .fg = app.theme.muted } });
-        try header_line.pushSpan(arena, .{ .content = spinner, .style = .{ .modifier = .{ .bold = true } } });
-    }
 
     // Header last so it renders on top (stack is bottom-up)
     var tool_call_list = std.ArrayList(ChatPart.ToolCallEntry).empty;
@@ -2197,16 +2172,16 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
                 .diff_lines = lines.items,
             } };
 
-            const block_height = try buildChatEntryParagraph(alloc, &stack, maybe_agent, app, .{
+            const block_height = try buildChatEntryParagraph(alloc, &stack, app, .{
                 .role = .agent,
                 .parts = parts,
-            }, false, inner_w);
+            }, inner_w);
             total += block_height;
         }
     }
 
     if (app.streaming_entry) |entry| {
-        const block_height = try buildChatEntryParagraph(alloc, &stack, maybe_agent, app, entry, true, inner_w);
+        const block_height = try buildChatEntryParagraph(alloc, &stack, app, entry, inner_w);
         total += block_height;
     }
 
@@ -2216,7 +2191,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
 
         if (maybe_agent == null and entry.role != .system) continue;
 
-        const block_height = try buildChatEntryParagraph(alloc, &stack, maybe_agent, app, entry, false, inner_w);
+        const block_height = try buildChatEntryParagraph(alloc, &stack, app, entry, inner_w);
         total += block_height;
     }
 
@@ -2285,8 +2260,11 @@ fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: 
         .padding = .all(1),
     };
 
-    var b: [255]u8 = undefined;
-    const line = if (state == .active) blk: {
+    const hl: r.tui.Style = .{ .fg = .white, .modifier = .{ .bold = true } };
+    const info: r.tui.Style = .{ .fg = app.theme.info };
+
+    var l = r.tui.Line{};
+    if (state == .active) {
         const spinner_str = text_utils.spinnerDots(app.frame_count);
         const exec_pool = app.swarm.exec;
         const ssh_suffix: []const u8 = if (exec_pool.ssh_active and exec_pool.ssh_target != null) " (SSH ON)" else "";
@@ -2300,23 +2278,45 @@ fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: 
         else
             std.fmt.bufPrint(&queued_buf, "({d} queued messages up)", .{queued_count}) catch "(queued messages up)";
 
-        break :blk std.fmt.bufPrint(&b, "{s} ({d}s) Consuming tokens at {d} T/s{s} {s}", .{
-            spinner_str,
-            secs,
-            @as(u32, @intFromFloat(slot.tokens_per_sec)),
-            ssh_suffix,
-            queued_suffix,
-        }) catch "…";
-    } else if (state == .complete) blk: {
-        break :blk std.fmt.bufPrint(&b, "Done ({d}s)", .{secs}) catch "…";
-    } else blk: {
-        break :blk std.fmt.bufPrint(&b, "Failed ({d}s)", .{secs}) catch "…";
-    };
+        const state_str: []const u8 = if (slot.agent.flags.is_thinking)
+            "thinking"
+        else if (slot.agent.flags.is_writing)
+            "writing"
+        else if (slot.agent.flags.is_calling)
+            "calling"
+        else
+            "";
 
-    var l = r.tui.Line{};
-    l.pushText(alloc, line, .{ .fg = app.theme.info }) catch {};
+        l.pushSpanPrint(alloc, "{s} (", .{spinner_str}, info) catch {};
+        if (secs >= 60)
+            l.pushSpanPrint(alloc, "{d}m {d}s", .{ secs / 60, secs % 60 }, hl) catch {}
+        else
+            l.pushSpanPrint(alloc, "{d}s", .{secs}, hl) catch {};
+        l.pushSpanPrint(alloc, ") Consuming Tokens at ", .{}, info) catch {};
+        l.pushSpanPrint(alloc, "{d} T/s", .{@as(u32, @intFromFloat(slot.tokens_per_sec))}, hl) catch {};
+
+        if (state_str.len > 0) {
+            l.pushSpanPrint(alloc, " while ", .{}, info) catch {};
+            l.pushSpanPrint(alloc, "{s}", .{state_str}, hl) catch {};
+        }
+
+        l.pushSpanPrint(alloc, "{s} {s}", .{ ssh_suffix, queued_suffix }, info) catch {};
+    } else {
+        const label = if (state == .complete) "Done" else "Failed";
+        if (secs >= 60)
+            l.pushSpanPrint(alloc, "{s} ({d}m {d}s)", .{ label, secs / 60, secs % 60 }, info) catch {}
+        else
+            l.pushSpanPrint(alloc, "{s} ({d}s)", .{ label, secs }, info) catch {};
+    }
+
     para.lines.append(alloc, l) catch {};
     para.render(alloc, area, area, buf);
+}
+
+fn formatDuration(buf: []u8, secs: u32) []const u8 {
+    if (secs >= 60)
+        return std.fmt.bufPrint(buf, "{d}m {d}s", .{ secs / 60, secs % 60 }) catch "…";
+    return std.fmt.bufPrint(buf, "{d}s", .{secs}) catch "…";
 }
 
 fn str_replace(buf: []u8, from: []const u8, to: []const u8, input: []const u8) []u8 {
