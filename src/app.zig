@@ -1716,7 +1716,11 @@ fn renderLuaError(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r
     p.renderSimple(arena, area, buf);
 }
 
-const RenderParagraphItem = struct { p: r.tui.Paragraph, h: usize };
+const RenderParagraphItem = struct {
+    p: r.tui.Paragraph,
+    h: usize,
+    is_tool_block: bool = false,
+};
 /// Build one r.tui.Paragraph per ChatEntry. Allocations live in `arena`; do not
 /// deinit the result. All paragraphs use `reverse = true` so the chat-area
 /// caller can stack them bottom-up.
@@ -1733,19 +1737,7 @@ fn buildChatEntryParagraph(
     var header_para = r.tui.Paragraph{};
     var header_line = r.tui.Line{};
 
-    const role_text: []const u8 = switch (entry.role) {
-        .user => "❯ you:",
-        .agent => "❯ blitz:",
-        .system => "❯ system:",
-    };
-
-    const role_color: r.tui.Color = switch (entry.role) {
-        .user => .cyan,
-        .agent => .bright_green,
-        .system => .red,
-    };
-
-    try header_line.pushSpan(arena, .{ .content = role_text, .style = .{ .modifier = .{ .bold = true }, .fg = role_color } });
+    var has_text = false;
 
     // Header last so it renders on top (stack is bottom-up)
     var tool_call_list = std.ArrayList(ChatPart.ToolCallEntry).empty;
@@ -1763,6 +1755,7 @@ fn buildChatEntryParagraph(
                 }
             },
             .message => |text| {
+                has_text = true;
                 var p = r.tui.Paragraph{};
                 try appendMarkdownText(&p, arena, text);
                 const h = p.totalHeightLong(inner_w);
@@ -1770,6 +1763,7 @@ fn buildChatEntryParagraph(
                 total += h;
             },
             .plain_text => |text| {
+                has_text = true;
                 var p = r.tui.Paragraph{};
                 try p.appendText(arena, text, .{});
                 const h = p.totalHeightLong(inner_w);
@@ -1795,9 +1789,25 @@ fn buildChatEntryParagraph(
         try out.append(arena, para);
     }
 
-    try header_para.lines.append(arena, header_line);
-    try out.append(arena, .{ .p = header_para, .h = 1 });
-    total += 1;
+    const show_header = entry.role != .agent or has_text;
+    if (show_header) {
+        const role_text: []const u8 = switch (entry.role) {
+            .user => "❯ you:",
+            .agent => "❯ blitz:",
+            .system => "❯ system:",
+        };
+
+        const role_color: r.tui.Color = switch (entry.role) {
+            .user => .cyan,
+            .agent => .bright_green,
+            .system => .red,
+        };
+
+        try header_line.pushSpan(arena, .{ .content = role_text, .style = .{ .modifier = .{ .bold = true }, .fg = role_color } });
+        try header_para.lines.append(arena, header_line);
+        try out.append(arena, .{ .p = header_para, .h = 1 });
+        total += 1;
+    }
 
     return total;
 }
@@ -1900,6 +1910,7 @@ fn buildToolGroupParagraph(
     return .{
         .h = p.totalHeightLong(inner_w),
         .p = p,
+        .is_tool_block = true,
     };
 }
 
@@ -2194,6 +2205,20 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
         const block_height = try buildChatEntryParagraph(alloc, &stack, app, entry, inner_w);
         total += block_height;
     }
+
+    // Consecutive tool-call blocks render as one contiguous group: zero the
+    // facing padding of each adjacent pair.
+    var idx: usize = 0;
+    while (idx + 1 < stack.items.len) : (idx += 1) {
+        if (stack.items[idx].is_tool_block and stack.items[idx + 1].is_tool_block) {
+            stack.items[idx].p.padding.top = 0;
+            stack.items[idx].h = stack.items[idx].p.totalHeightLong(inner_w);
+            stack.items[idx + 1].p.padding.bottom = 0;
+            stack.items[idx + 1].h = stack.items[idx + 1].p.totalHeightLong(inner_w);
+        }
+    }
+    total = 0;
+    for (stack.items) |item| total += item.h;
 
     if (i == 0) {
         const max_scroll: usize = if (total > inner_h) @intCast(total - inner_h) else 0;
