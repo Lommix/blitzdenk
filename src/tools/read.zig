@@ -3,7 +3,7 @@ const r = @import("root.zig");
 const std = @import("std");
 
 /// Bad models always read to little or cut at bad lines. Padding the read scope helps
-const READ_PADDING = 5;
+const READ_PADDING = 1;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 pub const ReadTool = prv.tool.Tool{
