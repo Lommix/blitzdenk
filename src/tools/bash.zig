@@ -45,12 +45,6 @@ pub const BashTool = prv.tool.Tool{
         \\Write files: Use write ('echo >..' or 'cat <<EOF' is FORBIDDEN!)
         \\While the bash tool can do similar things, it’s better to use the built-in tools as they provide a better user experience and make it easier to review tool calls and give permission.
         \\
-        \\Communication: Output text directly (NOT echo/printf)
-        \\Each bash invocation starts in the `cwd` shown under `# Env`. The shell environment is initialized from the user's profile (bash or zsh).
-        \\Run commands for that directory directly: use `zig build`, not `cd . && zig build`.
-        \\Never prefix a command with `cd . &&`, `cd "$PWD" &&`, or an equivalent no-op.
-        \\Use `cd <different-directory> && ...` only when the command must run elsewhere. A directory change does not persist to the next invocation.
-        \\
         \\# Instructions
         \\
         \\If your command will create new directories or files, first use this tool to run `ls` to verify the parent directory exists and is the correct location.
@@ -61,6 +55,7 @@ pub const BashTool = prv.tool.Tool{
         \\If the commands depend on each other and must run sequentially, use a single bash call with '&&' to chain them together.`,
         \\Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
         \\DO NOT use newlines to separate commands (newlines are ok in quoted strings).
+        \\Use the `workdir` parameter to run a command in a different directory; it defaults to the current cwd. Avoid `cd <dir> && cmd` — prefer `workdir`.
         \\
         \\You can use the `run_in_background` parameter to run the command in the background. Only use this if you don't need the result immediately and are OK being notified when the command completes later.
         \\You do not need to check the output right away - you'll be notified when it finishes. You do not need to use '&' at the end of the command when using this parameter.
@@ -68,6 +63,7 @@ pub const BashTool = prv.tool.Tool{
         .parameters_schema =
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Command to run directly in the current cwd. Example: use `zig build`, not `cd . && zig build`."},
+        \\  "workdir": {"type": "string", "description": "The working directory to run the command in. Defaults to the current cwd"},
         \\  "timeout_ms": {"type": "number", "default": 30000, "description": "Cancel command after X milliseconds. Ignored by 'run_in_background'"},
         \\  "run_in_background": {"type": "boolean", "default": false, "description": "Set to true to run this command in the background. Use read_process to read the current output later. You MUST use this instead of '&' for background processes!"}
         \\}, "required": ["command"]}
@@ -215,6 +211,7 @@ const Handle = prv.exec.CmdPool.Handle;
 fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
     const Args = struct {
         command: []const u8,
+        workdir: ?[]const u8 = null,
         run_in_background: bool = false,
         timeout_ms: i64 = 30_000,
     };
@@ -227,6 +224,9 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     };
 
     if (args.command.len == 0) return r.errResult(call, "empty command");
+
+    const run_cwd = if (args.workdir) |wd| (std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, wd }) catch
+        return r.errResult(call, "invalid workdir")) else ctx.cwd;
 
     // NOTE: quick rg pattern fix
     if (containsUnquotedDollar(args.command) and isRgCommand(args.command)) {
@@ -275,7 +275,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
     if (args.run_in_background) {
-        const handle = ctx.swarm.exec.run(ctx.cwd, &.{ "/bin/sh", "-c", args.command }) catch
+        const handle = ctx.swarm.exec.run(run_cwd, &.{ "/bin/sh", "-c", args.command }) catch
             return r.errResult(call, "failed to spawn command process");
 
         const id: u8 = @intFromEnum(handle);
@@ -294,7 +294,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     // Foreground with deadline race.
     const res = runWithDeadline(ctx, .{
-        .cwd = ctx.cwd,
+        .cwd = run_cwd,
         .argv = &.{ "/bin/sh", "-c", args.command },
     }, args.timeout_ms) catch |err| switch (err) {
         error.Timeout => {
