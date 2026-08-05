@@ -138,71 +138,6 @@ pub fn Locked(comptime T: type) type {
     };
 }
 
-pub const LoopGuard = struct {
-    counts: std.AutoHashMapUnmanaged(u64, u32) = .{},
-    warnings: std.StringHashMapUnmanaged(WarningLevel) = .{},
-
-    pub const FIRST_WARNING_AT = 3;
-    pub const BLOCK_AT = 6;
-
-    pub const WarningLevel = enum {
-        rethink,
-        force_rethink,
-    };
-
-    pub fn clear(self: *LoopGuard) void {
-        self.counts.clearRetainingCapacity();
-        self.warnings.clearRetainingCapacity();
-    }
-
-    pub fn record(self: *LoopGuard, alloc: std.mem.Allocator, call: apt.ToolCall) !u32 {
-        const key = callHash(call);
-        if (self.counts.getPtr(key)) |count| {
-            count.* += 1;
-            return count.*;
-        }
-
-        try self.counts.put(alloc, key, 1);
-        return 1;
-    }
-
-    pub fn warningForCount(count: u32) ?WarningLevel {
-        if (count >= BLOCK_AT) return .force_rethink;
-        if (count == FIRST_WARNING_AT) return .rethink;
-        return null;
-    }
-
-    fn callHash(call: apt.ToolCall) u64 {
-        var hasher = std.hash.Wyhash.init(0);
-
-        var name_len: u64 = call.name.len;
-        hasher.update(std.mem.asBytes(&name_len));
-        hasher.update(call.name);
-
-        var arguments_len: u64 = call.arguments.len;
-        hasher.update(std.mem.asBytes(&arguments_len));
-        hasher.update(call.arguments);
-
-        return hasher.final();
-    }
-};
-
-const loop_guard_rethink_warning =
-    \\<system-warning>
-    \\Loop guard: You have called the same tool with identical arguments 3 times.
-    \\Pause and rethink the approach before repeating it.
-    \\ Consider a different tool, different arguments, or reporting the current findings.
-    \\</system-warning>;
-;
-
-const loop_guard_force_rethink_warning =
-    \\<system-warning>
-    \\Looping error: You have called the same tool with identical arguments 6 times.
-    \\The tool call was not run. Stop repeating this call, identify why it is not making progress, choose a different approach, or report the blocker/current findings to the user.
-    \\</system-warning>
-    \\
-;
-
 pub const AgentFlags = packed struct {
     force_full_reminder: bool = false,
     is_fork: bool = false,
@@ -264,7 +199,6 @@ pub const Agent = struct {
     max_allowed_tool_calls: u32 = 64,
     tool_call_count: u32 = 0,
     flags: AgentFlags = .{},
-    loop_guard: LoopGuard = .{},
 
     pub fn new(
         config: apt.Config,
@@ -308,7 +242,6 @@ pub const Agent = struct {
         self.tool_call_runs = .{};
         self.tool_call_done = .{};
         self.tool_call_count = 0;
-        self.loop_guard = .{};
         _ = self.arena.reset(.free_all);
     }
 
@@ -346,7 +279,6 @@ pub const Agent = struct {
         self.iteration = 0;
         self.retry_count = 0;
         self.last_error = null;
-        self.loop_guard.clear();
     }
 
     pub fn retry(self: *Agent) void {
@@ -566,7 +498,6 @@ pub const Agent = struct {
         while (dit.next()) |en| _ = en.value_ptr.*.fut.cancel(self.pool.io);
         self.tool_call_runs.clearRetainingCapacity();
         self.tool_call_done.clearRetainingCapacity();
-        self.loop_guard.warnings.clearRetainingCapacity();
 
         self.in_flight_usage = .{};
         self.compaction.resetInFlight();
@@ -843,20 +774,6 @@ pub const Agent = struct {
                 continue;
             }
 
-            const loop_count = try self.loop_guard.record(alloc, call);
-            if (LoopGuard.warningForCount(loop_count)) |warning| {
-                try self.loop_guard.warnings.put(alloc, call.id, warning);
-                if (warning == .force_rethink) {
-                    try self.tool_call_done.put(alloc, call.id, .{
-                        .call_id = call.id,
-                        .name = call.name,
-                        .content = loop_guard_force_rethink_warning,
-                        .is_error = true,
-                    });
-                    continue;
-                }
-            }
-
             // Tool-call budget gate.
             if (self.tool_call_count >= self.max_allowed_tool_calls) {
                 std.log.debug("[TOOLCALL_LIMIT REACHED]", .{});
@@ -939,17 +856,12 @@ pub const Agent = struct {
             } });
         }
 
-        if (self.loopGuardWarningForResults(results[0..count])) |warn| {
-            try parts.append(alloc, .{ .text = try alloc.dupe(u8, warn) });
-        }
-
         try self.chat.messages.append(alloc, .{
             .role = .user,
             .parts = try parts.toOwnedSlice(alloc),
         });
 
         self.tool_call_done.clearRetainingCapacity();
-        self.loop_guard.warnings.clearRetainingCapacity();
 
         if (self.popQueuedParts(ctx)) |queued_parts| {
             try self.appendPartsToLastMessage(queued_parts);
@@ -992,21 +904,6 @@ pub const Agent = struct {
             return true;
         }
         return false;
-    }
-
-    fn loopGuardWarningForResults(self: *Agent, results: []const apt.ToolResult) ?[]const u8 {
-        var selected: ?LoopGuard.WarningLevel = null;
-
-        for (results) |result| {
-            const warning = self.loop_guard.warnings.get(result.call_id) orelse continue;
-            if (warning == .force_rethink) return loop_guard_force_rethink_warning;
-            selected = warning;
-        }
-
-        return switch (selected orelse return null) {
-            .rethink => loop_guard_rethink_warning,
-            .force_rethink => loop_guard_force_rethink_warning,
-        };
     }
 
     fn broadcastToolResults(self: *Agent, results: []const apt.ToolResult) void {

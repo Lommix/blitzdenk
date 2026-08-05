@@ -314,7 +314,6 @@ fn installCompactedHistory(self: *Agent, summary: []const u8) !void {
     self.tool_display.value = .{};
     self.tool_call_runs = .{};
     self.tool_call_done = .{};
-    self.loop_guard = .{};
     old_arena.deinit();
 
     const file_stats = self.file_stats.lock(self.pool.io);
@@ -358,7 +357,6 @@ fn installResponseHistory(self: *Agent, items: []const []const u8) !void {
     self.tool_display.value = .{};
     self.tool_call_runs = .{};
     self.tool_call_done = .{};
-    self.loop_guard = .{};
     old_arena.deinit();
 
     const file_stats = self.file_stats.lock(self.pool.io);
