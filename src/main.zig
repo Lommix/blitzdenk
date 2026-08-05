@@ -733,7 +733,7 @@ pub fn run(
                             },
                             .text => {
                                 if (app.input_buffer.items.len == 0) break;
-                                const input = gpa.dupe(u8, app.inputSlice()) catch break;
+                                const input = std.fmt.allocPrint(gpa, "{f}", .{std.unicode.fmtUtf8(app.inputSlice())}) catch break;
 
                                 // -- user commands (processed even while a session is running)
                                 if (input[0] == ':' or input[0] == '/') {
@@ -816,9 +816,9 @@ pub fn run(
                                     continue;
                                 }
 
-                                app.pushHistory(app.appAlloc(), app.inputSlice());
+                                app.pushHistory(app.appAlloc(), input);
                                 if (config_lua) |info| app.saveHistory(info.dir_path);
-                                try app.event_bus.emit(&app, .{ .user_message_sent = app.inputSlice() });
+                                try app.event_bus.emit(&app, .{ .user_message_sent = input });
                                 // state.pushChatMessage(.user, input);
 
                                 const alloc = gpa;
