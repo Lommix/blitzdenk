@@ -389,7 +389,6 @@ fn cloneBackgroundTasks(self: *Agent, alloc: std.mem.Allocator) !r.agent.Backgro
     for (guard.ptr.list.items) |task| try next.list.append(alloc, .{
         .handle = task.handle,
         .command = try alloc.dupe(u8, task.command),
-        .path = try alloc.dupe(u8, task.path),
     });
     return next;
 }

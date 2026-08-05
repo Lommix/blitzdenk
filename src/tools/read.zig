@@ -52,67 +52,11 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     if (args.path.len == 0) return r.errResult(call, "path is empty");
 
-    // Inspect a background task spawned by bash run_in_background.
-    // Snapshot the matching handle under lock, then drop the lock before
-    // poll/format work.
-    const BgMatch = struct { handle: prv.exec.CmdPool.Handle, idx: usize };
-    const bg_match: ?BgMatch = blk: {
-        const g = ctx.agent().bg_tasks.tryLock(ctx.io) orelse break :blk null;
-        defer g.unlock();
-        const items = g.ptr.list.items;
-        for (0..items.len) |i| {
-            const rev = items.len - i - 1;
-            if (std.mem.eql(u8, items[rev].path, args.path))
-                break :blk .{ .handle = items[rev].handle, .idx = rev };
-        }
-        break :blk null;
-    };
-
     var buf: [512]u8 = undefined;
     const rel_path = if (ctx.cwd.len > 0)
         r.replaceAll(args.path, ctx.cwd, ".", &buf)
     else
         args.path;
-
-    if (bg_match) |m| {
-        r.setToolStatusPrint(ctx, call, "(Reading Process) {s}", .{rel_path});
-        if (ctx.swarm.exec.poll(m.handle)) |res| {
-            defer ctx.swarm.exec.release(m.handle);
-            {
-                const g = ctx.agent().bg_tasks.lock(ctx.io);
-                defer g.unlock();
-                // Re-find — index may have shifted under us.
-                const items = g.ptr.list.items;
-                for (0..items.len) |i| {
-                    if (items[i].handle == m.handle) {
-                        _ = g.ptr.list.swapRemove(i);
-                        break;
-                    }
-                }
-            }
-            const content = std.fmt.allocPrint(ctx.alloc,
-                \\Command process finished. Final result:
-                \\
-                \\Stdout:
-                \\{s}
-                \\
-                \\Stderr:
-                \\{s}
-            , .{ res.stdout, res.stderr }) catch "failed to read command pipe";
-            return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
-        }
-        const slot = &ctx.swarm.exec.slots[@intFromEnum(m.handle)];
-        const content = std.fmt.allocPrint(ctx.alloc,
-            \\Command process is running
-            \\
-            \\Stdout:
-            \\{s}
-            \\
-            \\Stderr:
-            \\{s}
-        , .{ slot.stdout.items, slot.stderr.items }) catch "failed to read command pipe";
-        return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
-    }
 
     const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, args.path }) catch
         return r.errResult(call, "failed to resolve path");

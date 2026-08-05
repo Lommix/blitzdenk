@@ -35,7 +35,6 @@ pub const FileStats = std.StringHashMapUnmanaged(FileStat);
 pub const BackgroundTask = struct {
     handle: r.exec.CmdPool.Handle,
     command: []const u8,
-    path: []const u8,
 };
 
 pub const BackgroundTaskList = struct {

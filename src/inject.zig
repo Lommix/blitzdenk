@@ -106,15 +106,16 @@ fn inject_processes_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.pr
 
         if (i == 0) break :blk;
 
+        // Background tasks stay alive for the agent lifetime. Completed ones are
+        // NOT released here: the agent reads their output via read_process, so
+        // they must remain readable. Only cancel/teardown frees them.
         while (i > 0) {
             i -|= 1;
             const en = &g.ptr.list.items[i];
             if (app.swarm.exec.isDone(en.handle)) {
-                try w.print("[BACKGROUND PROCESS] Path: {s} cmd: {s} status: complete\n", .{ en.path, en.command });
-                // TODO: it's not the responsibilty of the reminder to clean this up
-                _ = g.ptr.list.swapRemove(i);
+                try w.print("[BACKGROUND PROCESS] id: {d} cmd: {s} status: complete. Read the output with read_process\n", .{ @intFromEnum(en.handle), en.command });
             } else {
-                try w.print("[BACKGROUND PROCESS] Path: {s} cmd: {s} status: working\n", .{ en.path, en.command });
+                try w.print("[BACKGROUND PROCESS] id: {d} cmd: {s} status: working\n", .{ @intFromEnum(en.handle), en.command });
             }
         }
     }

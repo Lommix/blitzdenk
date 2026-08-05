@@ -106,7 +106,8 @@ local lua_repl = blitz.register_tool({
 -- Per-agent tool overrides (full replace). Omit a call to keep defaults.
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.BASH,
-	blitz.tools.CANCEL_BACKGROUND,
+	blitz.tools.CANCEL_PROCESS,
+	blitz.tools.READ_PROCESS,
 	blitz.tools.READ,
 	blitz.tools.WRITE,
 	blitz.tools.EDIT,

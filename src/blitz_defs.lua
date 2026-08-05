@@ -74,7 +74,8 @@
 
 ---@class BlitzToolDef
 ---@field BASH string
----@field CANCEL_BACKGROUND string
+---@field CANCEL_PROCESS string
+---@field READ_PROCESS string
 ---@field READ string
 ---@field WRITE string
 ---@field EDIT string

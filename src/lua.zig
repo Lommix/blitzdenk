@@ -1024,7 +1024,8 @@ pub const BlitzToolDef = LuaType{
         .name = "BlitzToolDef",
         .fields = &.{
             .{ .name = "BASH", .ty = LuaType.string, .value = .{ .string = tl.bash.BashTool.def.name } },
-            .{ .name = "CANCEL_BACKGROUND", .ty = LuaType.string, .value = .{ .string = tl.bash.CancelBackgroundCommand.def.name } },
+            .{ .name = "CANCEL_PROCESS", .ty = LuaType.string, .value = .{ .string = tl.bash.CancelBackgroundCommand.def.name } },
+            .{ .name = "READ_PROCESS", .ty = LuaType.string, .value = .{ .string = tl.bash.ReadProcessTool.def.name } },
             .{ .name = "READ", .ty = LuaType.string, .value = .{ .string = tl.read.ReadTool.def.name } },
             .{ .name = "WRITE", .ty = LuaType.string, .value = .{ .string = tl.write.WriteTool.def.name } },
             .{ .name = "EDIT", .ty = LuaType.string, .value = .{ .string = tl.edit.EditTool.def.name } },

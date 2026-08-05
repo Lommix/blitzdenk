@@ -423,7 +423,8 @@ blitz.set_model_agent(blitz.AGENT_GENERAL, model, "max", novita)</code></pre>
 
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
     blitz.tools.BASH,
-    blitz.tools.CANCEL_BACKGROUND,
+    blitz.tools.CANCEL_PROCESS,
+    blitz.tools.READ_PROCESS,
     blitz.tools.READ,
     blitz.tools.WRITE,
     blitz.tools.EDIT,
