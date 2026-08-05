@@ -145,7 +145,7 @@ fn getTodo(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
 
     r.setToolStatusPrint(ctx, call, "get todo: {s}", .{snap.subject});
 
-    const msg = std.fmt.allocPrint(ctx.alloc, "Todo {d}: [{s}] subject: {s}\n description: {s}", .{
+    const msg = std.fmt.allocPrint(ctx.alloc, "<todo id=\"{d}\" state=\"{s}\">\n  <subject>{s}</subject>\n  <description>{s}</description>\n</todo>", .{
         snap.id, snap.state.toString(), snap.subject, snap.description,
     }) catch return r.errResult(call, "out of memory");
 
@@ -200,7 +200,7 @@ fn listTodos(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
 
     var allocating = std.Io.Writer.Allocating.init(ctx.alloc);
     for (snap) |todo| {
-        allocating.writer.print("{d}. [{s}] subject: {s}\n", .{
+        allocating.writer.print("<todo id=\"{d}\" state=\"{s}\">\n  <subject>{s}</subject>\n</todo>\n", .{
             todo.id, todo.state.toString(), todo.subject,
         }) catch return r.errResult(call, "out of memory");
     }

@@ -250,7 +250,7 @@ fn writePartForSummary(w: *std.Io.Writer, part: apt.ContentPart) !void {
                 },
                 .truncate => {
                     const kb = result.content.len / 1024;
-                    try w.print("[tool_result {s}{s}]\n<truncated tool result. original: {d} kb>\n", .{ result.name, if (result.is_error) " error" else "", kb });
+                    try w.print("[tool_result {s}{s}]\n<output truncated=\"true\" total_kb=\"{d}\">\n", .{ result.name, if (result.is_error) " error" else "", kb });
                 },
             }
         },

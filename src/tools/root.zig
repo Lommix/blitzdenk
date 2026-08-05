@@ -162,8 +162,8 @@ pub fn truncateOutputToOwned(
         const slice = output[0..end_byte];
         break :blk std.fmt.allocPrint(
             alloc,
-            "<result>\n{s}\n</result>\n..<stats>showing {d} of {d} bytes, {d} of {d} lines</stats>",
-            .{ slice, end_byte, output.len, lines_collected, total_lines },
+            "<output truncated=\"true\" bytes=\"{d}\" total_bytes=\"{d}\" lines=\"{d}\" total_lines=\"{d}\">\n{s}\n</output>",
+            .{ end_byte, output.len, lines_collected, total_lines, slice },
         ) catch slice;
     };
 

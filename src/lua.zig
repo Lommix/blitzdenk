@@ -2714,9 +2714,10 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
             c.lua_pop(L, 1);
             if (is_ok) {
                 _ = c.lua_getfield(L, -1, "msg");
-                _ = c.lua_pushlstring(L, "\nStdout:\n", 9);
+                _ = c.lua_pushlstring(L, "\n<stdout>\n", 10);
                 _ = c.lua_pushlstring(L, stdout.ptr, stdout.len);
-                _ = c.lua_concat(L, 3);
+                _ = c.lua_pushlstring(L, "\n</stdout>", 10);
+                _ = c.lua_concat(L, 4);
                 c.lua_setfield(L, -2, "msg");
             }
         }

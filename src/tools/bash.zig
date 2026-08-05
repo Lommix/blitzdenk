@@ -170,36 +170,21 @@ fn run_read_process(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.a
         if (maybe_res) |res| {
             defer ctx.swarm.exec.alloc.free(res.stdout);
             defer ctx.swarm.exec.alloc.free(res.stderr);
-            const content = std.fmt.allocPrint(ctx.alloc,
-                \\Command process finished. Final result:
-                \\
-                \\Stdout:
-                \\{s}
-                \\
-                \\Stderr:
-                \\{s}
-            , .{ res.stdout, res.stderr }) catch "failed to read command pipe";
-            // Keep the slot intact: a later read or status reminder may want the
-            // output again. release() happens via the reminder/cancel cleanup.
+            const content = formatBashResult(ctx.alloc, res.stdout, res.stderr, res.exit_code) catch "failed to read command pipe";
             return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
         }
     } else |_| {
         return r.errResult(call, "failed to read command output");
     }
 
-    // Still running: snapshot the partial output under the slot lock.
     const slot = &ctx.swarm.exec.slots[@intFromEnum(handle)];
     slot.output_lock.lockUncancelable(ctx.swarm.exec.io);
     defer slot.output_lock.unlock(ctx.swarm.exec.io);
-    const content = std.fmt.allocPrint(ctx.alloc,
-        \\Command process is running
-        \\
-        \\Stdout:
-        \\{s}
-        \\
-        \\Stderr:
-        \\{s}
-    , .{ slot.stdout.items, slot.stderr.items }) catch "failed to read command pipe";
+    const content = std.fmt.allocPrint(
+        ctx.alloc,
+        "<bash status=\"running\">\n<stdout>{s}</stdout>\n<stderr>{s}</stderr>\n</bash>",
+        .{ slot.stdout.items, slot.stderr.items },
+    ) catch "failed to read command pipe";
     return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
 }
 
@@ -312,10 +297,21 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     defer ctx.swarm.exec.alloc.free(res.stdout);
     defer ctx.swarm.exec.alloc.free(res.stderr);
 
-    const response = ctx.alloc.alloc(u8, res.stderr.len + res.stdout.len) catch return r.errResult(call, "oom");
-    @memcpy(response[0..res.stdout.len], res.stdout);
-    @memcpy(response[res.stdout.len..], res.stderr);
-    return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, response, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
+    const content = formatBashResult(ctx.alloc, res.stdout, res.stderr, res.exit_code) catch
+        return r.errResult(call, "oom");
+    return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
+}
+
+fn formatBashResult(
+    alloc: std.mem.Allocator,
+    stdout: []const u8,
+    stderr: []const u8,
+    exit_code: ?u8,
+) ![]const u8 {
+    if (exit_code) |code| {
+        return std.fmt.allocPrint(alloc, "<bash exit_code=\"{d}\">\n<stdout>{s}</stdout>\n<stderr>{s}</stderr>\n</bash>", .{ code, stdout, stderr });
+    }
+    return std.fmt.allocPrint(alloc, "<bash>\n<stdout>{s}</stdout>\n<stderr>{s}</stderr>\n</bash>", .{ stdout, stderr });
 }
 
 const RunError = error{ Timeout, Canceled, ExecFailed };
