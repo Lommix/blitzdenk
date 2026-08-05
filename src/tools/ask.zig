@@ -8,7 +8,8 @@ pub const AskTool = prv.tool.Tool{
     .def = .{
         .name = "ask_user",
         .description =
-        \\Ask the user a multiple-choice question to clarify intent, resolve ambiguity, or let them pick an approach. The user picks one of the provided options, or types a custom reply. The selected text (or typed message) is returned as the tool result.
+        \\Ask the user a multiple-choice question to clarify intent, resolve ambiguity, or let them pick an approach.
+        \\This tool is a must call if any ambiguity is found in the current task. Always tag your recommendation with "(recommended)"!
         \\
         ,
         .parameters_schema =
