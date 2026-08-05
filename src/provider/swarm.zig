@@ -104,6 +104,11 @@ pub const AgentSlot = struct {
     agent: Agent = undefined,
     parent_id: ?AgentId = null,
     time_elapsed: f32 = 0,
+    /// Tokens/s, updated each tickAll. Only meaningful while the agent is
+    /// actively streaming output.
+    tokens_per_sec: f32 = 0,
+    /// Seconds elapsed since the start of the current rate window.
+    rate_window_elapsed: f32 = 0,
     /// Set when state transitions to .complete or .failed. Sub-agent
     /// tools wait on this instead of busy-polling slot.state.
     event: std.Io.Event = .unset,
@@ -418,6 +423,7 @@ pub fn tickAll(self: *Self) bool {
     for (&self.slots) |*slot| {
         if (slot.state.load(.acquire) != .active) continue;
         slot.time_elapsed += dt;
+        updateTokenRate(slot, dt);
         const result = slot.agent.tick(dt, self.context);
         switch (result) {
             .complete => {
@@ -432,6 +438,16 @@ pub fn tickAll(self: *Self) bool {
         }
     }
     return running;
+}
+
+fn updateTokenRate(slot: *AgentSlot, dt: f32) void {
+    if (slot.agent.state != .streaming_response) {
+        slot.tokens_per_sec = 0;
+        slot.rate_window_elapsed = 0;
+        return;
+    }
+    slot.rate_window_elapsed += dt;
+    slot.tokens_per_sec = @as(f32, @floatFromInt(slot.agent.in_flight_usage.output_tokens)) / slot.rate_window_elapsed;
 }
 
 pub fn cancelAll(self: *Self) void {

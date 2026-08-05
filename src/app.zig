@@ -2300,9 +2300,10 @@ fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: 
         else
             std.fmt.bufPrint(&queued_buf, "({d} queued messages up)", .{queued_count}) catch "(queued messages up)";
 
-        break :blk std.fmt.bufPrint(&b, "{s} ({d}s) Consuming tokens …{s} {s}", .{
+        break :blk std.fmt.bufPrint(&b, "{s} ({d}s) Consuming tokens at {d} T/s{s} {s}", .{
             spinner_str,
             secs,
+            @as(u32, @intFromFloat(slot.tokens_per_sec)),
             ssh_suffix,
             queued_suffix,
         }) catch "…";
