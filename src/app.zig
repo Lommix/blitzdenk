@@ -1012,12 +1012,11 @@ pub const App = struct {
                 .diff_lines = lines.items,
             } };
 
-            const block_height = try buildChatEntryParagraph(arena, &stack, self, .{
+            var total: usize = 0;
+            try buildChatEntryParagraph(arena, &stack, &total, self, .{
                 .role = .agent,
                 .parts = parts,
             }, inner_w);
-
-            _ = block_height; // autofix
         }
 
         return null;
@@ -1716,19 +1715,44 @@ const RenderParagraphItem = struct {
     h: usize,
     is_tool_block: bool = false,
 };
+
+/// Zero the facing padding between the last two stack items when both are tool
+/// blocks, keeping `total` in sync. Only tool groups set `is_tool_block`, so
+/// this fires only when a tool group is appended after a tool group.
+fn collapseToolPadding(
+    out: *std.ArrayList(RenderParagraphItem),
+    total: *usize,
+    inner_w: u16,
+) void {
+    if (out.items.len < 2) return;
+    const prev = &out.items[out.items.len - 2];
+    const next = &out.items[out.items.len - 1];
+    if (!prev.is_tool_block or !next.is_tool_block) return;
+
+    const old_prev_h = prev.h;
+    prev.p.padding.top = 0;
+    prev.h = prev.p.totalHeightLong(inner_w);
+    total.* -= old_prev_h - prev.h;
+
+    const old_next_h = next.h;
+    next.p.padding.bottom = 0;
+    next.h = next.p.totalHeightLong(inner_w);
+    total.* -= old_next_h - next.h;
+}
+
 /// Build one r.tui.Paragraph per ChatEntry. Allocations live in `arena`; do not
 /// deinit the result. All paragraphs use `reverse = true` so the chat-area
 /// caller can stack them bottom-up.
 fn buildChatEntryParagraph(
     arena: std.mem.Allocator,
     out: *std.ArrayList(RenderParagraphItem),
+    total: *usize,
     app: *App,
     entry: ChatEntry,
     inner_w: u16,
-) !usize {
+) !void {
     // var buf: [255]u8 = undefined;
 
-    var total: usize = 0;
     var header_para = r.tui.Paragraph{};
     var header_line = r.tui.Line{};
 
@@ -1746,7 +1770,7 @@ fn buildChatEntryParagraph(
                     try p.appendText(arena, text, .{ .fg = app.theme.muted });
                     const h = p.totalHeightLong(inner_w);
                     try out.append(arena, .{ .p = p, .h = h });
-                    total += h;
+                    total.* += h;
                 }
             },
             .message => |text| {
@@ -1755,7 +1779,7 @@ fn buildChatEntryParagraph(
                 try appendMarkdownText(&p, arena, text);
                 const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
-                total += h;
+                total.* += h;
             },
             .plain_text => |text| {
                 has_text = true;
@@ -1763,7 +1787,7 @@ fn buildChatEntryParagraph(
                 try p.appendText(arena, text, .{});
                 const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
-                total += h;
+                total.* += h;
             },
             .plan => |p| {
                 _ = p;
@@ -1772,7 +1796,7 @@ fn buildChatEntryParagraph(
                 const p = buildDiffParagraph(arena, app, diff);
                 const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
-                total += h;
+                total.* += h;
             },
             .tool_call => |call| try tool_call_list.append(arena, call),
         }
@@ -1780,8 +1804,9 @@ fn buildChatEntryParagraph(
 
     if (tool_call_list.items.len > 0) {
         const para = try buildToolGroupParagraph(app, arena, tool_call_list.items, inner_w);
-        total += para.h;
         try out.append(arena, para);
+        total.* += para.h;
+        collapseToolPadding(out, total, inner_w);
     }
 
     const show_header = entry.role != .agent or has_text;
@@ -1801,10 +1826,8 @@ fn buildChatEntryParagraph(
         try header_line.pushSpan(arena, .{ .content = role_text, .style = .{ .modifier = .{ .bold = true }, .fg = role_color } });
         try header_para.lines.append(arena, header_line);
         try out.append(arena, .{ .p = header_para, .h = 1 });
-        total += 1;
+        total.* += 1;
     }
-
-    return total;
 }
 
 fn buildToolGroupParagraph(
@@ -2178,17 +2201,15 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
                 .diff_lines = lines.items,
             } };
 
-            const block_height = try buildChatEntryParagraph(alloc, &stack, app, .{
+            try buildChatEntryParagraph(alloc, &stack, &total, app, .{
                 .role = .agent,
                 .parts = parts,
             }, inner_w);
-            total += block_height;
         }
     }
 
     if (app.streaming_entry) |entry| {
-        const block_height = try buildChatEntryParagraph(alloc, &stack, app, entry, inner_w);
-        total += block_height;
+        try buildChatEntryParagraph(alloc, &stack, &total, app, entry, inner_w);
     }
 
     while (i > 0 and total < target) {
@@ -2197,23 +2218,8 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
 
         if (maybe_agent == null and entry.role != .system) continue;
 
-        const block_height = try buildChatEntryParagraph(alloc, &stack, app, entry, inner_w);
-        total += block_height;
+        try buildChatEntryParagraph(alloc, &stack, &total, app, entry, inner_w);
     }
-
-    // Consecutive tool-call blocks render as one contiguous group: zero the
-    // facing padding of each adjacent pair.
-    var idx: usize = 0;
-    while (idx + 1 < stack.items.len) : (idx += 1) {
-        if (stack.items[idx].is_tool_block and stack.items[idx + 1].is_tool_block) {
-            stack.items[idx].p.padding.top = 0;
-            stack.items[idx].h = stack.items[idx].p.totalHeightLong(inner_w);
-            stack.items[idx + 1].p.padding.bottom = 0;
-            stack.items[idx + 1].h = stack.items[idx + 1].p.totalHeightLong(inner_w);
-        }
-    }
-    total = 0;
-    for (stack.items) |item| total += item.h;
 
     if (i == 0) {
         const max_scroll: usize = if (total > inner_h) @intCast(total - inner_h) else 0;
