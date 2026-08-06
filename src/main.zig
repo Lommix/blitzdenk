@@ -496,10 +496,7 @@ pub fn run(
                 try app.lua_vm.publishAvailableSystems(context_factory);
                 app.dirty = true;
 
-                context_factory.clearTools();
-                inline for (reg.general_default_tool_set) |tool| {
-                    try context_factory.add(arena, tool, .all);
-                }
+                try context_factory.resetLoadedTools(arena);
                 lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
                     std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
                     break :blk;

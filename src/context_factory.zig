@@ -161,13 +161,16 @@ skill_dir: ?std.Io.Dir,
 flags: Flags = .{},
 // -------------------------------------------------------------------------------
 
-pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !*Self {
-    var self = try alloc.create(Self);
-
+fn buildDefaultTools(alloc: std.mem.Allocator) !std.ArrayList(ToolEntry) {
     var list = std.ArrayList(ToolEntry).empty;
     inline for (general_default_tool_set) |tool| {
         try list.append(alloc, .{ .tool = tool, .flags = .all });
     }
+    return list;
+}
+
+pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !*Self {
+    var self = try alloc.create(Self);
 
     var home_dir = try std.Io.Dir.openDirAbsolute(io, home, .{});
     const skill_dir: ?std.Io.Dir = home_dir.openDir(io, CONFIG_DIR ++ "skills/", .{ .iterate = true }) catch |err| switch (err) {
@@ -181,7 +184,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !*Self {
     };
 
     self.* = Self{
-        .loaded_tools = list,
+        .loaded_tools = .empty,
         .prompt_arena = std.heap.ArenaAllocator.init(alloc),
         .io = io,
         .skill_dir = skill_dir,
@@ -601,8 +604,8 @@ pub fn addAgentTool(self: *Self, agent_type: AgentType, name: []const u8) !void 
     tools.len += 1;
 }
 
-pub fn clearTools(self: *Self) void {
-    self.loaded_tools.clearRetainingCapacity();
+pub fn resetLoadedTools(self: *Self, alloc: std.mem.Allocator) !void {
+    self.loaded_tools = try buildDefaultTools(alloc);
 }
 
 pub fn build_system_prompt(

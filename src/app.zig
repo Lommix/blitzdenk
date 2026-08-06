@@ -456,6 +456,8 @@ pub const App = struct {
         self.input_buffer = .empty;
         self.chat_entries = .empty;
         self.queued = .{};
+        // NOTE: tiny leak per reset,
+        self.context_factory.resetLoadedTools(self.arena_session.allocator()) catch {};
         self.lua_vm.disableAllMcp();
         self.event_bus.emit(self, .session_reset) catch {};
         self.reloadMcpTools() catch {};
