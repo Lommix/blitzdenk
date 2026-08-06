@@ -626,7 +626,9 @@ pub const CmdPool = struct {
 test "runAndWaitTimeout cancels long-running command and releases slot" {
     const testing = std.testing;
 
-    var pool = CmdPool.init(testing.allocator, testing.io, &testing.environ);
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
+    var pool = CmdPool.init(testing.allocator, testing.io, &env);
     defer pool.deinit();
 
     const res = try pool.runAndWaitTimeout(.{
@@ -646,7 +648,9 @@ test "runAndWaitTimeout cancels long-running command and releases slot" {
 test "runAndWait drains output while writing large stdin" {
     const testing = std.testing;
 
-    var pool = CmdPool.init(testing.allocator, testing.io, &testing.environ);
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
+    var pool = CmdPool.init(testing.allocator, testing.io, &env);
     defer pool.deinit();
 
     const input = try testing.allocator.alloc(u8, 2 * 1024 * 1024);
@@ -670,7 +674,9 @@ test "runAndWait drains output while writing large stdin" {
 test "runAndWait preserves non-zero child exit code" {
     const testing = std.testing;
 
-    var pool = CmdPool.init(testing.allocator, testing.io, &testing.environ);
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
+    var pool = CmdPool.init(testing.allocator, testing.io, &env);
     defer pool.deinit();
 
     const res = try pool.runAndWait(.{
@@ -687,10 +693,12 @@ test "runAndWait preserves non-zero child exit code" {
 test "background slots stream partial output and keep it until release" {
     const testing = std.testing;
 
-    var pool = CmdPool.init(testing.allocator, testing.io, &testing.environ);
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
+    var pool = CmdPool.init(testing.allocator, testing.io, &env);
     defer pool.deinit();
 
-    const handle = try pool.run(.{
+    const handle = try pool.run(null, &.{
         "/bin/sh", "-c",
         \\printf 'early'
         \\sleep 0.3

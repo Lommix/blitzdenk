@@ -12,3 +12,7 @@ pub const config = @import("config.zig");
 pub const Swarm = @import("swarm.zig");
 pub const exec = @import("exec.zig");
 pub const ThreadSafeArena = @import("arena.zig").ThreadSafeArena;
+
+test {
+    std.testing.refAllDecls(@This());
+}

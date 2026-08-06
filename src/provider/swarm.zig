@@ -589,8 +589,10 @@ test "cancelAll drains tool owners before exec futures" {
         }
     };
 
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
     var swarm: Self = undefined;
-    try swarm.init(testing.allocator, testing.io, undefined, &testing.environ);
+    try swarm.init(testing.allocator, testing.io, undefined, &env);
     defer swarm.deinit();
 
     const id = swarm.reserveFreeSlot().?;

@@ -151,5 +151,6 @@ pub const BlitzdenkCfg = struct {
 
 test "parse reasoning effort" {
     try std.testing.expectEqual(.xhigh, parseReasoningEffort("xhigh"));
-    try std.testing.expectEqual(null, parseReasoningEffort("medium"));
+    try std.testing.expectEqual(.medium, parseReasoningEffort("medium"));
+    try std.testing.expectEqual(null, parseReasoningEffort("bogus"));
 }
