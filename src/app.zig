@@ -461,6 +461,7 @@ pub const App = struct {
         self.lua_vm.disableAllMcp();
         self.event_bus.emit(self, .session_reset) catch {};
         self.reloadMcpTools() catch {};
+        self.reloadLuaTools() catch {};
 
         // cleanup
         self.tool_status_entries = .{};
@@ -568,6 +569,19 @@ pub const App = struct {
 
         const new_tools = self.lsp_manager.registeredTools();
         for (new_tools) |entry| try self.context_factory.add(alloc, entry.tool, entry.flags);
+
+        try self.refreshLiveAgentTools();
+        self.dirty = true;
+    }
+
+    pub fn reloadLuaTools(self: *App) !void {
+        const alloc = self.sessionAlloc();
+
+        self.lua_vm.vm_mu.lockUncancelable(self.swarm.pool.io);
+        defer self.lua_vm.vm_mu.unlock(self.swarm.pool.io);
+
+        const tools = try self.lua_vm.getRegisteredTools(alloc);
+        for (tools) |tool| try self.context_factory.add(alloc, tool, .all);
 
         try self.refreshLiveAgentTools();
         self.dirty = true;

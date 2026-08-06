@@ -459,6 +459,33 @@ blitz.lsp.add({
     language_id = "zig",
     args = {},
 })</code></pre>
+            <h2>Custom tool results</h2>
+            <p>
+                Tool functions return a plain table. Raise errors with Lua's
+                <code>error("..")</code> — only the error text reaches the chat, never the trace:
+            </p>
+            <pre><code>local tool = blitz.register_tool({
+    name = "my_tool",
+    description = "Example tool",
+    args = {
+        text = { type = "string", description = "some text", required = true },
+    },
+    func = function(ctx, call)
+        if call.arguments.text == "" then
+            error("text is required")
+        end
+
+        return { msg = "got: " .. call.arguments.text }
+    end,
+})</code></pre>
+            <p>To attach an image to the result, return an <code>img</code> field with the raw bytes and media type:</p>
+            <pre><code>func = function(ctx, call)
+    local png, ok = blitz.shell("grim -g \"$(slurp)\" -t png -")
+    if not ok or not png or #png == 0 then
+        error("screenshot failed")
+    end
+    return { msg = "captured", img = { media_type = "image/png", data = png } }
+end</code></pre>
             <h2>Web fetch tool</h2>
             <p>A super simplified web fetch using an headless chromium and some unholy tricks.</p>
             <pre><code>M.web_fetch = blitz.register_tool({
@@ -470,7 +497,7 @@ blitz.lsp.add({
     func = function(ctx, call)
         local url = call.arguments.url
         if type(url) ~= "string" or url == "" then
-            return blitz.err("url is required")
+            error("url is required")
         end
 
         ctx:set_status("fetch " .. url)
@@ -486,10 +513,10 @@ blitz.lsp.add({
         )
 
         if not ok or content == nil or content == "" then
-            return blitz.err("chromium returned no output")
+            error("chromium returned no output")
         end
 
-        return blitz.ok(content)
+        return { msg = content }
     end,
 })</code></pre>
             <h2>Web search tool</h2>
@@ -504,7 +531,7 @@ blitz.lsp.add({
     func = function(ctx, call)
         local query = call.arguments.searchQuery
         if type(query) ~= "string" or query == "" then
-            return blitz.err("searchQuery is required")
+            error("searchQuery is required")
         end
 
         ctx:set_status("search " .. query)
@@ -519,17 +546,17 @@ blitz.lsp.add({
         local search_url = "http://127.0.0.1:8080/search?q=" .. urlencode(query) .. "&amp;format=json"
         local body, ok = blitz.shell("curl -sS --max-time 15 '" .. search_url .. "'")
         if not ok then
-            return blitz.err("searxng request failed")
+            error("searxng request failed")
         end
 
         local val, decoded = blitz.json.decode(body)
         if decoded == false then
-            return blitz.err("failed to parse searxng json response")
+            error("failed to parse searxng json response")
         end
 
         local results = type(val) == "table" and val.results or nil
         if type(results) ~= "table" or #results == 0 then
-            return blitz.ok("No results for: " .. query)
+            return { msg = "No results for: " .. query }
         end
 
         local max = tonumber(call.arguments.max_results) or 10
@@ -544,7 +571,7 @@ blitz.lsp.add({
             lines[#lines + 1] = ""
         end
 
-        return blitz.ok(table.concat(lines, "\n"))
+        return { msg = table.concat(lines, "\n") }
     end,
 })</code></pre>
             <h2>Commands</h2>

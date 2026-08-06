@@ -184,7 +184,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !*Self {
     };
 
     self.* = Self{
-        .loaded_tools = .empty,
+        .loaded_tools = try buildDefaultTools(alloc),
         .prompt_arena = std.heap.ArenaAllocator.init(alloc),
         .io = io,
         .skill_dir = skill_dir,

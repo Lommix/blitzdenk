@@ -155,16 +155,18 @@
 ---@field name string
 ---@field arguments table
 
----@class BlitzStatus
----@field status integer
+---@class BlitzToolResult
 ---@field msg? string
+---{ media_type = string, data = string }
+---@field img? table
+---@field exit_loop? boolean
 
 ---@class ToolDef
 ---@field name string
 ---@field description string
 ---@field schema? string
 ---@field args? table<string, BlitzArgDef>
----@field func fun(ctx: BlitzCtx, call: BlitzCall): BlitzStatus
+---@field func fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult
 
 ---@class BlitzThinking
 ---@field type string
@@ -239,10 +241,6 @@
 ---@field queue BlitzQueue
 ---@field tools BlitzToolDef
 ---@field events BlitzEventDef
----@field RET_FAILED integer
----@field RET_OK integer
----@field RET_ERR integer
----@field RET_EXIT_LOOP integer
 ---@field AGENT_GENERAL integer
 ---@field MODE_EXEC integer
 ---@field REQ_STATUS_PENDING integer
@@ -260,12 +258,8 @@
 ---@field add_tool fun(agent_type: integer, tool_name: string)
 ---Return the main agent, if a session is running.
 ---@field get_main_agent fun(): BlitzAgentId|nil
----Return success with content.
----@field ok fun(content?: string): BlitzStatus
----Return error with message.
----@field err fun(message?: string): BlitzStatus
 ---Exit the agent loop with a message.
----@field exit_loop fun(content?: string): BlitzStatus
+---@field exit_loop fun(content?: string): BlitzToolResult
 ---Register a provider.
 ---@field add_provider fun(def: BlitzProviderDef): integer
 ---Register a complete agent configuration.

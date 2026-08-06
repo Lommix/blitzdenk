@@ -91,15 +91,15 @@ local lua_repl = blitz.register_tool({
 
 		local fn, err = load(call.arguments.code)
 		if not fn then
-			return blitz.err(err)
+			error(err)
 		end
 
 		local ok, result = pcall(fn)
 		if not ok then
-			return blitz.err(tostring(result))
+			error(tostring(result))
 		end
 
-		return blitz.ok(tostring(result or "nil"))
+		return { msg = tostring(result or "nil") }
 	end,
 })
 

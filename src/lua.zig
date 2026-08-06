@@ -9,10 +9,6 @@ const log = std.log.scoped(.lua);
 const r = @import("root.zig");
 const lua = @This();
 
-pub const RET_FAILED: c_int = 1;
-pub const RET_OK: c_int = 2;
-pub const RET_ERR: c_int = 3;
-pub const RET_EXIT_LOOP: c_int = 4;
 pub const REQ_STATUS_PENDING: c_int = 0;
 pub const REQ_STATUS_APPROVED: c_int = 1;
 pub const REQ_STATUS_DENIED: c_int = 2;
@@ -179,9 +175,10 @@ const JsonEncodeRet = LuaType{ .raw = "string|nil, boolean" };
 const JsonDecodeRet = LuaType{ .raw = "any, boolean" };
 
 const StringListDef = LuaType{ .raw = "string[]" };
-const StatusDef = LuaType{ .table_def = .{ .name = "BlitzStatus", .fields = &.{
-    .{ .name = "status", .ty = LuaType.integer },
+const ToolResultDef = LuaType{ .table_def = .{ .name = "BlitzToolResult", .fields = &.{
     .{ .name = "msg", .ty = LuaType.string, .optional = true },
+    .{ .name = "img", .ty = LuaType.table, .optional = true, .desc = "{ media_type = string, data = string }" },
+    .{ .name = "exit_loop", .ty = LuaType.boolean, .optional = true },
 } } };
 const AgentIdDef = LuaType{ .table_def = .{ .name = "BlitzAgentId", .fields = &.{
     .{ .name = "index", .ty = LuaType.integer },
@@ -300,8 +297,8 @@ const ToolDef = LuaType{ .table_def = .{ .name = "ToolDef", .fields = &.{
     .{ .name = "schema", .ty = LuaType.string, .optional = true },
     .{ .name = "args", .ty = ToolArgsDef, .optional = true },
     .{ .name = "func", .ty = LuaType{ .raw_refs = .{
-        .text = "fun(ctx: BlitzCtx, call: BlitzCall): BlitzStatus",
-        .refs = &.{ CtxDef, CallDef, StatusDef },
+        .text = "fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult",
+        .refs = &.{ CtxDef, CallDef, ToolResultDef },
     } } },
 } } };
 const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
@@ -350,10 +347,6 @@ pub const Blitz = LuaType{
             .{ .name = "queue", .ty = BlitzQueue },
             .{ .name = "tools", .ty = BlitzToolDef },
             .{ .name = "events", .ty = BlitzEventDef },
-            .{ .name = "RET_FAILED", .ty = LuaType.integer, .value = .{ .integer = lua.RET_FAILED } },
-            .{ .name = "RET_OK", .ty = LuaType.integer, .value = .{ .integer = lua.RET_OK } },
-            .{ .name = "RET_ERR", .ty = LuaType.integer, .value = .{ .integer = lua.RET_ERR } },
-            .{ .name = "RET_EXIT_LOOP", .ty = LuaType.integer, .value = .{ .integer = lua.RET_EXIT_LOOP } },
             .{ .name = "AGENT_GENERAL", .ty = LuaType.integer, .value = .{ .integer = 0 } },
             .{ .name = "MODE_EXEC", .ty = LuaType.integer, .value = .{ .integer = 0 } },
             .{ .name = "REQ_STATUS_PENDING", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_PENDING } },
@@ -431,43 +424,15 @@ pub const Blitz = LuaType{
                 }
             }).lua_fn, "get_main_agent") } } },
             .{
-                .name = "ok",
-                .desc = "Return success with content.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{.{ .name = "content", .ty = LuaType.string, .optional = true }},
-                    .ret = &StatusDef,
-                    .fn_ptr = LuaFnBind((struct {
-                        const Ret = struct { status: c_int, msg: []const u8 };
-                        fn lua_fn(content: ?[]const u8) !Ret {
-                            return .{ .status = RET_OK, .msg = content orelse "" };
-                        }
-                    }).lua_fn, "ok"),
-                } },
-            },
-            .{
-                .name = "err",
-                .desc = "Return error with message.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{.{ .name = "message", .ty = LuaType.string, .optional = true }},
-                    .ret = &StatusDef,
-                    .fn_ptr = LuaFnBind((struct {
-                        const Ret = struct { status: c_int, msg: []const u8 };
-                        fn lua_fn(message: ?[]const u8) !Ret {
-                            return .{ .status = RET_ERR, .msg = message orelse "error" };
-                        }
-                    }).lua_fn, "err"),
-                } },
-            },
-            .{
                 .name = "exit_loop",
                 .desc = "Exit the agent loop with a message.",
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "content", .ty = LuaType.string, .optional = true }},
-                    .ret = &StatusDef,
+                    .ret = &ToolResultDef,
                     .fn_ptr = LuaFnBind((struct {
-                        const Ret = struct { status: c_int, msg: []const u8 };
+                        const Ret = struct { exit_loop: bool, msg: []const u8 };
                         fn lua_fn(content: ?[]const u8) !Ret {
-                            return .{ .status = RET_EXIT_LOOP, .msg = content orelse "" };
+                            return .{ .exit_loop = true, .msg = content orelse "" };
                         }
                     }).lua_fn, "exit_loop"),
                 } },
@@ -2006,8 +1971,6 @@ pub const LuaVm = struct {
     stdout_buf: std.ArrayList(u8) = .empty,
     last_error: [512]u8 = undefined,
     last_error_len: usize = 0,
-    failed_ref: c_int = c.LUA_NOREF,
-    exit_loop_ref: c_int = c.LUA_NOREF,
     /// Serializes lua_pcall across worker threads. Lua VMs are not
     /// thread-safe; native tools run in parallel, Lua tools serialize here.
     vm_mu: std.Io.Mutex = .init,
@@ -2060,38 +2023,12 @@ pub const LuaVm = struct {
         c.lua_pushlightuserdata(self.L, @ptrCast(a));
         c.lua_rawsetp(self.L, c.LUA_REGISTRYINDEX, @ptrCast(&app_registry_key));
         active_vm = self;
-        self.installStatusTables();
     }
 
     pub fn deinit(self: *LuaVm) void {
         if (active_vm == self) active_vm = null;
         c.lua_close(self.L);
         self.arena_state.deinit();
-    }
-
-    /// Build the singleton {status = RET_FAILED} table and expose it as
-    /// blitz.FAILED. Refs stashed so we can `lua_rawgeti` the same instance
-    /// for re-set after a reload.
-    fn installStatusTables(self: *LuaVm) void {
-        c.luaL_unref(self.L, c.LUA_REGISTRYINDEX, self.failed_ref);
-        c.luaL_unref(self.L, c.LUA_REGISTRYINDEX, self.exit_loop_ref);
-
-        c.lua_createtable(self.L, 0, 1);
-        setFieldAny(self.L, -2, "status", RET_FAILED);
-        self.failed_ref = c.luaL_ref(self.L, c.LUA_REGISTRYINDEX);
-
-        c.lua_createtable(self.L, 0, 1);
-        setFieldAny(self.L, -2, "status", RET_EXIT_LOOP);
-        self.exit_loop_ref = c.luaL_ref(self.L, c.LUA_REGISTRYINDEX);
-
-        _ = c.lua_getglobal(self.L, "blitz");
-        if (c.lua_type(self.L, -1) == c.LUA_TTABLE) {
-            _ = c.lua_rawgeti(self.L, c.LUA_REGISTRYINDEX, self.failed_ref);
-            setFieldPushed(self.L, -2, "FAILED");
-            _ = c.lua_rawgeti(self.L, c.LUA_REGISTRYINDEX, self.exit_loop_ref);
-            setFieldPushed(self.L, -2, "EXIT_LOOP");
-        }
-        c.lua_pop(self.L, 1);
     }
 
     pub fn load(self: *LuaVm, path: []const u8) !void {
@@ -2157,9 +2094,6 @@ pub const LuaVm = struct {
         self.mcp_entries.clearRetainingCapacity();
         self.lsp_entries.clearRetainingCapacity();
         self.stdout_buf.clearRetainingCapacity();
-        // Refs were tied to the closed lua_State; drop them before re-init.
-        self.failed_ref = c.LUA_NOREF;
-        self.exit_loop_ref = c.LUA_NOREF;
         if (self.app) |a| {
             a.config.resetProviders();
             a.default_context_limit = app.CONTEXT_LIMIT;
@@ -2493,17 +2427,6 @@ fn luaPrintToBuffer(L: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
-fn pushStatusTable(state: *c.lua_State, status: c_int, fallback: []const u8) void {
-    c.lua_createtable(state, 0, 2);
-    setFieldAny(state, -2, "status", status);
-    if (c.lua_type(state, 1) == c.LUA_TSTRING) {
-        c.lua_pushvalue(state, 1);
-    } else {
-        _ = c.lua_pushlstring(state, fallback.ptr, fallback.len);
-    }
-    setFieldPushed(state, -2, "msg");
-}
-
 pub fn getAppFromRegistry(L: *c.lua_State) ?*app.App {
     _ = c.lua_rawgetp(L, c.LUA_REGISTRYINDEX, @ptrCast(&app_registry_key));
     defer c.lua_pop(L, 1);
@@ -2698,28 +2621,26 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
     if (status != 0) {
         var err_len: usize = 0;
         const err_ptr = c.lua_tolstring(L, -1, &err_len);
-        const err_msg = if (err_ptr != null) err_ptr[0..err_len] else "lua error";
-        const owned = ctx.alloc.dupe(u8, err_msg) catch "lua error";
+        const err_view = if (err_ptr != null) err_ptr[0..err_len] else "lua error";
+        const owned = ctx.alloc.dupe(u8, err_view) catch "lua error";
         c.lua_pop(L, 1);
         return failedResult(call, owned);
     }
 
-    // Splice captured print() stdout into the OK table's msg field.
+    // Splice captured print() stdout into the returned table's msg field.
     const stdout = vm.stdout_buf.items;
     if (stdout.len > 0) {
         if (c.lua_type(L, -1) == c.LUA_TTABLE) {
-            _ = c.lua_getfield(L, -1, "status");
-            const is_ok = c.lua_type(L, -1) == c.LUA_TNUMBER and
-                c.lua_tointegerx(L, -1, null) == RET_OK;
-            c.lua_pop(L, 1);
-            if (is_ok) {
-                _ = c.lua_getfield(L, -1, "msg");
-                _ = c.lua_pushlstring(L, "\n<stdout>\n", 10);
-                _ = c.lua_pushlstring(L, stdout.ptr, stdout.len);
-                _ = c.lua_pushlstring(L, "\n</stdout>", 10);
-                _ = c.lua_concat(L, 4);
-                c.lua_setfield(L, -2, "msg");
+            _ = c.lua_getfield(L, -1, "msg");
+            if (c.lua_type(L, -1) != c.LUA_TSTRING) {
+                c.lua_pop(L, 1);
+                _ = c.lua_pushlstring(L, "", 0);
             }
+            _ = c.lua_pushlstring(L, "\n<stdout>\n", 10);
+            _ = c.lua_pushlstring(L, stdout.ptr, stdout.len);
+            _ = c.lua_pushlstring(L, "\n</stdout>", 10);
+            _ = c.lua_concat(L, 4);
+            c.lua_setfield(L, -2, "msg");
         }
         vm.stdout_buf.clearRetainingCapacity();
     }
@@ -2730,52 +2651,52 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
 }
 
 fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) ToolResult {
-    // Single return at top (-1): expect {status = int, msg = string|nil}.
+    // Single return at top (-1): expect {msg = string|nil, img = table|nil, exit_loop = bool|nil}.
     if (c.lua_type(L, -1) != c.LUA_TTABLE) return failedResult(call, "lua tool did not return a table");
 
-    _ = c.lua_getfield(L, -1, "status");
-    const status_ty = c.lua_type(L, -1);
-    if (status_ty != c.LUA_TNUMBER) {
-        c.lua_pop(L, 1);
-        return failedResult(call, "lua tool return missing status");
-    }
-    const status = c.lua_tointegerx(L, -1, null);
+    _ = c.lua_getfield(L, -1, "exit_loop");
+    const exit_loop = c.lua_type(L, -1) == c.LUA_TBOOLEAN and c.lua_toboolean(L, -1) != 0;
     c.lua_pop(L, 1);
 
-    switch (status) {
-        RET_FAILED => return failedResult(call, "lua tool failed"),
-        RET_EXIT_LOOP => {
-            _ = c.lua_getfield(L, -1, "msg");
-            var len: usize = 0;
-            const content_ptr = c.lua_tolstring(L, -1, &len);
-            const content_view = if (content_ptr != null) content_ptr[0..len] else "";
-            const owned = alloc.dupe(u8, content_view) catch "oom";
-            c.lua_pop(L, 1);
-            return .{
-                .call_id = call.id,
-                .name = call.name,
-                .content = owned,
-                .exit_loop = true,
-            };
-        },
-        RET_OK, RET_ERR => {
-            _ = c.lua_getfield(L, -1, "msg");
-            var len: usize = 0;
-            const content_ptr = c.lua_tolstring(L, -1, &len);
-            const fallback: []const u8 = if (status == RET_ERR) "error" else "";
-            const content_view = if (content_ptr != null) content_ptr[0..len] else fallback;
-            // Dupe out of Lua memory before pop frees the string.
-            const owned = alloc.dupe(u8, content_view) catch "oom";
-            c.lua_pop(L, 1);
-            return .{
-                .call_id = call.id,
-                .name = call.name,
-                .content = owned,
-                .is_error = status == RET_ERR,
-            };
-        },
-        else => return failedResult(call, "lua tool returned unknown status"),
+    _ = c.lua_getfield(L, -1, "msg");
+    var len: usize = 0;
+    const content_ptr = c.lua_tolstring(L, -1, &len);
+    const content_view = if (content_ptr != null) content_ptr[0..len] else "";
+    // Dupe out of Lua memory before pop frees the string.
+    const owned = alloc.dupe(u8, content_view) catch "oom";
+    c.lua_pop(L, 1);
+
+    _ = c.lua_getfield(L, -1, "img");
+    var image: ?prv.adapter.ImageContent = null;
+    if (c.lua_type(L, -1) == c.LUA_TTABLE) {
+        _ = c.lua_getfield(L, -1, "media_type");
+        var mt_len: usize = 0;
+        const mt_ptr = c.lua_tolstring(L, -1, &mt_len);
+        const media_type: []const u8 = if (mt_ptr) |p|
+            alloc.dupe(u8, p[0..mt_len]) catch "image/png"
+        else
+            "image/png";
+        c.lua_pop(L, 1);
+
+        _ = c.lua_getfield(L, -1, "data");
+        var d_len: usize = 0;
+        const d_ptr = c.lua_tolstring(L, -1, &d_len);
+        const data: ?[]const u8 = if (d_ptr) |p| alloc.dupe(u8, p[0..d_len]) catch null else null;
+        c.lua_pop(L, 1);
+
+        if (data) |bytes| {
+            if (bytes.len > 0) image = .{ .media_type = media_type, .data = bytes };
+        }
     }
+    c.lua_pop(L, 1);
+
+    return .{
+        .call_id = call.id,
+        .name = call.name,
+        .content = owned,
+        .image = image,
+        .exit_loop = exit_loop,
+    };
 }
 
 // ── Push ctx table with methods ─────────────────────────────────────

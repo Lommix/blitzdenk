@@ -21,3 +21,7 @@ Important modules:
 ## Commands
 
 - `zig build gen` generate the lua meta file `src/blitz_defs.lua`
+
+## RULES
+
+- Do not write comments!
