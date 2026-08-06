@@ -624,6 +624,13 @@ pub const StreamState = struct {
                 continue;
             }
             if (pool.isStreamDone(handle)) {
+                // Some providers omit the trailing newline on the final SSE
+                // line. Flush leftover bytes through the normal parser so a
+                // tail tool-call fragment isn't silently dropped at finalize.
+                if (self.buf.items.len > 0) {
+                    try self.buf.append(arena, '\n');
+                    if (try self.drainLine(arena, provider)) |d| return d;
+                }
                 self.term = .pending_finish;
                 continue;
             }
@@ -761,12 +768,27 @@ pub const StreamState = struct {
         const func = tc.function orelse return;
         const id = try arena.dupe(u8, tc.id orelse "");
         const name = try arena.dupe(u8, func.name orelse "");
+        const args = func.arguments orelse "";
+        // A compat stream's final chunk sometimes repeats a call that was
+        // already accumulated incrementally via delta.tool_calls. Reuse that
+        // slot (the complete object's arguments win) instead of registering a
+        // duplicate that would execute the tool twice.
+        if (id.len > 0) {
+            for (self.tools.items) |*t| {
+                if (t.started and std.mem.eql(u8, t.id, id)) {
+                    if (t.name.len == 0 and name.len > 0) t.name = name;
+                    t.args.clearRetainingCapacity();
+                    if (args.len > 0) try t.args.appendSlice(arena, args);
+                    return;
+                }
+            }
+        }
         try self.tools.append(arena, .{
             .id = id,
             .name = name,
             .args = blk: {
                 var a: std.ArrayList(u8) = .empty;
-                if (func.arguments) |args| try a.appendSlice(arena, args);
+                if (args.len > 0) try a.appendSlice(arena, args);
                 break :blk a;
             },
             .started = true,
@@ -779,7 +801,10 @@ pub const StreamState = struct {
     }
 
     fn pushDeltaToolCall(self: *StreamState, arena: Allocator, tc: OaiDeltaToolCall) !void {
-        const idx = tc.index orelse @as(u32, @intCast(self.tools.items.len));
+        const idx = tc.index orelse if (self.tools.items.len > 0)
+            @as(u32, @intCast(self.tools.items.len - 1))
+        else
+            0;
         while (self.tools.items.len <= idx) try self.tools.append(arena, .{});
         const slot = &self.tools.items[idx];
 
@@ -810,7 +835,17 @@ pub const StreamState = struct {
         // opening `{` of arguments; dropping it produces malformed JSON.
         if (tc.function) |f| {
             if (f.arguments) |args| {
-                if (args.len > 0) try slot.args.appendSlice(arena, args);
+                if (args.len > 0) {
+                    // Some providers resend the whole accumulated arguments
+                    // object with each delta (or a retry repeats a fragment).
+                    // When the new value starts with everything we already
+                    // have, it supersedes the old one — appending would yield
+                    // malformed JSON like `{"a":1}{"a":1,"b":2}` at finalize.
+                    if (slot.args.items.len > 0 and std.mem.startsWith(u8, args, slot.args.items)) {
+                        slot.args.clearRetainingCapacity();
+                    }
+                    try slot.args.appendSlice(arena, args);
+                }
             }
         }
 
@@ -1142,6 +1177,71 @@ test "openai stream assembles every parallel tool call delta" {
     try testing.expectEqualStrings("call_read", calls[1].id);
     try testing.expectEqualStrings("read", calls[1].name);
     try testing.expectEqualStrings("{\"path\":\"src/report.zig\"}", calls[1].arguments);
+}
+
+test "openai stream continues tool arg deltas that omit index" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    var starts = [_]OaiDeltaToolCall{.{ .index = 0, .id = "call_1", .function = .{ .name = "read", .arguments = "{\"path\":\"" } }};
+    var start_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &starts } }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &start_choices }) == null);
+
+    // Argument-only delta with no `index` — previously opened a fresh slot,
+    // leaving the real call with truncated JSON arguments.
+    var continuations = [_]OaiDeltaToolCall{.{ .function = .{ .arguments = "src/main.zig\"}" } }};
+    var cont_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &continuations } }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &cont_choices }) == null);
+
+    const result = try stream.finalize(arena);
+    try testing.expectEqual(@as(usize, 2), result.message.parts.len);
+    try testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.message.parts[1].tool_call.arguments);
+}
+
+test "openai stream replaces fully resent tool arguments" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    var starts = [_]OaiDeltaToolCall{.{ .index = 0, .id = "call_1", .function = .{ .name = "grep", .arguments = "{\"pattern\":\"report\"" } }};
+    var start_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &starts } }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &start_choices }) == null);
+
+    // Provider resends the full accumulated object; appending would produce
+    // `{"pattern":"report"}{"pattern":"report","case":true}` → malformed.
+    var resends = [_]OaiDeltaToolCall{.{ .index = 0, .function = .{ .arguments = "{\"pattern\":\"report\",\"case\":true}" } }};
+    var resend_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &resends } }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &resend_choices }) == null);
+
+    const result = try stream.finalize(arena);
+    try testing.expectEqual(@as(usize, 2), result.message.parts.len);
+    try testing.expectEqualStrings("{\"pattern\":\"report\",\"case\":true}", result.message.parts[1].tool_call.arguments);
+}
+
+test "openai stream dedupes final complete tool call against delta slot" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    var starts = [_]OaiDeltaToolCall{.{ .index = 0, .id = "call_1", .function = .{ .name = "read", .arguments = "{\"path\":\"" } }};
+    var start_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &starts } }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &start_choices }) == null);
+
+    // Final chunk repeats the call as a complete message object.
+    const final_tc = OaiResponseToolCall{ .id = "call_1", .function = .{ .name = "read", .arguments = "{\"path\":\"src/main.zig\"}" } };
+    var final_choices = [_]OaiStreamChoice{.{ .message = .{ .role = "assistant", .tool_calls = &[_]OaiResponseToolCall{final_tc} }, .finish_reason = "tool_calls" }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &final_choices }) == null);
+
+    const result = try stream.finalize(arena);
+    try testing.expectEqual(@as(usize, 2), result.message.parts.len);
+    try testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.message.parts[1].tool_call.arguments);
 }
 
 test "openai stream keeps tagged reasoning as thinking across schema fields" {

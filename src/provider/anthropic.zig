@@ -467,6 +467,17 @@ pub const StreamState = struct {
                 continue;
             }
             if (pool.isStreamDone(handle)) {
+                // Some providers omit the trailing "\n\n" on the final SSE
+                // event. Flush leftover bytes so a tail tool-input delta or
+                // the message_delta isn't silently dropped at finalize.
+                if (self.sse_buf.items.len > 0) {
+                    try self.sse_buf.appendSlice(arena, "\n\n");
+                    const delta = self.drainEvent(arena) catch |err| blk: {
+                        std.log.debug("final event parse failed: {s}", .{@errorName(err)});
+                        break :blk null;
+                    };
+                    if (delta) |d| return d;
+                }
                 // Stream exhausted without an explicit message_stop — treat as finish.
                 self.term = .pending_finish;
                 continue;
@@ -560,10 +571,23 @@ pub const StreamState = struct {
         } else if (std.mem.eql(u8, btype, "tool_use")) {
             const id = try arena.dupe(u8, block.id orelse "");
             const name = try arena.dupe(u8, block.name orelse "");
+            // Anthropic may ship the complete tool input in content_block_start
+            // for short tool calls (no input_json_delta events follow). Seed
+            // the accumulator so the arguments survive finalize; the empty {}
+            // sentinel is left untouched — deltas stream the real content.
+            var tool_input: std.ArrayList(u8) = .empty;
+            if (block.input) |input| {
+                if (input == .object and input.object.count() > 0) {
+                    var buf: std.Io.Writer.Allocating = .init(arena);
+                    try std.json.Stringify.value(input, .{}, &buf.writer);
+                    try tool_input.appendSlice(arena, try buf.toOwnedSlice());
+                }
+            }
             self.blocks.items[idx] = .{
                 .kind = .tool_use,
                 .tool_id = id,
                 .tool_name = name,
+                .tool_input = tool_input,
             };
             return .{ .tool_call_start = .{ .id = id, .name = name, .arguments = "" } };
         }
@@ -767,4 +791,29 @@ test "anthropic stream surfaces error event payload" {
         .provider_error => |body| try testing.expect(std.mem.indexOf(u8, body, "model unavailable") != null),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "anthropic stream seeds tool input from content_block_start" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    try stream.event_name.appendSlice(arena, "content_block_start");
+    try stream.event_data.appendSlice(
+        arena,
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read\",\"input\":{\"path\":\"src/main.zig\"}}}",
+    );
+    const delta = (try stream.dispatch(arena)) orelse return error.TestUnexpectedResult;
+    switch (delta) {
+        .tool_call_start => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    const result = try stream.finalize(arena);
+    try testing.expectEqual(@as(usize, 1), result.message.parts.len);
+    try testing.expectEqualStrings("toolu_1", result.message.parts[0].tool_call.id);
+    try testing.expectEqualStrings("read", result.message.parts[0].tool_call.name);
+    try testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.message.parts[0].tool_call.arguments);
 }

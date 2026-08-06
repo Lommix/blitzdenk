@@ -343,6 +343,12 @@ pub const StreamState = struct {
                 continue;
             }
             if (pool.isStreamDone(handle)) {
+                // Flush a final unterminated data line (providers sometimes
+                // omit the trailing newline) before settling on finish.
+                if (self.buf.items.len > 0) {
+                    try self.buf.append(arena, '\n');
+                    if (try self.drainLine(arena)) |delta| return delta;
+                }
                 self.finish_pending = true;
                 continue;
             }

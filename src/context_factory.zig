@@ -397,7 +397,7 @@ pub fn resetDefs(self: *Self) void {
         \\General purpose builder agent with full tool access.
         \\
         ,
-        .prompt = @embedFile("prompts/default.md"),
+        .prompt = @embedFile("prompts/opencode.md"),
         .tools = .from(&.{
             r.tools.write.WriteTool.def.name,
             r.tools.edit.EditTool.def.name,
