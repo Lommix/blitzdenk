@@ -16,6 +16,7 @@ pub const Action = union(enum) {
     cursor_down,
     toggle_skip,
     complete,
+    paste_image,
     lua: c_int,
 };
 
@@ -37,6 +38,7 @@ pub const KeyMap = struct {
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'z' } }, .action = .open_cmd },
         KeyBind{ .key = .{ .code = .esc }, .action = .cancel },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'g' } }, .action = .toggle_skip },
+        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'v' } }, .action = .paste_image },
     };
 
     pub fn parse(self: *const KeyMap, key: tui.Key) ?Action {

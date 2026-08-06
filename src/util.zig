@@ -1,6 +1,8 @@
 const std = @import("std");
 
 pub const BLITZ_DIR = ".blitz";
+/// Low-value cache; wiped automatically when the system reboots.
+pub const TMP_DIR = "/tmp/blitz";
 
 /// Ensure Blitzdenk's runtime-data directory exists below `dir`.
 pub fn ensureBlitzDir(dir: std.Io.Dir, io: std.Io) !void {

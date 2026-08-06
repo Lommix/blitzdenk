@@ -796,6 +796,15 @@ pub const App = struct {
             self.input_cursor = @intCast(self.input_buffer.items.len);
         }
         if (self.input_cursor == 0) return;
+
+        // Pasted image: deleting anywhere inside (or right after) the masked
+        // `[Image]` token removes the whole link.
+        if (r.clipboard.findPasteAt(self.input_buffer.items, self.input_cursor)) |rg| {
+            self.input_buffer.replaceRange(self.sessionAlloc(), rg.start, rg.end - rg.start, &.{}) catch return;
+            self.input_cursor = @intCast(rg.start);
+            return;
+        }
+
         var start: usize = self.input_cursor;
         while (start > 0) {
             start -= 1;
@@ -804,6 +813,49 @@ pub const App = struct {
         const len = self.input_cursor - start;
         self.input_buffer.replaceRange(self.sessionAlloc(), start, len, &.{}) catch return;
         self.input_cursor = @intCast(start);
+    }
+
+    /// The input as rendered: pasted-image URLs are masked with `[Image]` and
+    /// `cursor` is remapped to the display position.
+    pub fn displayInput(self: *const App, arena: std.mem.Allocator) r.clipboard.Display {
+        return r.clipboard.toDisplay(arena, self.input_buffer.items, self.input_cursor) catch {
+            return .{ .text = self.input_buffer.items, .cursor = self.input_cursor };
+        };
+    }
+
+    /// Ctrl+V handler. When the system clipboard holds an image, saves it to a
+    /// temp file and embeds its `file://` URL (masked as `[Image]`) instead of
+    /// inserting the raw paste text. Reports the outcome with a notification.
+    pub fn pasteImage(self: *App) void {
+        const img = r.clipboard.readImage(self.sessionAlloc(), &self.swarm.exec) catch null;
+        if (img) |image| {
+            defer self.sessionAlloc().free(image.data);
+            const url = r.clipboard.saveImage(self.io, self.sessionAlloc(), image.data, image.ext) catch null;
+            if (url) |u| {
+                self.appendBytes(u);
+                self.dirty = true;
+                self.notifications.append(self.arena_app.allocator(), "Image pasted", .{}) catch {};
+                return;
+            }
+            self.notifications.append(self.arena_app.allocator(), "Failed to save clipboard image", .{}) catch {};
+            return;
+        }
+        self.notifications.append(self.arena_app.allocator(), "Clipboard holds no image", .{}) catch {};
+    }
+
+    /// Terminal paste event handler. Pastes the clipboard image if one is
+    /// present, otherwise appends the raw paste `text`.
+    pub fn pasteImageOrText(self: *App, text: []const u8) void {
+        const img = r.clipboard.readImage(self.sessionAlloc(), &self.swarm.exec) catch null;
+        if (img) |image| {
+            defer self.sessionAlloc().free(image.data);
+            if (r.clipboard.saveImage(self.io, self.sessionAlloc(), image.data, image.ext) catch null) |u| {
+                self.appendBytes(u);
+                self.dirty = true;
+            }
+            return;
+        }
+        self.appendBytes(text);
     }
 
     pub fn inputSlice(self: *const App) []const u8 {
@@ -1461,8 +1513,9 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
     };
     const inner = para.inner(area);
 
-    const text = app.inputSlice();
-    const cursor: usize = app.input_cursor;
+    const display = app.displayInput(arena);
+    const text = display.text;
+    const cursor: usize = display.cursor;
     const cursor_style: r.tui.Style = .{ .fg = app.theme.text, .bg = border_color };
 
     var cursor_visual_row: usize = 0;

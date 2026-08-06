@@ -606,6 +606,10 @@ pub fn run(
                                     app.input_cursor = @intCast(sug.len);
                                 }
                             },
+                            .paste_image => {
+                                if (app.input_mode == .text) app.pasteImage();
+                                continue;
+                            },
                         }
                     }
                     switch (k.code) {
@@ -876,7 +880,7 @@ pub fn run(
                     }
                 },
                 .paste => |text| switch (app.input_mode) {
-                    .text => app.appendBytes(text),
+                    .text => app.pasteImageOrText(text),
                     .perm_message => |*pm| {
                         if (pm.len + text.len <= pm.buf.len) {
                             @memcpy(pm.buf[pm.len..][0..text.len], text);
