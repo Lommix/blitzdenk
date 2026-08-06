@@ -130,7 +130,6 @@ pub const LuaType = union(enum) {
         text: []const u8,
         refs: []const LuaType = &.{},
     },
-    nil,
     boolean,
     integer,
     number,
@@ -145,14 +144,10 @@ pub const LuaType = union(enum) {
         ret: ?*const LuaType = null,
         fn_ptr: c.lua_CFunction = null,
     },
-    userdata,
-    thread,
     any,
 
     pub const Value = union(enum) {
         integer: c.lua_Integer,
-        number: c.lua_Number,
-        boolean: bool,
         string: []const u8,
     };
 
@@ -1256,18 +1251,6 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         } },
     },
     .{
-        .name = "set_mode",
-        .desc = "Switch the active mode. Forces a full mode-reminder on the next turn.",
-        .ty = LuaType{ .function = .{
-            .args = &.{.{ .name = "mode", .ty = LuaType.integer }},
-            .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, mode: u8) !void {
-                    try a.cmd_queue.append(a.io, .{ .set_mode = mode });
-                }
-            }).lua_fn, "queue.set_mode"),
-        } },
-    },
-    .{
         .name = "push_chat_entry",
         .desc = "Push a chat entry into the chat log.",
         .ty = LuaType{ .function = .{
@@ -1321,49 +1304,43 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                         _ = c.luaL_error(state, "queue.spawn_agent: app not initialized");
                         return 0;
                     };
-                    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
-                        _ = c.luaL_error(state, "queue.spawn_agent: expected a single table argument");
+                    const vm = &a.lua_vm;
+
+                    const SpawnArgs = struct {
+                        parent_id: ?r.prv.Swarm.AgentId = null,
+                        prompt: []const u8,
+                        agent_type: ?u32 = null,
+                        fork: ?bool = null,
+                    };
+
+                    const spawn = switch (readAnyValueAlloc(SpawnArgs, state, "queue.spawn_agent", 1, vm.luaArena())) {
+                        .ok => |v| v,
+                        .err => |msg| {
+                            _ = c.luaL_error(state, "%s", msg.ptr);
+                            return 0;
+                        },
+                    };
+
+                    if ((spawn.fork orelse false) and spawn.parent_id == null) {
+                        _ = c.luaL_error(state, "queue.spawn_agent: fork=true requires parent_id");
                         return 0;
                     }
 
                     var args: r.cmd.Command.SpawnArgs = .{
                         .agent_id = .{ .index = 0, .generation = 0 },
+                        .parent_id = spawn.parent_id,
                         .prompt = &.{},
+                        .fork = spawn.fork orelse false,
                     };
-
-                    _ = c.lua_getfield(state, 1, "parent_id");
-                    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
-                        args.parent_id = readAgentIdArg(state, "queue.spawn_agent", c.lua_gettop(state));
-                    } else if (c.lua_type(state, -1) != c.LUA_TNIL) {
-                        _ = c.luaL_error(state, "queue.spawn_agent: parent_id must be a table or nil");
-                        return 0;
-                    }
-                    c.lua_pop(state, 1);
-
-                    _ = c.lua_getfield(state, 1, "prompt");
-                    if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-                        _ = c.luaL_error(state, "queue.spawn_agent: 'prompt' (string) required");
-                        return 0;
-                    }
-                    var p_len: usize = 0;
-                    const p_ptr = c.lua_tolstring(state, -1, &p_len);
-                    const parts = [_]prv.adapter.ContentPart{.{ .text = p_ptr[0..p_len] }};
-                    args.prompt = &parts;
-
-                    if (getOptionalU32(state, 1, "agent_type")) |t| {
+                    if (spawn.agent_type) |t| {
                         if (t > std.math.maxInt(u8)) {
                             _ = c.luaL_error(state, "queue.spawn_agent: agent_type out of range");
                             return 0;
                         }
                         args.agent_type = @intCast(t);
                     }
-                    if (getOptionalBool(state, 1, "fork")) |f| args.fork = f;
-                    c.lua_pop(state, 1);
-
-                    if (args.fork and args.parent_id == null) {
-                        _ = c.luaL_error(state, "queue.spawn_agent: fork=true requires parent_id");
-                        return 0;
-                    }
+                    const parts = [_]prv.adapter.ContentPart{.{ .text = spawn.prompt }};
+                    args.prompt = &parts;
 
                     const id = a.swarm.reserveFreeSlot() orelse {
                         c.lua_pushnil(state);
@@ -1556,15 +1533,6 @@ const LuaToolEntry = struct {
     }
 };
 
-const LuaAgentEntry = struct {
-    name: []const u8 = "",
-    description: []const u8 = "",
-    prompt: []const u8 = "",
-    in_agent_tool: bool = true,
-    model: []const u8 = "",
-    effort: []const u8 = "",
-};
-
 const LuaBindEntry = struct {
     key: tui.Key = .{ .code = .{ .char = 0 } },
     func_ref: c_int = c.LUA_NOREF,
@@ -1581,10 +1549,6 @@ const LuaCommandEntry = struct {
         return self.name[0..self.name_len];
     }
 };
-
-fn luaAbsIndex(L: *c.lua_State, idx: c_int) c_int {
-    return if (idx < 0) c.lua_gettop(L) + idx + 1 else idx;
-}
 
 fn fieldName(comptime field: []const u8) [*:0]const u8 {
     return (field ++ "\x00").ptr;
@@ -1652,8 +1616,6 @@ fn setCFunctionField(
 fn pushLuaValue(L: *c.lua_State, comptime value: LuaType.Value) void {
     switch (value) {
         .integer => |n| c.lua_pushinteger(L, n),
-        .number => |n| c.lua_pushnumber(L, n),
-        .boolean => |b| c.lua_pushboolean(L, @intFromBool(b)),
         .string => |s| _ = c.lua_pushlstring(L, s.ptr, s.len),
     }
 }
@@ -1757,7 +1719,7 @@ fn readAnyValueAlloc(
 
     if (T == LuaTableRef) {
         if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " is not a table");
-        return .Ok(.{ .idx = luaAbsIndex(state, idx) });
+        return .Ok(.{ .idx = c.lua_absindex(state, idx) });
     }
 
     switch (@typeInfo(T)) {
@@ -1771,7 +1733,7 @@ fn readAnyValueAlloc(
             }
             if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " must be table for allocation");
             const alloc = allocator orelse return .Err(name ++ " require allocator");
-            const abs = luaAbsIndex(state, idx);
+            const abs = c.lua_absindex(state, idx);
             const len = c.lua_rawlen(state, abs);
             const result = alloc.alloc(ptr.child, len) catch return .Err("oom");
             for (result, 0..) |*item, i| {
@@ -1812,7 +1774,7 @@ fn readAnyValueAlloc(
         },
         .array => |arr| {
             if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " not a table");
-            const abs = luaAbsIndex(state, idx);
+            const abs = c.lua_absindex(state, idx);
             if (c.lua_rawlen(state, abs) != arr.len) return .Err(name ++ " array length mismatch");
             var result: T = undefined;
             for (&result, 0..) |*item, i| {
@@ -1851,7 +1813,7 @@ fn readAnyValueAlloc(
 }
 
 fn readAnyFieldAlloc(comptime T: type, state: *c.lua_State, comptime field: []const u8, table_idx: c_int, allocator: ?Allocator) ReadResult(T) {
-    const abs = luaAbsIndex(state, table_idx);
+    const abs = c.lua_absindex(state, table_idx);
     _ = c.lua_getfield(state, abs, fieldName(field));
     defer c.lua_pop(state, 1);
     return readAnyValueAlloc(T, state, field, -1, allocator);
@@ -1866,27 +1828,6 @@ fn getStringField(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8, d
     if (len > dest.len) return null;
     @memcpy(dest[0..len], ptr[0..len]);
     return len;
-}
-
-/// Read a numeric field as f32. Returns null if missing or wrong type.
-fn getOptionalF32(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8) ?f32 {
-    _ = c.lua_getfield(state, luaAbsIndex(state, table_idx), field);
-    defer c.lua_pop(state, 1);
-    return readAnyValue(f32, state, -1);
-}
-
-/// Read a boolean field. Returns null if missing or wrong type.
-fn getOptionalBool(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8) ?bool {
-    _ = c.lua_getfield(state, luaAbsIndex(state, table_idx), field);
-    defer c.lua_pop(state, 1);
-    return readAnyValue(bool, state, -1);
-}
-
-/// Read a numeric field as u32. Returns null if missing, wrong type, or negative.
-fn getOptionalU32(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8) ?u32 {
-    _ = c.lua_getfield(state, luaAbsIndex(state, table_idx), field);
-    defer c.lua_pop(state, 1);
-    return readAnyValue(u32, state, -1);
 }
 
 fn findEntry(vm: *LuaVm, name: []const u8) ?*LuaToolEntry {
@@ -2051,12 +1992,7 @@ pub const LuaVm = struct {
     }
 
     pub fn exec(self: *LuaVm, code: []const u8) !void {
-        var buf: [8192]u8 = undefined;
-        if (code.len >= buf.len) return error.CodeTooLong;
-        @memcpy(buf[0..code.len], code);
-        buf[code.len] = 0;
-
-        const status = c.luaL_loadstring(self.L, &buf);
+        const status = c.luaL_loadbufferx(self.L, code.ptr, code.len, null, null);
         if (status != 0) {
             self.popError();
             return error.LuaExecFailed;
@@ -2158,51 +2094,55 @@ pub const LuaVm = struct {
         return out;
     }
 
-    pub fn getEnabledMcpServers(self: *LuaVm, alloc: Allocator) ![]@import("mcp.zig").ServerConfig {
-        if (self.mcp_entries.items.len == 0) return &.{};
+    fn collectEnabledServers(
+        comptime Entry: type,
+        comptime Cfg: type,
+        comptime toCfg: fn (*Entry) Cfg,
+        entries: []Entry,
+        alloc: Allocator,
+    ) ![]Cfg {
+        if (entries.len == 0) return &.{};
         var count: usize = 0;
-        for (self.mcp_entries.items) |*entry| {
+        for (entries) |*entry| {
             if (entry.enabled) count += 1;
         }
         if (count == 0) return &.{};
 
-        const out = try alloc.alloc(@import("mcp.zig").ServerConfig, count);
+        const out = try alloc.alloc(Cfg, count);
         var out_i: usize = 0;
-        for (self.mcp_entries.items) |*entry| {
+        for (entries) |*entry| {
             if (!entry.enabled) continue;
-            out[out_i] = .{
-                .name = entry.name,
-                .command = entry.command,
-                .args = entry.args,
-                .tools_prefix = entry.tools_prefix,
-            };
+            out[out_i] = toCfg(entry);
             out_i += 1;
         }
         return out;
     }
 
-    pub fn getEnabledLspServers(self: *LuaVm, alloc: Allocator) ![]@import("lsp.zig").ServerConfig {
-        if (self.lsp_entries.items.len == 0) return &.{};
-        var count: usize = 0;
-        for (self.lsp_entries.items) |*entry| {
-            if (entry.enabled) count += 1;
-        }
-        if (count == 0) return &.{};
+    fn mcpToConfig(entry: *LuaMcpServerEntry) @import("mcp.zig").ServerConfig {
+        return .{
+            .name = entry.name,
+            .command = entry.command,
+            .args = entry.args,
+            .tools_prefix = entry.tools_prefix,
+        };
+    }
 
-        const out = try alloc.alloc(@import("lsp.zig").ServerConfig, count);
-        var out_i: usize = 0;
-        for (self.lsp_entries.items) |*entry| {
-            if (!entry.enabled) continue;
-            out[out_i] = .{
-                .name = entry.name,
-                .command = entry.command,
-                .args = entry.args,
-                .root = entry.root,
-                .language_id = entry.language_id,
-            };
-            out_i += 1;
-        }
-        return out;
+    fn lspToConfig(entry: *LuaLspServerEntry) @import("lsp.zig").ServerConfig {
+        return .{
+            .name = entry.name,
+            .command = entry.command,
+            .args = entry.args,
+            .root = entry.root,
+            .language_id = entry.language_id,
+        };
+    }
+
+    pub fn getEnabledMcpServers(self: *LuaVm, alloc: Allocator) ![]@import("mcp.zig").ServerConfig {
+        return collectEnabledServers(LuaMcpServerEntry, @import("mcp.zig").ServerConfig, mcpToConfig, self.mcp_entries.items, alloc);
+    }
+
+    pub fn getEnabledLspServers(self: *LuaVm, alloc: Allocator) ![]@import("lsp.zig").ServerConfig {
+        return collectEnabledServers(LuaLspServerEntry, @import("lsp.zig").ServerConfig, lspToConfig, self.lsp_entries.items, alloc);
     }
 
     pub fn disableAllMcp(self: *LuaVm) void {
@@ -2435,109 +2375,6 @@ pub fn getAppFromRegistry(L: *c.lua_State) ?*app.App {
     return @ptrCast(@alignCast(ptr));
 }
 
-fn getCfgFromRegistry(L: *c.lua_State) ?*prv.config.BlitzdenkCfg {
-    const a = getAppFromRegistry(L) orelse return null;
-    return &a.config;
-}
-
-/// Read a required string field from the table at `table_idx`. On failure calls
-/// luaL_error (which does not return) so the caller can treat the return value
-/// as guaranteed. Returned slice is valid only while the field value remains on
-/// the stack — this helper leaves the field on top of the stack for the caller
-/// to pop once the slice has been copied elsewhere.
-fn requireStringFieldOnStack(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8) []const u8 {
-    _ = c.lua_getfield(state, table_idx, field);
-    if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-        _ = c.luaL_error(state, "add_provider: missing or non-string field '%s'", field);
-        return &.{};
-    }
-    var len: usize = 0;
-    const ptr = c.lua_tolstring(state, -1, &len);
-    return ptr[0..len];
-}
-
-fn parseProviderType(state: *c.lua_State, type_str: []const u8) prv.adapter.Provider {
-    if (std.mem.eql(u8, type_str, "openai")) return .openai;
-    if (std.mem.eql(u8, type_str, "response")) return .response;
-    if (std.mem.eql(u8, type_str, "anthropic")) return .anthropic;
-    if (std.mem.eql(u8, type_str, "ollama")) return .ollama;
-    _ = c.luaL_error(state, "add_provider: unknown type (expected openai/response/anthropic/ollama)");
-    return .openai; // unreachable; luaL_error longjmps
-}
-
-/// Populate slot.thinking_type_buf and return a Thinking value whose `.type`
-/// slice points at the slot's own buffer. Expects the table at absolute index
-/// `sub_idx` to contain `{ type = "...", budget_tokens = N? }`.
-fn readThinking(state: *c.lua_State, sub_idx: c_int, slot: *prv.config.Provider) prv.adapter.Thinking {
-    _ = c.lua_getfield(state, sub_idx, "type");
-    defer c.lua_pop(state, 1);
-    if (c.lua_type(state, -1) != c.LUA_TSTRING) {
-        _ = c.luaL_error(state, "add_provider: thinking.type must be a string");
-    }
-    var tlen: usize = 0;
-    const tptr = c.lua_tolstring(state, -1, &tlen);
-    if (!slot.setThinkingType(tptr[0..tlen])) {
-        _ = c.luaL_error(state, "add_provider: thinking.type too long");
-    }
-    return .{
-        .type = slot.getThinkingType(),
-        .budget_tokens = getOptionalU32(state, sub_idx, "budget_tokens"),
-    };
-}
-
-fn readReasoningEffort(state: *c.lua_State, table_idx: c_int) ?prv.config.ReasoningEffort {
-    _ = c.lua_getfield(state, table_idx, "effort");
-    defer c.lua_pop(state, 1);
-    if (c.lua_isnil(state, -1)) return null;
-
-    const value = readAnyValue([]const u8, state, -1) orelse {
-        _ = c.luaL_error(state, "add_provider: effort must be a string");
-        return null;
-    };
-    return prv.config.parseReasoningEffort(value) orelse {
-        _ = c.luaL_error(state, "add_provider: unknown effort (expected none/low/medium/high/xhigh/max)");
-        return null;
-    };
-}
-
-fn readOpenAiConfig(state: *c.lua_State, table_idx: c_int) prv.adapter.OpenAiConfig {
-    var cfg: prv.adapter.OpenAiConfig = .{};
-    cfg.temperature = getOptionalF32(state, table_idx, "temperature");
-    cfg.max_tokens = getOptionalU32(state, table_idx, "max_tokens");
-    cfg.max_completion_tokens = getOptionalU32(state, table_idx, "max_completion_tokens");
-    cfg.top_p = getOptionalF32(state, table_idx, "top_p");
-    cfg.frequency_penalty = getOptionalF32(state, table_idx, "frequency_penalty");
-    cfg.presence_penalty = getOptionalF32(state, table_idx, "presence_penalty");
-    cfg.enable_thinking = getOptionalBool(state, table_idx, "enable_thinking");
-
-    return cfg;
-}
-
-fn readAnthropicConfig(state: *c.lua_State, table_idx: c_int, slot: *prv.config.Provider) prv.adapter.AnthropicConfig {
-    var cfg: prv.adapter.AnthropicConfig = .{};
-    if (getOptionalU32(state, table_idx, "max_tokens")) |n| cfg.max_tokens = n;
-    cfg.temperature = getOptionalF32(state, table_idx, "temperature");
-    cfg.top_p = getOptionalF32(state, table_idx, "top_p");
-    cfg.top_k = getOptionalU32(state, table_idx, "top_k");
-
-    _ = c.lua_getfield(state, table_idx, "thinking");
-    if (c.lua_type(state, -1) == c.LUA_TTABLE) {
-        cfg.thinking = readThinking(state, c.lua_gettop(state), slot);
-    }
-    c.lua_pop(state, 1);
-
-    return cfg;
-}
-
-fn readOllamaConfig(state: *c.lua_State, table_idx: c_int) prv.adapter.OllamaConfig {
-    return .{
-        .temperature = getOptionalF32(state, table_idx, "temperature"),
-        .max_tokens = getOptionalU32(state, table_idx, "max_tokens"),
-        .top_p = getOptionalF32(state, table_idx, "top_p"),
-        .top_k = getOptionalU32(state, table_idx, "top_k"),
-    };
-}
-
 /// blitz.bind(vim_key_combo_string, lua func)
 /// blitz.add_command(":command", lua func)
 fn readAnyArg(
@@ -2558,19 +2395,6 @@ fn readAnyArg(
         _ = c.luaL_error(state, name ++ ": arg %d must be a " ++ expected, @as(c_int, idx));
         return null;
     };
-}
-
-fn readEnumArg(state: *c.lua_State, comptime E: type, comptime name: []const u8, idx: c_int) ?E {
-    if (c.lua_type(state, idx) != c.LUA_TNUMBER) {
-        _ = c.luaL_error(state, name ++ ": arg %d must be a number", @as(c_int, idx));
-        return null;
-    }
-    const n = c.lua_tointegerx(state, idx, null);
-    if (n < 0 or n > std.math.maxInt(u6)) {
-        _ = c.luaL_error(state, name ++ ": value out of range");
-        return null;
-    }
-    return @enumFromInt(@as(u6, @intCast(n)));
 }
 
 // ── Trampoline: Zig ToolFn → Lua function call ─────────────────────

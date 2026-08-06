@@ -88,7 +88,6 @@ fn luaTypeName(comptime ty: lua.LuaType) []const u8 {
     return switch (ty) {
         .raw => |raw| raw,
         .raw_refs => |raw| raw.text,
-        .nil => "nil",
         .boolean => "boolean",
         .integer => "integer",
         .number => "number",
@@ -96,8 +95,6 @@ fn luaTypeName(comptime ty: lua.LuaType) []const u8 {
         .table => "table",
         .table_def => |def| def.name,
         .function => "function",
-        .userdata => "userdata",
-        .thread => "thread",
         .any => "any",
     };
 }

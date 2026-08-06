@@ -53,8 +53,6 @@
 ---@field retry fun()
 ---Request compaction for the main agent.
 ---@field compact fun()
----Switch the active mode. Forces a full mode-reminder on the next turn.
----@field set_mode fun(mode: integer)
 ---Push a chat entry into the chat log.
 ---@field push_chat_entry fun(role: string, text: string)
 ---Queue a user message for the given agent.
