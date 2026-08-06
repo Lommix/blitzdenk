@@ -656,19 +656,14 @@ pub const App = struct {
         const frame_alloc = app.arena_frame.allocator();
         buf.fill(area, .{ .style = .{ .bg = app.theme.overlay } });
 
-        // Input Field
-        // const pending = app.firstPendingPermission();
         const input_height: u16 = blk: {
             switch (app.input_mode) {
                 .text, .perm_message, .passphrase => break :blk 5,
                 .perm_select => {
-                    // const p = pending orelse break :blk 5;
-                    // const entry = app.swarm.permission_requests.getPtr(p.call_id) orelse break :blk 5;
-                    //
-                    // if (entry.payload == .ask) {
-                    //     const opts: u16 = @intCast(@min(entry.payload.ask.options.len, r.tools.ask.MAX_OPTIONS));
-                    //     break :blk @min(@as(u16, 4) + opts, area.height / 2);
-                    // }
+                    const entry = app.active_permission orelse break :blk 5;
+                    if (entry.payload == .ask) {
+                        break :blk askPermissionInputHeight(entry.payload.ask.options.len, area.height);
+                    }
                     break :blk 6; // .call, .diff, .plan all have header + options
                 },
             }
@@ -2450,6 +2445,11 @@ fn renderAskWidget(app: *App, req: *prv.Swarm.PermissionReq, inner: r.tui.Rect, 
         const line = std.fmt.bufPrint(&line_buf, "{s}{s}", .{ prefix, label }) catch label;
         buf.setStringMax(inner.x + 1, y, line, style, inner.width -| 1);
     }
+}
+
+fn askPermissionInputHeight(options_len: usize, area_height: u16) u16 {
+    const opts: u16 = @intCast(@min(options_len, r.tools.ask.MAX_OPTIONS));
+    return @min(opts +| 4, area_height -| 1);
 }
 
 fn formatTokenCount(dest: []u8, count: u64) []const u8 {
