@@ -1514,7 +1514,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
 const LuaToolEntry = struct {
     name: [128]u8 = undefined,
     name_len: usize = 0,
-    description: [512]u8 = undefined,
+    description: [1024]u8 = undefined,
     desc_len: usize = 0,
     schema: [2048]u8 = undefined,
     schema_len: usize = 0,
