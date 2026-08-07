@@ -486,7 +486,7 @@ pub const App = struct {
 
                 const alloc = self.sessionAlloc();
                 if (renderableParts(alloc, en.agent_id, en.parts, en.plain_text)) |parts| {
-                    try self.chat_entries.append(alloc, .{
+                    try self.appendChatEntry(alloc, .{
                         .role = en.role,
                         .parts = parts,
                     });
@@ -601,7 +601,7 @@ pub const App = struct {
         const parts = alloc.alloc(ChatPart, 1) catch return;
         parts[0] = .{ .message = text };
 
-        self.chat_entries.append(alloc, .{
+        self.appendChatEntry(alloc, .{
             .role = .system,
             .parts = parts,
         }) catch return;
@@ -977,7 +977,7 @@ pub const App = struct {
     pub fn popQueuedMessage(self: *App, agent_id: prv.Swarm.AgentId, alloc: std.mem.Allocator) ?[]const prv.adapter.ContentPart {
         const queued = self.queued.popFor(agent_id) orelse return null;
 
-        if (queued.entry) |entry| self.chat_entries.append(self.sessionAlloc(), entry) catch {};
+        if (queued.entry) |entry| self.appendChatEntry(self.sessionAlloc(), entry) catch {};
 
         const parts = alloc.alloc(prv.adapter.ContentPart, queued.parts.len) catch return null;
         for (queued.parts, 0..) |*part, i| {
@@ -1029,11 +1029,6 @@ pub const App = struct {
                 else => {},
             }
         }
-        std.mem.sort(ChatPart, out.items, {}, struct {
-            fn lessThan(_: void, a: ChatPart, b: ChatPart) bool {
-                return partRank(a) < partRank(b);
-            }
-        }.lessThan);
         if (out.items.len == 0) return null;
         return out.toOwnedSlice(alloc) catch null;
     }
@@ -1059,6 +1054,7 @@ pub const App = struct {
             self.dropStreamingPreview();
             return;
         };
+        sortChatParts(slice);
 
         self.streaming_entry = .{ .role = .agent, .parts = slice };
     }
@@ -1066,6 +1062,11 @@ pub const App = struct {
     pub fn dropStreamingPreview(self: *App) void {
         self.streaming_entry = null;
         _ = self.arena_streaming_preview.reset(.free_all);
+    }
+
+    pub fn appendChatEntry(self: *App, alloc: std.mem.Allocator, entry: ChatEntry) !void {
+        sortChatParts(entry.parts);
+        try self.chat_entries.append(alloc, entry);
     }
 
     pub fn render_permission_preview(
@@ -1113,7 +1114,7 @@ pub const App = struct {
                     .diff_lines = try lines.toOwnedSlice(alloc),
                 } };
 
-                try self.chat_entries.append(alloc, .{
+                try self.appendChatEntry(alloc, .{
                     .role = .agent,
                     .parts = parts,
                 });
@@ -1302,6 +1303,14 @@ fn partRank(part: ChatPart) u8 {
         .diff => 3,
         .plan => 4,
     };
+}
+
+fn sortChatParts(parts: []ChatPart) void {
+    std.mem.sort(ChatPart, parts, {}, struct {
+        fn lessThan(_: void, a: ChatPart, b: ChatPart) bool {
+            return partRank(a) < partRank(b);
+        }
+    }.lessThan);
 }
 
 fn splitLinesAlloc(text: []const u8, alloc: std.mem.Allocator) ?[]const []const u8 {
@@ -2726,25 +2735,27 @@ test "renderableParts keeps streamed final parts together" {
     try std.testing.expectEqual(agent_id, rendered[2].tool_call.agent_id);
 }
 
-test "renderableParts sorts parts thinking, message, tool calls" {
+test "appendChatEntry sorts parts by rank" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const alloc = arena.allocator();
 
-    const parts = [_]prv.adapter.ContentPart{
-        .{ .tool_call = .{ .id = "call_1", .name = "bash", .arguments = "{}" } },
-        .{ .text = " answer " },
-        .{ .thinking = .{ .text = " think " } },
-        .{ .tool_call = .{ .id = "call_2", .name = "grep", .arguments = "{}" } },
+    var parts = [_]ChatPart{
+        .{ .tool_call = .{ .agent_id = .{ .index = 3, .generation = 7 }, .call_id = "call_1", .tool_name = "bash" } },
+        .{ .message = "answer" },
+        .{ .thinking = "think" },
+        .{ .tool_call = .{ .agent_id = .{ .index = 3, .generation = 7 }, .call_id = "call_2", .tool_name = "grep" } },
     };
 
-    const agent_id: prv.Swarm.AgentId = .{ .index = 3, .generation = 7 };
-    const rendered = App.renderableParts(alloc, agent_id, &parts, false) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 4), rendered.len);
-    try std.testing.expectEqualStrings("think", rendered[0].thinking);
-    try std.testing.expectEqualStrings("answer", rendered[1].message);
-    try std.testing.expectEqualStrings("call_1", rendered[2].tool_call.call_id);
-    try std.testing.expectEqualStrings("call_2", rendered[3].tool_call.call_id);
+    var app: App = undefined;
+    app.chat_entries = .empty;
+    try app.appendChatEntry(arena.allocator(), .{ .role = .agent, .parts = &parts });
+
+    const entry = app.chat_entries.items[0];
+    try std.testing.expectEqual(@as(usize, 4), entry.parts.len);
+    try std.testing.expectEqualStrings("think", entry.parts[0].thinking);
+    try std.testing.expectEqualStrings("answer", entry.parts[1].message);
+    try std.testing.expectEqualStrings("call_1", entry.parts[2].tool_call.call_id);
+    try std.testing.expectEqualStrings("call_2", entry.parts[3].tool_call.call_id);
 }
 
 test "renderableParts preserves provider errors as plain text" {

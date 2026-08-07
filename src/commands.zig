@@ -214,7 +214,7 @@ pub const Command = union(enum) {
                             app.swarm.releaseReservation(arg.agent_id);
                             if (arg.chat_entry) |en| {
                                 const entry = try r.util.deepClone(ChatEntry, en, alloc);
-                                try app.chat_entries.append(alloc, entry);
+                                try app.appendChatEntry(alloc, entry);
                             }
                             showProviderOnboarding(app, diagnostic);
                             app.running = app.swarm.countActive() > 0;
@@ -272,7 +272,7 @@ pub const Command = union(enum) {
 
                 if (arg.chat_entry) |en| {
                     const entry = try r.util.deepClone(ChatEntry, en, alloc);
-                    try app.chat_entries.append(alloc, entry);
+                    try app.appendChatEntry(alloc, entry);
                 }
 
                 const prompt = try r.util.deepClone(@TypeOf(arg.prompt), arg.prompt, alloc);
@@ -285,7 +285,7 @@ pub const Command = union(enum) {
             },
             .push_chat_entry => |en| {
                 const entry = try r.util.deepClone(ChatEntry, en, alloc);
-                try app.chat_entries.append(alloc, entry);
+                try app.appendChatEntry(alloc, entry);
             },
             .custom => |arg| {
                 try arg.func(arg.ptr, app);

@@ -83,7 +83,7 @@ pub fn loadSession(a: *app.App, w: *std.Io.Reader) !void {
     // Restore render chat entries into session arena (freed on next reset)
     for (save.chat_render) |entry| {
         const cloned = try util.deepClone(app.ChatEntry, entry, session_alloc);
-        try a.chat_entries.append(session_alloc, cloned);
+        try a.appendChatEntry(session_alloc, cloned);
     }
 
     a.main_agent_id = id;
