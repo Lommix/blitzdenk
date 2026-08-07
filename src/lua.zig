@@ -247,9 +247,13 @@ const ThemeDef = LuaType{ .table_def = .{ .name = "BlitzTheme", .fields = &.{
     .{ .name = "info", .ty = LuaType.string, .optional = true },
     .{ .name = "warn", .ty = LuaType.string, .optional = true },
     .{ .name = "err", .ty = LuaType.string, .optional = true },
+    .{ .name = "on_err", .ty = LuaType.string, .optional = true },
     .{ .name = "diff_surface", .ty = LuaType.string, .optional = true },
     .{ .name = "diff_add", .ty = LuaType.string, .optional = true },
     .{ .name = "diff_remove", .ty = LuaType.string, .optional = true },
+    .{ .name = "role_user", .ty = LuaType.string, .optional = true },
+    .{ .name = "role_agent", .ty = LuaType.string, .optional = true },
+    .{ .name = "role_system", .ty = LuaType.string, .optional = true },
 } } };
 
 const ThemeArg = struct {
@@ -262,9 +266,13 @@ const ThemeArg = struct {
     info: ?[]const u8 = null,
     warn: ?[]const u8 = null,
     err: ?[]const u8 = null,
+    on_err: ?[]const u8 = null,
     diff_surface: ?[]const u8 = null,
     diff_add: ?[]const u8 = null,
     diff_remove: ?[]const u8 = null,
+    role_user: ?[]const u8 = null,
+    role_agent: ?[]const u8 = null,
+    role_system: ?[]const u8 = null,
 };
 
 fn applyTheme(a: *r.app.App, theme: ThemeArg) !void {
@@ -279,9 +287,13 @@ fn applyTheme(a: *r.app.App, theme: ThemeArg) !void {
     if (theme.info) |v| t.info = try C.parseStrHex(v);
     if (theme.warn) |v| t.warn = try C.parseStrHex(v);
     if (theme.err) |v| t.err = try C.parseStrHex(v);
+    if (theme.on_err) |v| t.on_err = try C.parseStrHex(v);
     if (theme.diff_surface) |v| t.diff_surface = try C.parseStrHex(v);
     if (theme.diff_add) |v| t.diff_add = try C.parseStrHex(v);
     if (theme.diff_remove) |v| t.diff_remove = try C.parseStrHex(v);
+    if (theme.role_user) |v| t.role_user = try C.parseStrHex(v);
+    if (theme.role_agent) |v| t.role_agent = try C.parseStrHex(v);
+    if (theme.role_system) |v| t.role_system = try C.parseStrHex(v);
     a.dirty = true;
 }
 
@@ -881,9 +893,13 @@ pub const Blitz = LuaType{
                             info: [7]u8,
                             warn: [7]u8,
                             err: [7]u8,
+                            on_err: [7]u8,
                             diff_surface: [7]u8,
                             diff_add: [7]u8,
                             diff_remove: [7]u8,
+                            role_user: [7]u8,
+                            role_agent: [7]u8,
+                            role_system: [7]u8,
                         };
                         fn lua_fn(a: *r.app.App) !Ret {
                             const t = a.theme;
@@ -897,9 +913,13 @@ pub const Blitz = LuaType{
                                 .info = t.info.toHexStr(),
                                 .warn = t.warn.toHexStr(),
                                 .err = t.err.toHexStr(),
+                                .on_err = t.on_err.toHexStr(),
                                 .diff_surface = t.diff_surface.toHexStr(),
                                 .diff_add = t.diff_add.toHexStr(),
                                 .diff_remove = t.diff_remove.toHexStr(),
+                                .role_user = t.role_user.toHexStr(),
+                                .role_agent = t.role_agent.toHexStr(),
+                                .role_system = t.role_system.toHexStr(),
                             };
                         }
                     }).lua_fn, "get_theme"),

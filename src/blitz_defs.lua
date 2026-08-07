@@ -227,9 +227,13 @@
 ---@field info? string
 ---@field warn? string
 ---@field err? string
+---@field on_err? string
 ---@field diff_surface? string
 ---@field diff_add? string
 ---@field diff_remove? string
+---@field role_user? string
+---@field role_agent? string
+---@field role_system? string
 
 ---@class Blitz
 ---@field mcp BlitzMcp

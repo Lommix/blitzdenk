@@ -705,6 +705,7 @@ pub const Input = struct {
     text: []const u8,
     border_style: Style = .{},
     text_style: Style = .{},
+    screenshot_style: Style = .{},
     focused: bool = true,
     has_screenshot: bool = false,
 
@@ -729,7 +730,7 @@ pub const Input = struct {
             const tag = "[IMG]";
             const tag_x: u16 = if (input_end > tag.len + 1) input_end - @as(u16, tag.len + 1) else inner.x;
             for (tag, 0..) |ch, i| {
-                buf.set(tag_x +| @as(u16, @intCast(i)), inner.y, .{ .char = ch, .style = .{ .fg = .green } });
+                buf.set(tag_x +| @as(u16, @intCast(i)), inner.y, .{ .char = ch, .style = self.screenshot_style });
             }
         }
 

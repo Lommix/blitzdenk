@@ -283,9 +283,10 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         .argv = &.{ "/bin/sh", "-c", args.command },
     }, args.timeout_ms) catch |err| switch (err) {
         error.Timeout => {
+            const app = ctx.swarm.context.cast(@import("../app.zig").App);
             r.setToolStatusParagraph(ctx, call, &.{
                 &.{.{ .content = cleaned_command_str[0..@min(cleaned_command_str.len, 248)] }},
-                &.{.{ .content = "Timeout reached!", .style = .{ .fg = .red } }},
+                &.{.{ .content = "Timeout reached!", .style = .{ .fg = app.theme.err } }},
             }) catch {};
             return r.errResult(call,
                 \\!Command Timeout reached! Process killed.

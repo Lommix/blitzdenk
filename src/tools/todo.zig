@@ -153,6 +153,7 @@ fn getTodo(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
 }
 
 fn listTodos(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
+    const app = ctx.swarm.context.cast(@import("../app.zig").App);
     // Snapshot todos under lock so we can render outside it.
     const snap = blk: {
         const g = ctx.agent().todo_list.lock(ctx.io);
@@ -186,9 +187,9 @@ fn listTodos(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
         spans[start] = .{
             .content = todo.state.icon(),
             .style = .{ .fg = switch (todo.state) {
-                .pending => .white,
-                .in_progress => .yellow,
-                .done => .green,
+                .pending => app.theme.text,
+                .in_progress => app.theme.warn,
+                .done => app.theme.ok,
             } },
         };
         spans[start + 1] = .{

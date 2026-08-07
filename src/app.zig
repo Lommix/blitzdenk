@@ -50,9 +50,13 @@ pub const Theme = struct {
     info: r.tui.Color,
     warn: r.tui.Color,
     err: r.tui.Color,
+    on_err: r.tui.Color,
     diff_surface: r.tui.Color,
     diff_add: r.tui.Color,
     diff_remove: r.tui.Color,
+    role_user: r.tui.Color,
+    role_agent: r.tui.Color,
+    role_system: r.tui.Color,
 
     pub const default: Theme = .{
         .bg = .{ .rgb = .{ .r = 18, .g = 18, .b = 24 } },
@@ -65,8 +69,12 @@ pub const Theme = struct {
         .info = .blue,
         .warn = .yellow,
         .err = .red,
+        .on_err = .black,
         .diff_add = .{ .rgb = .{ .r = 166, .g = 227, .b = 161 } },
         .diff_remove = .{ .rgb = .{ .r = 243, .g = 139, .b = 168 } },
+        .role_user = .cyan,
+        .role_agent = .bright_green,
+        .role_system = .red,
     };
 };
 
@@ -1535,7 +1543,7 @@ fn renderCommandPalette(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, b
         .input_value = input,
         .preview = rows[0..],
         .border = .single,
-        .style = .{ .fg = .white, .bg = app.theme.overlay_dark },
+        .style = .{ .fg = app.theme.text, .bg = app.theme.overlay_dark },
         .padding = .{ .left = 2, .right = 2 },
     };
     palette.render(palette_area, buf);
@@ -1639,6 +1647,7 @@ fn renderPermMessage(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const input_widget: r.tui.Input = .{
         .text = pm.buf[0..pm.len],
         .border_style = .{ .fg = app.theme.warn },
+        .screenshot_style = .{ .fg = app.theme.ok },
         .has_screenshot = app.screenshot_buf != null,
     };
     input_widget.render(area, buf);
@@ -1653,8 +1662,8 @@ fn renderPassphraseModal(app: *App, full_area: r.tui.Rect, buf: *r.tui.Buffer) v
 
     const block: r.tui.Block = .{
         .title = " Password or Passphrase ",
-        .title_style = .{ .fg = Theme.default.warn, .modifier = .{ .bold = true } },
-        .style = .{ .fg = Theme.default.warn },
+        .title_style = .{ .fg = app.theme.warn, .modifier = .{ .bold = true } },
+        .style = .{ .fg = app.theme.warn },
         .borders = .all,
     };
     const inner = block.innerArea(modal);
@@ -1670,7 +1679,7 @@ fn renderPassphraseModal(app: *App, full_area: r.tui.Rect, buf: *r.tui.Buffer) v
         buf.set(x, y, .{ .char = '*' });
         x += 1;
     }
-    buf.set(x, y, .{ .char = '_', .style = .{ .fg = Theme.default.warn } });
+    buf.set(x, y, .{ .char = '_', .style = .{ .fg = app.theme.warn } });
 }
 
 fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rect, buf: *r.tui.Buffer) void {
@@ -1716,7 +1725,7 @@ fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rec
 
 fn renderStatusBar(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     for (area.x..area.x +| area.width) |x| {
-        buf.set(@intCast(x), area.y, .{ .char = ' ', .style = .{ .fg = .white, .bg = app.theme.overlay_dark } });
+        buf.set(@intCast(x), area.y, .{ .char = ' ', .style = .{ .fg = app.theme.text, .bg = app.theme.overlay_dark } });
     }
 
     if (app.lua_status_bar_enabled) {
@@ -1779,11 +1788,11 @@ fn renderCenteredStatusText(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer, sta
     }, area.width -| offset);
 }
 
-fn luaErrorParagraph(arena: std.mem.Allocator, msg: []const u8) !r.tui.Paragraph {
+fn luaErrorParagraph(app: *App, arena: std.mem.Allocator, msg: []const u8) !r.tui.Paragraph {
     var p: r.tui.Paragraph = .{
-        .style = .{ .fg = .black, .bg = .red },
+        .style = .{ .fg = app.theme.on_err, .bg = app.theme.err },
     };
-    try p.appendText(arena, msg, .{ .fg = .black, .bg = .red });
+    try p.appendText(arena, msg, .{ .fg = app.theme.on_err, .bg = app.theme.err });
     return p;
 }
 
@@ -1791,7 +1800,7 @@ fn luaErrorHeight(app: *App, arena: std.mem.Allocator, width: u16, max_height: u
     const msg = app.lua_vm.getLastError();
     if (msg.len == 0 or width == 0 or max_height == 0) return 0;
 
-    var p = try luaErrorParagraph(arena, msg);
+    var p = try luaErrorParagraph(app, arena, msg);
     return @min(p.totalHeight(width), max_height);
 }
 
@@ -1800,7 +1809,7 @@ fn renderLuaError(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r
     const msg = app.lua_vm.getLastError();
     if (msg.len == 0) return;
 
-    var p = try luaErrorParagraph(arena, msg);
+    var p = try luaErrorParagraph(app, arena, msg);
     p.renderSimple(arena, area, buf);
 }
 
@@ -1912,9 +1921,9 @@ fn buildChatEntryParagraph(
         };
 
         const role_color: r.tui.Color = switch (entry.role) {
-            .user => .cyan,
-            .agent => .bright_green,
-            .system => .red,
+            .user => app.theme.role_user,
+            .agent => app.theme.role_agent,
+            .system => app.theme.role_system,
         };
 
         try header_line.pushSpan(arena, .{ .content = role_text, .style = .{ .modifier = .{ .bold = true }, .fg = role_color } });
@@ -1984,7 +1993,7 @@ fn buildToolGroupParagraph(
                 if (app.swarm.getSlot(child_id)) |child_slot| {
                     if (child_slot.tokens_per_sec > 0) {
                         try line.pushSpan(arena, .{ .content = "  " });
-                        line.pushSpanPrint(arena, "{d}", .{@as(u32, @intFromFloat(child_slot.tokens_per_sec))}, .{ .fg = .white, .modifier = .{ .bold = true } }) catch {};
+                        line.pushSpanPrint(arena, "{d}", .{@as(u32, @intFromFloat(child_slot.tokens_per_sec))}, .{ .fg = app.theme.text, .modifier = .{ .bold = true } }) catch {};
                         line.pushSpanPrint(arena, " T/s", .{}, .{ .fg = app.theme.info }) catch {};
                     }
                 }
@@ -2055,6 +2064,7 @@ fn buildCompactionIndicatorParagraph(arena: std.mem.Allocator, app: *App) r.tui.
 
 fn buildMessageParagraph(
     arena: std.mem.Allocator,
+    app: *App,
     m: ChatEntry.MessageEntry,
     show_thinking: bool,
     is_thinking: bool,
@@ -2070,21 +2080,21 @@ fn buildMessageParagraph(
 
     const role_text: []const u8 = if (m.role == .user) "❯ you:" else "❯ blitz:";
     const role_style: r.tui.Style = if (m.role == .user)
-        .{ .fg = Theme.default.info, .modifier = .{ .bold = true } }
+        .{ .fg = app.theme.info, .modifier = .{ .bold = true } }
     else
-        .{ .fg = Theme.default.ok, .modifier = .{ .bold = true } };
+        .{ .fg = app.theme.ok, .modifier = .{ .bold = true } };
 
     {
         var role_line = r.tui.Line{ .style = role_style };
         role_line.pushText(arena, role_text, role_style) catch {};
         if (m.role == .agent and is_thinking and !show_thinking) {
-            role_line.pushText(arena, " thinking ", .{ .fg = Theme.default.muted }) catch {};
-            role_line.pushText(arena, spinner, .{ .fg = Theme.default.muted }) catch {};
+            role_line.pushText(arena, " thinking ", .{ .fg = app.theme.muted }) catch {};
+            role_line.pushText(arena, spinner, .{ .fg = app.theme.muted }) catch {};
         }
         p.lines.append(arena, role_line) catch {};
     }
 
-    const muted: r.tui.Style = .{ .fg = Theme.default.muted };
+    const muted: r.tui.Style = .{ .fg = app.theme.muted };
 
     for (m.parts) |part| switch (part) {
         .text => |txt| {
@@ -2119,11 +2129,11 @@ fn findToolResult(agent: *prv.agent.Agent, call_id: []const u8) ?prv.adapter.Too
     return null;
 }
 
-fn buildPlanParagraph(arena: std.mem.Allocator, plan: ChatEntry.PlanEntry) r.tui.Paragraph {
+fn buildPlanParagraph(arena: std.mem.Allocator, app: *App, plan: ChatEntry.PlanEntry) r.tui.Paragraph {
     var p: r.tui.Paragraph = .{
         .border = .double,
         .padding = .all(1),
-        .style = .{ .bg = Theme.default.diff_surface },
+        .style = .{ .bg = app.theme.diff_surface },
         .dynamic_border = false,
         .reverse = true,
     };
@@ -2390,7 +2400,7 @@ fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: 
         .padding = .all(1),
     };
 
-    const hl: r.tui.Style = .{ .fg = .white, .modifier = .{ .bold = true } };
+    const hl: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .bold = true } };
     const info: r.tui.Style = .{ .fg = app.theme.info };
 
     var l = r.tui.Line{};
