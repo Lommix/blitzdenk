@@ -754,6 +754,8 @@ pub fn run(
                                     if (app.lua_vm.vm_mu.tryLock()) {
                                         defer app.lua_vm.vm_mu.unlock(io);
                                         if (app.lua_vm.invokeCommand(input)) {
+                                            app.pushHistory(app.appAlloc(), input);
+                                            if (config_lua) |info| app.saveHistory(info.dir_path);
                                             app.input_buffer.clearRetainingCapacity();
                                             break;
                                         }
