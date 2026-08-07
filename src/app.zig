@@ -1969,6 +1969,16 @@ fn buildToolGroupParagraph(
                     }
                 }
             }
+
+            if (entry.child_id) |child_id| {
+                if (app.swarm.getSlot(child_id)) |child_slot| {
+                    if (child_slot.tokens_per_sec > 0) {
+                        try line.pushSpan(arena, .{ .content = "  " });
+                        line.pushSpanPrint(arena, "{d}", .{@as(u32, @intFromFloat(child_slot.tokens_per_sec))}, .{ .fg = .white, .modifier = .{ .bold = true } }) catch {};
+                        line.pushSpanPrint(arena, " T/s", .{}, .{ .fg = app.theme.info }) catch {};
+                    }
+                }
+            }
         } else {
             try line.pushSpan(arena, .{ .content = call.tool_name });
         }
