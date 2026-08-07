@@ -3,6 +3,10 @@
 // Copyright (c) 2026 Lorenz Mielke. All Rights Reserved.
 // ----------------------------------------------------------------
 const std = @import("std");
+const builtin = @import("builtin");
+const ct = @cImport({
+    @cInclude("time.h");
+});
 const r = @import("root.zig");
 const App = r.app.App;
 const BlitzdenkCfg = r.prv.config.BlitzdenkCfg;
@@ -56,6 +60,15 @@ fn fileLogFn(
     if (debug_log_fd < 0) return;
     var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
+    var ts: std.posix.timespec = undefined;
+    var tm: ct.struct_tm = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) == 0 and ct.localtime_r(&ts.sec, &tm) != null)
+        w.print("[{d:0>2}.{d:0>2} {d:0>2}:{d:0>2}] ", .{
+            @as(u32, @intCast(tm.tm_mday)),
+            @as(u32, @intCast(tm.tm_mon + 1)),
+            @as(u32, @intCast(tm.tm_hour)),
+            @as(u32, @intCast(tm.tm_min)),
+        }) catch return;
     const prefix = "[" ++ @tagName(level) ++ "] (" ++ @tagName(scope) ++ ") ";
     w.print(prefix ++ fmt ++ "\n", args) catch return;
     _ = std.c.write(debug_log_fd, buf[0..w.end].ptr, w.end);
@@ -138,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
     const split = CliArgs.split(init.minimal.args, &pos_buf);
     const cli_flags = split.flags;
     const command_result = CliCommand.parse(split.positional);
-    if (cli_flags.debug_log) openDebugLog(init.io);
+    if (cli_flags.debug_log or builtin.mode == .Debug) openDebugLog(init.io);
 
     const cmd: CliCommand = switch (command_result) {
         .err => |txt| {

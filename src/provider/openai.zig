@@ -1012,6 +1012,9 @@ pub const StreamState = struct {
             // partial JSON; replaying it provokes a 400 on the next request.
             if (!isValidJsonObject(self.arena, raw_args)) {
                 dropped += 1;
+                log.warn("dropping tool call id={s} name={s}: invalid arguments: {s}", .{
+                    t.id, t.name, raw_args,
+                });
                 continue;
             }
             try valid_calls.append(arena, .{ .tool_call = .{
