@@ -204,6 +204,7 @@ pub const Command = union(enum) {
             },
             .spawn_agent => |arg| {
                 if (!arg.fork) {
+                    if (app.swarm.getSlotState(arg.agent_id) != .reserved) return;
                     switch (app.context_factory.buildAgentApiConfig(
                         @enumFromInt(arg.agent_type),
                         &app.config,

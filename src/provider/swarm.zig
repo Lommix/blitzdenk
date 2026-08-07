@@ -132,6 +132,7 @@ pub fn releaseReservation(self: *Self, id: AgentId) void {
     const slot = &self.slots[id.index];
     if (slot.generation != id.generation) return;
     _ = slot.state.cmpxchgStrong(.reserved, .free, .acq_rel, .monotonic);
+    slot.event.set(self.pool.io);
 }
 
 pub const BroadcastEntry = struct {

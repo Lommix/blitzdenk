@@ -8,7 +8,9 @@ pub const AgentTool = prv.tool.Tool{
         .description =
         \\Launch a new agent to handle complex, multistep tasks autonomously.
         \\
-        \\When using the Agent tool, you must specify a subagent_type parameter to select which agent type to use.
+        \\When using the Agent tool, you must specify an agent_type parameter to select which agent type to use.
+        \\
+        \\By default the tool blocks until the sub-agent finishes and returns its final message as the tool result. Set "run_in_background": true to spawn it in the background instead: the tool returns immediately with the agent id, and the result is read later with the await_agent tool.
         \\
         \\When NOT to use the Agent tool:
         \\- If you want to read a specific file path, use the Read or Glob tool instead of the Agent tool, to find the match more quickly
@@ -18,10 +20,10 @@ pub const AgentTool = prv.tool.Tool{
         \\
         \\
         \\Usage notes:
-        \\1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
-        \\2. Once you have delegated work to an agent, do not duplicate that work yourself. Continue with non-overlapping tasks, or wait for the result. For background tasks, you will be notified automatically when the result is ready.
-        \\3. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result. The output includes a task_id you can reuse later to continue the same subagent session.
-        \\4. Each agent invocation starts with a fresh context unless you provide task_id to resume the same subagent session (which continues with its previous messages and tool outputs). When starting fresh, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
+        \\1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses (each call blocks until its agent finishes).
+        \\2. Once you have delegated work to an agent, do not duplicate that work yourself. Continue with non-overlapping tasks, or wait for the result. For background agents (run_in_background: true) you will be notified automatically when the result is ready.
+        \\3. A blocking agent call returns the agent's final message directly as its result. For background agents, read the result with the await_agent tool; the result is not visible to the user, so send a concise summary back to the user yourself.
+        \\4. Each agent invocation starts with a fresh context. Your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
         \\5. The agent's outputs should generally be trusted
         \\6. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
         \\7. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
@@ -34,7 +36,8 @@ pub const AgentTool = prv.tool.Tool{
         \\      "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
         \\      "prompt": {"type": "string", "description": "The task for the agent to perform"},
         \\      "agent_type": {"type": "string", "enum": {AGENT_LIST}, "description": "The type of specialized agent to use for this task"},
-        \\      "cwd": {"type": "string", "description": "The working directoy of the agent"}
+        \\      "cwd": {"type": "string", "description": "The working directoy of the agent"},
+        \\      "run_in_background": {"type": "boolean", "default": false, "description": "If true, spawn in the background and return immediately with the agent id; read the result later with await_agent. If false (default), block until the agent finishes and return its final message."}
         \\  },
         \\  "required": ["description","prompt","agent_type"]
         \\}
@@ -87,6 +90,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         prompt: []const u8,
         agent_type: []const u8,
         cwd: ?[]const u8 = null,
+        run_in_background: bool = false,
     };
 
     const parsed = std.json.parseFromSlice(
@@ -134,32 +138,107 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
             .prompt = parts,
             .cwd = cwd,
         },
-    }) catch return r.errResult(call, "command queue is full, inform user");
+    }) catch {
+        ctx.swarm.releaseReservation(child_id);
+        return r.errResult(call, "command queue is full, inform user");
+    };
 
     r.setToolChild(ctx, call, child_id);
 
     r.setToolStatusPrint(ctx, call, "{s} -> {s}", .{ args.agent_type, args.description });
-    {
-        const g = ctx.agent().bg_agents.lock(ctx.io);
-        defer g.unlock();
-        g.ptr.list.append(ctx.alloc, .{
-            .agent_id = child_id,
-            .description = args.description,
-            .status = .running,
-        }) catch {};
+    addBgAgent(ctx, child_id, args.description);
+
+    if (args.run_in_background) {
+        const text = std.fmt.allocPrint(
+            ctx.alloc,
+            "Agent spawned. Agent id: {d}",
+            .{child_id.pack()},
+        ) catch return r.errResult(call, "oom");
+
+        return .{
+            .call_id = call.id,
+            .content = text,
+            .name = call.name,
+            .comp_strat = .keep,
+        };
     }
 
-    const text = std.fmt.allocPrint(
-        ctx.alloc,
-        "Agent spawned. Agent id: {d}",
-        .{child_id.pack()},
-    ) catch return r.errResult(call, "oom");
+    return awaitChildResult(ctx, call, child_id, true);
+}
+
+fn addBgAgent(ctx: prv.tool.ToolContext, child_id: prv.Swarm.AgentId, description: []const u8) void {
+    const g = ctx.agent().bg_agents.lock(ctx.io);
+    defer g.unlock();
+    g.ptr.list.append(ctx.alloc, .{
+        .agent_id = child_id,
+        .description = description,
+        .status = .running,
+    }) catch {};
+}
+
+fn dropBgAgent(ctx: prv.tool.ToolContext, child_id: prv.Swarm.AgentId) void {
+    const g = ctx.agent().bg_agents.lock(ctx.io);
+    defer g.unlock();
+    for (g.ptr.list.items, 0..) |bg, i| {
+        if (bg.agent_id.index == child_id.index and bg.agent_id.generation == child_id.generation) {
+            _ = g.ptr.list.swapRemove(i);
+            break;
+        }
+    }
+}
+
+fn childGone(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall, child_id: prv.Swarm.AgentId) prv.adapter.ToolResult {
+    dropBgAgent(ctx, child_id);
+    return r.errResult(call, "child agent spawn failed or was canceled");
+}
+
+fn bail(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall, child_id: prv.Swarm.AgentId, msg: []const u8) prv.adapter.ToolResult {
+    releaseChild(ctx, child_id);
+    dropBgAgent(ctx, child_id);
+    return r.errResult(call, msg);
+}
+
+fn releaseChild(ctx: prv.tool.ToolContext, child_id: prv.Swarm.AgentId) void {
+    const st = ctx.swarm.getSlotState(child_id) orelse return;
+    switch (st) {
+        .reserved => ctx.swarm.releaseReservation(child_id),
+        else => ctx.swarm.releaseAgent(child_id),
+    }
+}
+
+fn awaitChildResult(
+    ctx: prv.tool.ToolContext,
+    call: prv.adapter.ToolCall,
+    child_id: prv.Swarm.AgentId,
+    despawn: bool,
+) prv.adapter.ToolResult {
+    while (true) {
+        const slot = ctx.swarm.getSlot(child_id) orelse return childGone(ctx, call, child_id);
+        const state = slot.state.load(.acquire);
+        if (state != .active and state != .reserved) break;
+
+        slot.event.wait(ctx.io) catch return bail(ctx, call, child_id, "canceled");
+        if (ctx.isCanceled()) return bail(ctx, call, child_id, "canceled");
+
+        const state2 = slot.state.load(.acquire);
+        if (state2 == .reserved or state2 == .active) {
+            slot.event.reset();
+        }
+    }
+
+    const slot = ctx.swarm.getSlot(child_id) orelse return childGone(ctx, call, child_id);
+    const is_err = slot.state.load(.acquire) == .failed;
+    const text = prv.tool.extractChildResult(ctx.swarm, child_id);
+    const owned = ctx.alloc.dupe(u8, text) catch return bail(ctx, call, child_id, "oom");
+
+    if (despawn) releaseChild(ctx, child_id);
+    dropBgAgent(ctx, child_id);
 
     return .{
         .call_id = call.id,
-        .content = text,
         .name = call.name,
-        .comp_strat = .keep,
+        .content = owned,
+        .is_error = is_err,
     };
 }
 
@@ -191,49 +270,7 @@ fn run_await_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.ad
 
     r.setToolStatusPrint(ctx, call, "waiting for agent {d}", .{args.agent_id});
 
-    const slot = ctx.swarm.getSlot(child_id) orelse
-        return r.errResult(call, "agent slot not found");
-
-    const state = slot.state.load(.acquire);
-    if (state == .active) {
-        slot.event.wait(ctx.io) catch {
-            ctx.swarm.releaseAgent(child_id);
-            return r.errResult(call, "canceled");
-        };
-    }
-
-    if (ctx.isCanceled()) {
-        ctx.swarm.releaseAgent(child_id);
-        return r.errResult(call, "canceled");
-    }
-
-    const post_slot = ctx.swarm.getSlot(child_id) orelse return r.errResult(call, "agent slot vanished");
-    const is_err = post_slot.state.load(.acquire) == .failed;
-    const text = prv.tool.extractChildResult(ctx.swarm, child_id);
-    const owned = ctx.alloc.dupe(u8, text) catch {
-        ctx.swarm.releaseAgent(child_id);
-        return r.errResult(call, "oom");
-    };
-
-    if (args.despawn) ctx.swarm.releaseAgent(child_id);
-
-    {
-        const g = ctx.agent().bg_agents.lock(ctx.io);
-        defer g.unlock();
-        for (g.ptr.list.items, 0..) |bg, i| {
-            if (bg.agent_id.index == child_id.index and bg.agent_id.generation == child_id.generation) {
-                _ = g.ptr.list.swapRemove(i);
-                break;
-            }
-        }
-    }
-
-    return .{
-        .call_id = call.id,
-        .name = call.name,
-        .content = owned,
-        .is_error = is_err,
-    };
+    return awaitChildResult(ctx, call, child_id, args.despawn);
 }
 
 pub const CancelAgent = prv.tool.Tool{
@@ -264,19 +301,9 @@ fn run_cancel_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.a
         if (slot.state.load(.acquire) == .active) {
             slot.agent.cancel();
         }
-        ctx.swarm.releaseAgent(child_id);
+        releaseChild(ctx, child_id);
     }
-
-    {
-        const g = ctx.agent().bg_agents.lock(ctx.io);
-        defer g.unlock();
-        for (g.ptr.list.items, 0..) |bg, i| {
-            if (bg.agent_id.index == child_id.index and bg.agent_id.generation == child_id.generation) {
-                _ = g.ptr.list.swapRemove(i);
-                break;
-            }
-        }
-    }
+    dropBgAgent(ctx, child_id);
 
     return r.okResult(call, "agent canceled");
 }
