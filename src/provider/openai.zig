@@ -719,19 +719,7 @@ pub const StreamState = struct {
                 if (ch.message) |m| {
                     if (m.content) |c| try self.pushText(arena, c);
                     if (m.tool_calls) |calls| {
-                        for (calls) |rtc| {
-                            const func = rtc.function orelse continue;
-                            try self.tools.append(arena, .{
-                                .id = try arena.dupe(u8, rtc.id orelse ""),
-                                .name = try arena.dupe(u8, func.name orelse ""),
-                                .args = blk: {
-                                    var a: std.ArrayList(u8) = .empty;
-                                    if (func.arguments) |args| try a.appendSlice(arena, args);
-                                    break :blk a;
-                                },
-                                .started = true,
-                            });
-                        }
+                        for (calls) |rtc| try self.pushToolCall(arena, rtc);
                     }
                 }
             }
@@ -1002,45 +990,39 @@ pub const StreamState = struct {
         var text_buf: std.ArrayList(u8) = .empty;
         try text_buf.appendSlice(self.arena, self.text_acc.items);
 
-        var valid_calls: std.ArrayList(adapter.ContentPart) = .empty;
-        var dropped: u32 = 0;
+        var tool_parts: std.ArrayList(adapter.ContentPart) = .empty;
+        var dropped_calls: std.ArrayList(adapter.DroppedToolCall) = .empty;
         for (self.tools.items) |*t| {
             if (!t.started) continue;
             const raw_args = if (t.args.items.len == 0) "{}" else t.args.items;
-            // Drop tool calls whose arguments don't parse as JSON. Truncation
-            // (finish_reason "length") or any provider-side cutoff produces
-            // partial JSON; replaying it provokes a 400 on the next request.
             if (!isValidJsonObject(self.arena, raw_args)) {
-                dropped += 1;
-                log.warn("dropping tool call id={s} name={s}: invalid arguments: {s}", .{
+                log.warn("tool call id={s} name={s} has invalid arguments (not executed): {s}", .{
                     t.id, t.name, raw_args,
                 });
+                try dropped_calls.append(arena, .{ .id = t.id, .name = t.name });
                 continue;
             }
-            try valid_calls.append(arena, .{ .tool_call = .{
+            try tool_parts.append(arena, .{ .tool_call = .{
                 .id = try arena.dupe(u8, t.id),
                 .name = try arena.dupe(u8, t.name),
                 .arguments = try arena.dupe(u8, raw_args),
             } });
         }
 
-        if (dropped > 0) {
-            const reason = self.finish_reason orelse "unknown";
-            const note = try std.fmt.allocPrint(
-                self.arena,
-                "\n[response truncated: {d} tool call(s) dropped due to malformed arguments (finish_reason={s}). Retry with a smaller change.]",
-                .{ dropped, reason },
-            );
+        if (dropped_calls.items.len > 0) {
+            const note = try adapter.droppedToolCallNote(self.arena, dropped_calls.items);
+            try text_buf.append(self.arena, '\n');
             try text_buf.appendSlice(self.arena, note);
         }
 
         try parts.append(arena, .{ .text = try arena.dupe(u8, text_buf.items) });
-        try parts.appendSlice(arena, valid_calls.items);
+        try parts.appendSlice(arena, tool_parts.items);
 
         const owned = try parts.toOwnedSlice(arena);
         return .{
             .message = .{ .role = .agent, .parts = owned },
             .usage = self.usage,
+            .dropped_tool_calls = @intCast(dropped_calls.items.len),
         };
     }
 };
@@ -1245,6 +1227,116 @@ test "openai stream dedupes final complete tool call against delta slot" {
     const result = try stream.finalize(arena);
     try testing.expectEqual(@as(usize, 2), result.message.parts.len);
     try testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.message.parts[1].tool_call.arguments);
+}
+
+test "openai stream drops invalid-args tool call and reports it" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    // Start a tool call with a truncated arguments fragment (no closing brace).
+    var starts = [_]OaiDeltaToolCall{.{ .index = 0, .id = "call_trunc", .function = .{ .name = "grep", .arguments = "{\"pattern\":\"foo\"" } }};
+    var start_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &starts } }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &start_choices }) == null);
+    // Stream ends without completing the JSON — finish_reason "length".
+    var finish_choices = [_]OaiStreamChoice{.{ .finish_reason = "length" }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &finish_choices }) == null);
+
+    const result = try stream.finalize(arena);
+    try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
+    var found = false;
+    var note_found = false;
+    for (result.message.parts) |part| switch (part) {
+        .tool_call => found = true,
+        .text => |t| {
+            if (std.mem.indexOf(u8, t, "had invalid arguments and was not executed") != null) note_found = true;
+        },
+        else => {},
+    };
+    try testing.expect(!found);
+    try testing.expect(note_found);
+}
+
+test "openai stream keeps valid calls and drops invalid calls in a mixed stream" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    var starts = [_]OaiDeltaToolCall{
+        .{ .index = 0, .id = "call_valid", .function = .{ .name = "read", .arguments = "{\"path\":\"src/main.zig\"}" } },
+        .{ .index = 1, .id = "call_trunc", .function = .{ .name = "grep", .arguments = "{\"pattern\":\"foo\"" } },
+    };
+    var start_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &starts } }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &start_choices }) == null);
+
+    const result = try stream.finalize(arena);
+    try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
+    var calls: [1]adapter.ToolCall = undefined;
+    var call_count: usize = 0;
+    var note_found = false;
+    for (result.message.parts) |part| switch (part) {
+        .tool_call => |call| {
+            calls[call_count] = call;
+            call_count += 1;
+        },
+        .text => |t| {
+            if (std.mem.indexOf(u8, t, "had invalid arguments and was not executed") != null) note_found = true;
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), call_count);
+    try testing.expectEqualStrings("call_valid", calls[0].id);
+    try testing.expectEqualStrings("read", calls[0].name);
+    try testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", calls[0].arguments);
+    try testing.expect(note_found);
+}
+
+test "openai serialize skips invalid-args tool_call and its tool_result together" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var chat: adapter.Chat = .{};
+    try chat.addMessage(arena, .agent, &.{
+        .{ .tool_call = .{ .id = "call_bad", .name = "grep", .arguments = "{\"pattern\":\"foo\"" } },
+        .{ .tool_call = .{ .id = "call_ok", .name = "read", .arguments = "{\"path\":\"src/main.zig\"}" } },
+    });
+    try chat.addMessage(arena, .user, &.{
+        .{ .tool_result = .{ .call_id = "call_bad", .name = "grep", .content = "invalid json", .is_error = true } },
+        .{ .tool_result = .{ .call_id = "call_ok", .name = "read", .content = "contents" } },
+    });
+
+    const cfg: adapter.Config = .{
+        .api_key = "test",
+        .model = "model",
+        .base_url = "https://example.test/v1",
+        .provider = .{ .openai = .{} },
+    };
+    const payload = try serializeRequest(testing.allocator, &chat, cfg, .blocking);
+    defer testing.allocator.free(payload);
+
+    try testing.expect(std.mem.indexOf(u8, payload, "call_ok") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "call_bad") == null);
+}
+
+test "openai stream reports zero dropped_tool_calls when all args valid" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    var starts = [_]OaiDeltaToolCall{.{ .index = 0, .id = "call_ok", .function = .{ .name = "read", .arguments = "{\"path\":\"src/main.zig\"}" } }};
+    var start_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &starts } }};
+    try testing.expect(try stream.applyChunk(arena, .{ .choices = &start_choices }) == null);
+
+    const result = try stream.finalize(arena);
+    try testing.expectEqual(@as(u32, 0), result.dropped_tool_calls);
 }
 
 test "openai stream keeps tagged reasoning as thinking across schema fields" {

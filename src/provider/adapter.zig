@@ -14,6 +14,28 @@ pub const ToolCall = struct {
     arguments: []const u8,
 };
 
+pub const DroppedToolCall = struct {
+    id: []const u8,
+    name: []const u8,
+};
+
+pub fn droppedToolCallNote(arena: Allocator, calls: []const DroppedToolCall) ![]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(arena);
+    try buf.append(arena, '[');
+    for (calls, 0..) |call, i| {
+        if (i > 0) try buf.appendSlice(arena, " ");
+        const line = try std.fmt.allocPrint(
+            arena,
+            "Tool call {s} ({s}) had invalid arguments and was not executed. Re-issue the call with valid JSON arguments.",
+            .{ call.name, call.id },
+        );
+        try buf.appendSlice(arena, line);
+    }
+    try buf.append(arena, ']');
+    return try buf.toOwnedSlice(arena);
+}
+
 pub const CompactionStrategy = enum {
     truncate,
     keep,
@@ -293,6 +315,7 @@ pub const Message = struct {
 pub const ResponseResult = struct {
     message: Message,
     usage: ?TokenUsage = null,
+    dropped_tool_calls: u32 = 0,
 };
 
 pub const CompletionMode = enum {

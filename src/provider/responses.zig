@@ -431,21 +431,64 @@ pub const StreamState = struct {
         var parts: std.ArrayList(adapter.ContentPart) = .empty;
         if (self.thinking.items.len > 0) try parts.append(arena, .{ .thinking = .{ .text = try arena.dupe(u8, self.thinking.items) } });
         if (self.text.items.len > 0) try parts.append(arena, .{ .text = try arena.dupe(u8, self.text.items) });
-        for (self.calls.items) |call| try parts.append(arena, .{ .tool_call = .{
-            .id = try arena.dupe(u8, call.id),
-            .name = try arena.dupe(u8, call.name),
-            .arguments = try arena.dupe(u8, call.arguments),
-        } });
+        var dropped_calls: std.ArrayList(adapter.DroppedToolCall) = .empty;
+        for (self.calls.items) |call| {
+            if (!isValidJsonObject(arena, call.arguments)) {
+                log.warn("tool call id={s} name={s} has invalid arguments (not executed): {s}", .{
+                    call.id, call.name, call.arguments,
+                });
+                try dropped_calls.append(arena, .{ .id = call.id, .name = call.name });
+                continue;
+            }
+            try parts.append(arena, .{ .tool_call = .{
+                .id = try arena.dupe(u8, call.id),
+                .name = try arena.dupe(u8, call.name),
+                .arguments = try arena.dupe(u8, call.arguments),
+            } });
+        }
+        if (dropped_calls.items.len > 0) {
+            const note = try adapter.droppedToolCallNote(arena, dropped_calls.items);
+            try parts.append(arena, .{ .text = note });
+        }
         if (parts.items.len == 0 and self.items.items.len == 0) return error.EmptyResponse;
-        const raw = try arena.alloc([]const u8, self.items.items.len);
-        for (self.items.items, 0..) |item, i| raw[i] = try arena.dupe(u8, item);
+        var raw_items: std.ArrayList([]const u8) = .empty;
+        for (self.items.items) |item| {
+            if (isInvalidFunctionCallItem(arena, item)) continue;
+            try raw_items.append(arena, try arena.dupe(u8, item));
+        }
+        if (dropped_calls.items.len > 0) {
+            const note = try adapter.droppedToolCallNote(arena, dropped_calls.items);
+            try raw_items.append(arena, try errorMessageItem(arena, note));
+        }
         return .{ .message = .{
             .role = .agent,
             .parts = try parts.toOwnedSlice(arena),
-            .provider_items = raw,
-        }, .usage = self.usage };
+            .provider_items = try raw_items.toOwnedSlice(arena),
+        }, .usage = self.usage, .dropped_tool_calls = @intCast(dropped_calls.items.len) };
     }
 };
+
+fn errorMessageItem(arena: Allocator, text: []const u8) ![]const u8 {
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    errdefer buf.deinit();
+    try buf.writer.writeAll("{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":");
+    try writeJson(&buf.writer, text);
+    try buf.writer.writeAll("}]}");
+    return buf.toOwnedSlice();
+}
+
+fn isInvalidFunctionCallItem(arena: Allocator, item: []const u8) bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, item, .{}) catch return false;
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, stringField(parsed.value, "type") orelse "", "function_call")) return false;
+    return !isValidJsonObject(arena, stringField(parsed.value, "arguments") orelse "{}");
+}
+
+fn isValidJsonObject(arena: Allocator, s: []const u8) bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, arena, s, .{}) catch return false;
+    defer parsed.deinit();
+    return parsed.value == .object;
+}
 
 test "responses request uses stateless streaming API" {
     const testing = std.testing;
@@ -542,4 +585,35 @@ test "responses stream aggregates text tools usage and raw items" {
     try testing.expectEqualStrings("call_1", result.message.parts[2].tool_call.id);
     try testing.expectEqual(@as(usize, 2), result.message.provider_items.len);
     try testing.expectEqual(@as(u64, 10), result.usage.?.input_tokens);
+}
+
+test "responses stream drops invalid-args call and retains only its error" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var stream = StreamState.init(arena);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena,
+        \\{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_trunc","name":"grep","arguments":"{\"pattern\":\"foo\""}}
+    , .{ .allocate = .alloc_always });
+    defer parsed.deinit();
+    _ = try stream.applyEvent(arena, parsed.value);
+
+    const result = try stream.finalize(arena);
+    try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
+    var found = false;
+    var note_found = false;
+    for (result.message.parts) |part| switch (part) {
+        .tool_call => found = true,
+        .text => |t| {
+            if (std.mem.indexOf(u8, t, "had invalid arguments and was not executed") != null) note_found = true;
+        },
+        else => {},
+    };
+    try testing.expect(!found);
+    try testing.expect(note_found);
+    try testing.expectEqual(@as(usize, 1), result.message.provider_items.len);
+    try testing.expect(std.mem.indexOf(u8, result.message.provider_items[0], "\"type\":\"function_call\"") == null);
+    try testing.expect(std.mem.indexOf(u8, result.message.provider_items[0], "had invalid arguments") != null);
 }

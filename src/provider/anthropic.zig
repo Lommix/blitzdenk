@@ -693,7 +693,7 @@ pub const StreamState = struct {
 
     pub fn finalize(self: *StreamState, arena: Allocator) !adapter.ResponseResult {
         var parts: std.ArrayList(adapter.ContentPart) = .empty;
-        var dropped: u32 = 0;
+        var dropped_calls: std.ArrayList(adapter.DroppedToolCall) = .empty;
         for (self.blocks.items) |*b| {
             switch (b.kind) {
                 .text => {
@@ -711,13 +711,11 @@ pub const StreamState = struct {
                 },
                 .tool_use => {
                     const raw_args = if (b.tool_input.items.len == 0) "{}" else b.tool_input.items;
-                    // Drop malformed tool_use. Truncation (stop_reason
-                    // "max_tokens") cuts mid-input_json_delta, leaving partial
-                    // JSON. Replaying it provokes a 400; thinking-block
-                    // signatures stay valid because earlier blocks already
-                    // received content_block_stop.
                     if (!isValidJsonObject(self.arena, raw_args)) {
-                        dropped += 1;
+                        std.log.warn("tool call id={s} name={s} has invalid arguments (not executed): {s}", .{
+                            b.tool_id, b.tool_name, raw_args,
+                        });
+                        try dropped_calls.append(arena, .{ .id = b.tool_id, .name = b.tool_name });
                         continue;
                     }
                     try parts.append(arena, .{ .tool_call = .{
@@ -729,13 +727,8 @@ pub const StreamState = struct {
             }
         }
 
-        if (dropped > 0) {
-            const reason = self.stop_reason orelse "unknown";
-            const note = try std.fmt.allocPrint(
-                arena,
-                "[response truncated: {d} tool call(s) dropped due to malformed arguments (stop_reason={s}). Retry with a smaller change.]",
-                .{ dropped, reason },
-            );
+        if (dropped_calls.items.len > 0) {
+            const note = try adapter.droppedToolCallNote(arena, dropped_calls.items);
             try parts.append(arena, .{ .text = note });
         }
 
@@ -743,6 +736,7 @@ pub const StreamState = struct {
         return .{
             .message = .{ .role = .agent, .parts = owned },
             .usage = self.usage,
+            .dropped_tool_calls = @intCast(dropped_calls.items.len),
         };
     }
 };
@@ -816,4 +810,78 @@ test "anthropic stream seeds tool input from content_block_start" {
     try testing.expectEqualStrings("toolu_1", result.message.parts[0].tool_call.id);
     try testing.expectEqualStrings("read", result.message.parts[0].tool_call.name);
     try testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.message.parts[0].tool_call.arguments);
+}
+
+test "anthropic stream drops invalid-args tool_use and reports it" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var stream = StreamState.init(arena);
+    try stream.event_name.appendSlice(arena, "content_block_start");
+    try stream.event_data.appendSlice(
+        arena,
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_trunc\",\"name\":\"grep\"}}",
+    );
+    const start = (try stream.dispatch(arena)) orelse return error.TestUnexpectedResult;
+    switch (start) {
+        .tool_call_start => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    stream.event_name.clearRetainingCapacity();
+    stream.event_data.clearRetainingCapacity();
+    try stream.event_name.appendSlice(arena, "content_block_delta");
+    try stream.event_data.appendSlice(
+        arena,
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"pattern\\\":\\\"foo\\\"\"}}",
+    );
+    const delta = (try stream.dispatch(arena)) orelse return error.TestUnexpectedResult;
+    switch (delta) {
+        .tool_input_delta => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    const result = try stream.finalize(arena);
+    try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
+    var found = false;
+    var note_found = false;
+    for (result.message.parts) |part| switch (part) {
+        .tool_call => found = true,
+        .text => |t| {
+            if (std.mem.indexOf(u8, t, "had invalid arguments and was not executed") != null) note_found = true;
+        },
+        else => {},
+    };
+    try testing.expect(!found);
+    try testing.expect(note_found);
+}
+
+test "anthropic serialize skips invalid-args tool_use and its tool_result together" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var chat: adapter.Chat = .{};
+    try chat.addMessage(arena, .agent, &.{
+        .{ .tool_call = .{ .id = "toolu_bad", .name = "grep", .arguments = "{\"pattern\":\"foo\"" } },
+        .{ .tool_call = .{ .id = "toolu_ok", .name = "read", .arguments = "{\"path\":\"src/main.zig\"}" } },
+    });
+    try chat.addMessage(arena, .user, &.{
+        .{ .tool_result = .{ .call_id = "toolu_bad", .name = "grep", .content = "invalid json", .is_error = true } },
+        .{ .tool_result = .{ .call_id = "toolu_ok", .name = "read", .content = "contents" } },
+    });
+
+    const cfg: adapter.Config = .{
+        .api_key = "test",
+        .model = "model",
+        .base_url = "https://example.test",
+        .provider = .{ .anthropic = .{} },
+    };
+    const payload = try serializeRequest(arena, &chat, cfg, .blocking);
+
+    try testing.expect(std.mem.indexOf(u8, payload, "toolu_ok") != null);
+    try testing.expect(std.mem.indexOf(u8, payload, "toolu_bad") == null);
 }
