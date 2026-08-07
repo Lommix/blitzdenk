@@ -21,16 +21,18 @@ pub const PatchTool = prv.tool.Tool{
         \\You MUST include a header to specify the action you are taking.
         \\Each operation starts with one of three headers:
         \\
-        \\*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+        \\*** Add File: <path> - create a new file. Every following line is a + line (the initial contents). Fails if the file already exists — use *** Update File: to modify an existing file.
         \\*** Delete File: <path> - remove an existing file. Nothing follows.
-        \\*** Update File: <path> - patch an existing file in place (optionally with a rename).
+        \\*** Update File: <path> - patch an existing file in place (optionally with a rename). The file is read fresh at apply time; it does not need to have been read with the read tool first.
         \\
-        \\May be immediately followed by *** Move to: <new path> if you want to rename the file.
-        \\Then one or more change chunks. The first chunk may start directly with change lines or with @@ (optionally followed by a hunk header). Additional chunks should use @@.
+        \\May be immediately followed by *** Move to: <new path> if you want to rename the file. A rename with no change hunks is allowed.
+        \\Then one or more change chunks. The first chunk may start directly with change lines or with @@; every additional chunk must start with @@.
         \\Within a hunk each line starts with:
         \\- A space for unchanged context
         \\- `-` for removed lines
         \\- `+` for added lines
+        \\
+        \\The `@@` line is an anchor, not a line count: the text after `@@` must appear verbatim as a line in the file (usually the class, function, or statement the hunk belongs to). The hunk is applied after the first occurrence of that line, searching forward from the end of the previous hunk, so hunks are applied strictly in file order. Standard unified-diff hunk headers like `@@ -1,3 +1,3 @@` are accepted and ignored; the context lines locate the hunk instead. A line reading `*** End of File` immediately after a hunk pins that hunk to the end of the file (useful for appending).
         \\
         \\For instructions on [context_before] and [context_after]:
         \\- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change’s [context_after] lines in the second change’s [context_before] lines.
@@ -49,6 +51,8 @@ pub const PatchTool = prv.tool.Tool{
         \\- [old_code]
         \\+ [new_code]
         \\[3 lines of post-context]
+        \\
+        \\Context matching is tolerant of trailing whitespace, indentation, and some unicode punctuation, but if a hunk's context could match in more than one place the patch fails with an ambiguity error instead of guessing — add an `@@` anchor line above the hunk to disambiguate. Files keep their existing line endings (CRLF is preserved).
         \\
         \\The full grammar definition is below:
         \\Patch := Begin { FileOp } End
@@ -79,6 +83,7 @@ pub const PatchTool = prv.tool.Tool{
         \\
         \\- You must include a header with your intended action (Add/Delete/Update)
         \\- You must prefix new lines with `+` even when creating a new file
+        \\- `*** Add File:` fails if the file already exists; `*** Update File:` never creates a file
         \\
         ,
         .parameters_schema =
@@ -110,8 +115,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     // 1. Parse the patch.
     const parsed = parsePatch(alloc, args.patch) catch |err| {
-        const msg = std.fmt.allocPrint(alloc, "patch parse error: {s}", .{@errorName(err)}) catch
-            "patch parse error";
+        const msg = parseErrorMessage(alloc, err) catch "patch parse error";
         return r.errResult(call, msg);
     };
     const patch = parsed.value;
@@ -120,7 +124,19 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         return r.errResult(call, "patch contains no file operations");
     }
 
-    // 2. Per-command: verify (preview before/after), request permission, apply.
+    // 2. Preview every command. Nothing is written here, so any failure aborts
+    // the whole patch with no partial changes.
+    var previews: std.ArrayList(Preview) = .empty;
+    defer {
+        for (previews.items) |p| {
+            if (p.before) |b| alloc.free(b);
+            if (p.after) |a| alloc.free(a);
+        }
+        previews.deinit(alloc);
+    }
+    var abs_paths: std.ArrayList([]const u8) = .empty;
+    defer abs_paths.deinit(alloc);
+
     var applied: usize = 0;
     for (patch.commands, 0..) |cmd, ci| {
         if (ctx.isCanceled()) return r.errResult(call, "canceled");
@@ -131,37 +147,37 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
         r.setToolStatusPrint(ctx, call, "patch {s}", .{cmd_path});
 
-        // For updates, the file must have been read first (matches edit.zig policy).
-        if (cmd == .file_update) {
-            const g = ctx.agent().file_stats.lock(ctx.io);
-            const seen = g.ptr.get(resolved) != null;
-            g.unlock();
-            if (!seen) {
+        if (cmd == .file_add) {
+            const exists = fileExistsViaExec(ctx, resolved) catch false;
+            if (exists) {
                 const msg = std.fmt.allocPrint(
                     alloc,
-                    "File {s} has not been read yet. Read it first before patching.",
+                    "Cannot add file {s}: it already exists. Use *** Update File: to modify an existing file, or *** Delete File: it first to replace it.",
                     .{cmd_path},
-                ) catch "file not yet read";
+                ) catch "cannot add existing file";
                 return r.errResult(call, msg);
             }
         }
 
         // Build before/after preview.
-        const preview = buildPreview(ctx, resolved, cmd) catch |err| {
+        var preview_diag: ApplyDiagnostics = .{};
+        const preview = buildPreview(ctx, resolved, cmd, &preview_diag) catch |err| {
+            const detail = applyErrorDescription(alloc, err, &preview_diag) catch "preview failed";
             const msg = std.fmt.allocPrint(alloc, "cannot preview {s} (cmd #{d}): {s}", .{
-                cmd_path, ci, @errorName(err),
+                cmd_path, ci, detail,
             }) catch "preview failed";
             return r.errResult(call, msg);
         };
-        defer {
-            if (preview.before) |b| alloc.free(b);
-            if (preview.after) |a| alloc.free(a);
-        }
+        previews.append(alloc, preview) catch return r.errResult(call, "out of memory");
+        abs_paths.append(alloc, resolved) catch return r.errResult(call, "out of memory");
+    }
 
+    // 3. Request permission for every command before touching disk.
+    for (previews.items, patch.commands) |p, cmd| {
         const decision = ctx.requestPerm(call.id, .always_check, .{ .diff = .{
-            .before = preview.before,
-            .after = preview.after orelse "",
-            .path = cmd_path,
+            .before = p.before,
+            .after = p.after orelse "",
+            .path = commandPath(cmd),
         } });
         switch (decision) {
             .approved => {},
@@ -176,25 +192,29 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
             },
             else => return r.errResult(call, "permission unresolved"),
         }
+    }
 
+    // 4. Apply every command.
+    for (patch.commands, abs_paths.items, 0..) |cmd, resolved, ci| {
         if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-        // Apply against resolved absolute path.
         const abs_cmd = withResolvedPath(alloc, ctx.cwd, cmd, resolved) catch
             return r.errResult(call, "failed to resolve path");
+
+        r.setToolStatusPrint(ctx, call, "patch {s}", .{commandPath(cmd)});
+
         var diag: ApplyDiagnostics = .{};
         executeCommand(ctx, abs_cmd, &diag) catch |err| {
+            const detail = applyErrorDescription(alloc, err, &diag) catch "patch apply failed";
             const msg = std.fmt.allocPrint(
                 alloc,
-                "patch apply failed at command #{d} ({s}): {s}. anchor=\"{s}\" hunk_index={d} detail={s}",
-                .{ ci, diag.path, @errorName(err), diag.expected_anchor, diag.hunk_index, diag.message },
+                "patch apply failed at command #{d} ({s}): {s}",
+                .{ ci, diag.path, detail },
             ) catch "patch apply failed";
             return r.errResult(call, msg);
         };
 
-        // Update FileStats so subsequent edits don't block on "file not read".
         updateFileStats(ctx, resolved, abs_cmd);
-
         applied += 1;
     }
 
@@ -238,6 +258,7 @@ fn buildPreview(
     ctx: prv.tool.ToolContext,
     abs_path: []const u8,
     cmd: PatchCommand,
+    diag: *ApplyDiagnostics,
 ) !Preview {
     const alloc = ctx.alloc;
     switch (cmd) {
@@ -252,11 +273,47 @@ fn buildPreview(
         .file_update => |u| {
             const before = (try readFileViaExec(ctx, abs_path, false, null)) orelse return ApplyError.FileNotFound;
             errdefer alloc.free(before);
-            var diag: ApplyDiagnostics = .{};
-            const after = try applyHunks(alloc, before, u.hunks, &diag);
+            const after = try applyHunks(alloc, before, u.hunks, diag);
             return .{ .before = before, .after = after };
         },
     }
+}
+
+fn fileExistsViaExec(ctx: prv.tool.ToolContext, path: []const u8) !bool {
+    const res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "test", "-e", path } }) catch return false;
+    defer ctx.swarm.exec.alloc.free(res.stdout);
+    defer ctx.swarm.exec.alloc.free(res.stderr);
+    return res.ty == .success;
+}
+
+fn parseErrorMessage(alloc: std.mem.Allocator, err: ParseError) ![]const u8 {
+    return switch (err) {
+        error.ExpectedTag => "patch parse error: expected a marker such as '*** Begin Patch' or a file-operation header (headers are case-sensitive)",
+        error.NoMatch => "patch parse error: unrecognized file operation; expected '*** Add File: <path>', '*** Delete File: <path>', or '*** Update File: <path>'",
+        error.EmptyUpdateFile => "patch parse error: an '*** Update File:' block needs at least one hunk or a '*** Move to: <path>'",
+        error.InvalidHunkLine => "patch parse error: malformed hunk line; each line must start with ' ' (context), '-' (removed), or '+' (added)",
+        error.UnexpectedEof => "patch parse error: unexpected end of patch (missing '*** End Patch'?)",
+        error.ExpectedNewline => "patch parse error: expected a newline",
+        else => try std.fmt.allocPrint(alloc, "patch parse error: {s}", .{@errorName(err)}),
+    };
+}
+
+fn applyErrorDescription(alloc: std.mem.Allocator, err: ApplyError, diag: *const ApplyDiagnostics) ![]const u8 {
+    return switch (err) {
+        error.HunkAnchorNotFound => if (diag.message.len > 0)
+            try std.fmt.allocPrint(alloc, "hunk did not match: {s} (anchor: \"{s}\", hunk #{d})", .{ diag.message, diag.expected_anchor, diag.hunk_index })
+        else
+            try std.fmt.allocPrint(alloc, "hunk did not match any lines (hunk #{d})", .{diag.hunk_index}),
+        error.AmbiguousContext => try std.fmt.allocPrint(alloc, "hunk context is ambiguous: {s}", .{diag.message}),
+        error.FileNotFound => "file not found",
+        error.FileTooLarge => "file exceeds the 1 MiB patch limit",
+        error.ExecFailed => if (diag.message.len > 0)
+            try std.fmt.allocPrint(alloc, "command failed: {s}", .{diag.message})
+        else
+            "command failed",
+        error.InvalidCommand => "invalid command",
+        else => try std.fmt.allocPrint(alloc, "{s}", .{@errorName(err)}),
+    };
 }
 
 fn updateFileStats(ctx: prv.tool.ToolContext, resolved: []const u8, cmd: PatchCommand) void {
@@ -334,6 +391,7 @@ pub const MAX_FILE_BYTES: usize = 1 * 1024 * 1024; // 1 MiB
 
 pub const ApplyError = error{
     HunkAnchorNotFound,
+    AmbiguousContext,
     FileNotFound,
     FileTooLarge,
     ExecFailed,
@@ -613,7 +671,7 @@ fn parseHunk(alloc: std.mem.Allocator, bytes: []const u8, allow_missing_context:
     if (hunkBoundaryStartsWith(bytes, "@@")) {
         const header_line = try markerPrefixLine("@@", alloc, bytes);
         const h = trimMarkerLine(header_line.value);
-        if (h.len > 0) {
+        if (h.len > 0 and !isUnifiedDiffRangeHeader(h)) {
             header = h;
         }
         cursor = header_line.rest;
@@ -642,6 +700,28 @@ fn parseHunk(alloc: std.mem.Allocator, bytes: []const u8, allow_missing_context:
 
     const owned = try lines.toOwnedSlice(alloc);
     return ok(Hunk, .{ .header = header, .lines = owned, .end_of_file = end_of_file }, cursor);
+}
+
+fn isUnifiedDiffRangeHeader(h: []const u8) bool {
+    var rest = trimLineRight(h);
+    if (!std.mem.endsWith(u8, rest, "@@")) return false;
+    rest = trimLineRight(rest[0 .. rest.len - 2]);
+    const space = std.mem.indexOfScalar(u8, rest, ' ') orelse return false;
+    if (space == 0 or space + 1 >= rest.len) return false;
+    return isRangeSpec(rest[0..space]) and isRangeSpec(rest[space + 1 ..]);
+}
+
+fn isRangeSpec(s: []const u8) bool {
+    if (s.len < 2) return false;
+    if (s[0] != '-' and s[0] != '+') return false;
+    var i: usize = 1;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+    if (i == 1) return false;
+    if (i < s.len and s[i] == ',') {
+        i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+    }
+    return i == s.len;
 }
 
 fn parseUpdateFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(PatchCommand) {
@@ -674,7 +754,7 @@ fn parseUpdateFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Resul
         allow_missing_context = false;
     }
 
-    if (hunks.items.len == 0) return ParseError.EmptyUpdateFile;
+    if (hunks.items.len == 0 and move_to == null) return ParseError.EmptyUpdateFile;
 
     const owned = try hunks.toOwnedSlice(alloc);
     return ok(PatchCommand, .{ .file_update = .{
@@ -724,7 +804,11 @@ fn splitLines(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     errdefer out.deinit(alloc);
     var it = std.mem.splitScalar(u8, src, '\n');
-    while (it.next()) |s| try out.append(alloc, s);
+    while (it.next()) |s| {
+        var ln = s;
+        if (ln.len > 0 and ln[ln.len - 1] == '\r') ln = ln[0 .. ln.len - 1];
+        try out.append(alloc, ln);
+    }
     return out.toOwnedSlice(alloc);
 }
 
@@ -778,7 +862,7 @@ pub fn applyHunks(
             const header_pattern = [_][]const u8{header};
             const header_at = try seekSequence(alloc, lines, cursor, &header_pattern, false) orelse {
                 diag.expected_anchor = header;
-                diag.message = "could not locate hunk header in target file";
+                diag.message = "could not find the '@@' anchor line in the file at/after the current position — '@@' anchors are literal lines, not line numbers; re-read the file and retry";
                 return ApplyError.HunkAnchorNotFound;
             };
             cursor = header_at.index + header_at.matched_len;
@@ -802,9 +886,13 @@ pub fn applyHunks(
         diag.expected_anchor = old_view.items[0];
 
         const match = try seekSequence(alloc, lines, cursor, old_view.items, h.end_of_file) orelse {
-            diag.message = "could not locate hunk anchor in target file";
+            diag.message = "could not match the hunk's context lines in the file at/after the current position — the file may have changed; re-read it and retry";
             return ApplyError.HunkAnchorNotFound;
         };
+        if (h.header == null and !h.end_of_file and match.ambiguous) {
+            diag.message = "the hunk's context matches multiple locations in the file — add an '@@ anchor' line above the hunk (or more context lines) to pick the right one";
+            return ApplyError.AmbiguousContext;
+        }
         const match_at = match.index;
 
         // Splice: replace lines[match_at..match_at+old_view.len] with new_view.items
@@ -820,7 +908,28 @@ pub fn applyHunks(
         cursor = match_at + new_view.items.len;
     }
 
-    return joinLines(alloc, lines);
+    const crlf = std.mem.indexOf(u8, src, "\r\n") != null;
+    const joined = try joinLines(alloc, lines);
+    if (!crlf) return joined;
+    defer alloc.free(joined);
+    return toCrlf(alloc, joined);
+}
+
+fn toCrlf(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    const extra = std.mem.count(u8, s, "\n");
+    const out = try alloc.alloc(u8, s.len + extra);
+    var j: usize = 0;
+    for (s) |c| {
+        if (c == '\n') {
+            out[j] = '\r';
+            out[j + 1] = '\n';
+            j += 2;
+        } else {
+            out[j] = c;
+            j += 1;
+        }
+    }
+    return out;
 }
 
 const MatchMode = enum {
@@ -833,6 +942,7 @@ const MatchMode = enum {
 const SequenceMatch = struct {
     index: usize,
     matched_len: usize,
+    ambiguous: bool = false,
 };
 
 fn seekSequence(
@@ -845,50 +955,72 @@ fn seekSequence(
     if (needle.len == 0) return null;
 
     const modes = [_]MatchMode{ .exact, .rstrip, .trim, .normalized_trim };
-    if (needle.len <= haystack.len) {
-        const start_at = if (end_of_file)
-            haystack.len - needle.len
-        else
-            @min(start, haystack.len - needle.len);
+    if (end_of_file) {
+        // Pinned to the end of the file: take the last match at/after `start`.
         for (modes) |mode| {
-            if (try findSliceWithMode(alloc, haystack, start_at, needle, mode)) |idx| {
+            if (try findLastWithMode(alloc, haystack, start, needle, mode)) |idx| {
                 return .{ .index = idx, .matched_len = needle.len };
             }
         }
-        if (end_of_file and start_at != @min(start, haystack.len - needle.len)) {
-            const fallback_start = @min(start, haystack.len - needle.len);
-            for (modes) |mode| {
-                if (try findSliceWithMode(alloc, haystack, fallback_start, needle, mode)) |idx| {
-                    return .{ .index = idx, .matched_len = needle.len };
+        if (needle.len > 1 and needle[needle.len - 1].len == 0) {
+            const shorter = needle[0 .. needle.len - 1];
+            if (shorter.len > 0) {
+                for (modes) |mode| {
+                    if (try findLastWithMode(alloc, haystack, start, shorter, mode)) |idx| {
+                        return .{ .index = idx, .matched_len = shorter.len };
+                    }
                 }
             }
+        }
+        return null;
+    }
+
+    if (needle.len <= haystack.len) {
+        const start_at = @min(start, haystack.len - needle.len);
+        for (modes) |mode| {
+            if (try findWithAmbiguity(alloc, haystack, start_at, needle, mode)) |m| return m;
         }
     }
 
     if (needle.len > 1 and needle[needle.len - 1].len == 0) {
         const shorter = needle[0 .. needle.len - 1];
         if (shorter.len <= haystack.len) {
-            const shorter_start_at = if (end_of_file)
-                haystack.len - shorter.len
-            else
-                @min(start, haystack.len - shorter.len);
+            const shorter_start_at = @min(start, haystack.len - shorter.len);
             for (modes) |mode| {
-                if (try findSliceWithMode(alloc, haystack, shorter_start_at, shorter, mode)) |idx| {
-                    return .{ .index = idx, .matched_len = shorter.len };
-                }
-            }
-            if (end_of_file and shorter_start_at != @min(start, haystack.len - shorter.len)) {
-                const fallback_start = @min(start, haystack.len - shorter.len);
-                for (modes) |mode| {
-                    if (try findSliceWithMode(alloc, haystack, fallback_start, shorter, mode)) |idx| {
-                        return .{ .index = idx, .matched_len = shorter.len };
-                    }
-                }
+                if (try findWithAmbiguity(alloc, haystack, shorter_start_at, shorter, mode)) |m| return m;
             }
         }
     }
 
     return null;
+}
+
+fn findLastWithMode(
+    alloc: std.mem.Allocator,
+    haystack: []const []const u8,
+    start: usize,
+    needle: []const []const u8,
+    mode: MatchMode,
+) !?usize {
+    var i = start;
+    var last: ?usize = null;
+    while (try findSliceWithMode(alloc, haystack, i, needle, mode)) |idx| {
+        last = idx;
+        i = idx + 1;
+    }
+    return last;
+}
+
+fn findWithAmbiguity(
+    alloc: std.mem.Allocator,
+    haystack: []const []const u8,
+    start: usize,
+    needle: []const []const u8,
+    mode: MatchMode,
+) !?SequenceMatch {
+    const idx = (try findSliceWithMode(alloc, haystack, start, needle, mode)) orelse return null;
+    const second = try findSliceWithMode(alloc, haystack, idx + 1, needle, mode);
+    return .{ .index = idx, .matched_len = needle.len, .ambiguous = second != null };
 }
 
 fn insertionIndexBeforeTrailingEmptyLine(lines: []const []const u8) usize {
@@ -1119,10 +1251,13 @@ fn deleteFileViaExec(ctx: prv.tool.ToolContext, path: []const u8, diag: *ApplyDi
     defer ctx.swarm.exec.alloc.free(res.stderr);
 
     if (res.ty != .success) {
-        diag.message = if (res.stderr.len > 0)
-            (ctx.alloc.dupe(u8, res.stderr) catch "delete command failed")
-        else
-            "delete command failed";
+        if (std.mem.indexOf(u8, res.stderr, "No such file") != null) {
+            diag.message = "file does not exist";
+        } else if (res.stderr.len > 0) {
+            diag.message = ctx.alloc.dupe(u8, res.stderr) catch "delete command failed";
+        } else {
+            diag.message = "delete command failed";
+        }
         return ApplyError.ExecFailed;
     }
 }
@@ -1471,6 +1606,25 @@ test "parseHunk keeps context lines that look like patch syntax" {
     try testing.expectEqualStrings("*** not a file marker", res.value.lines[1].context);
 }
 
+test "parseUpdateFile pure append hunk with end-of-file marker keeps flag" {
+    const alloc = testing.allocator;
+    const input =
+        "*** Update File: f.txt\n" ++
+        "+omega\n" ++
+        "*** End of File\n";
+    const res = try parseUpdateFile(alloc, input);
+    const upd = res.value.file_update;
+    defer {
+        for (upd.hunks) |h| alloc.free(h.lines);
+        alloc.free(upd.hunks);
+    }
+
+    try testing.expectEqual(@as(usize, 1), upd.hunks.len);
+    try testing.expectEqual(@as(?[]const u8, null), upd.hunks[0].header);
+    try testing.expectEqual(true, upd.hunks[0].end_of_file);
+    try testing.expectEqual(@as(usize, 1), upd.hunks[0].lines.len);
+}
+
 test "parseUpdateFile first context line may start with hunk marker text" {
     const alloc = testing.allocator;
     const input =
@@ -1657,6 +1811,57 @@ test "applyHunks pure add at end inserts before trailing newline sentinel" {
     try testing.expectEqualStrings("alpha\nomega\n", out);
 }
 
+test "applyHunks end-of-file pins to last occurrence of repeated context" {
+    const alloc = testing.allocator;
+    const src = "x\ny\nx\n";
+
+    const hunk_lines = [_]HunkLine{
+        .{ .delete = "x" },
+        .{ .add = "X" },
+    };
+    const hunks = [_]Hunk{.{ .header = null, .lines = &hunk_lines, .end_of_file = true }};
+
+    var diag: ApplyDiagnostics = .{};
+    const out = try applyHunks(alloc, src, &hunks, &diag);
+    defer alloc.free(out);
+
+    try testing.expectEqualStrings("x\ny\nX\n", out);
+}
+
+test "applyHunks pure append hunk with end-of-file appends at end of multiline file" {
+    const alloc = testing.allocator;
+    const src = "alpha\nbeta\n";
+
+    const hunk_lines = [_]HunkLine{
+        .{ .add = "omega" },
+        .{ .add = "final" },
+    };
+    const hunks = [_]Hunk{.{ .header = null, .lines = &hunk_lines, .end_of_file = true }};
+
+    var diag: ApplyDiagnostics = .{};
+    const out = try applyHunks(alloc, src, &hunks, &diag);
+    defer alloc.free(out);
+
+    try testing.expectEqualStrings("alpha\nbeta\nomega\nfinal\n", out);
+}
+
+test "applyHunks end-of-file after header pins to tail" {
+    const alloc = testing.allocator;
+    const src = "START\nx\ny\nEND\nx\n";
+
+    const hunk_lines = [_]HunkLine{
+        .{ .delete = "x" },
+        .{ .add = "X" },
+    };
+    const hunks = [_]Hunk{.{ .header = "END", .lines = &hunk_lines, .end_of_file = true }};
+
+    var diag: ApplyDiagnostics = .{};
+    const out = try applyHunks(alloc, src, &hunks, &diag);
+    defer alloc.free(out);
+
+    try testing.expectEqualStrings("START\nx\ny\nEND\nX\n", out);
+}
+
 test "applyHunks two hunks sequential, second after first" {
     const alloc = testing.allocator;
     const src = "a\nb\nc\nd\ne\nf\n";
@@ -1681,4 +1886,122 @@ test "applyHunks two hunks sequential, second after first" {
     defer alloc.free(out);
 
     try testing.expectEqualStrings("a\nB\nc\nd\nE\nf\n", out);
+}
+
+test "parseUpdateFile allows move-only rename" {
+    const alloc = testing.allocator;
+    const input =
+        "*** Update File: src/app.py\n" ++
+        "*** Move to: src/main.py\n";
+    const res = try parseUpdateFile(alloc, input);
+    const upd = res.value.file_update;
+    try testing.expectEqualStrings("src/main.py", upd.move_to.?);
+    try testing.expectEqual(@as(usize, 0), upd.hunks.len);
+}
+
+test "parseHunk ignores unified diff range header" {
+    const alloc = testing.allocator;
+    const input =
+        "@@ -1,3 +1,3 @@\n" ++
+        " alpha\n" ++
+        "-beta\n" ++
+        "+BETA\n" ++
+        " gamma\n";
+    const res = try parseHunk(alloc, input, false);
+    defer alloc.free(res.value.lines);
+    try testing.expectEqual(@as(?[]const u8, null), res.value.header);
+    try testing.expectEqual(@as(usize, 4), res.value.lines.len);
+}
+
+test "parseHunk ignores unified diff single-line range header" {
+    const alloc = testing.allocator;
+    const input =
+        "@@ -1 +1 @@\n" ++
+        "-old\n" ++
+        "+new\n";
+    const res = try parseHunk(alloc, input, false);
+    defer alloc.free(res.value.lines);
+    try testing.expectEqual(@as(?[]const u8, null), res.value.header);
+}
+
+test "parseHunk keeps code-anchor header" {
+    const alloc = testing.allocator;
+    const input =
+        "@@ def greet():\n" ++
+        "-old\n" ++
+        "+new\n";
+    const res = try parseHunk(alloc, input, false);
+    defer alloc.free(res.value.lines);
+    try testing.expectEqualStrings("def greet():", res.value.header.?);
+}
+
+test "applyHunks preserves CRLF line endings" {
+    const alloc = testing.allocator;
+    const src = "crlf-one\r\ncrlf-two\r\ncrlf-three\r\n";
+
+    const hunk_lines = [_]HunkLine{
+        .{ .context = "crlf-one" },
+        .{ .delete = "crlf-two" },
+        .{ .add = "crlf-TWO" },
+        .{ .context = "crlf-three" },
+    };
+    const hunks = [_]Hunk{.{ .header = null, .lines = &hunk_lines, .end_of_file = false }};
+
+    var diag: ApplyDiagnostics = .{};
+    const out = try applyHunks(alloc, src, &hunks, &diag);
+    defer alloc.free(out);
+
+    try testing.expectEqualStrings("crlf-one\r\ncrlf-TWO\r\ncrlf-three\r\n", out);
+}
+
+test "applyHunks rejects ambiguous context match" {
+    const alloc = testing.allocator;
+    const src = "x\ny\nx\ny\n";
+
+    const hunk_lines = [_]HunkLine{
+        .{ .delete = "x" },
+        .{ .add = "X" },
+    };
+    const hunks = [_]Hunk{.{ .header = null, .lines = &hunk_lines, .end_of_file = false }};
+
+    var diag: ApplyDiagnostics = .{};
+    try testing.expectError(ApplyError.AmbiguousContext, applyHunks(alloc, src, &hunks, &diag));
+    try testing.expectEqualStrings("x", diag.expected_anchor);
+}
+
+test "applyHunks @@ anchor disambiguates repeated context" {
+    const alloc = testing.allocator;
+    const src = "START\nx\ny\nEND\nSTART\nx\ny\nEND\n";
+
+    const hunk_lines = [_]HunkLine{
+        .{ .context = "x" },
+        .{ .delete = "y" },
+        .{ .add = "Y" },
+    };
+    const hunks = [_]Hunk{.{ .header = "END", .lines = &hunk_lines, .end_of_file = false }};
+
+    var diag: ApplyDiagnostics = .{};
+    const out = try applyHunks(alloc, src, &hunks, &diag);
+    defer alloc.free(out);
+
+    try testing.expectEqualStrings("START\nx\ny\nEND\nSTART\nx\nY\nEND\n", out);
+}
+
+test "applyHunks unified diff header still applies via context" {
+    const alloc = testing.allocator;
+    const src = "alpha\nbeta\ngamma\n";
+
+    const hunk_lines = [_]HunkLine{
+        .{ .context = "alpha" },
+        .{ .delete = "beta" },
+        .{ .add = "BETA" },
+        .{ .context = "gamma" },
+    };
+    const hunks = [_]Hunk{.{ .header = null, .lines = &hunk_lines, .end_of_file = false }};
+
+    var diag: ApplyDiagnostics = .{};
+    const out = try applyHunks(alloc, src, &hunks, &diag);
+    defer alloc.free(out);
+
+    try testing.expectEqualStrings("alpha\nBETA\ngamma\n", out);
 }
