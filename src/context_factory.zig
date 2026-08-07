@@ -461,13 +461,12 @@ pub fn remove(self: *Self, tool_name: []const u8) void {
 pub fn configureAgent(
     self: *const Self,
     agent: *r.prv.agent.Agent,
-    cwd: []const u8,
 ) !void {
     agent.reset();
     try self.refreshAgentTools(agent);
 
     const alloc = agent.arena.allocator();
-    const prompt = try self.build_system_prompt(alloc, cwd, @enumFromInt(agent.type_idx));
+    const prompt = try self.build_system_prompt(alloc, @enumFromInt(agent.type_idx));
     try agent.setSystemPrompt(prompt);
 }
 
@@ -609,7 +608,6 @@ pub fn resetLoadedTools(self: *Self, alloc: std.mem.Allocator) !void {
 pub fn build_system_prompt(
     self: *const Self,
     alloc: std.mem.Allocator,
-    cwd: []const u8,
     agent_type: AgentType,
 ) ![]const u8 {
     var allocating = std.Io.Writer.Allocating.init(alloc);
@@ -713,15 +711,6 @@ pub fn build_system_prompt(
             } else |_| {}
         }
     }
-
-    _ = try w.print(
-        \\
-        \\# Env
-        \\
-        \\bash cwd: {s}
-        \\Bash commands already start here. Do not cd to this directory.
-        \\
-    , .{cwd});
 
     return allocating.written();
 }
@@ -1018,7 +1007,7 @@ test "system_prompt" {
     var factory = try Self.init(alloc, std.testing.io, home_dir);
     defer factory.prompt_arena.deinit();
 
-    const prompt = try factory.build_system_prompt(alloc, ".", .general);
+    const prompt = try factory.build_system_prompt(alloc, .general);
     _ = prompt; // autofix
     // std.debug.print("{s}", .{prompt});
 }

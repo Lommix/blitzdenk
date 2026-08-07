@@ -773,12 +773,20 @@ pub fn run(
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
                                             .cd => |path| {
-                                                if (app.swarm.exec.ssh_target) |*tar| {
-                                                    const new_cwd = try app.swarm.exec.alloc.dupe(u8, path);
-                                                    tar.cwd = new_cwd;
-                                                } else {
-                                                    const new_cwd = try app.appAlloc().dupe(u8, path);
-                                                    app.cwd = new_cwd;
+                                                if (path.len > 0) {
+                                                    const base = app.swarm.exec.effectiveCwd(app.cwd);
+                                                    if (std.fs.path.resolve(app.appAlloc(), &.{ base, path })) |resolved| {
+                                                        if (app.swarm.exec.ssh_active) {
+                                                            if (app.swarm.exec.ssh_target) |*tar| {
+                                                                const new_remote = app.swarm.exec.alloc.dupe(u8, resolved) catch break;
+                                                                tar.cwd = new_remote;
+                                                            }
+                                                        }
+                                                        app.cwd = resolved;
+                                                        if (app.main_agent_id) |id| {
+                                                            if (app.swarm.getAgent(id)) |ag| ag.cwd = resolved;
+                                                        }
+                                                    } else |_| {}
                                                 }
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
@@ -1106,10 +1114,11 @@ pub const AppCommand = union(enum) {
         const at = std.mem.indexOfScalar(u8, arg, '@') orelse return null;
         const after_at = arg[at + 1 ..];
         const colon = std.mem.indexOfScalar(u8, after_at, ':') orelse return null;
+        const cwd = std.mem.trim(u8, after_at[colon + 1 ..], " \t");
         return .{ .ssh = .{
             .user = arg[0..at],
             .host = after_at[0..colon],
-            .cwd = after_at[colon + 1 ..],
+            .cwd = if (cwd.len == 0) "/" else cwd,
         } };
     }
 };

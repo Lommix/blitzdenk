@@ -19,6 +19,7 @@ pub const InjectionsHooks = struct {
 
         inline for (.{
             &inject_datetime_information,
+            &inject_cwd_information,
             &inject_mode_information,
             &inject_todo_information,
             &inject_budget_information,
@@ -74,6 +75,12 @@ pub const InjectionsHooks = struct {
         });
     }
 };
+
+fn inject_cwd_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
+    const cwd = app.swarm.exec.effectiveCwd(if (agent.cwd.len > 0) agent.cwd else app.cwd);
+    if (cwd.len == 0) return;
+    try w.print("[CWD] {s}\n", .{cwd});
+}
 
 fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.prv.agent.Agent) !void {
     const res = app.swarm.exec.runAndWait(.{ .argv = &.{ "date", "+%Y-%m-%d %H:%M:%S %Z" } }) catch return;

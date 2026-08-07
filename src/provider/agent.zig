@@ -799,13 +799,15 @@ pub const Agent = struct {
 
             const slot = try alloc.create(tc.RunningTool);
             slot.* = .{ .fut = .{ .any_future = null, .result = undefined } };
+            const fallback = if (self.cwd.len > 0) self.cwd else ".";
+            const tool_cwd = alloc.dupe(u8, swarm.exec.effectiveCwd(fallback)) catch fallback;
             const tool_ctx = tc.ToolContext{
                 .alloc = alloc,
                 .io = self.pool.io,
                 .swarm = swarm,
                 .self_id = self_id,
                 .cancel = &slot.cancel,
-                .cwd = if (self.cwd.len > 0) self.cwd else ".",
+                .cwd = tool_cwd,
             };
             slot.fut = std.Io.async(self.pool.io, runToolWrapper, .{ tool.func, tool_ctx, call, &slot.done });
             // TODO: emit event_bus.tool_call_started — needs event bus accessible from Agent
