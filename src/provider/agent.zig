@@ -177,6 +177,7 @@ pub const Agent = struct {
     swarm: ?*Swarm = null,
     swarm_id: ?Swarm.AgentId = null,
     depth: u16 = 0,
+    cwd: []const u8 = "",
     file_stats: Locked(FileStats) = .{},
     bg_tasks: Locked(BackgroundTaskList) = .{},
     bg_agents: Locked(BackgroundAgentList) = .{},
@@ -804,7 +805,7 @@ pub const Agent = struct {
                 .swarm = swarm,
                 .self_id = self_id,
                 .cancel = &slot.cancel,
-                .cwd = swarm.context.cwd(swarm.context.ptr),
+                .cwd = if (self.cwd.len > 0) self.cwd else ".",
             };
             slot.fut = std.Io.async(self.pool.io, runToolWrapper, .{ tool.func, tool_ctx, call, &slot.done });
             // TODO: emit event_bus.tool_call_started — needs event bus accessible from Agent

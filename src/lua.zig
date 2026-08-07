@@ -2429,7 +2429,7 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
 
     // Build ctx bridge and push as arg 1
     var bridge = CtxBridge{
-        .cwd = ctx.swarm.context.cwd(ctx.swarm.context.ptr),
+        .cwd = ctx.cwd,
         .tool_ctx = ctx,
         .tool_call = call,
     };

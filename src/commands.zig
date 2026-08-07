@@ -94,6 +94,7 @@ pub const Command = union(enum) {
         agent_type: u8 = @intFromEnum(r.ContextFactory.AgentType.general),
         fork: bool = false,
         chat_entry: ?ChatEntry = null,
+        cwd: []const u8 = "",
     };
 
     pub const CustomCmd = struct {
@@ -243,6 +244,12 @@ pub const Command = union(enum) {
                 }
                 constructed = true;
                 const agent = app.swarm.getAgent(arg.agent_id).?;
+                if (arg.cwd.len > 0) {
+                    agent.cwd = try alloc.dupe(u8, arg.cwd);
+                } else if (arg.parent_id) |pid| {
+                    if (app.swarm.getAgent(pid)) |p| agent.cwd = p.cwd;
+                }
+                if (agent.cwd.len == 0) agent.cwd = app.cwd;
                 try app.configureAgent(agent);
 
                 if (app.context_factory.agents.get(@enumFromInt(arg.agent_type))) |meta| {
@@ -393,11 +400,6 @@ test "handled spawn configuration failure keeps processing queued commands" {
         }).call,
         .permission = (struct {
             fn call(_: *anyopaque, _: *r.prv.Swarm.PermissionReq) void {}
-        }).call,
-        .cwd = (struct {
-            fn call(_: *anyopaque) []const u8 {
-                return ".";
-            }
         }).call,
         .build_config = (struct {
             fn call(_: *anyopaque, _: u8) anyerror!r.prv.adapter.Config {

@@ -45,7 +45,6 @@ pub const SwarmContextV = struct {
     //async
     broadcast: *const fn (*anyopaque, BroadcastEntry) void,
     permission: *const fn (*anyopaque, *PermissionReq) void,
-    cwd: *const fn (*anyopaque) []const u8,
     build_config: *const fn (*anyopaque, u8) anyerror!r.adapter.Config,
 
     //sync

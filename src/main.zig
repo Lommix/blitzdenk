@@ -317,12 +317,6 @@ pub fn run(
                 };
             }
         }).func,
-        .cwd = (struct {
-            fn func(ptr: *anyopaque) []const u8 {
-                const a: *App = @ptrCast(@alignCast(ptr));
-                return a.cwd;
-            }
-        }).func,
         .gen_system_reminders = &App.genSystemRemindersOpaque,
         .pop_queued_message = &App.popQueuedMessageOpaque,
     }, env);
@@ -863,6 +857,7 @@ pub fn run(
                                             .agent_type = @intFromEnum(reg.AgentType.general),
                                             .prompt = parts,
                                             .chat_entry = chat_entry,
+                                            .cwd = app.cwd,
                                         },
                                     });
                                 }

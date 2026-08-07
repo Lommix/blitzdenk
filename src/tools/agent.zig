@@ -33,7 +33,8 @@ pub const AgentTool = prv.tool.Tool{
         \\  "properties": {
         \\      "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
         \\      "prompt": {"type": "string", "description": "The task for the agent to perform"},
-        \\      "agent_type": {"type": "string", "enum": {AGENT_LIST}, "description": "The type of specialized agent to use for this task"}
+        \\      "agent_type": {"type": "string", "enum": {AGENT_LIST}, "description": "The type of specialized agent to use for this task"},
+        \\      "cwd": {"type": "string", "description": "The working directoy of the agent"}
         \\  },
         \\  "required": ["description","prompt","agent_type"]
         \\}
@@ -85,6 +86,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         description: []const u8,
         prompt: []const u8,
         agent_type: []const u8,
+        cwd: ?[]const u8 = null,
     };
 
     const parsed = std.json.parseFromSlice(
@@ -98,11 +100,24 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     const agent_type = app.context_factory.findAgentType(args.agent_type) orelse
         return r.errResult(call, "unknown agent type");
 
+    const cwd = if (args.cwd) |cwd|
+        std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, cwd }) catch
+            return r.errResult(call, "invalid cwd")
+    else
+        ctx.cwd;
+
     const child_id = ctx.swarm.reserveFreeSlot() orelse
         return r.errResult(call, "No agent slots left");
 
     const prompt = std.fmt.allocPrint(ctx.alloc,
-        \\Your Task: {s}
+        \\You are a dumb pipe. Do exactly what you are told, literally and narrowly.
+        \\
+        \\Do not ask questions. Do not explain. Do not infer intent.
+        \\Do not offer alternatives. Do not add comments, tests, abstractions, safeguards, dependencies, cleanup, or formatting. Do not touch unnamed files. Do not fix adjacent problems.
+        \\
+        \\If blocked, state the exact blocker in one sentence. Return only the requested artifact and one-line verification. Every extra word or edit is failure. Be silent, precise, and replaceable.
+        \\
+        \\Your Task: "{s}"
         \\
         \\{s}
     , .{ args.description, args.prompt }) catch return r.errResult(call, "out of memory");
@@ -117,6 +132,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
             .parent_id = ctx.self_id,
             .agent_type = @intFromEnum(agent_type),
             .prompt = parts,
+            .cwd = cwd,
         },
     }) catch return r.errResult(call, "command queue is full, inform user");
 
