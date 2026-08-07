@@ -433,6 +433,14 @@ pub const CmdPool = struct {
 
         const term = self.collectOutput(slot, &child) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
+            error.StreamTooLong => {
+                // Output hit the cap; keep the partial output and report
+                // success. Consumers truncate for display anyway, so a hard
+                // failure here turns "huge result" into a baffling process
+                // error with no exit code or stderr.
+                slot.result_ty = .success;
+                return;
+            },
             else => {
                 slot.result_ty = .failed;
                 slot.exit_code = null;
@@ -688,6 +696,26 @@ test "runAndWait preserves non-zero child exit code" {
 
     try testing.expectEqual(CmdResult.ResType.failed, res.ty);
     try testing.expectEqual(@as(?u8, 7), res.exit_code);
+}
+
+test "output over cap is reported as truncated success, not failure" {
+    const testing = std.testing;
+
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
+    var pool = CmdPool.init(testing.allocator, testing.io, &env);
+    defer pool.deinit();
+
+    const res = try pool.runAndWaitTimeout(.{
+        .argv = &.{ "/bin/sh", "-c", "yes x | head -c 6000000" },
+        .force_local = true,
+    }, 5_000);
+    defer pool.alloc.free(res.stdout);
+    defer pool.alloc.free(res.stderr);
+
+    try testing.expectEqual(CmdResult.ResType.success, res.ty);
+    try testing.expect(res.stdout.len >= MAX_OUTPUT);
+    try testing.expectEqual(@as(?u8, null), res.exit_code);
 }
 
 test "background slots stream partial output and keep it until release" {

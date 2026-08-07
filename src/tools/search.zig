@@ -129,6 +129,8 @@ fn runGlob(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adap
         appendIncludeGlob(ctx.alloc, &argv, ctx.cwd, args.path, pattern) catch
             return r.errResult(call, "failed to build glob command");
     }
+    appendHiddenExclusion(ctx.alloc, &argv, args.include_hidden, args.include_ignored) catch
+        return r.errResult(call, "failed to build glob command");
     appendExcludes(ctx.alloc, &argv, ctx.cwd, args.path, args.exclude) catch
         return r.errResult(call, "failed to build glob command");
     appendSearchPath(ctx.alloc, &argv, args.path) catch
@@ -173,6 +175,8 @@ fn runGrep(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adap
         appendIncludeGlob(ctx.alloc, &argv, ctx.cwd, args.path, glob) catch
             return r.errResult(call, "failed to build grep command");
     }
+    appendHiddenExclusion(ctx.alloc, &argv, args.include_hidden, args.include_ignored) catch
+        return r.errResult(call, "failed to build grep command");
     appendExcludes(ctx.alloc, &argv, ctx.cwd, args.path, args.exclude) catch
         return r.errResult(call, "failed to build grep command");
 
@@ -224,6 +228,20 @@ fn appendIncludeGlob(
     try argv.appendSlice(alloc, &.{ "--glob", resolved });
 }
 
+/// Any explicit `--glob` makes ripgrep whitelist hidden paths. Restore the
+/// documented default (omit hidden unless requested) with a trailing
+/// exclusion glob: ripgrep applies globs last-match-wins, so it must come
+/// after every include glob.
+fn appendHiddenExclusion(
+    alloc: std.mem.Allocator,
+    argv: *std.ArrayList([]const u8),
+    include_hidden: bool,
+    include_ignored: bool,
+) !void {
+    if (include_hidden or include_ignored) return;
+    try argv.appendSlice(alloc, &.{ "--glob", "!**/.*" });
+}
+
 fn appendExcludes(
     alloc: std.mem.Allocator,
     argv: *std.ArrayList([]const u8),
@@ -269,6 +287,12 @@ fn resolveGlobForSearchPath(
     const pattern = stripDotSlash(relative_pattern);
     if (path.len == 0 or std.mem.eql(u8, path, ".")) return pattern;
     if (std.fs.path.isAbsolute(pattern)) return pattern;
+    if (std.mem.eql(u8, path, "..") or std.mem.startsWith(u8, path, "../")) {
+        if (std.mem.indexOfScalar(u8, pattern, '/') != null and !std.mem.startsWith(u8, pattern, "**")) {
+            return std.fmt.allocPrint(alloc, "**/{s}", .{pattern});
+        }
+        return pattern;
+    }
     if (std.mem.indexOfScalar(u8, pattern, '/') == null) return pattern;
 
     if (std.mem.startsWith(u8, pattern, path) and
@@ -417,6 +441,17 @@ test "search globs resolve relative to narrowed path" {
     try std.testing.expectEqualStrings("src/*.zig", try resolveGlobForSearchPath(alloc, "/repo", ".", "./src/*.zig"));
     try std.testing.expectEqualStrings("src/**/*.zig", try resolveGlobForSearchPath(alloc, "/repo", "/repo/src", "**/*.zig"));
     try std.testing.expectEqualStrings("src/**/*.zig", try resolveGlobForSearchPath(alloc, "/repo", "/repo/src", "/repo/src/**/*.zig"));
+
+    try std.testing.expectEqualStrings("**", try resolveGlobForSearchPath(alloc, "/home/lommix/Projects/zig/blitzdenk", "/home/lommix/Projects/vendor", "**"));
+    try std.testing.expectEqualStrings("**/codex/**", try resolveGlobForSearchPath(alloc, "/home/lommix/Projects/zig/blitzdenk", "/home/lommix/Projects/vendor", "codex/**"));
+    try std.testing.expectEqualStrings("**/*.zig", try resolveGlobForSearchPath(alloc, "/home/lommix/Projects/zig/blitzdenk", "/home/lommix/Projects/vendor", "**/*.zig"));
+
+    try std.testing.expectEqualStrings("**/src/**/*.zig", try resolveGlobForSearchPath(alloc, "/home/lommix/Projects/zig/blitzdenk", "/home/lommix/Projects/vendor", "src/**/*.zig"));
+    try std.testing.expectEqualStrings("**/docs/*.md", try resolveGlobForSearchPath(alloc, "/home/lommix/Projects/zig/blitzdenk", "/home/lommix/Projects/vendor", "docs/*.md"));
+    try std.testing.expectEqualStrings("**/*/*.zig", try resolveGlobForSearchPath(alloc, "/home/lommix/Projects/zig/blitzdenk", "/home/lommix/Projects/vendor", "*/*.zig"));
+    try std.testing.expectEqualStrings("**/codex/**", try resolveGlobForSearchPath(alloc, "/repo", "..", "codex/**"));
+    try std.testing.expectEqualStrings("AGENTS.md", try resolveGlobForSearchPath(alloc, "/repo", "..", "AGENTS.md"));
+    try std.testing.expectEqualStrings("**/*.zig", try resolveGlobForSearchPath(alloc, "/repo", "..", "**/*.zig"));
 }
 
 test "include ignored also traverses hidden paths" {
@@ -425,6 +460,24 @@ test "include ignored also traverses hidden paths" {
 
     try appendWalkOptions(std.testing.allocator, &argv, false, true);
     try std.testing.expectEqualSlices([]const u8, &.{ "--hidden", "--no-ignore" }, argv.items);
+}
+
+test "hidden paths are re-excluded after include globs unless requested" {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(std.testing.allocator);
+
+    try appendHiddenExclusion(std.testing.allocator, &argv, false, false);
+    try std.testing.expectEqualSlices([]const u8, &.{ "--glob", "!**/.*" }, argv.items);
+
+    var argv_hidden: std.ArrayList([]const u8) = .empty;
+    defer argv_hidden.deinit(std.testing.allocator);
+    try appendHiddenExclusion(std.testing.allocator, &argv_hidden, true, false);
+    try std.testing.expectEqualSlices([]const u8, &.{}, argv_hidden.items);
+
+    var argv_ignored: std.ArrayList([]const u8) = .empty;
+    defer argv_ignored.deinit(std.testing.allocator);
+    try appendHiddenExclusion(std.testing.allocator, &argv_ignored, false, true);
+    try std.testing.expectEqualSlices([]const u8, &.{}, argv_ignored.items);
 }
 
 test "bare directory excludes include descendants relative to path" {
