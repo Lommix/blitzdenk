@@ -1028,6 +1028,11 @@ pub const App = struct {
                 else => {},
             }
         }
+        std.mem.sort(ChatPart, out.items, {}, struct {
+            fn lessThan(_: void, a: ChatPart, b: ChatPart) bool {
+                return partRank(a) < partRank(b);
+            }
+        }.lessThan);
         if (out.items.len == 0) return null;
         return out.toOwnedSlice(alloc) catch null;
     }
@@ -1287,6 +1292,16 @@ pub const ChatPart = union(enum) {
         diff_lines: []const r.tui.DiffLine,
     };
 };
+
+fn partRank(part: ChatPart) u8 {
+    return switch (part) {
+        .thinking => 0,
+        .message, .plain_text => 1,
+        .tool_call => 2,
+        .diff => 3,
+        .plan => 4,
+    };
+}
 
 fn splitLinesAlloc(text: []const u8, alloc: std.mem.Allocator) ?[]const []const u8 {
     // Count lines first
@@ -2698,6 +2713,27 @@ test "renderableParts keeps streamed final parts together" {
     try std.testing.expectEqualStrings("call_1", rendered[2].tool_call.call_id);
     try std.testing.expectEqualStrings("bash", rendered[2].tool_call.tool_name);
     try std.testing.expectEqual(agent_id, rendered[2].tool_call.agent_id);
+}
+
+test "renderableParts sorts parts thinking, message, tool calls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const parts = [_]prv.adapter.ContentPart{
+        .{ .tool_call = .{ .id = "call_1", .name = "bash", .arguments = "{}" } },
+        .{ .text = " answer " },
+        .{ .thinking = .{ .text = " think " } },
+        .{ .tool_call = .{ .id = "call_2", .name = "grep", .arguments = "{}" } },
+    };
+
+    const agent_id: prv.Swarm.AgentId = .{ .index = 3, .generation = 7 };
+    const rendered = App.renderableParts(alloc, agent_id, &parts, false) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 4), rendered.len);
+    try std.testing.expectEqualStrings("think", rendered[0].thinking);
+    try std.testing.expectEqualStrings("answer", rendered[1].message);
+    try std.testing.expectEqualStrings("call_1", rendered[2].tool_call.call_id);
+    try std.testing.expectEqualStrings("call_2", rendered[3].tool_call.call_id);
 }
 
 test "renderableParts preserves provider errors as plain text" {
