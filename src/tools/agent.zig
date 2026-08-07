@@ -163,43 +163,6 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     };
 }
 
-pub const SendMessageToAgent = prv.tool.Tool{
-    .def = .{
-        .name = "send_message_to_agent",
-        .description = "send a message to running agent",
-        .parameters_schema =
-        \\{"type":"object","properties":{
-        \\  "agent_id":{"type":"number","description":"the agent ID"},
-        \\  "message":{"type":"string","description":"the message to the agent"}
-        \\},"required":["agent_id", "message"]}
-        ,
-    },
-    .func = &run_send_message_to_agent,
-};
-
-fn run_send_message_to_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
-    const Args = struct {
-        agent_id: u32,
-        message: []const u8,
-    };
-
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
-        .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid arguments");
-
-    r.setToolStatusPrint(ctx, call, "sending message to agent {d}", .{args.agent_id});
-    const agent_id = prv.Swarm.AgentId.unpack(args.agent_id);
-
-    const app = ctx.swarm.context.cast(@import("../app.zig").App);
-
-    app.cmd_queue.append(ctx.io, .{ .queue_agent_message = .{
-        .agent_id = agent_id,
-        .parts = &.{.{ .text = args.message }},
-    } }) catch return r.errResult(call, "failed to queue message");
-
-    return r.okResult(call, "message sent");
-}
-
 pub const AwaitAgent = prv.tool.Tool{
     .def = .{
         .name = "await_agent",

@@ -86,7 +86,6 @@
 ---@field ASK string
 ---@field ENTER_SSH string
 ---@field EXIT_SSH string
----@field SEND_MESSAGE_TO_AGENT string
 ---@field AWAIT_AGENT string
 ---@field CANCEL_AGENT string
 ---@field GLOB string

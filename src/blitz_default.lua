@@ -118,7 +118,6 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.AGENT,
 	blitz.tools.AWAIT_AGENT,
 	blitz.tools.CANCEL_AGENT,
-	blitz.tools.SEND_MESSAGE_TO_AGENT,
 	blitz.tools.GLOB,
 	blitz.tools.GREP,
 	blitz.tools.LOADSKILL,

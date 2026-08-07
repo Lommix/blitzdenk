@@ -998,7 +998,6 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "ASK", .ty = LuaType.string, .value = .{ .string = tl.ask.AskTool.def.name } },
             .{ .name = "ENTER_SSH", .ty = LuaType.string, .value = .{ .string = tl.ssh.EnterSshMode.def.name } },
             .{ .name = "EXIT_SSH", .ty = LuaType.string, .value = .{ .string = tl.ssh.ExitSshMode.def.name } },
-            .{ .name = "SEND_MESSAGE_TO_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.SendMessageToAgent.def.name } },
             .{ .name = "AWAIT_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AwaitAgent.def.name } },
             .{ .name = "CANCEL_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.CancelAgent.def.name } },
             .{ .name = "GLOB", .ty = LuaType.string, .value = .{ .string = tl.search.GlobTool.def.name } },
