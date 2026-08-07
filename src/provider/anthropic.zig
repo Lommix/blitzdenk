@@ -712,9 +712,6 @@ pub const StreamState = struct {
                 .tool_use => {
                     const raw_args = if (b.tool_input.items.len == 0) "{}" else b.tool_input.items;
                     if (!isValidJsonObject(self.arena, raw_args)) {
-                        std.log.warn("tool call id={s} name={s} has invalid arguments (not executed): {s}", .{
-                            b.tool_id, b.tool_name, raw_args,
-                        });
                         try dropped_calls.append(arena, .{ .id = b.tool_id, .name = b.tool_name });
                         continue;
                     }

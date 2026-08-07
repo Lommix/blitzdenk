@@ -434,9 +434,6 @@ pub const StreamState = struct {
         var dropped_calls: std.ArrayList(adapter.DroppedToolCall) = .empty;
         for (self.calls.items) |call| {
             if (!isValidJsonObject(arena, call.arguments)) {
-                log.warn("tool call id={s} name={s} has invalid arguments (not executed): {s}", .{
-                    call.id, call.name, call.arguments,
-                });
                 try dropped_calls.append(arena, .{ .id = call.id, .name = call.name });
                 continue;
             }
