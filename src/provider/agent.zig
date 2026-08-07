@@ -585,11 +585,19 @@ pub const Agent = struct {
                     self.flags.is_writing = false;
                     self.flags.is_calling = false;
                 },
-                .tool_call_start, .tool_input_delta => {
+                .tool_call_start => |call| {
                     self.flags.is_thinking = false;
                     self.flags.is_writing = false;
                     self.flags.is_calling = true;
-                    // Nothing to render incrementally — final parts come from finalize.
+                    self.approx_output_bytes += call.name.len + call.arguments.len;
+                    self.in_flight_usage.output_tokens = self.approx_output_bytes / 3;
+                },
+                .tool_input_delta => |d| {
+                    self.flags.is_thinking = false;
+                    self.flags.is_writing = false;
+                    self.flags.is_calling = true;
+                    self.approx_output_bytes += d.json_fragment.len;
+                    self.in_flight_usage.output_tokens = self.approx_output_bytes / 3;
                 },
                 .usage => |u| {
                     self.in_flight_usage = u;

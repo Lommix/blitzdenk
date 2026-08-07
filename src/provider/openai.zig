@@ -501,6 +501,7 @@ const ToolAcc = struct {
     id: []u8 = &.{},
     name: []u8 = &.{},
     args: std.ArrayList(u8) = .empty,
+    emitted: usize = 0,
     started: bool = false,
 };
 
@@ -779,12 +780,13 @@ pub const StreamState = struct {
                 if (args.len > 0) try a.appendSlice(arena, args);
                 break :blk a;
             },
+            .emitted = args.len,
             .started = true,
         });
         try self.pending_tool_deltas.append(arena, .{ .tool_call_start = .{
             .id = id,
             .name = name,
-            .arguments = "",
+            .arguments = args,
         } });
     }
 
@@ -841,8 +843,9 @@ pub const StreamState = struct {
             try self.pending_tool_deltas.append(arena, .{ .tool_call_start = .{
                 .id = slot.id,
                 .name = slot.name,
-                .arguments = "",
+                .arguments = slot.args.items,
             } });
+            slot.emitted = slot.args.items.len;
             return;
         }
 
@@ -851,8 +854,9 @@ pub const StreamState = struct {
                 if (args.len > 0) {
                     try self.pending_tool_deltas.append(arena, .{ .tool_input_delta = .{
                         .call_id = slot.id,
-                        .json_fragment = try arena.dupe(u8, args),
+                        .json_fragment = try arena.dupe(u8, slot.args.items[slot.emitted..]),
                     } });
+                    slot.emitted = slot.args.items.len;
                     return;
                 }
             }

@@ -402,7 +402,7 @@ pub const StreamState = struct {
             if (std.mem.eql(u8, stringField(item, "type") orelse "", "function_call")) return .{ .tool_call_start = .{
                 .id = try arena.dupe(u8, stringField(item, "call_id") orelse stringField(item, "id") orelse ""),
                 .name = try arena.dupe(u8, stringField(item, "name") orelse ""),
-                .arguments = "",
+                .arguments = try arena.dupe(u8, stringField(item, "arguments") orelse ""),
             } };
         }
         if (std.mem.eql(u8, kind, "response.output_item.done") and event == .object) {

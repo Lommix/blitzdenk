@@ -589,7 +589,7 @@ pub const StreamState = struct {
                 .tool_name = name,
                 .tool_input = tool_input,
             };
-            return .{ .tool_call_start = .{ .id = id, .name = name, .arguments = "" } };
+            return .{ .tool_call_start = .{ .id = id, .name = name, .arguments = tool_input.items } };
         }
         return null;
     }

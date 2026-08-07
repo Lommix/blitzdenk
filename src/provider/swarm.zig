@@ -440,12 +440,13 @@ pub fn tickAll(self: *Self) bool {
 }
 
 fn updateTokenRate(slot: *AgentSlot, dt: f32) void {
-    if (slot.agent.state != .streaming_response) {
+    if (slot.agent.stream == null) {
         slot.tokens_per_sec = 0;
         slot.rate_window_elapsed = 0;
         return;
     }
     slot.rate_window_elapsed += dt;
+    if (slot.rate_window_elapsed <= 0) return;
     slot.tokens_per_sec = @as(f32, @floatFromInt(slot.agent.in_flight_usage.output_tokens)) / slot.rate_window_elapsed;
 }
 
