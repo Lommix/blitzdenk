@@ -32,7 +32,7 @@ pub const PatchTool = prv.tool.Tool{
         \\- `-` for removed lines
         \\- `+` for added lines
         \\
-        \\The `@@` line is an anchor, not a line count: the text after `@@` must appear verbatim as a line in the file (usually the class, function, or statement the hunk belongs to). The hunk is applied after the first occurrence of that line, searching forward from the end of the previous hunk, so hunks are applied strictly in file order. Standard unified-diff hunk headers like `@@ -1,3 +1,3 @@` are accepted and ignored; the context lines locate the hunk instead. A line reading `*** End of File` immediately after a hunk pins that hunk to the end of the file (useful for appending).
+        \\The `@@` line is an anchor, not a line count: the text after `@@` must appear verbatim as a line in the file (usually the class, function, or statement the hunk belongs to). The hunk is applied after the first occurrence of that line, searching forward from the end of the previous hunk, so hunks are applied strictly in file order. A line reading `*** End of File` immediately after a hunk pins that hunk to the end of the file (useful for appending).
         \\
         \\For instructions on [context_before] and [context_after]:
         \\- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change’s [context_after] lines in the second change’s [context_before] lines.
@@ -671,7 +671,7 @@ fn parseHunk(alloc: std.mem.Allocator, bytes: []const u8, allow_missing_context:
     if (hunkBoundaryStartsWith(bytes, "@@")) {
         const header_line = try markerPrefixLine("@@", alloc, bytes);
         const h = trimMarkerLine(header_line.value);
-        if (h.len > 0 and !isUnifiedDiffRangeHeader(h)) {
+        if (h.len > 0) {
             header = h;
         }
         cursor = header_line.rest;
@@ -700,28 +700,6 @@ fn parseHunk(alloc: std.mem.Allocator, bytes: []const u8, allow_missing_context:
 
     const owned = try lines.toOwnedSlice(alloc);
     return ok(Hunk, .{ .header = header, .lines = owned, .end_of_file = end_of_file }, cursor);
-}
-
-fn isUnifiedDiffRangeHeader(h: []const u8) bool {
-    var rest = trimLineRight(h);
-    if (!std.mem.endsWith(u8, rest, "@@")) return false;
-    rest = trimLineRight(rest[0 .. rest.len - 2]);
-    const space = std.mem.indexOfScalar(u8, rest, ' ') orelse return false;
-    if (space == 0 or space + 1 >= rest.len) return false;
-    return isRangeSpec(rest[0..space]) and isRangeSpec(rest[space + 1 ..]);
-}
-
-fn isRangeSpec(s: []const u8) bool {
-    if (s.len < 2) return false;
-    if (s[0] != '-' and s[0] != '+') return false;
-    var i: usize = 1;
-    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
-    if (i == 1) return false;
-    if (i < s.len and s[i] == ',') {
-        i += 1;
-        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
-    }
-    return i == s.len;
 }
 
 fn parseUpdateFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(PatchCommand) {
@@ -1899,7 +1877,7 @@ test "parseUpdateFile allows move-only rename" {
     try testing.expectEqual(@as(usize, 0), upd.hunks.len);
 }
 
-test "parseHunk ignores unified diff range header" {
+test "parseHunk keeps unified diff range header as literal anchor" {
     const alloc = testing.allocator;
     const input =
         "@@ -1,3 +1,3 @@\n" ++
@@ -1909,11 +1887,11 @@ test "parseHunk ignores unified diff range header" {
         " gamma\n";
     const res = try parseHunk(alloc, input, false);
     defer alloc.free(res.value.lines);
-    try testing.expectEqual(@as(?[]const u8, null), res.value.header);
+    try testing.expectEqualStrings("-1,3 +1,3 @@", res.value.header.?);
     try testing.expectEqual(@as(usize, 4), res.value.lines.len);
 }
 
-test "parseHunk ignores unified diff single-line range header" {
+test "parseHunk keeps unified diff single-line range header as literal anchor" {
     const alloc = testing.allocator;
     const input =
         "@@ -1 +1 @@\n" ++
@@ -1921,7 +1899,7 @@ test "parseHunk ignores unified diff single-line range header" {
         "+new\n";
     const res = try parseHunk(alloc, input, false);
     defer alloc.free(res.value.lines);
-    try testing.expectEqual(@as(?[]const u8, null), res.value.header);
+    try testing.expectEqualStrings("-1 +1 @@", res.value.header.?);
 }
 
 test "parseHunk keeps code-anchor header" {
@@ -2004,4 +1982,20 @@ test "applyHunks unified diff header still applies via context" {
     defer alloc.free(out);
 
     try testing.expectEqualStrings("alpha\nBETA\ngamma\n", out);
+}
+
+test "applyHunks unified diff range header is treated as literal context and fails" {
+    const alloc = testing.allocator;
+    const src = "alpha\nbeta\ngamma\n";
+
+    const hunk_lines = [_]HunkLine{
+        .{ .delete = "beta" },
+        .{ .add = "BETA" },
+    };
+    const hunks = [_]Hunk{.{ .header = "-1,3 +1,3 @@", .lines = &hunk_lines, .end_of_file = false }};
+
+    var diag: ApplyDiagnostics = .{};
+    const err = applyHunks(alloc, src, &hunks, &diag);
+    try testing.expectError(ApplyError.HunkAnchorNotFound, err);
+    try testing.expectEqualStrings("-1,3 +1,3 @@", diag.expected_anchor);
 }
