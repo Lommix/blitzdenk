@@ -1010,10 +1010,8 @@ pub const StreamState = struct {
             } });
         }
 
-        if (dropped_calls.items.len > 0) {
-            const note = try adapter.droppedToolCallNote(self.arena, dropped_calls.items);
-            try text_buf.append(self.arena, '\n');
-            try text_buf.appendSlice(self.arena, note);
+        for (dropped_calls.items) |call| {
+            log.warn("dropped tool call {s} ({s}): arguments are not a valid JSON object", .{ call.name, call.id });
         }
 
         try parts.append(arena, .{ .text = try arena.dupe(u8, text_buf.items) });
@@ -1248,16 +1246,11 @@ test "openai stream drops invalid-args tool call and reports it" {
     const result = try stream.finalize(arena);
     try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
     var found = false;
-    var note_found = false;
     for (result.message.parts) |part| switch (part) {
         .tool_call => found = true,
-        .text => |t| {
-            if (std.mem.indexOf(u8, t, "had invalid arguments and was not executed") != null) note_found = true;
-        },
         else => {},
     };
     try testing.expect(!found);
-    try testing.expect(note_found);
 }
 
 test "openai stream keeps valid calls and drops invalid calls in a mixed stream" {
@@ -1278,14 +1271,10 @@ test "openai stream keeps valid calls and drops invalid calls in a mixed stream"
     try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
     var calls: [1]adapter.ToolCall = undefined;
     var call_count: usize = 0;
-    var note_found = false;
     for (result.message.parts) |part| switch (part) {
         .tool_call => |call| {
             calls[call_count] = call;
             call_count += 1;
-        },
-        .text => |t| {
-            if (std.mem.indexOf(u8, t, "had invalid arguments and was not executed") != null) note_found = true;
         },
         else => {},
     };
@@ -1293,7 +1282,6 @@ test "openai stream keeps valid calls and drops invalid calls in a mixed stream"
     try testing.expectEqualStrings("call_valid", calls[0].id);
     try testing.expectEqualStrings("read", calls[0].name);
     try testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", calls[0].arguments);
-    try testing.expect(note_found);
 }
 
 test "openai serialize skips invalid-args tool_call and its tool_result together" {

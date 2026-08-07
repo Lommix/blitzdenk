@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const adapter = @import("adapter.zig");
 const http = @import("http.zig");
+const log = std.log.scoped(.anthropic_stream);
 
 pub const Config = adapter.Config;
 
@@ -724,9 +725,8 @@ pub const StreamState = struct {
             }
         }
 
-        if (dropped_calls.items.len > 0) {
-            const note = try adapter.droppedToolCallNote(arena, dropped_calls.items);
-            try parts.append(arena, .{ .text = note });
+        for (dropped_calls.items) |call| {
+            log.warn("dropped tool call {s} ({s}): arguments are not a valid JSON object", .{ call.name, call.id });
         }
 
         const owned = try parts.toOwnedSlice(arena);
@@ -843,16 +843,11 @@ test "anthropic stream drops invalid-args tool_use and reports it" {
     const result = try stream.finalize(arena);
     try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
     var found = false;
-    var note_found = false;
     for (result.message.parts) |part| switch (part) {
         .tool_call => found = true,
-        .text => |t| {
-            if (std.mem.indexOf(u8, t, "had invalid arguments and was not executed") != null) note_found = true;
-        },
         else => {},
     };
     try testing.expect(!found);
-    try testing.expect(note_found);
 }
 
 test "anthropic serialize skips invalid-args tool_use and its tool_result together" {
