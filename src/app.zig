@@ -1982,7 +1982,8 @@ fn buildToolGroupParagraph(
                     if (child.flags.is_thinking) try line.pushSpan(arena, .{ .content = "  thinking", .style = .{ .fg = app.theme.muted } });
                     if (child.flags.is_calling) try line.pushSpan(arena, .{ .content = "  calling", .style = .{ .fg = app.theme.muted } });
                     if (child.flags.is_writing) try line.pushSpan(arena, .{ .content = "  writing", .style = .{ .fg = app.theme.muted } });
-                    if (child.flags.is_thinking or child.flags.is_calling or child.flags.is_writing) {
+                    if (child.flags.is_waiting) try line.pushSpan(arena, .{ .content = "  retrying", .style = .{ .fg = app.theme.muted } });
+                    if (child.flags.is_thinking or child.flags.is_calling or child.flags.is_writing or child.flags.is_waiting) {
                         try line.pushSpan(arena, .{ .content = " " });
                         try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
                     }
@@ -2424,6 +2425,8 @@ fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: 
             "writing"
         else if (slot.agent.flags.is_calling)
             "calling"
+        else if (slot.agent.flags.is_waiting)
+            "retrying"
         else
             "";
 

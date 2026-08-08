@@ -15,6 +15,7 @@ pub const RequestPool = struct {
         headers_ready: std.atomic.Value(bool) = .init(false),
         generation: u32 = 0,
         status: std.http.Status = .ok,
+        retry_after_secs: ?u32 = null,
         duration_ms: u64 = 0,
         deadline_ms: ?i64 = null,
         err: ?anyerror = null,
@@ -66,6 +67,7 @@ pub const RequestPool = struct {
         slot.done.store(false, .release);
         slot.headers_ready.store(false, .release);
         slot.err = null;
+        slot.retry_after_secs = null;
         slot.deadline_ms = if (timeout_ms) |t| nowMs(self.io) + @as(i64, @intCast(t)) else null;
         slot.body = .init(&slot.body_buf);
 
@@ -172,6 +174,15 @@ pub const RequestPool = struct {
         var response = try req.receiveHead(&redirect_buf);
 
         slot.status = response.head.status;
+        if (response.head.status == .too_many_requests) {
+            var it = response.head.iterateHeaders();
+            while (it.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "retry-after")) {
+                    slot.retry_after_secs = std.fmt.parseUnsigned(u32, std.mem.trim(u8, header.value, " \t"), 10) catch null;
+                    break;
+                }
+            }
+        }
         slot.headers_ready.store(true, .release);
         log.debug("headers received status={d}", .{@intFromEnum(response.head.status)});
 
@@ -236,6 +247,12 @@ pub const RequestPool = struct {
         if (slot.err) |e| return e;
         if (!slot.headers_ready.load(.acquire)) return error.NotReady;
         return slot.status;
+    }
+
+    pub fn retryAfter(self: *RequestPool, handle: RequestHandle) ?u32 {
+        const slot = &self.slots[handle.index];
+        if (slot.generation != handle.generation) return null;
+        return slot.retry_after_secs;
     }
 
     /// Pop the next available bytes from the body queue. Returns null if

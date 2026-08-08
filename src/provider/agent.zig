@@ -18,6 +18,7 @@ pub const State = enum {
     executing_tools,
     complete,
     retry_timeout,
+    rate_limit_wait,
     awaiting_pool_slot,
     failed,
 };
@@ -145,12 +146,15 @@ pub const AgentFlags = packed struct {
     is_thinking: bool = false,
     is_writing: bool = false,
     is_calling: bool = false,
+    is_waiting: bool = false,
 };
 
 // Fat and juicy
 pub const Agent = struct {
     pub const MAX_TOOL_CALLS = tc.MAX_TOOL_CALLS_PER_REQ;
     pub const TIMEOUT_DURATION = 3;
+    pub const RATE_LIMIT_WAIT_SECONDS: f32 = 10;
+    pub const MAX_RATE_LIMIT_WAITS: u32 = 6;
     pub const MAX_RETRIES = 3;
     pub const REQUEST_TIMEOUT_MS: u32 = 60_000;
     pub const MAX_DELTAS_PER_TICK: u32 = 32;
@@ -197,6 +201,9 @@ pub const Agent = struct {
     tool_call_runs: std.StringHashMapUnmanaged(*tc.RunningTool) = .{},
     /// Settled tool results awaiting commit, keyed by call.id.
     tool_call_done: std.StringHashMapUnmanaged(apt.ToolResult) = .{},
+    rate_limit_count: u32 = 0,
+    rate_limit_wait_secs: f32 = RATE_LIMIT_WAIT_SECONDS,
+    rate_limit_retry_after: ?u32 = null,
     max_allowed_tool_calls: u32 = 64,
     tool_call_count: u32 = 0,
     flags: AgentFlags = .{},
@@ -236,6 +243,9 @@ pub const Agent = struct {
         self.bg_agents = .{};
         self.todo_list = .{};
         self.retry_count = 0;
+        self.rate_limit_count = 0;
+        self.rate_limit_wait_secs = RATE_LIMIT_WAIT_SECONDS;
+        self.rate_limit_retry_after = null;
         self.timeout = 0;
         self.last_input_context_size = 0;
         self.compaction = .{};
@@ -276,15 +286,22 @@ pub const Agent = struct {
         self.flags.is_thinking = false;
         self.flags.is_writing = false;
         self.flags.is_calling = false;
+        self.flags.is_waiting = false;
         self.state = .sending_request;
         self.iteration = 0;
         self.retry_count = 0;
+        self.rate_limit_count = 0;
+        self.rate_limit_wait_secs = RATE_LIMIT_WAIT_SECONDS;
+        self.rate_limit_retry_after = null;
         self.last_error = null;
     }
 
     pub fn retry(self: *Agent) void {
         self.state = .sending_request;
         self.retry_count = 0;
+        self.rate_limit_count = 0;
+        self.rate_limit_wait_secs = RATE_LIMIT_WAIT_SECONDS;
+        self.rate_limit_retry_after = null;
         self.last_error = null;
     }
 
@@ -307,7 +324,15 @@ pub const Agent = struct {
             .idle => return .idle,
             .compacting => {
                 const continue_after = self.compaction.continue_after;
-                const done = compact.poll(self) catch |err| return self.fail(err);
+                const done = compact.poll(self) catch |err| switch (err) {
+                    error.RateLimited => {
+                        self.compaction.continue_after = continue_after;
+                        if (!continue_after) self.compaction.requested = true;
+                        self.enterRateLimitWait();
+                        return .pending;
+                    },
+                    else => return self.fail(err),
+                };
                 if (done) {
                     if (continue_after) {
                         self.state = .sending_request;
@@ -332,6 +357,17 @@ pub const Agent = struct {
                     self.state = .sending_request;
                 }
 
+                return .pending;
+            },
+            .rate_limit_wait => {
+                if (self.rate_limit_count >= MAX_RATE_LIMIT_WAITS) return self.fail(error.RateLimitReached);
+                self.timeout += dt;
+                if (self.timeout >= self.rate_limit_wait_secs) {
+                    self.timeout = 0;
+                    self.rate_limit_count += 1;
+                    self.flags.is_waiting = false;
+                    self.state = .sending_request;
+                }
                 return .pending;
             },
             .sending_request => {
@@ -396,6 +432,13 @@ pub const Agent = struct {
                     }
                     self.request_start_ms = null;
                     if (err == error.ProviderRequestFailed) return self.fail(err);
+                    if (err == error.RateLimited) {
+                        self.flags.is_thinking = false;
+                        self.flags.is_writing = false;
+                        self.flags.is_calling = false;
+                        self.enterRateLimitWait();
+                        return .pending;
+                    }
                     if (self.retry_count < MAX_RETRIES) {
                         self.retry_count += 1;
                         self.last_error = err;
@@ -415,6 +458,13 @@ pub const Agent = struct {
                     }
                     self.dropStream();
                     if (err == error.ProviderRequestFailed) return self.fail(err);
+                    if (err == error.RateLimited) {
+                        self.flags.is_thinking = false;
+                        self.flags.is_writing = false;
+                        self.flags.is_calling = false;
+                        self.enterRateLimitWait();
+                        return .pending;
+                    }
                     if (self.retry_count < MAX_RETRIES) {
                         self.flags.is_thinking = false;
                         self.flags.is_writing = false;
@@ -428,6 +478,7 @@ pub const Agent = struct {
                     return self.fail(err);
                 };
                 self.retry_count = 0;
+                self.rate_limit_count = 0;
                 return outcome;
             },
             .executing_tools => {
@@ -470,9 +521,25 @@ pub const Agent = struct {
         self.flags.is_thinking = false;
         self.flags.is_writing = false;
         self.flags.is_calling = false;
+        self.flags.is_waiting = false;
         self.last_error = err;
         self.state = .failed;
         return .failed;
+    }
+
+    fn enterRateLimitWait(self: *Agent) void {
+        var rnd: [4]u8 = undefined;
+        self.pool.io.random(&rnd);
+        const jitter: f32 = @floatFromInt(@as(u32, rnd[0]) % 3);
+        const base: f32 = if (self.rate_limit_retry_after) |secs|
+            @floatFromInt(@max(@min(secs, 60), 1))
+        else
+            RATE_LIMIT_WAIT_SECONDS;
+        self.rate_limit_wait_secs = base + jitter;
+        self.rate_limit_retry_after = null;
+        self.flags.is_waiting = true;
+        self.state = .rate_limit_wait;
+        self.timeout = 0;
     }
 
     pub fn cancel(self: *Agent) void {
@@ -505,6 +572,7 @@ pub const Agent = struct {
         self.flags.is_thinking = false;
         self.flags.is_writing = false;
         self.flags.is_calling = false;
+        self.flags.is_waiting = false;
         self.state = .complete;
     }
 
@@ -524,6 +592,13 @@ pub const Agent = struct {
             const body = self.pool.collectBody(handle, alloc) catch &.{};
             const snippet = body[0..@min(body.len, 2048)];
             log.warn("http {d} from provider: {s}", .{ status_code, snippet });
+            if (status_code == 429) {
+                self.rate_limit_retry_after = self.pool.retryAfter(handle);
+                self.pool.cancel(handle);
+                self.pending_handle = null;
+                self.request_start_ms = null;
+                return error.RateLimited;
+            }
             self.reportProviderError(status_code, body);
             self.pool.cancel(handle);
             self.pending_handle = null;
@@ -608,6 +683,7 @@ pub const Agent = struct {
                     self.last_input_context_size = @intCast(@min(total, std.math.maxInt(u32)));
                 },
                 .provider_error => |body| {
+                    if (isRateLimitBody(body)) return error.RateLimited;
                     self.reportProviderError(null, body);
                     return error.ProviderRequestFailed;
                 },
@@ -720,6 +796,11 @@ pub const Agent = struct {
             }
         }
         return parts[0..kept];
+    }
+
+    fn isRateLimitBody(body: []const u8) bool {
+        return std.mem.indexOf(u8, body, "rate_limit") != null or
+            std.mem.indexOf(u8, body, "overloaded") != null;
     }
 
     fn popQueuedParts(self: *Agent, ctx: Swarm.SwarmContextV) ?[]const apt.ContentPart {

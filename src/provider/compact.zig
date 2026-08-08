@@ -114,6 +114,10 @@ pub fn poll(self: *Agent) !bool {
     if (status_code < 200 or status_code >= 300) {
         const snippet = body[0..@min(body.len, 2048)];
         log.warn("compact http {d} from provider: {s}", .{ status_code, snippet });
+        if (status_code == 429) {
+            self.rate_limit_retry_after = self.pool.retryAfter(handle);
+            return error.RateLimited;
+        }
         return error.CompactionRequestFailed;
     }
 
