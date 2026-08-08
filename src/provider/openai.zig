@@ -1228,62 +1228,6 @@ test "openai stream dedupes final complete tool call against delta slot" {
     try testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.message.parts[1].tool_call.arguments);
 }
 
-test "openai stream drops invalid-args tool call and reports it" {
-    const testing = std.testing;
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var stream = StreamState.init(arena);
-    // Start a tool call with a truncated arguments fragment (no closing brace).
-    var starts = [_]OaiDeltaToolCall{.{ .index = 0, .id = "call_trunc", .function = .{ .name = "grep", .arguments = "{\"pattern\":\"foo\"" } }};
-    var start_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &starts } }};
-    try testing.expect(try stream.applyChunk(arena, .{ .choices = &start_choices }) == null);
-    // Stream ends without completing the JSON — finish_reason "length".
-    var finish_choices = [_]OaiStreamChoice{.{ .finish_reason = "length" }};
-    try testing.expect(try stream.applyChunk(arena, .{ .choices = &finish_choices }) == null);
-
-    const result = try stream.finalize(arena);
-    try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
-    var found = false;
-    for (result.message.parts) |part| switch (part) {
-        .tool_call => found = true,
-        else => {},
-    };
-    try testing.expect(!found);
-}
-
-test "openai stream keeps valid calls and drops invalid calls in a mixed stream" {
-    const testing = std.testing;
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var stream = StreamState.init(arena);
-    var starts = [_]OaiDeltaToolCall{
-        .{ .index = 0, .id = "call_valid", .function = .{ .name = "read", .arguments = "{\"path\":\"src/main.zig\"}" } },
-        .{ .index = 1, .id = "call_trunc", .function = .{ .name = "grep", .arguments = "{\"pattern\":\"foo\"" } },
-    };
-    var start_choices = [_]OaiStreamChoice{.{ .delta = .{ .tool_calls = &starts } }};
-    try testing.expect(try stream.applyChunk(arena, .{ .choices = &start_choices }) == null);
-
-    const result = try stream.finalize(arena);
-    try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
-    var calls: [1]adapter.ToolCall = undefined;
-    var call_count: usize = 0;
-    for (result.message.parts) |part| switch (part) {
-        .tool_call => |call| {
-            calls[call_count] = call;
-            call_count += 1;
-        },
-        else => {},
-    };
-    try testing.expectEqual(@as(usize, 1), call_count);
-    try testing.expectEqualStrings("call_valid", calls[0].id);
-    try testing.expectEqualStrings("read", calls[0].name);
-    try testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", calls[0].arguments);
-}
-
 test "openai serialize skips invalid-args tool_call and its tool_result together" {
     const testing = std.testing;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);

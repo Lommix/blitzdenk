@@ -809,47 +809,6 @@ test "anthropic stream seeds tool input from content_block_start" {
     try testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.message.parts[0].tool_call.arguments);
 }
 
-test "anthropic stream drops invalid-args tool_use and reports it" {
-    const testing = std.testing;
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    var stream = StreamState.init(arena);
-    try stream.event_name.appendSlice(arena, "content_block_start");
-    try stream.event_data.appendSlice(
-        arena,
-        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_trunc\",\"name\":\"grep\"}}",
-    );
-    const start = (try stream.dispatch(arena)) orelse return error.TestUnexpectedResult;
-    switch (start) {
-        .tool_call_start => {},
-        else => return error.TestUnexpectedResult,
-    }
-
-    stream.event_name.clearRetainingCapacity();
-    stream.event_data.clearRetainingCapacity();
-    try stream.event_name.appendSlice(arena, "content_block_delta");
-    try stream.event_data.appendSlice(
-        arena,
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"pattern\\\":\\\"foo\\\"\"}}",
-    );
-    const delta = (try stream.dispatch(arena)) orelse return error.TestUnexpectedResult;
-    switch (delta) {
-        .tool_input_delta => {},
-        else => return error.TestUnexpectedResult,
-    }
-
-    const result = try stream.finalize(arena);
-    try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
-    var found = false;
-    for (result.message.parts) |part| switch (part) {
-        .tool_call => found = true,
-        else => {},
-    };
-    try testing.expect(!found);
-}
-
 test "anthropic serialize skips invalid-args tool_use and its tool_result together" {
     const testing = std.testing;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);

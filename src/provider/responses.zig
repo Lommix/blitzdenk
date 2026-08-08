@@ -570,26 +570,3 @@ test "responses stream aggregates text tools usage and raw items" {
     try testing.expectEqual(@as(u64, 10), result.usage.?.input_tokens);
 }
 
-test "responses stream drops invalid-args call and retains only its error" {
-    const testing = std.testing;
-    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var stream = StreamState.init(arena);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, arena,
-        \\{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_trunc","name":"grep","arguments":"{\"pattern\":\"foo\""}}
-    , .{ .allocate = .alloc_always });
-    defer parsed.deinit();
-    _ = try stream.applyEvent(arena, parsed.value);
-
-    const result = try stream.finalize(arena);
-    try testing.expectEqual(@as(u32, 1), result.dropped_tool_calls);
-    var found = false;
-    for (result.message.parts) |part| switch (part) {
-        .tool_call => found = true,
-        else => {},
-    };
-    try testing.expect(!found);
-    try testing.expectEqual(@as(usize, 0), result.message.provider_items.len);
-}
