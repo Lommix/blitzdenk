@@ -403,7 +403,7 @@ test "handled spawn configuration failure keeps processing queued commands" {
             fn call(_: *anyopaque, _: *r.prv.Swarm.PermissionReq) void {}
         }).call,
         .build_config = (struct {
-            fn call(_: *anyopaque, _: u8) anyerror!r.prv.adapter.Config {
+            fn call(_: *anyopaque, _: u8) anyerror!r.prv.Swarm.BuiltConfig {
                 return error.UnexpectedConfigBuild;
             }
         }).call,

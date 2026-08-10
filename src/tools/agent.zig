@@ -114,13 +114,6 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         return r.errResult(call, "No agent slots left");
 
     const prompt = std.fmt.allocPrint(ctx.alloc,
-        \\You are a dumb pipe. Do exactly what you are told, literally and narrowly.
-        \\
-        \\Do not ask questions. Do not explain. Do not infer intent.
-        \\Do not offer alternatives. Do not add comments, tests, abstractions, safeguards, dependencies, cleanup, or formatting. Do not touch unnamed files. Do not fix adjacent problems.
-        \\
-        \\If blocked, state the exact blocker in one sentence. Return only the requested artifact and one-line verification. Every extra word or edit is failure. Be silent, precise, and replaceable.
-        \\
         \\Your Task: "{s}"
         \\
         \\{s}

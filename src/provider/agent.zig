@@ -171,6 +171,7 @@ pub const Agent = struct {
     tools: std.ArrayList(tc.Tool) = .empty,
     mode_idx: u8 = 0,
     type_idx: u8 = 0,
+    name: []const u8 = "",
     state: State = .idle,
     pending_handle: ?http.RequestPool.RequestHandle = null,
     request_start_ms: ?i64 = null,
@@ -272,9 +273,21 @@ pub const Agent = struct {
     }
 
     pub fn deinit(self: *Agent) void {
+        self.writeReport();
         self.dropStream();
         self.stream_arena.deinit();
         self.arena.deinit();
+    }
+
+    pub fn writeReport(self: *const Agent) void {
+        const swarm = self.swarm orelse return;
+        if (!swarm.report_enabled) return;
+        const id = self.swarm_id orelse return;
+        if (self.name.len == 0) return;
+        if (self.chat.messages.items.len == 0) return;
+        r.report.writeReleasedReport(self.pool.io, self.gpa, self.name, self.config.model, id.index, &self.chat) catch |err| {
+            std.log.scoped(.report).err("failed to write report: {any}", .{err});
+        };
     }
 
     pub fn runWithMsg(self: *Agent, parts: []const apt.ContentPart) void {

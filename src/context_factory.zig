@@ -336,6 +336,10 @@ pub fn getMode(self: *const Self, mode: Mode) ModeDef {
     return self.modes.get(mode) orelse .{ .name = "UNKNOWN", .prompt = "", .sparse = "" };
 }
 
+pub fn agentName(self: *const Self, agent_type: AgentType) []const u8 {
+    return if (self.getAgent(agent_type)) |def| def.name else "UNKNOWN";
+}
+
 fn getAgent(self: *const Self, agent_type: AgentType) ?*const AgentDef {
     return if (self.agents.getPtrConst(agent_type).*) |*def| def else null;
 }

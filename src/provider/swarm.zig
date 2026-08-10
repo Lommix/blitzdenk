@@ -38,6 +38,11 @@ pub const PermissionState = union(enum) {
     message: []const u8,
 };
 
+pub const BuiltConfig = struct {
+    config: r.adapter.Config,
+    name: []const u8,
+};
+
 ///! the swarm vtable and hooks
 pub const SwarmContextV = struct {
     ptr: *anyopaque,
@@ -45,7 +50,7 @@ pub const SwarmContextV = struct {
     //async
     broadcast: *const fn (*anyopaque, BroadcastEntry) void,
     permission: *const fn (*anyopaque, *PermissionReq) void,
-    build_config: *const fn (*anyopaque, u8) anyerror!r.adapter.Config,
+    build_config: *const fn (*anyopaque, u8) anyerror!BuiltConfig,
 
     //sync
     gen_system_reminders: *const fn (*anyopaque, *Agent) void,
@@ -59,6 +64,7 @@ pub const SwarmContextV = struct {
 // ----------------------------------
 gpa: std.mem.Allocator,
 slots: [MAX_AGENTS]AgentSlot = [_]AgentSlot{.{}} ** MAX_AGENTS,
+report_enabled: bool = false,
 
 // let it own
 pool: http.RequestPool,
@@ -261,6 +267,7 @@ pub fn forkAgent(
         parent_slot.agent.mode_idx,
     );
     errdefer slot.agent.deinit();
+    slot.agent.name = parent_slot.agent.name;
 
     slot.agent.chat = try parent_slot.agent.chat.clone(slot.agent.arena.allocator());
     slot.agent.tools = try parent_slot.agent.tools.clone(slot.agent.arena.allocator());
@@ -304,6 +311,7 @@ pub fn forkAgentInSlot(
         parent_slot.agent.mode_idx,
     );
     errdefer slot.agent.deinit();
+    slot.agent.name = parent_slot.agent.name;
 
     slot.agent.chat = try parent_slot.agent.chat.clone(slot.agent.arena.allocator());
     slot.agent.tools = try parent_slot.agent.tools.clone(slot.agent.arena.allocator());
@@ -340,15 +348,16 @@ pub fn newAgent(
     const slot = &self.slots[id.index];
     slot.parent_id = parent_id;
 
-    const config = try self.context.build_config(self.context.ptr, agent_type_idx);
+    const built = try self.context.build_config(self.context.ptr, agent_type_idx);
     slot.agent = Agent.new(
-        config,
+        built.config,
         &self.pool,
         self.gpa,
         agent_type_idx,
         mode_type_idx,
     );
     errdefer slot.agent.deinit();
+    slot.agent.name = built.name;
 
     slot.agent.swarm = self;
     slot.agent.swarm_id = id;
@@ -374,15 +383,16 @@ pub fn newAgentInSlot(
     const slot = &self.slots[idx.index];
     if (slot.generation != idx.generation) return error.AgentSlotGenerationMissmatch;
 
-    const config = try self.context.build_config(self.context.ptr, agent_type_idx);
+    const built = try self.context.build_config(self.context.ptr, agent_type_idx);
     slot.agent = Agent.new(
-        config,
+        built.config,
         &self.pool,
         self.gpa,
         agent_type_idx,
         mode_type_idx,
     );
     errdefer slot.agent.deinit();
+    slot.agent.name = built.name;
 
     slot.agent.swarm = self;
     slot.agent.swarm_id = idx;
@@ -624,4 +634,29 @@ test "cancelAll drains tool owners before exec futures" {
 
     try testing.expectEqual(SlotState.complete, slot.state.load(.acquire));
     try testing.expect(!swarm.exec.slots[0].in_use.load(.acquire));
+}
+
+test "releaseAgent frees a slot with a non-empty chat" {
+    const testing = std.testing;
+
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
+    var swarm: Self = undefined;
+    try swarm.init(testing.allocator, testing.io, undefined, &env);
+    defer swarm.deinit();
+
+    const id = swarm.reserveFreeSlot().?;
+    const slot = &swarm.slots[id.index];
+    slot.agent = Agent.new(.{
+        .api_key = "",
+        .model = "test-model",
+        .base_url = "",
+        .provider = .{ .ollama = .{} },
+    }, &swarm.pool, testing.allocator, 0, 0);
+    slot.agent.swarm = &swarm;
+    slot.agent.swarm_id = id;
+    try slot.agent.chat.addMessage(slot.agent.arena.allocator(), .user, &.{.{ .text = "hello" }});
+
+    swarm.releaseAgent(id);
+    try testing.expectEqual(SlotState.free, swarm.slots[id.index].state.load(.acquire));
 }

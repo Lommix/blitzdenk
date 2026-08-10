@@ -231,6 +231,7 @@ pub fn main(init: std.process.Init) !void {
                 \\  --log              write debug.log in path
                 \\  --strict           request permissions
                 \\  --clean            skip local user context
+                \\  --report           write per-agent markdown reports on exit
                 \\
             , .{});
         },
@@ -300,7 +301,7 @@ pub fn run(
             }
         }).func,
         .build_config = (struct {
-            fn func(ptr: *anyopaque, agent_type_idx: u8) anyerror!r.prv.adapter.Config {
+            fn func(ptr: *anyopaque, agent_type_idx: u8) anyerror!r.prv.Swarm.BuiltConfig {
                 const a: *App = @ptrCast(@alignCast(ptr));
                 const result = a.context_factory.buildAgentApiConfig(
                     @enumFromInt(agent_type_idx),
@@ -308,7 +309,10 @@ pub fn run(
                     a.swarm.exec.env,
                 );
                 return switch (result) {
-                    .config => |config| try r.prv.adapter.cloneConfig(a.appAlloc(), config),
+                    .config => |config| .{
+                        .config = try r.prv.adapter.cloneConfig(a.appAlloc(), config),
+                        .name = a.context_factory.agentName(@enumFromInt(agent_type_idx)),
+                    },
                     .diagnostic => |diagnostic| switch (diagnostic) {
                         .no_default_model => error.NoDefaultModel,
                         .invalid_provider => error.InvalidProvider,
@@ -322,6 +326,7 @@ pub fn run(
     }, env);
 
     app.swarm = swarm;
+    swarm.report_enabled = flags.report or builtin.mode == .Debug;
 
     // Lua VM holds an opaque pointer to App + a getter for the mutable cfg
     // (swarm.cfg is *const, so a sibling accessor unwraps the const).
@@ -1130,6 +1135,8 @@ pub const CliFlags = packed struct {
     strict_mode: bool = false,
     /// don't load AGENTS.md
     no_context: bool = false,
+    /// write per-agent markdown reports on exit
+    report: bool = false,
 
     fn applyToken(self: *CliFlags, tok: []const u8) bool {
         if (std.mem.eql(u8, tok, "--log")) {
@@ -1144,6 +1151,11 @@ pub const CliFlags = packed struct {
 
         if (std.mem.eql(u8, tok, "--clean")) {
             self.strict_mode = true;
+            return true;
+        }
+
+        if (std.mem.eql(u8, tok, "--report")) {
+            self.report = true;
             return true;
         }
 
