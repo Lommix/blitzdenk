@@ -184,6 +184,9 @@ pub const Command = union(enum) {
                     const ag = app.swarm.getAgent(id).?;
                     try app.event_bus.emit(app, .{ .agent_complete = id });
                     ag.requestCompaction();
+                    if (ag.state != .idle and ag.state != .complete) {
+                        app.swarm.wakeAgent(id);
+                    }
                     app.running = true;
                     app.auto_scroll = true;
                 }

@@ -427,6 +427,13 @@ pub fn retryAgent(self: *Self, id: AgentId) void {
     slot.state.store(.active, .release);
 }
 
+pub fn wakeAgent(self: *Self, id: AgentId) void {
+    const slot = self.getSlot(id) orelse return;
+    if (slot.state.load(.acquire) == .active) return;
+    slot.time_elapsed = 0;
+    slot.state.store(.active, .release);
+}
+
 pub fn tickAll(self: *Self) bool {
     var running = false;
     const dt = self.progress_time();

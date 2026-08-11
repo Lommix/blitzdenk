@@ -299,6 +299,7 @@ pub const ResponseResult = struct {
     message: Message,
     usage: ?TokenUsage = null,
     dropped_tool_calls: u32 = 0,
+    finish_reason: ?[]const u8 = null,
 };
 
 pub const CompletionMode = enum {

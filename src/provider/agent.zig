@@ -192,6 +192,7 @@ pub const Agent = struct {
     session_id: [32]u8,
     last_input_context_size: u32 = 0, // track total context size
     context_limit: u32 = 128 * 1024, // everything above 128k context is dump
+    overflow_recovery_attempted: bool = false,
     compaction: compact.State = .{},
     in_flight_usage: apt.TokenUsage = .{}, // streaming usage
     total_usage: apt.TokenUsage = .{}, // accumulated across turns
@@ -249,6 +250,7 @@ pub const Agent = struct {
         self.rate_limit_retry_after = null;
         self.timeout = 0;
         self.last_input_context_size = 0;
+        self.overflow_recovery_attempted = false;
         self.compaction = .{};
         self.in_flight_usage = .{};
         self.tool_call_runs = .{};
@@ -302,6 +304,7 @@ pub const Agent = struct {
         self.flags.is_waiting = false;
         self.state = .sending_request;
         self.iteration = 0;
+        self.overflow_recovery_attempted = false;
         self.retry_count = 0;
         self.rate_limit_count = 0;
         self.rate_limit_wait_secs = RATE_LIMIT_WAIT_SECONDS;
@@ -592,9 +595,7 @@ pub const Agent = struct {
     fn startStreaming(self: *Agent) !void {
         const handle = self.pending_handle.?;
         const status = self.pool.getStatus(handle) catch |err| {
-            self.pool.cancel(handle);
-            self.pending_handle = null;
-            self.request_start_ms = null;
+            self.abortRequest(handle);
             return err;
         };
         const status_code: u16 = @intFromEnum(status);
@@ -607,15 +608,19 @@ pub const Agent = struct {
             log.warn("http {d} from provider: {s}", .{ status_code, snippet });
             if (status_code == 429) {
                 self.rate_limit_retry_after = self.pool.retryAfter(handle);
-                self.pool.cancel(handle);
-                self.pending_handle = null;
-                self.request_start_ms = null;
+                self.abortRequest(handle);
                 return error.RateLimited;
             }
+            if (isOverflowErrorBody(body) and !self.overflow_recovery_attempted) {
+                self.overflow_recovery_attempted = true;
+                self.abortRequest(handle);
+                compact.request(self, .auto);
+                self.state = .sending_request;
+                log.warn("provider context overflow: compacting before retry", .{});
+                return;
+            }
             self.reportProviderError(status_code, body);
-            self.pool.cancel(handle);
-            self.pending_handle = null;
-            self.request_start_ms = null;
+            self.abortRequest(handle);
             return error.ProviderRequestFailed;
         }
 
@@ -629,6 +634,21 @@ pub const Agent = struct {
         self.in_flight_usage = .{};
         self.approx_output_bytes = 0;
         self.state = .streaming_response;
+    }
+
+    fn abortRequest(self: *Agent, handle: http.RequestPool.RequestHandle) void {
+        self.pool.cancel(handle);
+        self.pending_handle = null;
+        self.request_start_ms = null;
+    }
+
+    fn isOverflowErrorBody(body: []const u8) bool {
+        return std.ascii.indexOfIgnoreCase(body, "context") != null or
+            std.ascii.indexOfIgnoreCase(body, "too many tokens") != null or
+            std.ascii.indexOfIgnoreCase(body, "token limit") != null or
+            std.ascii.indexOfIgnoreCase(body, "prompt is too long") != null or
+            std.ascii.indexOfIgnoreCase(body, "input is too long") != null or
+            std.ascii.indexOfIgnoreCase(body, "request_too_large") != null;
     }
 
     /// Index of the in-progress streaming message. Valid while state is
@@ -742,10 +762,11 @@ pub const Agent = struct {
             self.chat.messages.items[msg_idx].time_ms = @max(0, http.nowMs(self.pool.io) - start_ms);
         }
 
+        const final_usage = result.usage orelse self.in_flight_usage;
+
         if (self.swarm) |swarm| {
             // Prefer finalize's authoritative usage; fall back to last in-flight
             // value if the provider didn't report it on close.
-            const final_usage = result.usage orelse self.in_flight_usage;
             self.total_usage.add(final_usage);
             swarm.recordUsage(self.config.model, final_usage);
             if (self.swarm_id) |id| {
@@ -779,9 +800,31 @@ pub const Agent = struct {
             return .pending;
         }
 
+        if (self.isOverflowStop(result.finish_reason)) {
+            return self.recoverOverflow();
+        }
+
         self.flags.is_calling = false;
         self.state = .complete;
         return .complete;
+    }
+
+    fn isOverflowStop(self: *const Agent, reason: ?[]const u8) bool {
+        const fr = reason orelse return false;
+        if (!(std.mem.eql(u8, fr, "length") or std.mem.eql(u8, fr, "max_tokens"))) return false;
+        return !self.overflow_recovery_attempted;
+    }
+
+    fn recoverOverflow(self: *Agent) TickResult {
+        self.overflow_recovery_attempted = true;
+        if (self.chat.messages.items.len > 0) {
+            _ = self.chat.messages.pop();
+        }
+        self.flags.is_calling = false;
+        compact.request(self, .auto);
+        self.state = .sending_request;
+        log.warn("context overflow: dropping truncated assistant message and compacting before retry", .{});
+        return .pending;
     }
 
     fn dropStream(self: *Agent) void {

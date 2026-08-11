@@ -7,16 +7,46 @@ const responses = r.responses;
 
 const log = std.log.scoped(.compact);
 
-const PROMPT =
-    \\You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another agent that will resume the task.
+const SUMMARY_SYSTEM_PROMPT =
+    \\You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
     \\
-    \\Include:
-    \\- Current progress and key decisions made
-    \\- Important context, constraints, or user preferences
-    \\- What remains to be done (clear next steps)
-    \\- Any critical data, examples, or references needed to continue
+    \\Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.
     \\
-    \\Be concise, structured, and focused on helping the next agent seamlessly continue the work.
+;
+
+const SUMMARIZATION_PROMPT =
+    \\The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
+    \\
+    \\Use this EXACT format:
+    \\
+    \\## Goal
+    \\[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+    \\
+    \\## Constraints & Preferences
+    \\- [Any constraints, preferences, or requirements mentioned by user]
+    \\- [Or "(none)" if none were mentioned]
+    \\
+    \\## Progress
+    \\### Done
+    \\- [x] [Completed tasks/changes]
+    \\
+    \\### In Progress
+    \\- [ ] [Current work]
+    \\
+    \\### Blocked
+    \\- [Issues preventing progress, if any]
+    \\
+    \\## Key Decisions
+    \\- **[Decision]**: [Brief rationale]
+    \\
+    \\## Next Steps
+    \\1. [Ordered list of what should happen next]
+    \\
+    \\## Critical Context
+    \\- [Any data, examples, or references needed to continue]
+    \\- [Or "(none)" if not applicable]
+    \\
+    \\Keep each section concise. Preserve exact file paths, function names, and error messages.
     \\
 ;
 
@@ -28,9 +58,9 @@ const SUMMARY_PREFIX =
     \\
 ;
 
-const AUTO_COMPACT_NUMERATOR: u64 = 9;
-const AUTO_COMPACT_DENOMINATOR: u64 = 10;
-const RECENT_USER_MAX_TOKENS: u64 = 20_000;
+const KEEP_RECENT_TOKENS: u64 = 20_000;
+const TOOL_RESULT_MAX_CHARS: usize = 2000;
+const RESERVE_TOKENS: u64 = 16_384;
 const COMPACTION_TIMEOUT_MS: u32 = 5 * 60_000;
 
 pub const Reason = enum {
@@ -76,7 +106,13 @@ pub fn maybeStart(self: *Agent) !bool {
     self.compaction.pending_handle = switch (self.config.provider) {
         .response => responses.compact(self.pool, arena, &self.chat, self.config, options),
         else => blk: {
-            var compact_chat = try buildCompactPrompt(arena, &self.chat);
+            const cut_index = computeCutIndex(&self.chat);
+            if (cut_index == 0) {
+                self.compaction.requested = false;
+                log.debug("skipping compaction: nothing to summarize", .{});
+                return false;
+            }
+            var compact_chat = try buildCompactPrompt(arena, &self.chat, cut_index);
             compact_chat.tools = .empty;
             break :blk apt.complete(self.pool, arena, &compact_chat, self.config, options);
         },
@@ -177,7 +213,7 @@ fn shouldStart(self: *const Agent, estimate: u64) bool {
 }
 
 fn autoCompactLimit(self: *const Agent) u64 {
-    return (@as(u64, self.context_limit) * AUTO_COMPACT_NUMERATOR) / AUTO_COMPACT_DENOMINATOR;
+    return self.context_limit -| RESERVE_TOKENS;
 }
 
 pub fn estimateNextRequestTokens(self: *const Agent) u64 {
@@ -213,52 +249,74 @@ fn approxTokens(bytes: u64) u64 {
     return @max(1, (bytes + 2) / 3);
 }
 
-fn buildCompactPrompt(alloc: std.mem.Allocator, chat: *const apt.Chat) !apt.Chat {
+fn buildCompactPrompt(alloc: std.mem.Allocator, chat: *const apt.Chat, cut_index: usize) !apt.Chat {
     var compact_chat: apt.Chat = .{};
-
-    if (findSystemMessage(chat)) |system| {
-        try compact_chat.addMessage(alloc, .system, system.parts);
-    }
+    try compact_chat.addMessage(alloc, .system, &.{.{ .text = SUMMARY_SYSTEM_PROMPT }});
 
     var transcript: std.Io.Writer.Allocating = .init(alloc);
     errdefer transcript.deinit();
-    try transcript.writer.writeAll(PROMPT);
-    try transcript.writer.writeAll("\n\n<conversation>\n");
+    try transcript.writer.writeAll("<conversation>\n");
 
-    // TODO:prune old tool calls?
-    // reserach some criteria for a filter
-    for (chat.messages.items) |msg| {
+    for (chat.messages.items[0..cut_index]) |msg| {
         if (msg.role == .system) continue;
-        try transcript.writer.print("\n[{s}]\n", .{@tagName(msg.role)});
-        for (msg.parts) |part| {
-            try writePartForSummary(&transcript.writer, part);
-        }
+        try writeMessageForSummary(&transcript.writer, msg);
+        try transcript.writer.writeAll("\n\n");
     }
 
-    try transcript.writer.writeAll("\n</conversation>\n");
+    try transcript.writer.writeAll("</conversation>\n\n");
+    try transcript.writer.writeAll(SUMMARIZATION_PROMPT);
+
     const text = try transcript.toOwnedSlice();
     try compact_chat.addMessage(alloc, .user, &.{.{ .text = text }});
     return compact_chat;
 }
 
-fn writePartForSummary(w: *std.Io.Writer, part: apt.ContentPart) !void {
-    switch (part) {
-        .text => |text| try w.print("{s}\n", .{text}),
-        .thinking => |thinking| try w.print("[thinking]\n{s}\n", .{thinking.text}),
-        .image => |img| try w.print("[image {s}, {d} bytes]\n", .{ img.media_type, img.data.len }),
-        .tool_call => |call| try w.print("[tool_call {s}]\n{s}\n", .{ call.name, call.arguments }),
-        .tool_result => |result| {
-            switch (result.comp_strat) {
-                .keep, .summarize => {
-                    try w.print("[tool_result {s}{s}]\n{s}\n", .{ result.name, if (result.is_error) " error" else "", result.content });
+fn writeMessageForSummary(w: *std.Io.Writer, msg: apt.Message) !void {
+    switch (msg.role) {
+        .system => {},
+        .user => {
+            for (msg.parts) |part| switch (part) {
+                .text => |text| {
+                    if (text.len == 0) continue;
+                    try w.writeAll("[User]: ");
+                    try w.writeAll(text);
+                    try w.writeByte('\n');
                 },
-                .truncate => {
-                    const kb = result.content.len / 1024;
-                    try w.print("[tool_result {s}{s}]\n<output truncated=\"true\" total_kb=\"{d}\">\n", .{ result.name, if (result.is_error) " error" else "", kb });
+                .image => |img| try w.print("[Image {s}, {d} bytes]\n", .{ img.media_type, img.data.len }),
+                .tool_result => |result| try writeToolResult(w, result),
+                else => {},
+            };
+        },
+        .agent => {
+            for (msg.parts) |part| switch (part) {
+                .thinking => |thinking| {
+                    if (thinking.text.len == 0) continue;
+                    try w.writeAll("[Assistant thinking]: ");
+                    try w.writeAll(thinking.text);
+                    try w.writeByte('\n');
                 },
-            }
+                .text => |text| {
+                    if (text.len == 0) continue;
+                    try w.writeAll("[Assistant]: ");
+                    try w.writeAll(text);
+                    try w.writeByte('\n');
+                },
+                .tool_call => |call| try w.print("[Assistant tool calls]: {s}({s})\n", .{ call.name, call.arguments }),
+                else => {},
+            };
         },
     }
+}
+
+fn writeToolResult(w: *std.Io.Writer, result: apt.ToolResult) !void {
+    try w.print("[Tool result {s}{s}]: ", .{ result.name, if (result.is_error) " error" else "" });
+    if (result.content.len <= TOOL_RESULT_MAX_CHARS) {
+        try w.writeAll(result.content);
+    } else {
+        try w.writeAll(result.content[0..TOOL_RESULT_MAX_CHARS]);
+        try w.print("\n\n[... {d} more characters truncated]", .{result.content.len - TOOL_RESULT_MAX_CHARS});
+    }
+    try w.writeByte('\n');
 }
 
 fn installCompactedHistory(self: *Agent, summary: []const u8) !void {
@@ -277,27 +335,10 @@ fn installCompactedHistory(self: *Agent, summary: []const u8) !void {
         try appendClonedMessage(&next, alloc, system);
     }
 
-    var recent = std.ArrayList([]const u8).empty;
-    var recent_tokens: u64 = 0;
-    defer recent.deinit(alloc);
-
-    var i = self.chat.messages.items.len;
-    while (i > 0) {
-        i -= 1;
-        const msg = self.chat.messages.items[i];
-        if (msg.role != .user) continue;
-        const text = try userMessageText(self.arena.allocator(), msg);
-        if (text.len == 0 or isSummaryMessage(text)) continue;
-        const tokens = approxTokens(text.len);
-        if (recent_tokens + tokens > RECENT_USER_MAX_TOKENS) break;
-        try recent.append(alloc, text);
-        recent_tokens += tokens;
-    }
-
-    i = recent.items.len;
-    while (i > 0) {
-        i -= 1;
-        try next.addMessage(alloc, .user, &.{.{ .text = try alloc.dupe(u8, recent.items[i]) }});
+    const cut_index = computeCutIndex(&self.chat);
+    for (self.chat.messages.items[cut_index..]) |msg| {
+        if (msg.role == .system) continue;
+        try appendClonedMessage(&next, alloc, msg);
     }
 
     const summary_text = try std.fmt.allocPrint(alloc, "{s}\n{s}", .{ SUMMARY_PREFIX, summary });
@@ -425,26 +466,55 @@ fn extractSummaryText(alloc: std.mem.Allocator, parts: []const apt.ContentPart) 
     return try out.toOwnedSlice();
 }
 
-fn userMessageText(alloc: std.mem.Allocator, msg: apt.Message) ![]const u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    errdefer out.deinit();
-
-    for (msg.parts) |part| {
-        switch (part) {
-            .text => |text| {
-                if (out.written().len > 0) try out.writer.writeByte('\n');
-                try out.writer.writeAll(text);
-            },
-            else => {},
+fn computeCutIndex(chat: *const apt.Chat) usize {
+    var accumulated: u64 = 0;
+    var i = chat.messages.items.len;
+    var cut_index: usize = 0;
+    while (i > 0) {
+        i -= 1;
+        const msg = chat.messages.items[i];
+        if (msg.role == .system) continue;
+        if (isSummaryMessageOf(&msg)) continue;
+        const tokens = messageTokenEstimate(msg);
+        if (tokens == 0) continue;
+        accumulated += tokens;
+        if (accumulated >= KEEP_RECENT_TOKENS) {
+            var j = i;
+            while (j < chat.messages.items.len) : (j += 1) {
+                if (isCutPoint(chat.messages.items[j])) {
+                    cut_index = j;
+                    break;
+                }
+            }
+            break;
         }
     }
-
-    if (out.written().len == 0) return "";
-    return try out.toOwnedSlice();
+    return cut_index;
 }
 
-fn isSummaryMessage(text: []const u8) bool {
-    return std.mem.startsWith(u8, text, SUMMARY_PREFIX);
+fn isCutPoint(msg: apt.Message) bool {
+    if (msg.role == .system) return false;
+    if (isSummaryMessageOf(&msg)) return false;
+    for (msg.parts) |part| switch (part) {
+        .tool_result => return false,
+        else => {},
+    };
+    return true;
+}
+
+fn messageTokenEstimate(msg: apt.Message) u64 {
+    var bytes: u64 = @tagName(msg.role).len + 8;
+    for (msg.provider_items) |item| bytes += item.len;
+    for (msg.parts) |part| bytes += partBytes(part);
+    return approxTokens(bytes);
+}
+
+fn isSummaryMessageOf(msg: *const apt.Message) bool {
+    for (msg.parts) |part| switch (part) {
+        .text => |text| if (std.mem.startsWith(u8, text, SUMMARY_PREFIX)) return true,
+        else => {},
+    };
+    return false;
 }
 
 fn findSystemMessage(chat: *const apt.Chat) ?apt.Message {
@@ -498,7 +568,7 @@ test "compaction rotates the agent arena without an API request" {
     defer schema.deinit();
 }
 
-test "auto compaction ignores maximum output tokens" {
+test "auto compaction reserves tokens and ignores maximum output tokens" {
     const testing = std.testing;
     var pool: http.RequestPool = .{};
     try pool.init(testing.allocator, testing.io);
@@ -516,8 +586,8 @@ test "auto compaction ignores maximum output tokens" {
     for (0..4) |_| try agent.chat.addMessage(alloc, .user, &.{.{ .text = "" }});
     agent.context_limit = 100_000;
 
-    try testing.expect(!shouldStart(&agent, 89_999));
-    try testing.expect(shouldStart(&agent, 90_000));
+    try testing.expect(!shouldStart(&agent, 83_615));
+    try testing.expect(shouldStart(&agent, 83_616));
 }
 
 test "responses compaction installs canonical output and rotates arena" {
@@ -550,4 +620,160 @@ test "responses compaction installs canonical output and rotates arena" {
     try testing.expectEqualStrings("system", agent.chat.messages.items[0].parts[0].text);
     try testing.expectEqual(@as(usize, 2), agent.chat.messages.items[1].provider_items.len);
     try testing.expect(std.mem.indexOf(u8, agent.chat.messages.items[1].provider_items[1], "opaque") != null);
+}
+
+test "cut point keeps a contiguous tail and never cuts at tool results" {
+    const testing = std.testing;
+    var pool: http.RequestPool = .{};
+    try pool.init(testing.allocator, testing.io);
+    defer pool.deinit();
+
+    var agent = Agent.new(.{
+        .api_key = "test",
+        .model = "test",
+        .base_url = "https://example.test",
+        .provider = .{ .openai = .{} },
+    }, &pool, testing.allocator, 0, 0);
+    defer agent.deinit();
+
+    const alloc = agent.arena.allocator();
+    try agent.chat.addMessage(alloc, .system, &.{.{ .text = "system" }});
+
+    const big = try alloc.alloc(u8, 40_000);
+    @memset(big, 'x');
+    try agent.chat.addMessage(alloc, .user, &.{.{ .text = big }});
+    try agent.chat.addMessage(alloc, .agent, &.{.{ .tool_call = .{
+        .id = "c1",
+        .name = "read",
+        .arguments = "{}",
+    } }});
+    try agent.chat.addMessage(alloc, .user, &.{.{ .tool_result = .{
+        .call_id = "c1",
+        .name = "read",
+        .content = big,
+    } }});
+    try agent.chat.addMessage(alloc, .user, &.{.{ .text = "recent instruction" }});
+
+    try testing.expectEqual(@as(usize, 1), computeCutIndex(&agent.chat));
+}
+
+test "compaction keeps recent messages verbatim after the cut point" {
+    const testing = std.testing;
+    var gpa: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    defer testing.expect(gpa.deinit() == .ok) catch @panic("leak");
+
+    var pool: http.RequestPool = .{};
+    try pool.init(gpa.allocator(), testing.io);
+    defer pool.deinit();
+
+    var agent = Agent.new(.{
+        .api_key = "test",
+        .model = "test",
+        .base_url = "https://example.test",
+        .provider = .{ .openai = .{} },
+    }, &pool, gpa.allocator(), 0, 0);
+    defer agent.deinit();
+
+    const alloc = agent.arena.allocator();
+    try agent.chat.addMessage(alloc, .system, &.{.{ .text = "system" }});
+
+    const big = try alloc.alloc(u8, 40_000);
+    @memset(big, 'x');
+    try agent.chat.addMessage(alloc, .user, &.{.{ .text = big }});
+    try agent.chat.addMessage(alloc, .agent, &.{.{ .tool_call = .{
+        .id = "c1",
+        .name = "read",
+        .arguments = "{}",
+    } }});
+    try agent.chat.addMessage(alloc, .user, &.{.{ .tool_result = .{
+        .call_id = "c1",
+        .name = "read",
+        .content = big,
+    } }});
+    try agent.chat.addMessage(alloc, .user, &.{.{ .text = "recent instruction" }});
+
+    try installCompactedHistory(&agent, "summary");
+
+    try testing.expectEqual(@as(usize, 6), agent.chat.messages.items.len);
+    try testing.expectEqualStrings("system", agent.chat.messages.items[0].parts[0].text);
+    switch (agent.chat.messages.items[2].parts[0]) {
+        .tool_call => |call| try testing.expectEqualStrings("c1", call.id),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (agent.chat.messages.items[3].parts[0]) {
+        .tool_result => |result| try testing.expectEqualStrings("read", result.name),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqualStrings("recent instruction", agent.chat.messages.items[4].parts[0].text);
+    try testing.expect(std.mem.endsWith(u8, agent.chat.messages.items[5].parts[0].text, "summary"));
+}
+
+test "compact prompt uses structured format" {
+    const testing = std.testing;
+    var pool: http.RequestPool = .{};
+    try pool.init(testing.allocator, testing.io);
+    defer pool.deinit();
+
+    var agent = Agent.new(.{
+        .api_key = "test",
+        .model = "test",
+        .base_url = "https://example.test",
+        .provider = .{ .openai = .{} },
+    }, &pool, testing.allocator, 0, 0);
+    defer agent.deinit();
+
+    const alloc = agent.arena.allocator();
+    try agent.chat.addMessage(alloc, .system, &.{.{ .text = "agent system prompt" }});
+    try agent.chat.addMessage(alloc, .user, &.{.{ .text = "hello" }});
+
+    const compact_chat = try buildCompactPrompt(alloc, &agent.chat, 2);
+    try testing.expectEqualStrings(SUMMARY_SYSTEM_PROMPT, compact_chat.messages.items[0].parts[0].text);
+    const text = compact_chat.messages.items[1].parts[0].text;
+    try testing.expect(std.mem.indexOf(u8, text, "## Goal") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "## Next Steps") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[User]: hello") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "<previous-summary>") == null);
+}
+
+test "summary serialization uses pi-style labels and truncates tool results" {
+    const testing = std.testing;
+    var pool: http.RequestPool = .{};
+    try pool.init(testing.allocator, testing.io);
+    defer pool.deinit();
+
+    var agent = Agent.new(.{
+        .api_key = "test",
+        .model = "test",
+        .base_url = "https://example.test",
+        .provider = .{ .openai = .{} },
+    }, &pool, testing.allocator, 0, 0);
+    defer agent.deinit();
+
+    const alloc = agent.arena.allocator();
+    try agent.chat.addMessage(alloc, .system, &.{.{ .text = "system" }});
+    try agent.chat.addMessage(alloc, .user, &.{.{ .text = "hello" }});
+    try agent.chat.addMessage(alloc, .agent, &.{
+        .{ .thinking = .{ .text = "hmm" } },
+        .{ .text = "answer" },
+        .{ .tool_call = .{ .id = "c1", .name = "read", .arguments = "{\"path\":\"x\"}" } },
+    });
+
+    const huge = try alloc.alloc(u8, 10_000);
+    @memset(huge, 'y');
+    try agent.chat.addMessage(alloc, .user, &.{.{ .tool_result = .{
+        .call_id = "c1",
+        .name = "read",
+        .content = huge,
+    } }});
+
+    const compact_chat = try buildCompactPrompt(alloc, &agent.chat, agent.chat.messages.items.len);
+    const text = compact_chat.messages.items[1].parts[0].text;
+    try testing.expect(std.mem.indexOf(u8, text, "[User]: hello") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[Assistant thinking]: hmm") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[Assistant]: answer") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[Assistant tool calls]: read({\"path\":\"x\"})") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[Tool result read]: ") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "more characters truncated") != null);
+    const tool_result_pos = std.mem.indexOf(u8, text, "[Tool result read]: ") orelse return error.TestUnexpectedResult;
+    try testing.expect(tool_result_pos + "[Tool result read]: ".len + 2000 <= text.len);
 }

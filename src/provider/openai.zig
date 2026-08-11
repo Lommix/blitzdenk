@@ -1022,6 +1022,7 @@ pub const StreamState = struct {
             .message = .{ .role = .agent, .parts = owned },
             .usage = self.usage,
             .dropped_tool_calls = @intCast(dropped_calls.items.len),
+            .finish_reason = self.finish_reason,
         };
     }
 };
