@@ -35,37 +35,13 @@ pub const BashTool = prv.tool.Tool{
     .def = .{
         .name = "bash",
         .description =
-        \\Executes a given bash command and returns its output.
-        \\
-        \\IMPORTANT: Avoid using this tool to run cat, tee, sed commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user:
-        \\Read files: Use read (NOT cat/head/tail)
-        \\Find files: Use glob (NOT find/ls/rg pipelines)
-        \\Search file contents: Use grep (NOT grep/rg pipelines)
-        \\Edit files: Use edit (NOT sed/awk)
-        \\Write files: Use write ('echo >..' or 'cat <<EOF' is FORBIDDEN!)
-        \\While the bash tool can do similar things, it’s better to use the built-in tools as they provide a better user experience and make it easier to review tool calls and give permission.
-        \\
-        \\# Instructions
-        \\
-        \\If your command will create new directories or files, first use this tool to run `ls` to verify the parent directory exists and is the correct location.
-        \\Always quote file paths that contain spaces with double quotes in your command.
-        \\You may specify an optional timeout in milliseconds up to 60 seconds. By default, your command will timeout after 1 minute.
-        \\
-        \\If the commands are independent and can run in parallel, make multiple bash tool calls in a single message. Example: if you need to run "git status" and "git diff", send a single message with two bash tool calls in parallel.
-        \\If the commands depend on each other and must run sequentially, use a single bash call with '&&' to chain them together.`,
-        \\Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
-        \\DO NOT use newlines to separate commands (newlines are ok in quoted strings).
-        \\Use the `workdir` parameter to run a command in a different directory; it defaults to the current cwd. Avoid `cd <dir> && cmd` — prefer `workdir`.
-        \\
-        \\You can use the `run_in_background` parameter to run the command in the background. Only use this if you don't need the result immediately and are OK being notified when the command completes later.
-        \\You do not need to check the output right away - you'll be notified when it finishes. You do not need to use '&' at the end of the command when using this parameter.
+        \\Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to first 1000 lines or 32KB (whichever is hit first). Optionally provide a timeout in seconds. Set "run_in_background" to true to run the command in the background and poll it with read_process / stop it with cancel_process.
         ,
         .parameters_schema =
         \\{"type": "object", "properties": {
-        \\  "command": {"type": "string", "description": "Command to run directly in the current cwd. Example: use `zig build`, not `cd . && zig build`."},
-        \\  "workdir": {"type": "string", "description": "The working directory to run the command in. Defaults to the current cwd"},
-        \\  "timeout_ms": {"type": "number", "default": 30000, "description": "Cancel command after X milliseconds. Ignored by 'run_in_background'"},
-        \\  "run_in_background": {"type": "boolean", "default": false, "description": "Set to true to run this command in the background. Use read_process to read the current output later. You MUST use this instead of '&' for background processes!"}
+        \\  "command": {"type": "string", "description": "Bash command to execute"},
+        \\  "timeout": {"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
+        \\  "run_in_background": {"type": "boolean", "default": false, "description": "If true, spawn the command in the background and return immediately with a process id; poll with read_process, stop with cancel_process"}
         \\}, "required": ["command"]}
         ,
     },
@@ -196,9 +172,8 @@ const Handle = prv.exec.CmdPool.Handle;
 fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
     const Args = struct {
         command: []const u8,
-        workdir: ?[]const u8 = null,
+        timeout: ?f64 = null,
         run_in_background: bool = false,
-        timeout_ms: i64 = 30_000,
     };
 
     const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
@@ -209,14 +184,6 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     };
 
     if (args.command.len == 0) return r.errResult(call, "empty command");
-
-    const run_cwd = if (args.workdir) |wd| (std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, wd }) catch
-        return r.errResult(call, "invalid workdir")) else ctx.cwd;
-
-    // NOTE: quick rg pattern fix
-    if (containsUnquotedDollar(args.command) and isRgCommand(args.command)) {
-        return r.errResult(call, "rg pattern contains unquoted `$`. Shell expands `$var` before rg sees it, silently corrupting the regex. Single-quote the pattern: `rg 'pattern'`");
-    }
 
     // Replace full cwd paths with "." for cleaner output (stack buffer)
     var buf: [512]u8 = undefined;
@@ -260,7 +227,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
     if (args.run_in_background) {
-        const handle = ctx.swarm.exec.run(run_cwd, &.{ "/bin/sh", "-c", args.command }) catch
+        const handle = ctx.swarm.exec.run(ctx.cwd, &.{ "/bin/sh", "-c", args.command }) catch
             return r.errResult(call, "failed to spawn command process");
 
         const id: u8 = @intFromEnum(handle);
@@ -278,10 +245,16 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     }
 
     // Foreground with deadline race.
+    const timeout_ms: i64 = blk: {
+        const t = args.timeout orelse break :blk std.math.maxInt(i64);
+        if (!std.math.isFinite(t) or t <= 0)
+            return r.errResult(call, "timeout must be a positive number of seconds");
+        break :blk timeoutToMs(t);
+    };
     const res = runWithDeadline(ctx, .{
-        .cwd = run_cwd,
+        .cwd = ctx.cwd,
         .argv = &.{ "/bin/sh", "-c", args.command },
-    }, args.timeout_ms) catch |err| switch (err) {
+    }, timeout_ms) catch |err| switch (err) {
         error.Timeout => {
             const app = ctx.swarm.context.cast(@import("../app.zig").App);
             r.setToolStatusParagraph(ctx, call, &.{
@@ -395,6 +368,11 @@ fn classifyCommand(cmd: []const u8) Classification {
     return result;
 }
 
+fn timeoutToMs(secs: f64) i64 {
+    const capped = @min(secs, 2_147_483);
+    return @as(i64, @intFromFloat(capped * 1000));
+}
+
 fn isSudo(cmd: []const u8) bool {
     if (std.mem.find(u8, cmd, "sudo") != null) return true;
     return false;
@@ -442,31 +420,6 @@ fn nextSegment(input: []const u8) struct { []const u8, []const u8 } {
         }
     }
     return .{ input, "" };
-}
-
-fn isRgCommand(cmd: []const u8) bool {
-    const trimmed = std.mem.trim(u8, cmd, " \t");
-    return std.mem.startsWith(u8, trimmed, "rg") or std.mem.startsWith(u8, trimmed, "ripgrep");
-}
-
-fn containsUnquotedDollar(cmd: []const u8) bool {
-    var in_single: bool = false;
-    var in_double: bool = false;
-    for (cmd) |c| {
-        switch (c) {
-            '\'' => {
-                if (!in_double) in_single = !in_single;
-            },
-            '"' => {
-                if (!in_single) in_double = !in_double;
-            },
-            '$' => {
-                if (!in_single and !in_double) return true;
-            },
-            else => {},
-        }
-    }
-    return false;
 }
 
 fn isInList(name: []const u8, list: []const []const u8) bool {
