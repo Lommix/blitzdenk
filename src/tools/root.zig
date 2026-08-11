@@ -160,16 +160,23 @@ pub fn truncateOutputToOwned(
         output
     else blk: {
         const slice = output[0..end_byte];
-        break :blk std.fmt.allocPrint(
-            alloc,
-            "<output truncated=\"true\" bytes=\"{d}\" total_bytes=\"{d}\" lines=\"{d}\" total_lines=\"{d}\">\n{s}\n</output>",
-            .{ end_byte, output.len, lines_collected, total_lines, slice },
-        ) catch slice;
+        const notice = if (lines_collected >= max_lines)
+            std.fmt.allocPrint(
+                alloc,
+                "[Truncated: showing {d} of {d} lines ({d} line limit)]",
+                .{ lines_collected, total_lines, max_lines },
+            )
+        else
+            std.fmt.allocPrint(
+                alloc,
+                "[Truncated: {d} lines shown ({d}KB limit)]",
+                .{ lines_collected, @divTrunc(max_bytes, 1024) },
+            );
+        const n = notice catch break :blk slice;
+        defer alloc.free(n);
+        break :blk std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ slice, n }) catch slice;
     };
 
-    // std.json.Stringify emits invalid UTF-8 []const u8 as a JSON number array
-    // (bytes), not a string. Provider APIs reject that on the next request.
-    // fmtUtf8(...).data is a no-op wrapper; format through {f} to replace.
     return ensureValidUtf8(alloc, raw);
 }
 

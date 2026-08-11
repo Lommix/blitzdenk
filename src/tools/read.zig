@@ -9,16 +9,14 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 pub const ReadTool = prv.tool.Tool{
     .def = .{
         .name = "read",
-        .description = "Read the contents of a file. Output is truncated to" ++ std.fmt.comptimePrint("{d} lines or {d} KB", .{ r.MAX_DISPLAY_LINES, @divTrunc(r.MAX_DISPLAY_BYTES, 1024) }) ++
-            \\(whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.\n" ++
-            \\OUTPUT FORMAT: each line is prefixed with `<right-aligned line number><TAB>`, e.g. `   42\\tcode`. The number+tab is display only and is NOT part of the file. " ++
-            \\When using oldText for the edit tool, strip the prefix and use the raw line content exactly (preserve original tabs/spaces verbatim, no line numbers)."
+        .description = "Read the contents of a file. For text files, output is truncated to " ++ std.fmt.comptimePrint("{d} lines or {d}KB", .{ r.MAX_DISPLAY_LINES, @divTrunc(r.MAX_DISPLAY_BYTES, 1024) }) ++
+            \\(whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
         ,
         .parameters_schema =
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\      "path": {"type": "string", "description": "Path to the file to read (relative to cwd or absolute)"},
+        \\      "path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
         \\      "offset": {"type": "number", "description": "Line number to start reading from (1-indexed)"},
         \\      "limit": {"type": "number", "description": "Maximum number of lines to read"}
         \\  },
