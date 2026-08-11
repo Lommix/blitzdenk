@@ -8,6 +8,7 @@ pub const EnterSshMode = tc.Tool{
     .def = .{
         .name = "enter_ssh",
         .description = "Enter ssh mode. All subsequent tool calls (read,write,edit,bash) run on the remote target.",
+        .prompt_snippet = "Switch to running tools on a remote host",
         .parameters_schema =
         \\{"type":"object","properties":{},"required":[]}
         ,
@@ -19,6 +20,7 @@ pub const ExitSshMode = tc.Tool{
     .def = .{
         .name = "exit_ssh",
         .description = "Exit ssh mode. All subsequent tool calls run locally.",
+        .prompt_snippet = "Switch back to local execution",
         .parameters_schema =
         \\{"type":"object","properties":{},"required":[]}
         ,

@@ -8,6 +8,8 @@ pub const LoadSkillTool = r.prv.tool.Tool{
         \\Load a specialized skill into the chat context.
         \\
         ,
+        .prompt_snippet = "Load a skill",
+        .prompt_guidelines = "Load a skill when the task matches its trigger rules.",
         .parameters_schema =
         \\{
         \\  "type": "object",

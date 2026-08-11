@@ -6,6 +6,8 @@ pub const WriteTool = prv.tool.Tool{
     .def = .{
         .name = "write",
         .description = "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+        .prompt_snippet = "Write content to a file",
+        .prompt_guidelines = "Use write to create or fully overwrite files; use edit for targeted changes to existing files.",
         .parameters_schema =
         \\{
         \\  "type": "object",

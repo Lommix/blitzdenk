@@ -16,6 +16,8 @@ pub const EditTool = prv.tool.Tool{
         \\When old_string does not match exactly, the tool falls back to fuzzy matching: line-trimmed, indentation-flexible, and whitespace-normalized. With replace_all=false a fuzzy match is applied only when it is unique; multiple candidates are rejected as ambiguous. Re-read the file and copy bytes exactly to avoid surprises.
         \\
         ,
+        .prompt_snippet = "Edit a single file using text replacement",
+        .prompt_guidelines = "Re-read the file and copy bytes exactly when replacing text.",
         .parameters_schema =
         \\{
         \\  "type": "object",

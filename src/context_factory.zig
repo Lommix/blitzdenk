@@ -500,6 +500,8 @@ pub fn refreshAgentTools(self: *const Self, agent: *r.prv.agent.Agent) !void {
                 .name = tool.def.name,
                 .description = def.desc,
                 .parameters_schema = def.schema,
+                .prompt_snippet = tool.def.prompt_snippet,
+                .prompt_guidelines = tool.def.prompt_guidelines,
             });
 
             continue;
@@ -620,6 +622,38 @@ pub fn build_system_prompt(
     const def = self.getAgent(agent_type) orelse return error.UnknownAgent;
     _ = try w.write(def.prompt);
     try w.writeByte('\n');
+
+    var wrote_tools_header = false;
+    for (0..def.tools.len) |i| {
+        const tool = self.findLoaded(def.tools.nameAt(i)) orelse continue;
+        if (tool.def.prompt_snippet) |snippet| {
+            if (!wrote_tools_header) {
+                _ = try w.write(
+                    \\
+                    \\# Available tools:
+                    \\
+                );
+                wrote_tools_header = true;
+            }
+            try w.print("- {s}: {s}\n", .{ tool.def.name, snippet });
+        }
+    }
+
+    var wrote_guidelines_header = false;
+    for (0..def.tools.len) |i| {
+        const tool = self.findLoaded(def.tools.nameAt(i)) orelse continue;
+        if (tool.def.prompt_guidelines) |guidelines| {
+            if (!wrote_guidelines_header) {
+                _ = try w.write(
+                    \\
+                    \\# Guidelines:
+                    \\
+                );
+                wrote_guidelines_header = true;
+            }
+            try w.print("- {s}\n", .{guidelines});
+        }
+    }
 
     if (self.agentHasTool(agent_type, r.tools.skill.LoadSkillTool.def.name)) {
         if (self.skill_dir) |skill_dir| {
@@ -1012,6 +1046,9 @@ test "system_prompt" {
     defer factory.prompt_arena.deinit();
 
     const prompt = try factory.build_system_prompt(alloc, .general);
-    _ = prompt; // autofix
-    // std.debug.print("{s}", .{prompt});
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "# Available tools:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "- read: Read file contents") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "- bash: Execute a bash command") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "# Guidelines:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "- Use read to examine files instead of cat or sed.") != null);
 }

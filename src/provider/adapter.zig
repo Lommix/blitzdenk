@@ -41,6 +41,8 @@ pub const ToolDef = struct {
     name: []const u8,
     description: []const u8,
     parameters_schema: []const u8,
+    prompt_snippet: ?[]const u8 = null,
+    prompt_guidelines: ?[]const u8 = null,
 };
 
 pub const TokenUsage = struct {

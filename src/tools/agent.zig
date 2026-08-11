@@ -29,6 +29,8 @@ pub const AgentTool = prv.tool.Tool{
         \\7. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
         \\
         ,
+        .prompt_snippet = "Launch a subagent",
+        .prompt_guidelines = "Launch multiple agents concurrently whenever possible.",
         .parameters_schema =
         \\{
         \\  "type": "object",
@@ -239,6 +241,7 @@ pub const AwaitAgent = prv.tool.Tool{
     .def = .{
         .name = "await_agent",
         .description = "Wait for a agent to finish and read its result",
+        .prompt_snippet = "Wait for a background agent",
         .parameters_schema =
         \\{"type":"object","properties":{
         \\  "agent_id":{"type":"number","description":"the agent id"},
@@ -270,6 +273,7 @@ pub const CancelAgent = prv.tool.Tool{
     .def = .{
         .name = "cancel_agent",
         .description = "Cancel a running agent",
+        .prompt_snippet = "Cancel a running agent",
         .parameters_schema =
         \\{"type":"object","properties":{
         \\  "agent_id":{"type":"number","description":"The agent id to cancel"}

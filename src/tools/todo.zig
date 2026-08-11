@@ -44,6 +44,8 @@ pub const CreateTodoTool = tc.Tool{
         \\All todos are created with status \`pending\`.
         \\
         ,
+        .prompt_snippet = "Create a todo item",
+        .prompt_guidelines = "Use todos to track multi-step work.",
         .parameters_schema =
         \\{"type":"object","properties":{
         \\  "subject": {"type": "string", "description":"A brief, actionable title in imperative form"},
@@ -58,6 +60,7 @@ pub const GetTodoTool = tc.Tool{
     .def = .{
         .name = "get_todo",
         .description = "Get a todo by ID from your todo list.",
+        .prompt_snippet = "Get a todo by ID",
         .parameters_schema =
         \\{"type":"object","properties":{"id":{"type":"integer","description":"Todo ID"}},"required":["id"]}
         ,
@@ -69,6 +72,7 @@ pub const ListTodosTool = tc.Tool{
     .def = .{
         .name = "list_todos",
         .description = "List all todos in your todo list.",
+        .prompt_snippet = "List todos",
         .parameters_schema =
         \\{"type":"object","properties":{},"required":[]}
         ,
@@ -80,6 +84,7 @@ pub const UpdateTodoStateTool = tc.Tool{
     .def = .{
         .name = "update_todo_state",
         .description = "Update the state of a todo",
+        .prompt_snippet = "Update a todo's state",
         .parameters_schema =
         \\{"type":"object","properties":{"id":{"type":"integer","description":"Todo ID"},"state":{"type":"string","enum":["pending","in_progress","done"],"description":"New state"}},"required":["id","state"]}
         ,

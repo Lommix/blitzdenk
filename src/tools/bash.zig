@@ -37,6 +37,8 @@ pub const BashTool = prv.tool.Tool{
         .description =
         \\Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to first 1000 lines or 32KB (whichever is hit first). Optionally provide a timeout in seconds. Set "run_in_background" to true to run the command in the background and poll it with read_process / stop it with cancel_process.
         ,
+        .prompt_snippet = "Execute a bash command",
+        .prompt_guidelines = "Use bash for operations without a dedicated tool (e.g. ls, rg, find, builds, tests).",
         .parameters_schema =
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Bash command to execute"},
@@ -52,6 +54,7 @@ pub const CancelBackgroundCommand = prv.tool.Tool{
     .def = .{
         .name = "cancel_process",
         .description = "cancel a background process which was spawned with the bash 'run_in_background' mode",
+        .prompt_snippet = "Cancel a background process",
         .parameters_schema =
         \\{"type": "object", "properties": {
         \\  "id": {"type": "number", "description": "the background process id"}
@@ -68,6 +71,7 @@ pub const ReadProcessTool = prv.tool.Tool{
         \\Reads the current stdout/stderr of a background command spawned with the bash 'run_in_background' mode.
         \\Returns the output so far, even while the process is still running.
         ,
+        .prompt_snippet = "Read a background process' output",
         .parameters_schema =
         \\{"type": "object", "properties": {
         \\  "id": {"type": "number", "description": "the background process id"}

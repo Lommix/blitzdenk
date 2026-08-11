@@ -12,6 +12,8 @@ pub const ReadTool = prv.tool.Tool{
         .description = "Read the contents of a file. For text files, output is truncated to " ++ std.fmt.comptimePrint("{d} lines or {d}KB", .{ r.MAX_DISPLAY_LINES, @divTrunc(r.MAX_DISPLAY_BYTES, 1024) }) ++
             \\(whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
         ,
+        .prompt_snippet = "Read file contents",
+        .prompt_guidelines = "Use read to examine files instead of cat or sed.",
         .parameters_schema =
         \\{
         \\  "type": "object",
@@ -31,6 +33,7 @@ pub const ViewImageTool = prv.tool.Tool{
     .def = .{
         .name = "view_image",
         .description = "Load an image from a local path or HTTP(S) URL into the model context. Supports PNG, JPEG, GIF, and WebP images up to 4 MB.",
+        .prompt_snippet = "Load an image into the model context",
         .parameters_schema =
         \\{
         \\  "type": "object",

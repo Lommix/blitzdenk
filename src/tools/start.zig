@@ -5,6 +5,7 @@ pub const StartMcpTool = r.prv.tool.Tool{
     .def = .{
         .name = "start_mcp",
         .description = "Start one configured MCP server by name and add its tools to this session.",
+        .prompt_snippet = "Start an MCP server",
         .parameters_schema =
         \\{"type":"object","properties":{"name":{"type":"string","description":"Configured MCP name"}},"required":["name"]}
         ,
@@ -16,6 +17,7 @@ pub const StartLspTool = r.prv.tool.Tool{
     .def = .{
         .name = "start_lsp",
         .description = "Start one configured LSP server by name and add the lsp tool to this session.",
+        .prompt_snippet = "Start an LSP server",
         .parameters_schema =
         \\{"type":"object","properties":{"name":{"type":"string","description":"Configured LSP name"}},"required":["name"]}
         ,

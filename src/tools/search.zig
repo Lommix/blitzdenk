@@ -14,6 +14,8 @@ pub const GlobTool = r.prv.tool.Tool{
         \\
         \\Every field is data, not a shell fragment. Do not add `rg`, `find`, shell syntax, or pipes to any argument.
         ,
+        .prompt_snippet = "Find files by glob",
+        .prompt_guidelines = "Use glob to discover files by name or path shape.",
         .parameters_schema =
         \\{
         \\  "type": "object",
@@ -38,6 +40,8 @@ pub const GrepTool = r.prv.tool.Tool{
         \\
         \\Every field is data, not a shell fragment. Do not add `rg`, shell quoting, or pipes to any argument.
         ,
+        .prompt_snippet = "Search file contents",
+        .prompt_guidelines = "Use grep to find definitions, references, and error messages in code.",
         .parameters_schema =
         \\{
         \\  "type": "object",

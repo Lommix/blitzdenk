@@ -86,6 +86,8 @@ pub const PatchTool = prv.tool.Tool{
         \\- `*** Add File:` fails if the file already exists; `*** Update File:` never creates a file
         \\
         ,
+        .prompt_snippet = "Apply a patch to one or more files",
+        .prompt_guidelines = "Use patch for multi-file changes; edit or write for single files.",
         .parameters_schema =
         \\{
         \\  "type": "object",

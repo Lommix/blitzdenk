@@ -12,6 +12,8 @@ pub const AskTool = prv.tool.Tool{
         \\This tool is a must call if any ambiguity is found in the current task. Always tag your recommendation with "(recommended)"!
         \\
         ,
+        .prompt_snippet = "Ask the user a question",
+        .prompt_guidelines = "Call ask_user when the task is ambiguous.",
         .parameters_schema =
         \\{
         \\  "type": "object",

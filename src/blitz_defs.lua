@@ -163,6 +163,8 @@
 ---@field description string
 ---@field schema? string
 ---@field args? table<string, BlitzArgDef>
+---@field snippet? string
+---@field guidelines? string
 ---@field func fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult
 
 ---@class BlitzThinking

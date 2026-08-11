@@ -303,6 +303,8 @@ const ToolDef = LuaType{ .table_def = .{ .name = "ToolDef", .fields = &.{
     .{ .name = "description", .ty = LuaType.string },
     .{ .name = "schema", .ty = LuaType.string, .optional = true },
     .{ .name = "args", .ty = ToolArgsDef, .optional = true },
+    .{ .name = "snippet", .ty = LuaType.string, .optional = true },
+    .{ .name = "guidelines", .ty = LuaType.string, .optional = true },
     .{ .name = "func", .ty = LuaType{ .raw_refs = .{
         .text = "fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult",
         .refs = &.{ CtxDef, CallDef, ToolResultDef },
@@ -381,6 +383,12 @@ pub const Blitz = LuaType{
 
                                 entry.name_len = getStringField(state, def.idx, "name", &entry.name) orelse return error.InvalidToolName;
                                 entry.desc_len = getStringField(state, def.idx, "description", &entry.description) orelse return error.InvalidToolDescription;
+                                if (getStringField(state, def.idx, "snippet", &entry.snippet)) |len| {
+                                    entry.snippet_len = len;
+                                }
+                                if (getStringField(state, def.idx, "guidelines", &entry.guidelines)) |len| {
+                                    entry.guidelines_len = len;
+                                }
 
                                 // schema (string) OR args (table) — at least one required
                                 if (getStringField(state, def.idx, "schema", &entry.schema)) |len| {
@@ -1535,6 +1543,10 @@ const LuaToolEntry = struct {
     name_len: usize = 0,
     description: [1024]u8 = undefined,
     desc_len: usize = 0,
+    snippet: [256]u8 = undefined,
+    snippet_len: usize = 0,
+    guidelines: [512]u8 = undefined,
+    guidelines_len: usize = 0,
     schema: [2048]u8 = undefined,
     schema_len: usize = 0,
     func_ref: c_int = c.LUA_NOREF,
@@ -1546,6 +1558,12 @@ const LuaToolEntry = struct {
     }
     fn descSlice(self: *const LuaToolEntry) []const u8 {
         return self.description[0..self.desc_len];
+    }
+    fn snippetSlice(self: *const LuaToolEntry) []const u8 {
+        return self.snippet[0..self.snippet_len];
+    }
+    fn guidelinesSlice(self: *const LuaToolEntry) []const u8 {
+        return self.guidelines[0..self.guidelines_len];
     }
     fn schemaSlice(self: *const LuaToolEntry) []const u8 {
         return self.schema[0..self.schema_len];
@@ -2092,6 +2110,8 @@ pub const LuaVm = struct {
                     .name = entry.nameSlice(),
                     .description = entry.descSlice(),
                     .parameters_schema = entry.schemaSlice(),
+                    .prompt_snippet = if (entry.snippet_len > 0) entry.snippetSlice() else null,
+                    .prompt_guidelines = if (entry.guidelines_len > 0) entry.guidelinesSlice() else null,
                 },
                 .func = &luaToolTrampoline,
             };
