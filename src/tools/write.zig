@@ -5,13 +5,13 @@ const std = @import("std");
 pub const WriteTool = prv.tool.Tool{
     .def = .{
         .name = "write",
-        .description = "Create or overwrite a file with the given content. If the file exists it will be replaced entirely. Parent directories are created automatically.",
+        .description = "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
         .parameters_schema =
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\      "path": {"type": "string", "description": "Path to the file (relative to cwd or absolute)"},
-        \\      "content": {"type": "string", "description": "The full content to write to the file"}
+        \\      "path": {"type": "string", "description": "Path to the file to write (relative or absolute)"},
+        \\      "content": {"type": "string", "description": "Content to write to the file"}
         \\  },
         \\  "required": ["path", "content"]
         \\}
@@ -23,7 +23,6 @@ pub const WriteTool = prv.tool.Tool{
 const Args = struct {
     path: []const u8,
     content: []const u8,
-    is_plan: bool = false,
 };
 
 fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
@@ -86,7 +85,9 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         look.value_ptr.* = .{ .last_read = now, .last_write = now };
     }
 
-    return r.okResult(call, "file written successfully");
+    const msg = std.fmt.allocPrint(ctx.alloc, "Successfully wrote {d} bytes to {s}", .{ args.content.len, args.path }) catch
+        "write failed";
+    return r.okResult(call, msg);
 }
 
 fn runWrite(ctx: prv.tool.ToolContext, resolved: []const u8, content: []const u8) ?prv.exec.CmdResult {
