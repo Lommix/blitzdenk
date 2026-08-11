@@ -25,8 +25,6 @@ pub const general_default_tool_set = .{
     r.tools.todos.CreateTodoTool,
     r.tools.patch.PatchTool,
     r.tools.ask.AskTool,
-    r.tools.ssh.EnterSshMode,
-    r.tools.ssh.ExitSshMode,
     r.tools.search.GlobTool,
     r.tools.search.GrepTool,
     r.tools.skill.LoadSkillTool,

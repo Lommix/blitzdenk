@@ -32,11 +32,6 @@ pub const UiState = union(enum) {
 pub const AppFlags = packed struct {
     show_thinking: bool = true,
     debug_log: bool = true,
-    /// When true, the agent sees the SSH state reminder and gets the
-    /// `enter_ssh`/`exit_ssh` r.tools. When false, SSH mode is locked from the
-    /// agent's perspective: it cannot toggle and is not informed of the state.
-    /// Toggle from TUI / r.lua.
-    ssh_agent_control: bool = true,
     skip_permissions: bool = true,
 };
 

@@ -84,8 +84,6 @@
 ---@field UPDATE_TODO_STATE string
 ---@field CREATE_TODO string
 ---@field ASK string
----@field ENTER_SSH string
----@field EXIT_SSH string
 ---@field AWAIT_AGENT string
 ---@field CANCEL_AGENT string
 ---@field GLOB string
@@ -216,7 +214,6 @@
 ---@class BlitzAppFlags
 ---@field show_thinking? boolean
 ---@field debug_log? boolean
----@field ssh_agent_control? boolean
 ---@field skip_permissions? boolean
 
 ---@class BlitzTheme

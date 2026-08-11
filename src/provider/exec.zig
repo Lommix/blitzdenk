@@ -102,10 +102,6 @@ pub const CmdPool = struct {
         self.ssh_active = false;
     }
 
-    pub fn setSshActive(self: *Self, active: bool) void {
-        self.ssh_active = active;
-    }
-
     /// Returns a usable SSH_AUTH_SOCK path. If `inherited_sock` already points
     /// at a live socket, returns it untouched. Otherwise spawns `ssh-agent -s`
     /// and records pid + socket on self. Subsequent runWithOpts() calls

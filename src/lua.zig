@@ -323,7 +323,6 @@ const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
 const AppFlagsDef = LuaType{ .table_def = .{ .name = "BlitzAppFlags", .fields = &.{
     .{ .name = "show_thinking", .ty = LuaType.boolean, .optional = true },
     .{ .name = "debug_log", .ty = LuaType.boolean, .optional = true },
-    .{ .name = "ssh_agent_control", .ty = LuaType.boolean, .optional = true },
     .{ .name = "skip_permissions", .ty = LuaType.boolean, .optional = true },
 } } };
 const McpServerDef = LuaType{ .table_def = .{ .name = "BlitzMcpServerDef", .fields = &.{
@@ -1024,8 +1023,6 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "UPDATE_TODO_STATE", .ty = LuaType.string, .value = .{ .string = tl.todos.UpdateTodoStateTool.def.name } },
             .{ .name = "CREATE_TODO", .ty = LuaType.string, .value = .{ .string = tl.todos.CreateTodoTool.def.name } },
             .{ .name = "ASK", .ty = LuaType.string, .value = .{ .string = tl.ask.AskTool.def.name } },
-            .{ .name = "ENTER_SSH", .ty = LuaType.string, .value = .{ .string = tl.ssh.EnterSshMode.def.name } },
-            .{ .name = "EXIT_SSH", .ty = LuaType.string, .value = .{ .string = tl.ssh.ExitSshMode.def.name } },
             .{ .name = "AWAIT_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AwaitAgent.def.name } },
             .{ .name = "CANCEL_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.CancelAgent.def.name } },
             .{ .name = "GLOB", .ty = LuaType.string, .value = .{ .string = tl.search.GlobTool.def.name } },
