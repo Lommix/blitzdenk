@@ -4,35 +4,22 @@ const r = @import("root.zig");
 const SEARCH_TIMEOUT_MS = 10_000;
 const MAX_CONTEXT_LINES = 100;
 
-const CaseMode = enum {
-    sensitive,
-    insensitive,
-};
-
 pub const GlobTool = r.prv.tool.Tool{
     .def = .{
         .name = "glob",
         .description =
-        \\Find files by path glob. Use this whenever you need to discover files by name, extension, or path shape; use grep instead when you need to search file contents.
+        \\Find files by path glob. Use this whenever you need to discover files by name, extension, or path shape; use grep when you need to search file contents.
         \\
-        \\`pattern` is a gitignore-style glob matched against paths. Examples: `**/*.zig` finds Zig files recursively, `**/*.{zig,lua}` finds either extension using brace alternation, `src/**/test*.zig` finds matching tests below src, and `AGENTS.md` finds that filename at any depth. Use `additional_patterns` when unrelated globs should be ORed in one globally sorted search. Set `path` to narrow the directory being searched.
+        \\`pattern` is a gitignore-style glob matched against paths, e.g. `**/*.zig` or `src/**/*.zig`. `path` narrows the directory being searched. Results respect ignore files, are sorted by path, and are truncated to 1000 lines or 32 KB.
         \\
-        \\Results respect ignore files and omit hidden files by default. `include_ignored` also enables hidden traversal so ignored hidden paths are not silently omitted. Results are sorted by path for stable output.
-        \\
-        \\Every field is data, not a shell fragment. Do not add `rg`, `find`, shell syntax, or pipes to any argument. Large results are truncated automatically.
+        \\Every field is data, not a shell fragment. Do not add `rg`, `find`, shell syntax, or pipes to any argument.
         ,
         .parameters_schema =
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\    "pattern": {"type": "string", "description": "Primary file-path glob to match, such as `**/*.zig`, `**/*.{zig,lua}`, or `AGENTS.md`. Brace groups are alternatives. This is a glob, not a regular expression."},
-        \\    "additional_patterns": {"type": "array", "items": {"type": "string"}, "description": "Optional additional path globs ORed with `pattern` in the same search. Use this when brace alternatives cannot express the desired patterns; all results are sorted together."},
-        \\    "path": {"type": "string", "default": ".", "description": "Directory to search, relative to the current working directory or absolute. Use the narrowest known directory for faster searches."},
-        \\    "exclude": {"type": "array", "items": {"type": "string"}, "description": "Optional path globs to exclude, without a leading `!`, such as `vendor/**` or `**/*.generated.zig`."},
-        \\    "case_mode": {"type": "string", "enum": ["sensitive", "insensitive"], "default": "sensitive", "description": "Whether path globs use case-sensitive matching. Set `insensitive` when filename case should not matter, independent of host filesystem behavior."},
-        \\    "include_hidden": {"type": "boolean", "default": false, "description": "Include hidden files and directories. Ignore rules still apply unless `include_ignored` is also true."},
-        \\    "include_ignored": {"type": "boolean", "default": false, "description": "Include files excluded by .gitignore, .ignore, and global ignore files, including hidden paths. Use sparingly because vendor/build trees can be large."},
-        \\    "max_depth": {"type": "integer", "minimum": 0, "maximum": 1000, "description": "Maximum directory depth below `path`. A value of 1 includes only direct children; omit it for unlimited traversal."}
+        \\    "pattern": {"type": "string", "description": "Glob pattern to match files, e.g. `**/*.zig` or `src/**/*.zig`"},
+        \\    "path": {"type": "string", "default": ".", "description": "Directory to search in, relative to the current working directory or absolute"}
         \\  },
         \\  "required": ["pattern"]
         \\}
@@ -45,27 +32,22 @@ pub const GrepTool = r.prv.tool.Tool{
     .def = .{
         .name = "grep",
         .description =
-        \\Search text inside files using ripgrep. Use this for definitions, references, error messages, configuration keys, and any other content search. Use glob instead when you only need filenames.
+        \\Search file contents for patterns. Use this for definitions, references, error messages, configuration keys, and any other content search; use glob when you only need filenames.
         \\
-        \\`pattern` is a regular expression by default. Examples: `fn\s+render` finds function declarations, `TODO|FIXME` finds either word, and `literal.name` treats `.` as a wildcard. Set `fixed_strings` when punctuation must be matched literally or when you do not need regex syntax. Searches use smart case by default: lowercase patterns ignore case, while a pattern containing uppercase is case-sensitive.
+        \\`pattern` is a regular expression by default; set `literal` when punctuation must be matched literally. `path` narrows the search, `glob` filters files, and `context` includes surrounding lines. Results respect .gitignore, include file paths and line numbers, and are truncated to 1000 lines or 32 KB.
         \\
-        \\Narrow searches with `path` and `globs` whenever possible. Normal output includes file paths and line numbers. Use `context` when nearby lines matter.
-        \\
-        \\Every field is data, not a shell fragment. Do not add `rg`, shell quoting, or pipes to any argument. Large results are truncated automatically.
+        \\Every field is data, not a shell fragment. Do not add `rg`, shell quoting, or pipes to any argument.
         ,
         .parameters_schema =
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\    "pattern": {"type": "string", "description": "Regular expression to search for. Set `fixed_strings` to true to treat it as literal text instead."},
-        \\    "path": {"type": "string", "default": ".", "description": "File or directory to search, relative to the current working directory or absolute. Use the narrowest known path for speed and relevance."},
-        \\    "globs": {"type": "array", "items": {"type": "string"}, "description": "Optional file-path globs to include, relative to `path`, such as `*.zig` or `tui/**/*.zig`. A cwd-relative form beginning with `path` is also accepted. These filter files; they do not search their contents."},
-        \\    "exclude": {"type": "array", "items": {"type": "string"}, "description": "Optional file-path globs to exclude, without a leading `!`, such as `vendor/**` or `**/fixtures/**`."},
-        \\    "case_mode": {"type": "string", "enum": ["sensitive", "insensitive"], "description": "Explicit case override. Omit this field for smart case: lowercase patterns ignore case while patterns containing uppercase are case-sensitive."},
-        \\    "fixed_strings": {"type": "boolean", "default": false, "description": "Treat the entire pattern as literal text instead of a regular expression. Prefer this for exact strings containing regex punctuation."},
-        \\    "context": {"type": "integer", "minimum": 0, "maximum": 100, "default": 0, "description": "Number of lines to show before and after each match."},
-        \\    "include_hidden": {"type": "boolean", "default": false, "description": "Search hidden files and directories. Ignore rules still apply unless `include_ignored` is also true."},
-        \\    "include_ignored": {"type": "boolean", "default": false, "description": "Search files excluded by .gitignore, .ignore, and global ignore files, including hidden paths. Use sparingly because vendor/build trees can be large."}
+        \\    "pattern": {"type": "string", "description": "Search pattern (regex or literal string)"},
+        \\    "path": {"type": "string", "default": ".", "description": "File or directory to search, relative to the current working directory or absolute"},
+        \\    "glob": {"type": "string", "description": "Filter files by glob pattern, e.g. `*.zig` or `src/**/*.zig`"},
+        \\    "ignoreCase": {"type": "boolean", "default": false, "description": "Case-insensitive search (default: false)"},
+        \\    "literal": {"type": "boolean", "default": false, "description": "Treat pattern as literal string instead of regex (default: false)"},
+        \\    "context": {"type": "number", "minimum": 0, "maximum": 100, "default": 0, "description": "Number of lines to show before and after each match (default: 0)"}
         \\  },
         \\  "required": ["pattern"]
         \\}
@@ -76,25 +58,16 @@ pub const GrepTool = r.prv.tool.Tool{
 
 const GlobArgs = struct {
     pattern: []const u8,
-    additional_patterns: []const []const u8 = &.{},
     path: []const u8 = ".",
-    exclude: []const []const u8 = &.{},
-    case_mode: CaseMode = .sensitive,
-    include_hidden: bool = false,
-    include_ignored: bool = false,
-    max_depth: ?u32 = null,
 };
 
 const GrepArgs = struct {
     pattern: []const u8,
     path: []const u8 = ".",
-    globs: []const []const u8 = &.{},
-    exclude: []const []const u8 = &.{},
-    case_mode: ?CaseMode = null,
-    fixed_strings: bool = false,
+    glob: ?[]const u8 = null,
+    ignoreCase: bool = false,
+    literal: bool = false,
     context: u32 = 0,
-    include_hidden: bool = false,
-    include_ignored: bool = false,
 };
 
 fn runGlob(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adapter.ToolResult {
@@ -103,35 +76,15 @@ fn runGlob(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adap
     }) catch return r.errResult(call, "invalid JSON arguments for glob");
 
     if (validateCommon(args.pattern, args.path)) |msg| return r.errResult(call, msg);
-    if (args.max_depth) |depth| {
-        if (depth > 1000) return r.errResult(call, "max_depth must be between 0 and 1000");
-    }
 
     r.setToolStatusPrint(ctx, call, "glob  {s}  {s}", .{ args.pattern, args.path });
 
     var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(ctx.alloc, &.{ "rg", "--files", "--sort=path" }) catch
         return r.errResult(call, "failed to build glob command");
-    if (args.case_mode == .insensitive) argv.append(ctx.alloc, "--glob-case-insensitive") catch
+    argv.append(ctx.alloc, "--hidden") catch
         return r.errResult(call, "failed to build glob command");
-    appendWalkOptions(ctx.alloc, &argv, args.include_hidden, args.include_ignored) catch
-        return r.errResult(call, "failed to build glob command");
-    if (args.max_depth) |depth| {
-        const value = std.fmt.allocPrint(ctx.alloc, "{d}", .{depth}) catch
-            return r.errResult(call, "failed to build glob command");
-        argv.appendSlice(ctx.alloc, &.{ "--max-depth", value }) catch
-            return r.errResult(call, "failed to build glob command");
-    }
     appendIncludeGlob(ctx.alloc, &argv, ctx.cwd, args.path, args.pattern) catch
-        return r.errResult(call, "failed to build glob command");
-    for (args.additional_patterns) |pattern| {
-        if (pattern.len == 0) return r.errResult(call, "additional_patterns must not contain an empty pattern");
-        appendIncludeGlob(ctx.alloc, &argv, ctx.cwd, args.path, pattern) catch
-            return r.errResult(call, "failed to build glob command");
-    }
-    appendHiddenExclusion(ctx.alloc, &argv, args.include_hidden, args.include_ignored) catch
-        return r.errResult(call, "failed to build glob command");
-    appendExcludes(ctx.alloc, &argv, ctx.cwd, args.path, args.exclude) catch
         return r.errResult(call, "failed to build glob command");
     appendSearchPath(ctx.alloc, &argv, args.path) catch
         return r.errResult(call, "failed to build glob command");
@@ -160,24 +113,17 @@ fn runGrep(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adap
     argv.appendSlice(ctx.alloc, &.{ "rg", "--color=never", "--no-heading", "--line-number", "--with-filename" }) catch
         return r.errResult(call, "failed to build grep command");
 
-    argv.append(ctx.alloc, if (args.case_mode) |case_mode| switch (case_mode) {
-        .sensitive => "--case-sensitive",
-        .insensitive => "--ignore-case",
-    } else "--smart-case") catch return r.errResult(call, "failed to build grep command");
-
-    if (args.fixed_strings) argv.append(ctx.alloc, "--fixed-strings") catch
+    if (args.ignoreCase) argv.append(ctx.alloc, "--ignore-case") catch
         return r.errResult(call, "failed to build grep command");
-    appendWalkOptions(ctx.alloc, &argv, args.include_hidden, args.include_ignored) catch
+    if (args.literal) argv.append(ctx.alloc, "--fixed-strings") catch
         return r.errResult(call, "failed to build grep command");
 
-    for (args.globs) |glob| {
-        if (glob.len == 0) return r.errResult(call, "globs must not contain an empty pattern");
+    if (args.glob) |glob| {
+        if (glob.len == 0) return r.errResult(call, "glob must not be empty");
         appendIncludeGlob(ctx.alloc, &argv, ctx.cwd, args.path, glob) catch
             return r.errResult(call, "failed to build grep command");
     }
-    appendHiddenExclusion(ctx.alloc, &argv, args.include_hidden, args.include_ignored) catch
-        return r.errResult(call, "failed to build grep command");
-    appendExcludes(ctx.alloc, &argv, ctx.cwd, args.path, args.exclude) catch
+    argv.append(ctx.alloc, "--hidden") catch
         return r.errResult(call, "failed to build grep command");
 
     if (args.context > 0) {
@@ -196,8 +142,8 @@ fn runGrep(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adap
         .kind = "grep",
         .pattern = args.pattern,
         .path = args.path,
-        .regex = !args.fixed_strings,
-        .empty_message = "No matches found in searchable text. Binary data is not searched as ordinary text.",
+        .regex = !args.literal,
+        .empty_message = "No matches found.",
     });
 }
 
@@ -205,16 +151,6 @@ fn validateCommon(pattern: []const u8, path: []const u8) ?[]const u8 {
     if (pattern.len == 0) return "pattern is empty";
     if (path.len == 0) return "path is empty";
     return null;
-}
-
-fn appendWalkOptions(
-    alloc: std.mem.Allocator,
-    argv: *std.ArrayList([]const u8),
-    include_hidden: bool,
-    include_ignored: bool,
-) !void {
-    if (include_hidden or include_ignored) try argv.append(alloc, "--hidden");
-    if (include_ignored) try argv.append(alloc, "--no-ignore");
 }
 
 fn appendIncludeGlob(
@@ -226,43 +162,6 @@ fn appendIncludeGlob(
 ) !void {
     const resolved = try resolveGlobForSearchPath(alloc, cwd, path, pattern);
     try argv.appendSlice(alloc, &.{ "--glob", resolved });
-}
-
-/// Any explicit `--glob` makes ripgrep whitelist hidden paths. Restore the
-/// documented default (omit hidden unless requested) with a trailing
-/// exclusion glob: ripgrep applies globs last-match-wins, so it must come
-/// after every include glob.
-fn appendHiddenExclusion(
-    alloc: std.mem.Allocator,
-    argv: *std.ArrayList([]const u8),
-    include_hidden: bool,
-    include_ignored: bool,
-) !void {
-    if (include_hidden or include_ignored) return;
-    try argv.appendSlice(alloc, &.{ "--glob", "!**/.*" });
-}
-
-fn appendExcludes(
-    alloc: std.mem.Allocator,
-    argv: *std.ArrayList([]const u8),
-    cwd: []const u8,
-    path: []const u8,
-    excludes: []const []const u8,
-) !void {
-    for (excludes) |exclude| {
-        if (exclude.len == 0) return error.EmptyExclude;
-        const resolved = try resolveGlobForSearchPath(alloc, cwd, path, exclude);
-        const negated = try std.fmt.allocPrint(alloc, "!{s}", .{resolved});
-        try argv.appendSlice(alloc, &.{ "--glob", negated });
-
-        // Ripgrep globs match files. Also exclude descendants so a bare
-        // directory such as `zig-cache` prunes the whole subtree.
-        const trimmed = std.mem.trimEnd(u8, exclude, "/");
-        const descendant_pattern = try std.fmt.allocPrint(alloc, "{s}/**", .{trimmed});
-        const resolved_descendants = try resolveGlobForSearchPath(alloc, cwd, path, descendant_pattern);
-        const descendants = try std.fmt.allocPrint(alloc, "!{s}", .{resolved_descendants});
-        try argv.appendSlice(alloc, &.{ "--glob", descendants });
-    }
 }
 
 /// Ripgrep evaluates slash-containing globs against paths rooted at its cwd,
@@ -454,49 +353,6 @@ test "search globs resolve relative to narrowed path" {
     try std.testing.expectEqualStrings("**/*.zig", try resolveGlobForSearchPath(alloc, "/repo", "..", "**/*.zig"));
 }
 
-test "include ignored also traverses hidden paths" {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(std.testing.allocator);
-
-    try appendWalkOptions(std.testing.allocator, &argv, false, true);
-    try std.testing.expectEqualSlices([]const u8, &.{ "--hidden", "--no-ignore" }, argv.items);
-}
-
-test "hidden paths are re-excluded after include globs unless requested" {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(std.testing.allocator);
-
-    try appendHiddenExclusion(std.testing.allocator, &argv, false, false);
-    try std.testing.expectEqualSlices([]const u8, &.{ "--glob", "!**/.*" }, argv.items);
-
-    var argv_hidden: std.ArrayList([]const u8) = .empty;
-    defer argv_hidden.deinit(std.testing.allocator);
-    try appendHiddenExclusion(std.testing.allocator, &argv_hidden, true, false);
-    try std.testing.expectEqualSlices([]const u8, &.{}, argv_hidden.items);
-
-    var argv_ignored: std.ArrayList([]const u8) = .empty;
-    defer argv_ignored.deinit(std.testing.allocator);
-    try appendHiddenExclusion(std.testing.allocator, &argv_ignored, false, true);
-    try std.testing.expectEqualSlices([]const u8, &.{}, argv_ignored.items);
-}
-
-test "bare directory excludes include descendants relative to path" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    var argv: std.ArrayList([]const u8) = .empty;
-
-    try appendExcludes(alloc, &argv, "/repo", "src", &.{"zig-cache"});
-    const expected: []const []const u8 = &.{
-        "--glob",
-        "!zig-cache",
-        "--glob",
-        "!src/zig-cache/**",
-    };
-    try std.testing.expectEqual(expected.len, argv.items.len);
-    for (expected, argv.items) |want, got| try std.testing.expectEqualStrings(want, got);
-}
-
 test "search errors add context and simplify regex parse failures" {
     const regex_error = try formatSearchError(std.testing.allocator, .{
         .kind = "grep",
@@ -530,9 +386,13 @@ test "search schemas and defaults parse" {
     const grep_schema = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, GrepTool.def.parameters_schema, .{});
     defer grep_schema.deinit();
 
+    const glob_args = try std.json.parseFromSlice(GlobArgs, std.testing.allocator, "{\"pattern\":\"**/*.zig\"}", .{});
+    defer glob_args.deinit();
+
     const grep_args = try std.json.parseFromSlice(GrepArgs, std.testing.allocator, "{\"pattern\":\"needle\"}", .{});
     defer grep_args.deinit();
-    try std.testing.expect(grep_args.value.case_mode == null);
-    try std.testing.expect(!grep_args.value.fixed_strings);
+    try std.testing.expect(grep_args.value.glob == null);
+    try std.testing.expect(!grep_args.value.ignoreCase);
+    try std.testing.expect(!grep_args.value.literal);
     try std.testing.expectEqual(@as(u32, 0), grep_args.value.context);
 }
