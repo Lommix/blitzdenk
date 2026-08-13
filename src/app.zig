@@ -1874,7 +1874,7 @@ fn buildChatEntryParagraph(
             .message => |text| {
                 has_text = true;
                 var p = r.tui.Paragraph{};
-                try appendMarkdownText(&p, arena, text);
+                try appendMarkdownText(&p, arena, text, inner_w);
                 const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total.* += h;
@@ -2097,7 +2097,7 @@ fn buildMessageParagraph(
             if (m.role == .user) {
                 appendPlainText(&p, arena, txt, .{});
             } else {
-                appendMarkdownText(&p, arena, txt);
+                appendMarkdownText(&p, arena, txt, 0) catch {};
             }
         },
         .thinking => |txt| {
@@ -2227,19 +2227,30 @@ fn appendThinkingText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []cons
     }
 }
 
-fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8) !void {
+fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8, width: u16) !void {
     if (raw.len == 0) return;
     var hl = r.tui.MarkdownStreamingHighlighter.init(arena);
     try hl.feed(raw);
     hl.finish();
 
     var current: r.tui.Line = .{};
+    var skip_newline = false;
     drain: while (true) switch (hl.consume()) {
         .done, .need_bytes => break :drain,
         .span => |s| {
+            if (s.kind == .heading_h1 or s.kind == .heading_h2) {
+                try appendHeadingLine(p, arena, s, width);
+                skip_newline = true;
+                continue;
+            }
             if (std.mem.eql(u8, s.content, "\n")) {
-                try p.lines.append(arena, current);
-                current = .{};
+                if (skip_newline) {
+                    skip_newline = false;
+                    current = .{};
+                } else {
+                    try p.lines.append(arena, current);
+                    current = .{};
+                }
                 continue;
             }
             try current.pushSpan(arena, s);
@@ -2248,6 +2259,27 @@ fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []cons
     if (current.spans.items.len > 0) {
         try p.lines.append(arena, current);
     }
+}
+
+fn appendHeadingLine(p: *r.tui.Paragraph, arena: std.mem.Allocator, span: r.tui.Span, width: u16) !void {
+    const fill: u8 = if (span.kind == .heading_h1) '=' else '-';
+    const sep = if (fill == '=') "===" else "---";
+    const w: usize = width;
+
+    var line: r.tui.Line = .{ .style = span.style };
+    try line.pushSpan(arena, .{ .content = sep, .style = span.style });
+    try line.pushSpan(arena, span);
+    try line.pushSpan(arena, .{ .content = sep, .style = span.style });
+
+    const used: usize = 6 + span.widthCols();
+    if (w > used) {
+        const fill_len = w - used;
+        const fill_buf = try arena.alloc(u8, fill_len);
+        @memset(fill_buf, fill);
+        try line.pushText(arena, fill_buf, span.style);
+    }
+
+    try p.lines.append(arena, line);
 }
 
 fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
@@ -2793,4 +2825,40 @@ test "ToolStatusStore retains terminal tool result" {
     const agent = &store.agents[agent_id.index];
     try std.testing.expectEqual(agent_id.generation, agent.generation);
     try std.testing.expect(agent.entries.get("call_1").?.is_error.?);
+}
+
+test "appendMarkdownText fills headline to width" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var p: r.tui.Paragraph = .{};
+    try appendMarkdownText(&p, alloc, "# Hi\n## Bye\n### Low\n", 20);
+
+    try std.testing.expectEqual(@as(usize, 3), p.lines.items.len);
+
+    const h1 = p.lines.items[0];
+    try std.testing.expectEqual(@as(usize, 4), h1.spans.items.len);
+    try std.testing.expectEqualStrings("===", h1.spans.items[0].content);
+    try std.testing.expectEqualStrings("Hi", h1.spans.items[1].content);
+    try std.testing.expectEqualStrings("===", h1.spans.items[2].content);
+    try std.testing.expectEqual(@as(usize, 12), h1.spans.items[3].content.len);
+    for (h1.spans.items[3].content) |c| try std.testing.expectEqual(@as(u8, '='), c);
+    try std.testing.expectEqual(@as(usize, 20), h1.widthCols());
+    try std.testing.expect(h1.spans.items[1].style.modifier.bold);
+
+    const h2 = p.lines.items[1];
+    try std.testing.expectEqual(@as(usize, 4), h2.spans.items.len);
+    try std.testing.expectEqualStrings("---", h2.spans.items[0].content);
+    try std.testing.expectEqualStrings("Bye", h2.spans.items[1].content);
+    try std.testing.expectEqualStrings("---", h2.spans.items[2].content);
+    try std.testing.expectEqual(@as(usize, 11), h2.spans.items[3].content.len);
+    for (h2.spans.items[3].content) |c| try std.testing.expectEqual(@as(u8, '-'), c);
+    try std.testing.expectEqual(@as(usize, 20), h2.widthCols());
+
+    const h3 = p.lines.items[2];
+    try std.testing.expectEqual(@as(usize, 1), h3.spans.items.len);
+    try std.testing.expectEqualStrings("Low", h3.spans.items[0].content);
+    try std.testing.expect(!h3.spans.items[0].style.modifier.bold);
+    try std.testing.expect(h3.spans.items[0].style.fg != .reset);
 }

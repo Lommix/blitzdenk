@@ -121,6 +121,10 @@ pub const MarkdownStreamingHighlighter = struct {
     /// owned copy of code block's lang tag — buffer may realloc so we can't slice it.
     code_lang_buf: [32]u8 = undefined,
     code_lang_len: u8 = 0,
+    /// true while consuming the body of a heading or blockquote line.
+    in_block: bool = false,
+    /// style applied to plain runs inside the current block line.
+    block_style: r.Style = .{},
 
     pub fn init(alloc: std.mem.Allocator) Self {
         return .{ .alloc = alloc };
@@ -177,6 +181,12 @@ pub const MarkdownStreamingHighlighter = struct {
             const line_end = std.mem.indexOfScalarPos(u8, buf, self.cursor, '\n') orelse {
                 if (!self.eof) return .need_bytes;
                 const line = buf[self.cursor..];
+                if (line.len > 0 and line[0] == '#') {
+                    var depth: usize = 0;
+                    while (depth < line.len and depth < 6 and line[depth] == '#') depth += 1;
+                    if (depth < line.len and line[depth] == ' ') return self.startHeading(line, buf.len, depth);
+                }
+                if (line.len >= 2 and line[0] == '>' and line[1] == ' ') return self.startQuote();
                 if (isTableSeparatorLine(line)) {
                     self.cursor = buf.len;
                     self.at_line_start = true;
@@ -232,21 +242,11 @@ pub const MarkdownStreamingHighlighter = struct {
             if (line.len > 0 and line[0] == '#') {
                 var depth: usize = 0;
                 while (depth < line.len and depth < 6 and line[depth] == '#') depth += 1;
-                if (depth < line.len and line[depth] == ' ') {
-                    // emit heading prefix span ("# ", "## ", etc.) then inline remainder.
-                    const prefix = line[0 .. depth + 1];
-                    self.cursor += prefix.len;
-                    self.at_line_start = false;
-                    return .{ .span = .{ .content = prefix, .style = self.theme.heading } };
-                }
+                if (depth < line.len and line[depth] == ' ') return self.startHeading(line, line_end, depth);
             }
 
             // Blockquote: > text
-            if (line.len >= 2 and line[0] == '>' and line[1] == ' ') {
-                self.cursor += 2;
-                self.at_line_start = false;
-                return .{ .span = .{ .content = "│ ", .style = self.theme.quote } };
-            }
+            if (line.len >= 2 and line[0] == '>' and line[1] == ' ') return self.startQuote();
 
             // Bullet list: "- " or "* "
             if (line.len >= 2 and (line[0] == '-' or line[0] == '*') and line[1] == ' ') {
@@ -281,6 +281,31 @@ pub const MarkdownStreamingHighlighter = struct {
         return self.consumeInline();
     }
 
+    fn startHeading(self: *Self, line: []const u8, line_end: usize, depth: usize) Result {
+        if (depth <= 2) {
+            self.cursor = line_end;
+            self.at_line_start = true;
+            return .{ .span = .{
+                .content = line[depth + 1 ..],
+                .style = self.theme.heading,
+                .kind = if (depth == 1) .heading_h1 else .heading_h2,
+            } };
+        }
+        self.cursor += depth + 1;
+        self.at_line_start = false;
+        self.in_block = true;
+        self.block_style = .{ .fg = self.theme.heading.fg };
+        return self.consumeInline();
+    }
+
+    fn startQuote(self: *Self) Result {
+        self.cursor += 2;
+        self.at_line_start = false;
+        self.in_block = true;
+        self.block_style = self.theme.quote;
+        return .{ .span = .{ .content = "  │ ", .style = self.block_style } };
+    }
+
     /// Emit the next inline segment (plain run up to next emphasis marker,
     /// or a styled run if we're sitting on a marker).
     fn consumeInline(self: *Self) Result {
@@ -296,6 +321,8 @@ pub const MarkdownStreamingHighlighter = struct {
 
         // End of line → emit newline, reset at_line_start for next block-level decision.
         if (buf[cur] == '\n') {
+            self.in_block = false;
+            self.block_style = .{};
             self.cursor = cur + 1;
             self.at_line_start = true;
             return .{ .span = .{ .content = "\n", .style = self.theme.plain } };
@@ -303,6 +330,8 @@ pub const MarkdownStreamingHighlighter = struct {
 
         // Try emphasis at current position.
         if (self.tryEmphasis(cur)) |res| return res;
+
+        const plain_style = if (self.in_block) self.block_style else self.theme.plain;
 
         // Scan plain run until next emphasis marker or newline.
         var end = cur;
@@ -318,12 +347,12 @@ pub const MarkdownStreamingHighlighter = struct {
         if (end == cur) {
             // Marker that didn't match — emit as single literal char to make progress.
             self.cursor = cur + 1;
-            return .{ .span = .{ .content = buf[cur .. cur + 1], .style = self.theme.plain } };
+            return .{ .span = .{ .content = buf[cur .. cur + 1], .style = plain_style } };
         }
 
         const slice = buf[cur..end];
         self.cursor = end;
-        return .{ .span = .{ .content = slice, .style = self.theme.plain } };
+        return .{ .span = .{ .content = slice, .style = plain_style } };
     }
 
     const EmphasisKind = enum { code, bold, italic };
@@ -367,11 +396,12 @@ pub const MarkdownStreamingHighlighter = struct {
     fn tryEmphasis(self: *Self, pos: usize) ?Result {
         const hit = self.matchEmphasis(pos) orelse return null;
         const buf = self.buffer.items;
-        const style = switch (hit.kind) {
+        var style = switch (hit.kind) {
             .code => self.theme.inline_code,
             .bold => self.theme.bold,
             .italic => self.theme.italic,
         };
+        if (self.in_block) style.fg = self.block_style.fg;
         self.cursor = hit.close + hit.open_len;
         return .{ .span = .{ .content = buf[pos + hit.open_len .. hit.close], .style = style } };
     }
@@ -390,7 +420,8 @@ pub const MarkdownStreamingHighlighter = struct {
         }
         const slice = buf[self.cursor..end];
         self.cursor = end;
-        return .{ .span = .{ .content = slice, .style = self.theme.plain } };
+        const style = if (self.in_block) self.block_style else self.theme.plain;
+        return .{ .span = .{ .content = slice, .style = style } };
     }
 
     // ── Code mode ──────────────────────────────────────────────────────────
@@ -648,10 +679,77 @@ test "markdown: heading" {
         .done => break,
     };
 
-    // first span: "## " with heading style
+    // H2 heading emits its title as a tagged span; the renderer decorates it.
     try std.testing.expect(got.items.len >= 2);
-    try std.testing.expectEqualStrings("## ", got.items[0].content);
+    try std.testing.expectEqualStrings("Title", got.items[0].content);
+    try std.testing.expectEqual(r.Span.Kind.heading_h2, got.items[0].kind);
     try std.testing.expect(got.items[0].style.modifier.bold);
+}
+
+test "markdown: heading levels decorate and color" {
+    const alloc = std.testing.allocator;
+    var hl = MarkdownStreamingHighlighter.init(alloc);
+    defer hl.deinit();
+
+    try hl.feed("# One\n### Three\n");
+    hl.finish();
+
+    var got: std.ArrayList(r.Span) = .empty;
+    defer got.deinit(alloc);
+    while (true) switch (hl.consume()) {
+        .span => |s| try got.append(alloc, s),
+        .need_bytes => unreachable,
+        .done => break,
+    };
+
+    const joined = try collectPlain(got.items, alloc);
+    defer alloc.free(joined);
+    try std.testing.expectEqualStrings("One\nThree\n", joined);
+
+    var h1_bold = false;
+    var h3_bold = false;
+    var h3_colored = false;
+    for (got.items) |s| {
+        if (std.mem.eql(u8, s.content, "One") and s.kind == .heading_h1 and s.style.modifier.bold) h1_bold = true;
+        if (std.mem.eql(u8, s.content, "Three")) {
+            h3_bold = s.style.modifier.bold;
+            h3_colored = s.style.fg != .reset;
+        }
+    }
+    try std.testing.expect(h1_bold);
+    try std.testing.expect(!h3_bold);
+    try std.testing.expect(h3_colored);
+}
+
+test "markdown: blockquote indents with border and color" {
+    const alloc = std.testing.allocator;
+    var hl = MarkdownStreamingHighlighter.init(alloc);
+    defer hl.deinit();
+
+    try hl.feed("> *quoted*\n");
+    hl.finish();
+
+    var got: std.ArrayList(r.Span) = .empty;
+    defer got.deinit(alloc);
+    while (true) switch (hl.consume()) {
+        .span => |s| try got.append(alloc, s),
+        .need_bytes => unreachable,
+        .done => break,
+    };
+
+    const joined = try collectPlain(got.items, alloc);
+    defer alloc.free(joined);
+    try std.testing.expectEqualStrings("  │ quoted\n", joined);
+
+    const theme: HighlightTheme = .{};
+    var saw_border = false;
+    var saw_colored_body = false;
+    for (got.items) |s| {
+        if (std.mem.eql(u8, s.content, "  │ ") and std.meta.eql(s.style.fg, theme.quote.fg)) saw_border = true;
+        if (std.mem.eql(u8, s.content, "quoted") and std.meta.eql(s.style.fg, theme.quote.fg)) saw_colored_body = true;
+    }
+    try std.testing.expect(saw_border);
+    try std.testing.expect(saw_colored_body);
 }
 
 test "markdown: fenced zig code highlights keywords" {
@@ -751,12 +849,12 @@ test "markdown: multiple fenced blocks close properly" {
         .done => break,
     };
 
-    // Heading prefix "## " must appear (proves we exited code mode).
+    // H2 heading span must appear (proves we exited code mode).
     var saw_heading = false;
     // Fence markers must never appear as literal content.
     var saw_fence = false;
     for (got.items) |s| {
-        if (std.mem.eql(u8, s.content, "## ")) saw_heading = true;
+        if (std.mem.eql(u8, s.content, "Rust") and s.kind == .heading_h2) saw_heading = true;
         if (std.mem.indexOf(u8, s.content, "```") != null) saw_fence = true;
     }
     try std.testing.expect(saw_heading);
@@ -871,7 +969,7 @@ test "markdown: table rows are tagged" {
     for (got.items) |s| switch (s.kind) {
         .table_row => rows += 1,
         .table_separator => seps += 1,
-        .text => {},
+        .text, .heading_h1, .heading_h2 => {},
     };
     try std.testing.expectEqual(@as(usize, 2), rows);
     try std.testing.expectEqual(@as(usize, 1), seps);

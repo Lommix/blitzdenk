@@ -717,7 +717,10 @@ fn parseUpdateFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Resul
     }
 
     var hunks: std.ArrayList(Hunk) = .empty;
-    defer hunks.deinit(alloc);
+    errdefer {
+        for (hunks.items) |h| alloc.free(h.lines);
+        hunks.deinit(alloc);
+    }
 
     var allow_missing_context = true;
     while (cursor.len > 0) {
@@ -734,7 +737,10 @@ fn parseUpdateFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Resul
         allow_missing_context = false;
     }
 
-    if (hunks.items.len == 0 and move_to == null) return ParseError.EmptyUpdateFile;
+    if (hunks.items.len == 0 and move_to == null) {
+        if (cursor.len == 0) return ParseError.UnexpectedEof;
+        return ParseError.EmptyUpdateFile;
+    }
 
     const owned = try hunks.toOwnedSlice(alloc);
     return ok(PatchCommand, .{ .file_update = .{
@@ -751,22 +757,34 @@ fn parseFileOp(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(Pa
     return ParseError.NoMatch;
 }
 
+fn freeCommands(alloc: std.mem.Allocator, cmds: []const PatchCommand) void {
+    for (cmds) |c| switch (c) {
+        .file_add => |a| alloc.free(a.lines),
+        .file_delete => {},
+        .file_update => |u| {
+            for (u.hunks) |h| alloc.free(h.lines);
+            alloc.free(u.hunks);
+        },
+    };
+}
+
 pub fn parsePatch(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(Patch) {
     const input = stripCommonWrappers(bytes);
     const begin = try markerLine("*** Begin Patch", alloc, input);
 
     var cmds: std.ArrayList(PatchCommand) = .empty;
     defer cmds.deinit(alloc);
+    errdefer freeCommands(alloc, cmds.items);
 
     var cursor = begin.rest;
     if (peekTrimmedStartsWith(cursor, "*** Environment ID: ")) {
         cursor = lineRest(cursor);
     }
     while (!peekTrimmedEql(cursor, "*** End Patch")) {
+        if (cursor.len == 0) return ParseError.UnexpectedEof;
         const op = try parseFileOp(alloc, cursor);
         try cmds.append(alloc, op.value);
         cursor = op.rest;
-        if (cursor.len == 0) return ParseError.UnexpectedEof;
     }
 
     const final_rest = lineRest(cursor);
@@ -1414,14 +1432,7 @@ test "parsePatch full example" {
     const res = try parsePatch(alloc, input);
     const patch = res.value;
     defer {
-        for (patch.commands) |c| switch (c) {
-            .file_add => |a| alloc.free(a.lines),
-            .file_update => |u| {
-                for (u.hunks) |h| alloc.free(h.lines);
-                alloc.free(u.hunks);
-            },
-            .file_delete => {},
-        };
+        freeCommands(alloc, patch.commands);
         alloc.free(patch.commands);
     }
     try testing.expectEqual(@as(usize, 3), patch.commands.len);
@@ -1441,6 +1452,19 @@ test "parsePatch errors on unknown FileOp" {
     const alloc = testing.allocator;
     const input = "*** Begin Patch\n*** Bogus: x\n*** End Patch\n";
     try testing.expectError(ParseError.NoMatch, parsePatch(alloc, input));
+}
+
+test "parsePatch errors on truncated patch" {
+    const alloc = testing.allocator;
+    const inputs = [_][]const u8{
+        "*** Begin Patch\n*** Add File: hello.txt\n+Hello world\n",
+        "*** Begin Patch\n",
+        "*** Begin Patch\n*** Add File: a\n+x\n*** Update File: b\n",
+        "*** Begin Patch\n*** Environment ID: xyz",
+    };
+    for (inputs) |input| {
+        try testing.expectError(ParseError.UnexpectedEof, parsePatch(alloc, input));
+    }
 }
 
 test "parsePatch strips heredoc wrapper and trims markers" {

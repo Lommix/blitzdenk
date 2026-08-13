@@ -188,7 +188,7 @@ pub const Block = struct {
 // ── Text ──
 
 pub const Span = struct {
-    pub const Kind = enum { text, table_row, table_separator };
+    pub const Kind = enum { text, table_row, table_separator, heading_h1, heading_h2 };
 
     content: []const u8,
     style: Style = .{},
@@ -1074,7 +1074,7 @@ fn tableLineKind(line: *const Line) ?TableLineKind {
     for (line.spans.items) |span| switch (span.kind) {
         .table_row => return .row,
         .table_separator => return .separator,
-        .text => {},
+        .text, .heading_h1, .heading_h2 => {},
     };
     return null;
 }
