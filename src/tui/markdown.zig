@@ -90,25 +90,22 @@ pub const HighlightTheme = struct {
     plain: r.Style = .{},
 };
 
-/// Streaming markdown highlighter. Feed bytes with `feed`, then drain with
-/// `consume` until it returns `.need_bytes` or `.done`. `finish()` flushes any
-/// trailing partial block.
-///
-/// Span slices returned by `consume` reference the internal buffer and are
-/// valid until the next `feed` or `deinit`. Caller must copy out the content
-/// before feeding more bytes.
-pub const MarkdownStreamingHighlighter = struct {
+/// Streaming markdown renderer. Feed bytes with `feed`, then drain with `next`
+/// to get fully wrapped, styled lines at the configured width. `finish()`
+/// flushes any trailing partial block.
+pub const MarkdownStreamRenderer = struct {
     const Self = @This();
 
     pub const Mode = enum { markdown, code };
 
-    pub const Result = union(enum) {
+    const Result = union(enum) {
         span: r.Span,
         need_bytes,
         done,
     };
 
     alloc: std.mem.Allocator,
+    width: u16,
     buffer: std.ArrayList(u8) = .empty,
     cursor: usize = 0, // parsed up to here
     mode: Mode = .markdown,
@@ -125,13 +122,30 @@ pub const MarkdownStreamingHighlighter = struct {
     in_block: bool = false,
     /// style applied to plain runs inside the current block line.
     block_style: r.Style = .{},
+    in_list: bool = false,
+    list_indent: [16]u8 = undefined,
+    list_indent_len: u8 = 0,
+    pending_list_marker: bool = false,
+    current: r.Line = .{},
+    table_lines: std.ArrayList(r.Line) = .empty,
+    pending: std.ArrayList(r.Line) = .empty,
+    out_cursor: usize = 0,
+    skip_newline: bool = false,
 
-    pub fn init(alloc: std.mem.Allocator) Self {
-        return .{ .alloc = alloc };
+    pub fn init(alloc: std.mem.Allocator, width: u16) Self {
+        return .{ .alloc = alloc, .width = width };
     }
 
     pub fn deinit(self: *Self) void {
         self.buffer.deinit(self.alloc);
+        if (self.current.spans.items.len > 0) self.current.deinit(self.alloc);
+        for (self.table_lines.items) |*ln| ln.deinit(self.alloc);
+        self.table_lines.deinit(self.alloc);
+        var i = self.out_cursor;
+        while (i < self.pending.items.len) : (i += 1) {
+            self.pending.items[i].deinit(self.alloc);
+        }
+        self.pending.deinit(self.alloc);
     }
 
     /// Hand the internal byte buffer to the caller. After this, `deinit` is a
@@ -148,12 +162,148 @@ pub const MarkdownStreamingHighlighter = struct {
         try self.buffer.appendSlice(self.alloc, src);
     }
 
-    /// Mark end of input. Subsequent `consume` may flush any remaining bytes.
+    /// Mark end of input. Subsequent `next` may flush any remaining bytes.
     pub fn finish(self: *Self) void {
         self.eof = true;
     }
 
-    pub fn consume(self: *Self) Result {
+    pub fn next(self: *Self) !?r.Line {
+        if (self.out_cursor < self.pending.items.len) {
+            const line = self.pending.items[self.out_cursor];
+            self.out_cursor += 1;
+            return line;
+        }
+        if (self.done) return null;
+
+        while (true) {
+            switch (self.consumeSpan()) {
+                .done => {
+                    self.done = true;
+                    try self.flushCurrent();
+                    try self.flushTable();
+                    break;
+                },
+                .need_bytes => break,
+                .span => |s| try self.onSpan(s),
+            }
+        }
+
+        if (self.out_cursor < self.pending.items.len) {
+            const line = self.pending.items[self.out_cursor];
+            self.out_cursor += 1;
+            return line;
+        }
+        return null;
+    }
+
+    fn onSpan(self: *Self, s: r.Span) !void {
+        if (s.kind == .heading_h1 or s.kind == .heading_h2) {
+            try self.flushCurrent();
+            try self.flushTable();
+            try self.emitHeadingLine(s);
+            self.skip_newline = true;
+            return;
+        }
+        if (s.kind == .horizontal_rule) {
+            try self.flushCurrent();
+            try self.flushTable();
+            try self.emitHrLine(s);
+            self.skip_newline = true;
+            return;
+        }
+        if (std.mem.eql(u8, s.content, "\n")) {
+            if (self.skip_newline) {
+                self.skip_newline = false;
+            } else {
+                const had_content = self.current.spans.items.len > 0;
+                try self.flushCurrent();
+                if (!had_content) try self.pending.append(self.alloc, .{});
+            }
+            return;
+        }
+        try self.current.pushSpan(self.alloc, s);
+    }
+
+    fn flushCurrent(self: *Self) !void {
+        if (self.current.spans.items.len == 0) return;
+        const line = self.current;
+        self.current = .{};
+        try self.commitLine(line);
+    }
+
+    fn commitLine(self: *Self, line: r.Line) !void {
+        if (r.widgets.tableLineKind(&line) != null) {
+            var table_line = line;
+            errdefer table_line.deinit(self.alloc);
+            try self.table_lines.append(self.alloc, table_line);
+            return;
+        }
+        try self.flushTable();
+        var src = line;
+        defer src.deinit(self.alloc);
+        if (self.width == 0) {
+            try cloneLineInto(self.alloc, &src, &self.pending);
+        } else {
+            try wrapLineInto(self.alloc, &src, self.width, &self.pending);
+        }
+    }
+
+    fn flushTable(self: *Self) !void {
+        if (self.table_lines.items.len == 0) return;
+        const lines = self.table_lines.items;
+        defer {
+            for (self.table_lines.items) |*ln| ln.deinit(self.alloc);
+            self.table_lines.clearRetainingCapacity();
+        }
+        if (self.width > 0 and lines.len >= 2 and r.widgets.tableLineKind(&lines[0]) == .row and r.widgets.tableLineKind(&lines[1]) == .separator) {
+            try r.widgets.appendTableRows(self.alloc, lines, self.width, &self.pending);
+            return;
+        }
+        for (lines) |*ln| {
+            if (self.width == 0) try cloneLineInto(self.alloc, ln, &self.pending) else try wrapLineInto(self.alloc, ln, self.width, &self.pending);
+        }
+    }
+
+    fn emitHeadingLine(self: *Self, span: r.Span) !void {
+        const fill: u8 = if (span.kind == .heading_h1) '=' else '-';
+        const sep = if (fill == '=') "====" else "----";
+        const w: usize = self.width;
+
+        var line = r.Line{ .style = span.style };
+        errdefer line.deinit(self.alloc);
+        try line.pushSpan(self.alloc, .{ .content = sep, .style = span.style });
+        try line.pushSpan(self.alloc, span);
+        try line.pushSpan(self.alloc, .{ .content = sep, .style = span.style });
+
+        const used: usize = 8 + span.widthCols();
+        if (w > used) {
+            const fill_len = w - used;
+            const fill_buf = try self.alloc.alloc(u8, fill_len);
+            defer self.alloc.free(fill_buf);
+            @memset(fill_buf, fill);
+            try line.pushSpan(self.alloc, .{ .content = fill_buf, .style = span.style });
+        }
+
+        try self.pending.append(self.alloc, line);
+    }
+
+    fn emitHrLine(self: *Self, span: r.Span) !void {
+        const w: usize = if (self.width == 0) 64 else self.width;
+
+        var line = r.Line{ .style = span.style };
+        errdefer line.deinit(self.alloc);
+        const buf = try self.alloc.alloc(u8, w * 3);
+        defer self.alloc.free(buf);
+        for (0..w) |i| {
+            buf[i * 3] = 0xE2;
+            buf[i * 3 + 1] = 0x94;
+            buf[i * 3 + 2] = 0x80;
+        }
+        try line.pushSpan(self.alloc, .{ .content = buf, .style = span.style });
+        try self.pending.append(self.alloc, line);
+    }
+
+    fn consumeSpan(self: *Self) Result {
         if (self.done) return .done;
 
         const buf = self.buffer.items;
@@ -176,11 +326,18 @@ pub const MarkdownStreamingHighlighter = struct {
     fn consumeMarkdown(self: *Self) Result {
         const buf = self.buffer.items;
 
+        if (self.pending_list_marker) {
+            self.pending_list_marker = false;
+            return self.consumeListMarker();
+        }
+
         if (self.at_line_start) {
             // Need a full line (or EOF) to decide block-level structure.
             const line_end = std.mem.indexOfScalarPos(u8, buf, self.cursor, '\n') orelse {
                 if (!self.eof) return .need_bytes;
                 const line = buf[self.cursor..];
+                if (listMarkerAtLineStart(line)) |info| return self.startListItem(line, info);
+                if (self.tryListContinuation(line)) |res| return res;
                 if (line.len > 0 and line[0] == '#') {
                     var depth: usize = 0;
                     while (depth < line.len and depth < 6 and line[depth] == '#') depth += 1;
@@ -197,10 +354,18 @@ pub const MarkdownStreamingHighlighter = struct {
                     self.at_line_start = true;
                     return .{ .span = .{ .content = line, .style = self.theme.plain, .kind = .table_row } };
                 }
+                const trimmed = std.mem.trim(u8, line, " \t\r");
+                if (trimmed.len >= 3 and (allSameChar(trimmed, '-') or allSameChar(trimmed, '*') or allSameChar(trimmed, '_'))) {
+                    self.cursor = buf.len;
+                    self.at_line_start = true;
+                    return .{ .span = .{ .content = line, .style = self.theme.hr, .kind = .horizontal_rule } };
+                }
                 return self.emitInlineRun(buf.len);
             };
 
             const line = buf[self.cursor..line_end];
+            if (listMarkerAtLineStart(line)) |info| return self.startListItem(line, info);
+            if (self.tryListContinuation(line)) |res| return res;
 
             // Fenced code block opener: ```lang
             if (std.mem.startsWith(u8, line, "```")) {
@@ -215,15 +380,14 @@ pub const MarkdownStreamingHighlighter = struct {
                 return .{ .span = .{ .content = "\n", .style = self.theme.plain } };
             }
 
-            // Horizontal rule: --- (or more) alone on line.
+            // Horizontal rule: ---, ***, ___ (or more) alone on line.
             // Advance cursor *up to* (not past) the trailing '\n' so the next
             // consume() sees an empty line and emits the line break naturally.
             const trimmed = std.mem.trim(u8, line, " \t\r");
-            if (trimmed.len >= 3 and allSameChar(trimmed, '-')) {
+            if (trimmed.len >= 3 and (allSameChar(trimmed, '-') or allSameChar(trimmed, '*') or allSameChar(trimmed, '_'))) {
                 self.cursor = line_end;
                 self.at_line_start = true;
-                const dashes = "────────────────────────────────────────────────────────────────";
-                return .{ .span = .{ .content = dashes, .style = self.theme.hr } };
+                return .{ .span = .{ .content = line, .style = self.theme.hr, .kind = .horizontal_rule } };
             }
 
             if (isTableSeparatorLine(line)) {
@@ -247,25 +411,6 @@ pub const MarkdownStreamingHighlighter = struct {
 
             // Blockquote: > text
             if (line.len >= 2 and line[0] == '>' and line[1] == ' ') return self.startQuote();
-
-            // Bullet list: "- " or "* "
-            if (line.len >= 2 and (line[0] == '-' or line[0] == '*') and line[1] == ' ') {
-                self.cursor += 2;
-                self.at_line_start = false;
-                return .{ .span = .{ .content = "• ", .style = self.theme.list_marker } };
-            }
-
-            // Numbered list: "N. " or "NN. "
-            {
-                var i: usize = 0;
-                while (i < line.len and std.ascii.isDigit(line[i])) i += 1;
-                if (i > 0 and i + 1 < line.len and line[i] == '.' and line[i + 1] == ' ') {
-                    const prefix = line[0 .. i + 2];
-                    self.cursor += prefix.len;
-                    self.at_line_start = false;
-                    return .{ .span = .{ .content = prefix, .style = self.theme.list_marker } };
-                }
-            }
 
             // Empty line
             if (line.len == 0) {
@@ -304,6 +449,99 @@ pub const MarkdownStreamingHighlighter = struct {
         self.in_block = true;
         self.block_style = self.theme.quote;
         return .{ .span = .{ .content = "  │ ", .style = self.block_style } };
+    }
+
+    fn startListIndent(self: *Self, width: usize) void {
+        const n = @min(width, self.list_indent.len);
+        @memset(self.list_indent[0..n], ' ');
+        self.list_indent_len = @intCast(n);
+        self.in_list = true;
+    }
+
+    const ListMarkerInfo = struct {
+        lead: usize,
+        marker: usize,
+        marker_cols: usize,
+    };
+
+    fn listMarkerAtLineStart(line: []const u8) ?ListMarkerInfo {
+        var lead: usize = 0;
+        while (lead < line.len and line[lead] == ' ') lead += 1;
+        const rest = line[lead..];
+
+        if (rest.len >= 2 and (rest[0] == '-' or rest[0] == '*') and rest[1] == ' ') {
+            return .{ .lead = lead, .marker = 2, .marker_cols = 2 };
+        }
+
+        var i: usize = 0;
+        while (i < rest.len and std.ascii.isDigit(rest[i])) i += 1;
+        if (i > 0 and i + 1 < rest.len and rest[i] == '.' and rest[i + 1] == ' ') {
+            return .{ .lead = lead, .marker = i + 2, .marker_cols = i + 2 };
+        }
+
+        return null;
+    }
+
+    fn markerContent(line: []const u8, info: ListMarkerInfo) []const u8 {
+        const m = line[info.lead .. info.lead + info.marker];
+        if (m.len >= 1 and (m[0] == '-' or m[0] == '*')) return "• ";
+        return m;
+    }
+
+    fn startListItem(self: *Self, line: []const u8, info: ListMarkerInfo) Result {
+        self.startListIndent(info.lead + info.marker_cols);
+        if (info.lead > 0) {
+            self.cursor += info.lead;
+            self.at_line_start = false;
+            self.pending_list_marker = true;
+            return .{ .span = .{ .content = line[0..info.lead], .style = self.theme.plain } };
+        }
+        self.cursor += info.marker;
+        self.at_line_start = false;
+        return .{ .span = .{ .content = markerContent(line, info), .style = self.theme.list_marker } };
+    }
+
+    fn consumeListMarker(self: *Self) Result {
+        const buf = self.buffer.items;
+        const line = buf[self.cursor..];
+        const info = listMarkerAtLineStart(line) orelse {
+            self.at_line_start = false;
+            return .{ .span = .{ .content = "", .style = self.theme.plain } };
+        };
+        self.cursor += info.marker;
+        self.at_line_start = false;
+        return .{ .span = .{ .content = markerContent(line, info), .style = self.theme.list_marker } };
+    }
+
+    fn tryListContinuation(self: *Self, line: []const u8) ?Result {
+        if (!self.in_list) return null;
+        if (self.listLineStartsNewBlock(line)) {
+            self.in_list = false;
+            self.list_indent_len = 0;
+            return null;
+        }
+
+        var lead: usize = 0;
+        while (lead < line.len and (line[lead] == ' ' or line[lead] == '\t')) lead += 1;
+        self.cursor += lead;
+        self.at_line_start = false;
+        return .{ .span = .{ .content = self.list_indent[0..self.list_indent_len], .style = self.theme.plain } };
+    }
+
+    fn listLineStartsNewBlock(self: *const Self, line: []const u8) bool {
+        _ = self;
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) return true;
+        if (line.len > 0 and line[0] == '#') {
+            var depth: usize = 0;
+            while (depth < line.len and depth < 6 and line[depth] == '#') depth += 1;
+            if (depth < line.len and line[depth] == ' ') return true;
+        }
+        if (line.len >= 2 and line[0] == '>' and line[1] == ' ') return true;
+        if (std.mem.startsWith(u8, line, "```")) return true;
+        if (trimmed.len >= 3 and (allSameChar(trimmed, '-') or allSameChar(trimmed, '*') or allSameChar(trimmed, '_'))) return true;
+        if (isTableSeparatorLine(line) or isTableRowLine(line)) return true;
+        return false;
     }
 
     /// Emit the next inline segment (plain run up to next emphasis marker,
@@ -610,6 +848,18 @@ fn findDouble(buf: []const u8, from: usize, c: u8) ?usize {
     return null;
 }
 
+fn wrapLineInto(alloc: std.mem.Allocator, src: *const r.Line, width: usize, out: *std.ArrayList(r.Line)) !void {
+    const indent = r.widgets.listMarkerIndent(src) orelse r.widgets.blockquoteIndent(src) orelse 0;
+    if (indent > 0 and width > indent) try r.widgets.wrapLineIndented(alloc, src, width, indent, out) else try r.wrapLine(alloc, src, width, out);
+}
+
+fn cloneLineInto(alloc: std.mem.Allocator, src: *const r.Line, out: *std.ArrayList(r.Line)) !void {
+    var copy = r.Line{ .style = src.style };
+    errdefer copy.deinit(alloc);
+    for (src.spans.items) |span| try copy.pushSpan(alloc, span);
+    try out.append(alloc, copy);
+}
+
 // ── Tests ──
 
 fn collectPlain(spans: []const r.Span, alloc: std.mem.Allocator) ![]u8 {
@@ -621,7 +871,7 @@ fn collectPlain(spans: []const r.Span, alloc: std.mem.Allocator) ![]u8 {
 
 test "markdown: plain paragraph" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("hello world\n");
@@ -629,7 +879,7 @@ test "markdown: plain paragraph" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -642,7 +892,7 @@ test "markdown: plain paragraph" {
 
 test "markdown: bold inside sentence" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("pre **bold** post\n");
@@ -650,7 +900,7 @@ test "markdown: bold inside sentence" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -665,7 +915,7 @@ test "markdown: bold inside sentence" {
 
 test "markdown: heading" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("## Title\n");
@@ -673,7 +923,7 @@ test "markdown: heading" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -688,7 +938,7 @@ test "markdown: heading" {
 
 test "markdown: heading levels decorate and color" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("# One\n### Three\n");
@@ -696,7 +946,7 @@ test "markdown: heading levels decorate and color" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -723,7 +973,7 @@ test "markdown: heading levels decorate and color" {
 
 test "markdown: blockquote indents with border and color" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("> *quoted*\n");
@@ -731,7 +981,7 @@ test "markdown: blockquote indents with border and color" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -754,7 +1004,7 @@ test "markdown: blockquote indents with border and color" {
 
 test "markdown: fenced zig code highlights keywords" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("```zig\nfn foo() void {}\n```\n");
@@ -762,7 +1012,7 @@ test "markdown: fenced zig code highlights keywords" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -778,7 +1028,7 @@ test "markdown: fenced zig code highlights keywords" {
 
 test "markdown: bullet list" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("- apple\n- pear\n");
@@ -786,7 +1036,7 @@ test "markdown: bullet list" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -799,9 +1049,78 @@ test "markdown: bullet list" {
     try std.testing.expectEqual(@as(usize, 2), bullets);
 }
 
+test "markdown: list continuation carries indentation" {
+    const alloc = std.testing.allocator;
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
+    defer hl.deinit();
+
+    try hl.feed("- foo\nbar\n");
+    hl.finish();
+
+    var got: std.ArrayList(r.Span) = .empty;
+    defer got.deinit(alloc);
+    while (true) switch (hl.consumeSpan()) {
+        .span => |s| try got.append(alloc, s),
+        .need_bytes => unreachable,
+        .done => break,
+    };
+
+    const joined = try collectPlain(got.items, alloc);
+    defer alloc.free(joined);
+    try std.testing.expectEqualStrings("• foo\n  bar\n", joined);
+
+    var saw_indent = false;
+    for (got.items) |s| {
+        if (std.mem.eql(u8, s.content, "  ")) saw_indent = true;
+    }
+    try std.testing.expect(saw_indent);
+}
+
+test "markdown: numbered list continuation carries indentation" {
+    const alloc = std.testing.allocator;
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
+    defer hl.deinit();
+
+    try hl.feed("1. foo\nbar\n");
+    hl.finish();
+
+    var got: std.ArrayList(r.Span) = .empty;
+    defer got.deinit(alloc);
+    while (true) switch (hl.consumeSpan()) {
+        .span => |s| try got.append(alloc, s),
+        .need_bytes => unreachable,
+        .done => break,
+    };
+
+    const joined = try collectPlain(got.items, alloc);
+    defer alloc.free(joined);
+    try std.testing.expectEqualStrings("1. foo\n   bar\n", joined);
+}
+
+test "markdown: nested bullet list keeps indentation" {
+    const alloc = std.testing.allocator;
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
+    defer hl.deinit();
+
+    try hl.feed("- parent\n  - child\n");
+    hl.finish();
+
+    var got: std.ArrayList(r.Span) = .empty;
+    defer got.deinit(alloc);
+    while (true) switch (hl.consumeSpan()) {
+        .span => |s| try got.append(alloc, s),
+        .need_bytes => unreachable,
+        .done => break,
+    };
+
+    const joined = try collectPlain(got.items, alloc);
+    defer alloc.free(joined);
+    try std.testing.expectEqualStrings("• parent\n  • child\n", joined);
+}
+
 test "markdown: code fence preserves surrounding lines" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("prose\n```zig\nfn foo() void {}\n```\ntail\n");
@@ -809,7 +1128,7 @@ test "markdown: code fence preserves surrounding lines" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -835,7 +1154,7 @@ test "markdown: code fence preserves surrounding lines" {
 
 test "markdown: multiple fenced blocks close properly" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("```zig\nfn a() void {}\n```\n## Rust\n```rust\nfn b() {}\n```\n");
@@ -843,7 +1162,7 @@ test "markdown: multiple fenced blocks close properly" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -863,14 +1182,14 @@ test "markdown: multiple fenced blocks close properly" {
 
 test "markdown: partial input returns need_bytes then completes" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     // Feed partial line (no newline yet).
     try hl.feed("hello **wor");
 
     // should yield need_bytes on at_line_start peek (no \n available)
-    const first = hl.consume();
+    const first = hl.consumeSpan();
     try std.testing.expect(first == .need_bytes);
 
     // Feed rest.
@@ -879,7 +1198,7 @@ test "markdown: partial input returns need_bytes then completes" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => break, // no more bytes — shouldn't happen after finish
         .done => break,
@@ -894,7 +1213,7 @@ test "markdown: partial input returns need_bytes then completes" {
 
 test "markdown: tab bytes survive code block (expanded at render time)" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("```zig\n\tfn x() void {}\n```\n");
@@ -902,7 +1221,7 @@ test "markdown: tab bytes survive code block (expanded at render time)" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -919,38 +1238,42 @@ test "markdown: tab bytes survive code block (expanded at render time)" {
 
 test "markdown: horizontal rule emits dashes then newline" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
-    defer hl.deinit();
+    const markers = [_][]const u8{ "---", "***", "___" };
+    for (markers) |marker| {
+        var hl = MarkdownStreamRenderer.init(alloc, 200);
+        defer hl.deinit();
 
-    try hl.feed("a\n---\nb\n");
-    hl.finish();
+        const input = try std.fmt.allocPrint(alloc, "a\n{s}\nb\n", .{marker});
+        defer alloc.free(input);
+        try hl.feed(input);
+        hl.finish();
 
-    var got: std.ArrayList(r.Span) = .empty;
-    defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
-        .span => |s| try got.append(alloc, s),
-        .need_bytes => unreachable,
-        .done => break,
-    };
+        var got: std.ArrayList(r.Span) = .empty;
+        defer got.deinit(alloc);
+        while (true) switch (hl.consumeSpan()) {
+            .span => |s| try got.append(alloc, s),
+            .need_bytes => unreachable,
+            .done => break,
+        };
 
-    // The HR span precedes a standalone "\n" span (from the empty-line path
-    // that replaces the old pending_newline mechanism).
-    const theme: HighlightTheme = .{};
-    var hr_idx: ?usize = null;
-    for (got.items, 0..) |s, i| {
-        if (std.meta.eql(s.style.fg, theme.hr.fg) and s.content.len > 3) {
-            hr_idx = i;
-            break;
+        // The HR span precedes a standalone "\n" span (from the empty-line path
+        // that replaces the old pending_newline mechanism).
+        var hr_idx: ?usize = null;
+        for (got.items, 0..) |s, i| {
+            if (s.kind == .horizontal_rule) {
+                hr_idx = i;
+                break;
+            }
         }
+        try std.testing.expect(hr_idx != null);
+        try std.testing.expect(hr_idx.? + 1 < got.items.len);
+        try std.testing.expectEqualStrings("\n", got.items[hr_idx.? + 1].content);
     }
-    try std.testing.expect(hr_idx != null);
-    try std.testing.expect(hr_idx.? + 1 < got.items.len);
-    try std.testing.expectEqualStrings("\n", got.items[hr_idx.? + 1].content);
 }
 
 test "markdown: table rows are tagged" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("| Name | Value |\n| :--- | ---: |\n| a | 1 |\n");
@@ -958,7 +1281,7 @@ test "markdown: table rows are tagged" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -969,7 +1292,7 @@ test "markdown: table rows are tagged" {
     for (got.items) |s| switch (s.kind) {
         .table_row => rows += 1,
         .table_separator => seps += 1,
-        .text, .heading_h1, .heading_h2 => {},
+        .text, .heading_h1, .heading_h2, .horizontal_rule => {},
     };
     try std.testing.expectEqual(@as(usize, 2), rows);
     try std.testing.expectEqual(@as(usize, 1), seps);
@@ -977,7 +1300,7 @@ test "markdown: table rows are tagged" {
 
 test "markdown: final table row without newline is tagged" {
     const alloc = std.testing.allocator;
-    var hl = MarkdownStreamingHighlighter.init(alloc);
+    var hl = MarkdownStreamRenderer.init(alloc, 200);
     defer hl.deinit();
 
     try hl.feed("| Name | Value |\n| --- | --- |\n| a | 1 |");
@@ -985,7 +1308,7 @@ test "markdown: final table row without newline is tagged" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consume()) {
+    while (true) switch (hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -993,4 +1316,147 @@ test "markdown: final table row without newline is tagged" {
 
     try std.testing.expect(got.items.len > 0);
     try std.testing.expectEqual(r.Span.Kind.table_row, got.items[got.items.len - 1].kind);
+}
+
+fn drainLines(rdr: *MarkdownStreamRenderer, alloc: std.mem.Allocator) !std.ArrayList(r.Line) {
+    var out: std.ArrayList(r.Line) = .empty;
+    errdefer {
+        for (out.items) |*l| l.deinit(alloc);
+        out.deinit(alloc);
+    }
+    while (try rdr.next()) |line| try out.append(alloc, line);
+    return out;
+}
+
+test "renderer: plain paragraph wraps to width" {
+    const alloc = std.testing.allocator;
+    var renderer = MarkdownStreamRenderer.init(alloc, 11);
+    defer renderer.deinit();
+    try renderer.feed("hello world foo bar baz\n");
+    renderer.finish();
+
+    var lines = try drainLines(&renderer, alloc);
+    defer {
+        for (lines.items) |*l| l.deinit(alloc);
+        lines.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), lines.items.len);
+    const first = try r.widgets.lineText(alloc, &lines.items[0]);
+    defer alloc.free(first);
+    const second = try r.widgets.lineText(alloc, &lines.items[1]);
+    defer alloc.free(second);
+    try std.testing.expectEqualStrings("hello world", first);
+    try std.testing.expectEqualStrings("foo bar baz", second);
+}
+
+test "renderer: blank lines are preserved" {
+    const alloc = std.testing.allocator;
+    var renderer = MarkdownStreamRenderer.init(alloc, 200);
+    defer renderer.deinit();
+    try renderer.feed("a\n\nb\n");
+    renderer.finish();
+
+    var lines = try drainLines(&renderer, alloc);
+    defer {
+        for (lines.items) |*l| l.deinit(alloc);
+        lines.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), lines.items.len);
+    try std.testing.expectEqual(@as(usize, 0), lines.items[1].spans.items.len);
+}
+
+test "renderer: list wrap keeps indentation" {
+    const alloc = std.testing.allocator;
+    var renderer = MarkdownStreamRenderer.init(alloc, 11);
+    defer renderer.deinit();
+    try renderer.feed("- hello world foo bar baz\n");
+    renderer.finish();
+
+    var lines = try drainLines(&renderer, alloc);
+    defer {
+        for (lines.items) |*l| l.deinit(alloc);
+        lines.deinit(alloc);
+    }
+
+    try std.testing.expect(lines.items.len > 1);
+    try std.testing.expectEqualStrings("  ", lines.items[1].spans.items[0].content);
+}
+
+test "renderer: blockquote wrap keeps indentation" {
+    const alloc = std.testing.allocator;
+    var renderer = MarkdownStreamRenderer.init(alloc, 11);
+    defer renderer.deinit();
+    try renderer.feed("> hello world foo bar baz\n");
+    renderer.finish();
+
+    var lines = try drainLines(&renderer, alloc);
+    defer {
+        for (lines.items) |*l| l.deinit(alloc);
+        lines.deinit(alloc);
+    }
+
+    try std.testing.expect(lines.items.len > 1);
+    try std.testing.expectEqualStrings("    ", lines.items[1].spans.items[0].content);
+}
+
+test "renderer: table renders full width" {
+    const alloc = std.testing.allocator;
+    var renderer = MarkdownStreamRenderer.init(alloc, 20);
+    defer renderer.deinit();
+    try renderer.feed("| Name | Value |\n| --- | --- |\n| a | 1 |\n");
+    renderer.finish();
+
+    var lines = try drainLines(&renderer, alloc);
+    defer {
+        for (lines.items) |*l| l.deinit(alloc);
+        lines.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), lines.items.len);
+    const header = try r.widgets.lineText(alloc, &lines.items[0]);
+    defer alloc.free(header);
+    try std.testing.expectEqualStrings("│ Name    │ Value  │", header);
+
+    const rule = try r.widgets.lineText(alloc, &lines.items[1]);
+    defer alloc.free(rule);
+    var want_rule: [60]u8 = undefined;
+    var ri: usize = 0;
+    while (ri < want_rule.len) : (ri += 3) {
+        want_rule[ri] = 0xE2;
+        want_rule[ri + 1] = 0x94;
+        want_rule[ri + 2] = 0x80;
+    }
+    try std.testing.expectEqualStrings(want_rule[0..], rule);
+
+    const body = try r.widgets.lineText(alloc, &lines.items[2]);
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings("│ a       │ 1      │", body);
+}
+
+test "renderer: horizontal rule fills width" {
+    const alloc = std.testing.allocator;
+    var renderer = MarkdownStreamRenderer.init(alloc, 20);
+    defer renderer.deinit();
+    try renderer.feed("---\n");
+    renderer.finish();
+
+    var lines = try drainLines(&renderer, alloc);
+    defer {
+        for (lines.items) |*l| l.deinit(alloc);
+        lines.deinit(alloc);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), lines.items.len);
+    const rule = try r.widgets.lineText(alloc, &lines.items[0]);
+    defer alloc.free(rule);
+    var want: [60]u8 = undefined;
+    var i: usize = 0;
+    while (i < want.len) : (i += 3) {
+        want[i] = 0xE2;
+        want[i + 1] = 0x94;
+        want[i + 2] = 0x80;
+    }
+    try std.testing.expectEqualStrings(want[0..], rule);
 }

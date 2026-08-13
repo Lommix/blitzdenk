@@ -6,7 +6,7 @@ pub const widgets = @import("widgets.zig");
 pub const text_utils = @import("text_utils.zig");
 pub const icon = @import("icon.zig");
 pub const markdown = @import("markdown.zig");
-pub const MarkdownStreamingHighlighter = markdown.MarkdownStreamingHighlighter;
+pub const MarkdownStreamRenderer = markdown.MarkdownStreamRenderer;
 pub const HighlightTheme = markdown.HighlightTheme;
 pub const wrapLine = widgets.wrapLine;
 

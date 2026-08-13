@@ -188,7 +188,7 @@ pub const Block = struct {
 // ── Text ──
 
 pub const Span = struct {
-    pub const Kind = enum { text, table_row, table_separator, heading_h1, heading_h2 };
+    pub const Kind = enum { text, table_row, table_separator, heading_h1, heading_h2, horizontal_rule };
 
     content: []const u8,
     style: Style = .{},
@@ -417,6 +417,31 @@ pub fn wrapLineEx(
     }
 }
 
+fn prependIndent(alloc: std.mem.Allocator, row: *Line, indent: usize) !void {
+    const spaces = try alloc.alloc(u8, indent);
+    @memset(spaces, ' ');
+    errdefer alloc.free(spaces);
+    try row.spans.insert(alloc, 0, .{ .content = spaces, .style = row.style, .owned = true });
+}
+
+pub fn wrapLineIndented(
+    alloc: std.mem.Allocator,
+    src: *const Line,
+    width: usize,
+    indent: usize,
+    out: *std.ArrayList(Line),
+) !void {
+    if (indent == 0 or indent >= width) return wrapLine(alloc, src, width, out);
+
+    var tmp: std.ArrayList(Line) = .empty;
+    defer tmp.deinit(alloc);
+    try wrapLineEx(alloc, src, width, width - indent, &tmp);
+    for (tmp.items, 0..) |*row, idx| {
+        if (idx > 0) try prependIndent(alloc, row, indent);
+        try out.append(alloc, row.*);
+    }
+}
+
 test "wrapLine basic word wrap" {
     const alloc = std.testing.allocator;
     var src: Line = .{};
@@ -494,6 +519,87 @@ test "wrapLine hard-splits long word" {
     try wrapLine(alloc, &src, 5, &out);
     // 15/5 = 3 lines
     try std.testing.expectEqual(@as(usize, 3), out.items.len);
+}
+
+test "wrapLineIndented indents wrapped list continuation rows" {
+    const alloc = std.testing.allocator;
+    var src: Line = .{};
+    defer src.deinit(alloc);
+    try src.pushText(alloc, "• ", .{ .fg = .cyan });
+    try src.pushText(alloc, "hello world foo bar baz", .{});
+
+    var out: std.ArrayList(Line) = .empty;
+    defer {
+        for (out.items) |*l| l.deinit(alloc);
+        out.deinit(alloc);
+    }
+
+    try wrapLineIndented(alloc, &src, 11, 2, &out);
+    try std.testing.expect(out.items.len > 1);
+    try std.testing.expectEqualStrings("•", out.items[0].spans.items[0].content);
+    try std.testing.expectEqualStrings("  ", out.items[1].spans.items[0].content);
+    try std.testing.expectEqual(@as(usize, out.items.len), countWrappedRowsEx(&src, 11, 9));
+}
+
+test "buildParagraphRows indents wrapped list continuation rows" {
+    const alloc = std.testing.allocator;
+    var line: Line = .{};
+    defer line.deinit(alloc);
+    try line.pushText(alloc, "• ", .{ .fg = .cyan });
+    try line.pushText(alloc, "hello world foo bar baz", .{});
+
+    var lines = [_]Line{line};
+    var out: std.ArrayList(Line) = .empty;
+    defer {
+        for (out.items) |*l| l.deinit(alloc);
+        out.deinit(alloc);
+    }
+
+    try buildParagraphRows(alloc, &lines, 11, &out);
+    try std.testing.expectEqual(@as(usize, countParagraphRows(&lines, 11)), out.items.len);
+    try std.testing.expect(out.items.len > 1);
+    try std.testing.expectEqualStrings("  ", out.items[1].spans.items[0].content);
+}
+
+test "buildParagraphRows indents wrapped nested list rows" {
+    const alloc = std.testing.allocator;
+    var line: Line = .{};
+    defer line.deinit(alloc);
+    try line.pushText(alloc, "  ", .{});
+    try line.pushText(alloc, "• ", .{ .fg = .cyan });
+    try line.pushText(alloc, "hello world foo bar baz", .{});
+
+    var lines = [_]Line{line};
+    var out: std.ArrayList(Line) = .empty;
+    defer {
+        for (out.items) |*l| l.deinit(alloc);
+        out.deinit(alloc);
+    }
+
+    try buildParagraphRows(alloc, &lines, 11, &out);
+    try std.testing.expectEqual(@as(usize, countParagraphRows(&lines, 11)), out.items.len);
+    try std.testing.expect(out.items.len > 1);
+    try std.testing.expectEqualStrings("    ", out.items[1].spans.items[0].content);
+}
+
+test "buildParagraphRows indents wrapped blockquote rows" {
+    const alloc = std.testing.allocator;
+    var line: Line = .{};
+    defer line.deinit(alloc);
+    try line.pushText(alloc, "  │ ", .{ .fg = .bright_cyan, .modifier = .{ .italic = true } });
+    try line.pushText(alloc, "hello world foo bar baz", .{});
+
+    var lines = [_]Line{line};
+    var out: std.ArrayList(Line) = .empty;
+    defer {
+        for (out.items) |*l| l.deinit(alloc);
+        out.deinit(alloc);
+    }
+
+    try buildParagraphRows(alloc, &lines, 11, &out);
+    try std.testing.expectEqual(@as(usize, countParagraphRows(&lines, 11)), out.items.len);
+    try std.testing.expect(out.items.len > 1);
+    try std.testing.expectEqualStrings("    ", out.items[1].spans.items[0].content);
 }
 
 test "Paragraph renders markdown table full width" {
@@ -805,6 +911,7 @@ pub const Paragraph = struct {
     /// (`innerWidth`, `totalHeight`) include it.
     padding: Padding = .{},
     lines: std.ArrayList(Line) = .empty,
+    wrap: bool = true,
     scroll_offset: usize = 0,
 
     pub fn deinit(self: *Paragraph, alloc: std.mem.Allocator) void {
@@ -875,6 +982,7 @@ pub const Paragraph = struct {
     /// this to size the area before render.
     pub fn totalHeightLong(self: *const Paragraph, width: u16) usize {
         const border_rows: u16 = self.topRows() + self.bottomRows();
+        if (!self.wrap) return @as(usize, border_rows) + self.lines.items.len;
         const inner_w = self.innerWidth(width);
         if (inner_w == 0) return border_rows;
 
@@ -907,14 +1015,17 @@ pub const Paragraph = struct {
         const inner_w = self.innerWidth(area.width);
 
         // Wrap all source lines into a flat list of visual rows.
-        var rows: std.ArrayList(Line) = .empty;
+        var wrapped: std.ArrayList(Line) = .empty;
         defer {
-            for (rows.items) |*row| row.deinit(scratch);
-            rows.deinit(scratch);
+            if (self.wrap) {
+                for (wrapped.items) |*row| row.deinit(scratch);
+                wrapped.deinit(scratch);
+            }
         }
-        if (inner_w > 0) {
-            buildParagraphRows(scratch, self.lines.items, inner_w, &rows) catch {};
-        }
+        const rows: []const Line = if (self.wrap) blk: {
+            if (inner_w > 0) buildParagraphRows(scratch, self.lines.items, inner_w, &wrapped) catch {};
+            break :blk wrapped.items;
+        } else self.lines.items;
 
         // Background fill across the area-clip intersection. `.reset` bg
         // means transparent — skip the fill so the terminal default shows.
@@ -987,15 +1098,15 @@ pub const Paragraph = struct {
             // its left/right glyphs so dynamic_border can swap to T-junctions
             // on rows with visible text. Layout is reverse or forward.
             if (self.reverse) {
-                const rows_count: i32 = @intCast(rows.items.len);
-                const skip: i32 = @intCast(@min(self.scroll_offset, rows.items.len));
+                const rows_count: i32 = @intCast(rows.len);
+                const skip: i32 = @intCast(@min(self.scroll_offset, rows.len));
                 var i: i32 = rows_count - 1 - skip;
                 var y: i32 = content_bottom;
                 while (i >= 0 and y >= content_top) : ({
                     i -= 1;
                     y -= 1;
                 }) {
-                    const row = &rows.items[@intCast(i)];
+                    const row = &rows[@intCast(i)];
                     const content_visible = self.dynamic_border and rowHasVisibleContent(row);
                     if (sides.left) {
                         const g: u21 = if (content_visible) set.t_left else set.v;
@@ -1014,8 +1125,8 @@ pub const Paragraph = struct {
                 }
             } else {
                 const skip: usize = self.scroll_offset;
-                const start = @min(skip, rows.items.len);
-                const visible = rows.items[start..];
+                const start = @min(skip, rows.len);
+                const visible = rows[start..];
                 var y: i32 = content_top;
                 const y_end: i32 = content_bottom + 1;
                 for (visible) |*row| {
@@ -1043,20 +1154,20 @@ pub const Paragraph = struct {
 
         // No border kind: just lay out rows.
         if (self.reverse) {
-            const rows_count: i32 = @intCast(rows.items.len);
-            const skip: i32 = @intCast(@min(self.scroll_offset, rows.items.len));
+            const rows_count: i32 = @intCast(rows.len);
+            const skip: i32 = @intCast(@min(self.scroll_offset, rows.len));
             var i: i32 = rows_count - 1 - skip;
             var y: i32 = content_bottom;
             while (i >= 0 and y >= content_top) : ({
                 i -= 1;
                 y -= 1;
             }) {
-                renderRowClipped(&rows.items[@intCast(i)], content_x, y, inner_w, buf, clip, para_bg);
+                renderRowClipped(&rows[@intCast(i)], content_x, y, inner_w, buf, clip, para_bg);
             }
         } else {
             const skip: usize = self.scroll_offset;
-            const start = @min(skip, rows.items.len);
-            const visible = rows.items[start..];
+            const start = @min(skip, rows.len);
+            const visible = rows[start..];
             var y: i32 = content_top;
             const y_end: i32 = content_bottom + 1;
             for (visible) |*row| {
@@ -1068,15 +1179,58 @@ pub const Paragraph = struct {
     }
 };
 
-const TableLineKind = enum { row, separator };
+pub const TableLineKind = enum { row, separator };
 
-fn tableLineKind(line: *const Line) ?TableLineKind {
+pub fn tableLineKind(line: *const Line) ?TableLineKind {
     for (line.spans.items) |span| switch (span.kind) {
         .table_row => return .row,
         .table_separator => return .separator,
-        .text, .heading_h1, .heading_h2 => {},
+        .text, .heading_h1, .heading_h2, .horizontal_rule => {},
     };
     return null;
+}
+
+pub fn listMarkerIndent(line: *const Line) ?usize {
+    const spans = line.spans.items;
+    if (spans.len == 0) return null;
+
+    var idx: usize = 0;
+    var lead: usize = 0;
+    if (isAllSpaces(spans[0].content)) {
+        lead = std.unicode.utf8CountCodepoints(spans[0].content) catch spans[0].content.len;
+        idx += 1;
+        if (idx >= spans.len) return null;
+    }
+
+    const marker = spans[idx].content;
+    if (std.mem.eql(u8, marker, "• ")) {
+        return lead + (std.unicode.utf8CountCodepoints(marker) catch marker.len);
+    }
+
+    if (marker.len < 3) return null;
+    if (marker[marker.len - 2] != '.' or marker[marker.len - 1] != ' ') return null;
+    var i: usize = 0;
+    while (i < marker.len - 2) : (i += 1) {
+        if (!std.ascii.isDigit(marker[i])) return null;
+    }
+    if (i == 0) return null;
+    return lead + marker.len;
+}
+
+pub fn blockquoteIndent(line: *const Line) ?usize {
+    const spans = line.spans.items;
+    if (spans.len == 0) return null;
+    const first = spans[0].content;
+    if (std.mem.eql(u8, first, "  │ ")) {
+        return std.unicode.utf8CountCodepoints(first) catch first.len;
+    }
+    return null;
+}
+
+fn isAllSpaces(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| if (c != ' ') return false;
+    return true;
 }
 
 fn buildParagraphRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: *std.ArrayList(Line)) !void {
@@ -1091,7 +1245,14 @@ fn buildParagraphRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: 
         }
 
         var tmp: std.ArrayList(Line) = .empty;
-        wrapLine(alloc, &lines[i], width, &tmp) catch {
+        defer tmp.deinit(alloc);
+        const indent = listMarkerIndent(&lines[i]) orelse blockquoteIndent(&lines[i]) orelse 0;
+        const use_indent = indent > 0 and @as(usize, width) > indent;
+        const wrapped = if (use_indent)
+            wrapLineIndented(alloc, &lines[i], width, indent, &tmp)
+        else
+            wrapLine(alloc, &lines[i], width, &tmp);
+        wrapped catch {
             try out.append(alloc, .{ .style = lines[i].style });
             i += 1;
             continue;
@@ -1117,7 +1278,11 @@ fn countParagraphRows(lines: []Line, width: u16) usize {
             continue;
         }
 
-        const wrapped = countWrappedRows(&lines[i], width);
+        const indent = listMarkerIndent(&lines[i]) orelse blockquoteIndent(&lines[i]) orelse 0;
+        const wrapped = if (indent > 0 and @as(usize, width) > indent)
+            countWrappedRowsEx(&lines[i], width, width - indent)
+        else
+            countWrappedRows(&lines[i], width);
         count += if (wrapped == 0) 1 else wrapped;
         i += 1;
     }
@@ -1125,8 +1290,15 @@ fn countParagraphRows(lines: []Line, width: u16) usize {
 }
 
 fn countWrappedRows(src: *const Line, width: u16) usize {
+    return countWrappedRowsEx(src, width, width);
+}
+
+fn countWrappedRowsEx(src: *const Line, first_width: usize, cont_width: usize) usize {
+    if (first_width == 0 and cont_width == 0) return 0;
+
     var rows: usize = 0;
     var col: usize = 0;
+    var width = first_width;
 
     for (src.spans.items) |span| {
         var pos: usize = 0;
@@ -1142,6 +1314,7 @@ fn countWrappedRows(src: *const Line, width: u16) usize {
                 if (col > 0 and col + run_cols > width) {
                     rows += 1;
                     col = 0;
+                    width = cont_width;
                     continue;
                 }
                 col += run_cols;
@@ -1149,6 +1322,7 @@ fn countWrappedRows(src: *const Line, width: u16) usize {
                 if (col + run_cols > width) {
                     rows += 1;
                     col = 0;
+                    width = cont_width;
                 }
                 col += run_cols;
             } else {
@@ -1166,6 +1340,7 @@ fn countWrappedRows(src: *const Line, width: u16) usize {
                     if (take_cols == 0) {
                         rows += 1;
                         col = 0;
+                        width = cont_width;
                         continue;
                     }
                     col += take_cols;
@@ -1173,6 +1348,7 @@ fn countWrappedRows(src: *const Line, width: u16) usize {
                     if (col >= width and bi < run.len) {
                         rows += 1;
                         col = 0;
+                        width = cont_width;
                     }
                 }
             }
@@ -1183,7 +1359,7 @@ fn countWrappedRows(src: *const Line, width: u16) usize {
     return rows;
 }
 
-fn appendTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: *std.ArrayList(Line)) !void {
+pub fn appendTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: *std.ArrayList(Line)) !void {
     if (width == 0 or lines.len < 2) return;
 
     const max_cols = 16;
@@ -1218,7 +1394,7 @@ fn appendTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: *st
     }
 }
 
-fn lineText(alloc: std.mem.Allocator, line: *const Line) ![]u8 {
+pub fn lineText(alloc: std.mem.Allocator, line: *const Line) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(alloc);
     for (line.spans.items) |span| try out.appendSlice(alloc, span.content);
