@@ -207,7 +207,8 @@ pub const Line = struct {
 
     pub fn new(alloc: std.mem.Allocator, comptime txt: []const u8, args: anytype, style: Style) !Line {
         var l = Line{};
-        try l.pushSpan(alloc, .{ .content = try std.fmt.allocPrint(alloc, txt, args), .style = style });
+        errdefer l.deinit(alloc);
+        try l.pushSpanPrint(alloc, txt, args, style);
         return l;
     }
 
@@ -219,8 +220,10 @@ pub const Line = struct {
     }
     /// Appends a span. Span's `content` must outlive the Line (not copied).
     pub fn pushSpanPrint(self: *Line, alloc: std.mem.Allocator, comptime txt: []const u8, args: anytype, style: Style) !void {
+        const content = try std.fmt.allocPrint(alloc, txt, args);
+        errdefer alloc.free(content);
         try self.spans.append(alloc, .{
-            .content = try std.fmt.allocPrint(alloc, txt, args),
+            .content = content,
             .style = style,
             .owned = true,
         });
@@ -228,8 +231,10 @@ pub const Line = struct {
 
     /// Appends a span. Span's `content` must outlive the Line (not copied).
     pub fn pushSpan(self: *Line, alloc: std.mem.Allocator, span: Span) !void {
+        const content = try alloc.dupe(u8, span.content);
+        errdefer alloc.free(content);
         try self.spans.append(alloc, .{
-            .content = try alloc.dupe(u8, span.content),
+            .content = content,
             .style = span.style,
             .kind = span.kind,
             .owned = true,

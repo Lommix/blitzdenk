@@ -1874,7 +1874,7 @@ fn buildChatEntryParagraph(
             .message => |text| {
                 has_text = true;
                 var p = r.tui.Paragraph{};
-                try appendMarkdownText(&p, arena, text, inner_w);
+                try appendMarkdownText(&p, arena, text, inner_w, app.theme);
                 const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total.* += h;
@@ -2097,7 +2097,7 @@ fn buildMessageParagraph(
             if (m.role == .user) {
                 appendPlainText(&p, arena, txt, .{});
             } else {
-                appendMarkdownText(&p, arena, txt, 0) catch {};
+                appendMarkdownText(&p, arena, txt, 0, app.theme) catch {};
             }
         },
         .thinking => |txt| {
@@ -2227,9 +2227,37 @@ fn appendThinkingText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []cons
     }
 }
 
-fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8, width: u16) !void {
+fn markdownTheme(theme: Theme) r.tui.HighlightTheme {
+    return .{
+        .heading = .{ .fg = theme.info, .modifier = .{ .bold = true } },
+        .bold = .{ .fg = theme.text, .modifier = .{ .bold = true } },
+        .italic = .{ .fg = theme.text, .modifier = .{ .italic = true } },
+        .inline_code = .{ .fg = theme.warn },
+        .code_default = .{ .fg = theme.text },
+        .code_keyword = .{ .fg = theme.warn, .modifier = .{ .bold = true } },
+        .code_expression = .{ .fg = theme.info },
+        .code_string = .{ .fg = theme.ok },
+        .code_number = .{ .fg = theme.warn },
+        .code_comment = .{ .fg = theme.muted, .modifier = .{ .italic = true } },
+        .list_marker = .{ .fg = theme.info },
+        .quote = .{ .fg = theme.info, .modifier = .{ .italic = true } },
+        .hr = .{ .fg = theme.info },
+        .plain = .{ .fg = theme.text },
+        .mermaid = .{
+            .text = .{ .fg = theme.text },
+            .strong = .{ .fg = theme.text, .modifier = .{ .bold = true } },
+            .muted = .{ .fg = theme.muted },
+            .border = .{ .fg = theme.muted },
+            .edge = .{ .fg = theme.muted },
+            .accent = .{ .fg = theme.info },
+        },
+    };
+}
+
+fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8, width: u16, theme: Theme) !void {
     if (raw.len == 0) return;
-    var renderer = r.tui.MarkdownStreamRenderer.init(arena, width);
+    const md_theme = markdownTheme(theme);
+    var renderer = r.tui.MarkdownStreamRenderer.initWithOptions(arena, width, md_theme, .{});
     defer renderer.deinit();
     try renderer.feed(raw);
     renderer.finish();
@@ -2790,7 +2818,7 @@ test "appendMarkdownText fills headline to width" {
     const alloc = arena.allocator();
 
     var p: r.tui.Paragraph = .{};
-    try appendMarkdownText(&p, alloc, "# Hi\n## Bye\n### Low\n", 20);
+    try appendMarkdownText(&p, alloc, "# Hi\n## Bye\n### Low\n", 20, .default);
 
     try std.testing.expectEqual(@as(usize, 3), p.lines.items.len);
 

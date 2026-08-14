@@ -1,5 +1,6 @@
 const std = @import("std");
 const r = @import("root.zig");
+const mermaid = @import("mermaid.zig");
 
 // ── Syntax highlighting tables ──
 
@@ -88,6 +89,7 @@ pub const HighlightTheme = struct {
     quote: r.Style = .{ .fg = .bright_cyan, .modifier = .{ .italic = true } },
     hr: r.Style = .{ .fg = .bright_cyan },
     plain: r.Style = .{},
+    mermaid: mermaid.Theme = .{},
 };
 
 /// Streaming markdown renderer. Feed bytes with `feed`, then drain with `next`
@@ -110,6 +112,7 @@ pub const MarkdownStreamRenderer = struct {
     cursor: usize = 0, // parsed up to here
     mode: Mode = .markdown,
     theme: HighlightTheme = .{},
+    mermaid_options: mermaid.Options = .{},
     done: bool = false,
     /// true once `finish()` is called — treat EOF as valid terminator for blocks.
     eof: bool = false,
@@ -133,7 +136,18 @@ pub const MarkdownStreamRenderer = struct {
     skip_newline: bool = false,
 
     pub fn init(alloc: std.mem.Allocator, width: u16) Self {
-        return .{ .alloc = alloc, .width = width };
+        return .{ .alloc = alloc, .width = width, .mermaid_options = .{ .width = width } };
+    }
+
+    pub fn initWithTheme(alloc: std.mem.Allocator, width: u16, theme: HighlightTheme) Self {
+        return .{ .alloc = alloc, .width = width, .theme = theme, .mermaid_options = .{ .width = width, .theme = theme.mermaid } };
+    }
+
+    pub fn initWithOptions(alloc: std.mem.Allocator, width: u16, theme: HighlightTheme, options: mermaid.Options) Self {
+        var mermaid_options = options;
+        mermaid_options.width = width;
+        mermaid_options.theme = theme.mermaid;
+        return .{ .alloc = alloc, .width = width, .theme = theme, .mermaid_options = mermaid_options };
     }
 
     pub fn deinit(self: *Self) void {
@@ -176,7 +190,7 @@ pub const MarkdownStreamRenderer = struct {
         if (self.done) return null;
 
         while (true) {
-            switch (self.consumeSpan()) {
+            switch (try self.consumeSpan()) {
                 .done => {
                     self.done = true;
                     try self.flushCurrent();
@@ -303,7 +317,7 @@ pub const MarkdownStreamRenderer = struct {
         try self.pending.append(self.alloc, line);
     }
 
-    fn consumeSpan(self: *Self) Result {
+    fn consumeSpan(self: *Self) !Result {
         if (self.done) return .done;
 
         const buf = self.buffer.items;
@@ -323,7 +337,7 @@ pub const MarkdownStreamRenderer = struct {
 
     // ── Markdown mode ──────────────────────────────────────────────────────
 
-    fn consumeMarkdown(self: *Self) Result {
+    fn consumeMarkdown(self: *Self) !Result {
         const buf = self.buffer.items;
 
         if (self.pending_list_marker) {
@@ -366,6 +380,8 @@ pub const MarkdownStreamRenderer = struct {
             const line = buf[self.cursor..line_end];
             if (listMarkerAtLineStart(line)) |info| return self.startListItem(line, info);
             if (self.tryListContinuation(line)) |res| return res;
+
+            if (isMermaidFenceLine(line)) return self.consumeMermaidBlock(line_end);
 
             // Fenced code block opener: ```lang
             if (std.mem.startsWith(u8, line, "```")) {
@@ -424,6 +440,65 @@ pub const MarkdownStreamRenderer = struct {
         }
 
         return self.consumeInline();
+    }
+
+    fn consumeMermaidBlock(self: *Self, opener_line_end: usize) !Result {
+        const buf = self.buffer.items;
+        const content_start = opener_line_end + 1;
+        var pos = content_start;
+        var content_end: usize = buf.len;
+        var found = false;
+
+        while (pos < buf.len) {
+            const nl = std.mem.indexOfScalarPos(u8, buf, pos, '\n') orelse buf.len;
+            const line = buf[pos..nl];
+            if (isClosingFenceLine(line)) {
+                content_end = pos;
+                found = true;
+                break;
+            }
+            if (nl == buf.len) break;
+            pos = nl + 1;
+        }
+
+        if (!found and !self.eof) return .need_bytes;
+        if (!found) content_end = buf.len;
+
+        const close_line_end = if (found)
+            std.mem.indexOfScalarPos(u8, buf, content_end, '\n') orelse buf.len
+        else
+            buf.len;
+        self.cursor = if (close_line_end < buf.len) close_line_end + 1 else buf.len;
+        self.at_line_start = true;
+
+        try self.flushCurrent();
+        try self.flushTable();
+        self.renderMermaid(buf[content_start..content_end]) catch |err| switch (err) {
+            error.DiagramTooLarge => try self.appendRawMermaid(buf[content_start..content_end]),
+            else => return err,
+        };
+        return .{ .span = .{ .content = "\n", .style = self.theme.plain } };
+    }
+
+    fn renderMermaid(self: *Self, source: []const u8) !void {
+        var out: std.ArrayList(r.Line) = .empty;
+        defer out.deinit(self.alloc);
+        errdefer for (out.items) |*line| line.deinit(self.alloc);
+        try mermaid.renderWithOptions(self.alloc, source, &out, self.mermaid_options);
+        try self.pending.ensureUnusedCapacity(self.alloc, out.items.len);
+        for (out.items) |line| self.pending.appendAssumeCapacity(line);
+        out.items.len = 0;
+    }
+
+    fn appendRawMermaid(self: *Self, source: []const u8) !void {
+        var it = std.mem.splitScalar(u8, source, '\n');
+        while (it.next()) |raw| {
+            const line = std.mem.trimEnd(u8, raw, "\r");
+            var l = r.Line{};
+            errdefer l.deinit(self.alloc);
+            try l.pushSpan(self.alloc, .{ .content = line, .style = self.theme.mermaid.muted });
+            try self.pending.append(self.alloc, l);
+        }
     }
 
     fn startHeading(self: *Self, line: []const u8, line_end: usize, depth: usize) Result {
@@ -786,6 +861,20 @@ fn allSameChar(s: []const u8, ch: u8) bool {
     return s.len > 0;
 }
 
+fn isMermaidFenceLine(line: []const u8) bool {
+    const t = std.mem.trimStart(u8, line, " \t");
+    const needle = "```mermaid";
+    if (!std.ascii.startsWithIgnoreCase(t, needle)) return false;
+    return t.len == needle.len or t[needle.len] == ' ' or t[needle.len] == '\t';
+}
+
+fn isClosingFenceLine(line: []const u8) bool {
+    const t = std.mem.trim(u8, line, " \t\r");
+    if (t.len < 3) return false;
+    for (t) |ch| if (ch != '`') return false;
+    return true;
+}
+
 fn isTableRowLine(line: []const u8) bool {
     const trimmed = std.mem.trim(u8, line, " \t\r");
     if (trimmed.len == 0) return false;
@@ -879,7 +968,7 @@ test "markdown: plain paragraph" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -900,7 +989,7 @@ test "markdown: bold inside sentence" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -923,7 +1012,7 @@ test "markdown: heading" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -946,7 +1035,7 @@ test "markdown: heading levels decorate and color" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -981,7 +1070,7 @@ test "markdown: blockquote indents with border and color" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1012,7 +1101,7 @@ test "markdown: fenced zig code highlights keywords" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1036,7 +1125,7 @@ test "markdown: bullet list" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1059,7 +1148,7 @@ test "markdown: list continuation carries indentation" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1086,7 +1175,7 @@ test "markdown: numbered list continuation carries indentation" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1107,7 +1196,7 @@ test "markdown: nested bullet list keeps indentation" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1128,7 +1217,7 @@ test "markdown: code fence preserves surrounding lines" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1162,7 +1251,7 @@ test "markdown: multiple fenced blocks close properly" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1189,7 +1278,7 @@ test "markdown: partial input returns need_bytes then completes" {
     try hl.feed("hello **wor");
 
     // should yield need_bytes on at_line_start peek (no \n available)
-    const first = hl.consumeSpan();
+    const first = try hl.consumeSpan();
     try std.testing.expect(first == .need_bytes);
 
     // Feed rest.
@@ -1198,7 +1287,7 @@ test "markdown: partial input returns need_bytes then completes" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => break, // no more bytes — shouldn't happen after finish
         .done => break,
@@ -1221,7 +1310,7 @@ test "markdown: tab bytes survive code block (expanded at render time)" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1250,7 +1339,7 @@ test "markdown: horizontal rule emits dashes then newline" {
 
         var got: std.ArrayList(r.Span) = .empty;
         defer got.deinit(alloc);
-        while (true) switch (hl.consumeSpan()) {
+        while (true) switch (try hl.consumeSpan()) {
             .span => |s| try got.append(alloc, s),
             .need_bytes => unreachable,
             .done => break,
@@ -1281,7 +1370,7 @@ test "markdown: table rows are tagged" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1308,7 +1397,7 @@ test "markdown: final table row without newline is tagged" {
 
     var got: std.ArrayList(r.Span) = .empty;
     defer got.deinit(alloc);
-    while (true) switch (hl.consumeSpan()) {
+    while (true) switch (try hl.consumeSpan()) {
         .span => |s| try got.append(alloc, s),
         .need_bytes => unreachable,
         .done => break,
@@ -1459,4 +1548,86 @@ test "renderer: horizontal rule fills width" {
         want[i + 2] = 0x80;
     }
     try std.testing.expectEqualStrings(want[0..], rule);
+}
+
+test "renderer: mermaid fence renders diagram instead of raw fence" {
+    const alloc = std.testing.allocator;
+    var renderer = MarkdownStreamRenderer.init(alloc, 40);
+    defer renderer.deinit();
+    try renderer.feed("before\n```mermaid\ngraph TD\nA[Alpha] --> B[Beta]\n```\nafter\n");
+    renderer.finish();
+
+    var lines = try drainLines(&renderer, alloc);
+    defer {
+        for (lines.items) |*l| l.deinit(alloc);
+        lines.deinit(alloc);
+    }
+
+    var saw_before = false;
+    var saw_after = false;
+    var saw_alpha = false;
+    var saw_raw_fence = false;
+    for (lines.items) |*l| {
+        const text = try r.widgets.lineText(alloc, l);
+        defer alloc.free(text);
+        if (std.mem.indexOf(u8, text, "before") != null) saw_before = true;
+        if (std.mem.indexOf(u8, text, "after") != null) saw_after = true;
+        if (std.mem.indexOf(u8, text, "Alpha") != null) saw_alpha = true;
+        if (std.mem.indexOf(u8, text, "```mermaid") != null) saw_raw_fence = true;
+    }
+    try std.testing.expect(saw_before);
+    try std.testing.expect(saw_after);
+    try std.testing.expect(saw_alpha);
+    try std.testing.expect(!saw_raw_fence);
+}
+
+test "mermaid fence detection requires word boundary" {
+    try std.testing.expect(isMermaidFenceLine("```mermaid"));
+    try std.testing.expect(isMermaidFenceLine(" ```mermaid "));
+    try std.testing.expect(!isMermaidFenceLine("```mermaidjs"));
+    try std.testing.expect(!isMermaidFenceLine("```mermaid_viz"));
+    try std.testing.expect(isClosingFenceLine(" ``` "));
+    try std.testing.expect(isClosingFenceLine("````"));
+    try std.testing.expect(!isClosingFenceLine("```not-a-close"));
+}
+
+test "renderer: table flushes before mermaid diagram" {
+    const alloc = std.testing.allocator;
+    var renderer = MarkdownStreamRenderer.init(alloc, 40);
+    defer renderer.deinit();
+    try renderer.feed("| Name |\n|---|\n| row |\n```mermaid\ngraph TD\nA[Alpha] --> B[Beta]\n```\n");
+    renderer.finish();
+
+    var lines = try drainLines(&renderer, alloc);
+    defer {
+        for (lines.items) |*l| l.deinit(alloc);
+        lines.deinit(alloc);
+    }
+
+    var name_idx: ?usize = null;
+    var alpha_idx: ?usize = null;
+    for (lines.items, 0..) |*l, i| {
+        const text = try r.widgets.lineText(alloc, l);
+        defer alloc.free(text);
+        if (name_idx == null and std.mem.indexOf(u8, text, "Name") != null) name_idx = i;
+        if (alpha_idx == null and std.mem.indexOf(u8, text, "Alpha") != null) alpha_idx = i;
+    }
+    try std.testing.expect(name_idx != null);
+    try std.testing.expect(alpha_idx != null);
+    try std.testing.expect(name_idx.? < alpha_idx.?);
+}
+
+fn markdownMermaidAllocationFailureCase(alloc: std.mem.Allocator) !void {
+    var renderer = MarkdownStreamRenderer.init(alloc, 32);
+    defer renderer.deinit();
+    try renderer.feed("before\n```mermaid\nflowchart TD\nA[Alpha beta gamma] --> B[Beta]\n```\nafter\n");
+    renderer.finish();
+    while (try renderer.next()) |value| {
+        var line = value;
+        line.deinit(alloc);
+    }
+}
+
+test "renderer: mermaid ownership survives every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, markdownMermaidAllocationFailureCase, .{});
 }
