@@ -423,7 +423,7 @@ pub const Blitz = LuaType{
                         .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_name", .ty = LuaType.string } },
                         .fn_ptr = LuaFnBind((struct {
                             fn lua_fn(a: *r.app.App, agent_type_id: u32, tool_name: []const u8) !void {
-                                try a.cmd_queue.append(a.swarm.pool.io, .{ .add_tool = .{
+                                try a.cmd_queue.append(a.io, .{ .add_tool = .{
                                     .agent_type = @enumFromInt(agent_type_id),
                                     .tool_name = tool_name,
                                 } });
@@ -433,7 +433,7 @@ pub const Blitz = LuaType{
                 },
             },
             .{ .name = "get_main_agent", .desc = "Return the main agent, if a session is running.", .ty = LuaType{ .function = .{ .ret = &AgentIdOrNilDef, .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App) !?r.prv.Swarm.AgentId {
+                fn lua_fn(a: *r.app.App) !?r.AgentId {
                     return a.main_agent_id;
                 }
             }).lua_fn, "get_main_agent") } } },
@@ -473,17 +473,17 @@ pub const Blitz = LuaType{
                                 frequency_penalty: ?f32 = null,
                                 presence_penalty: ?f32 = null,
                                 enable_thinking: ?bool = true,
-                                thinking: ?r.prv.adapter.Thinking = null,
+                                thinking: ?r.models.Thinking = null,
                             };
 
-                            fn lua_fn(a: *r.app.App, args: Arg) !r.prv.config.ProviderHandle {
+                            fn lua_fn(a: *r.app.App, args: Arg) !r.config.ProviderHandle {
                                 const slot = a.config.reserveProvider(args.url, args.key_envar) orelse return error.MaxProviderReached;
 
                                 if (args.effort) |eff| {
-                                    slot.reasoning_effort = prv.config.parseReasoningEffort(eff) orelse return error.UnknownEffortValue;
+                                    slot.reasoning_effort = r.config.parseReasoningEffort(eff) orelse return error.UnknownEffortValue;
                                 }
 
-                                const ptype: prv.adapter.Provider = blk: {
+                                const ptype: r.models.Kind = blk: {
                                     if (std.mem.eql(u8, args.type, "openai")) break :blk .openai;
                                     if (std.mem.eql(u8, args.type, "response")) break :blk .response;
                                     if (std.mem.eql(u8, args.type, "anthropic")) break :blk .anthropic;
@@ -549,7 +549,7 @@ pub const Blitz = LuaType{
 
                             fn lua_fn(a: *r.app.App, def: Args) !u32 {
                                 const effort = if (def.effort) |eff|
-                                    r.prv.config.parseReasoningEffort(eff) orelse return error.UnknownEffortType
+                                    r.config.parseReasoningEffort(eff) orelse return error.UnknownEffortType
                                 else
                                     .medium;
 
@@ -603,7 +603,7 @@ pub const Blitz = LuaType{
                         .fn_ptr = LuaFnBind((struct {
                             fn lua_fn(a: *r.app.App, agent_type_id: u32, model: []const u8, effort: []const u8, handle: u32) !void {
                                 const agent_type: r.ContextFactory.AgentType = @enumFromInt(agent_type_id);
-                                const eff = r.prv.config.parseReasoningEffort(effort) orelse return error.UnknownEffort;
+                                const eff = r.config.parseReasoningEffort(effort) orelse return error.UnknownEffort;
                                 try a.context_factory.setAgentModel(agent_type, model, eff, @enumFromInt(handle));
                             }
                         }).lua_fn, "set_model_agent"),
@@ -625,12 +625,12 @@ pub const Blitz = LuaType{
                             };
 
                             fn lua_fn(a: *r.app.App) !Ret {
-                                const useage = a.swarm.usage();
+                                const useage = a.registry.usage();
                                 return .{
                                     .input = useage.input_tokens,
                                     .output = useage.output_tokens,
-                                    .cache = useage.cached_tokens,
-                                    .cache_creation = useage.cache_creation_tokens,
+                                    .cache = useage.cache_read_tokens,
+                                    .cache_creation = useage.cache_write_tokens,
                                 };
                             }
                         }).lua_fn, "token_usage"),
@@ -654,15 +654,15 @@ pub const Blitz = LuaType{
 
                             fn lua_fn(a: *r.app.App) ![]Entry {
                                 const arena = a.lua_vm.arena_state.allocator();
-                                const entries = try a.swarm.usageByModel(arena);
+                                const entries = try a.registry.usageByModel(arena);
                                 const out = try arena.alloc(Entry, entries.len);
                                 for (entries, out) |e, *o| {
                                     o.* = .{
                                         .model = e.model,
                                         .input = e.usage.input_tokens,
                                         .output = e.usage.output_tokens,
-                                        .cache = e.usage.cached_tokens,
-                                        .cache_creation = e.usage.cache_creation_tokens,
+                                        .cache = e.usage.cache_read_tokens,
+                                        .cache_creation = e.usage.cache_write_tokens,
                                     };
                                 }
                                 arena.free(entries);
@@ -693,10 +693,10 @@ pub const Blitz = LuaType{
                         .fn_ptr = LuaFnBind((struct {
                             fn lua_fn(a: *r.app.App, limit: u32) !void {
                                 a.default_context_limit = limit;
-                                for (&a.swarm.slots) |*slot| {
+                                for (&a.registry.slots) |*slot| {
                                     const slot_state = slot.state.load(.acquire);
                                     if (slot_state == .free or slot_state == .reserved) continue;
-                                    slot.agent.context_limit = limit;
+                                    if (slot.agent) |*agent| agent.context_limit = limit;
                                 }
                             }
                         }).lua_fn, "set_compact_edge"),
@@ -971,7 +971,7 @@ pub const Blitz = LuaType{
                             };
                             const cmd = readAnyArg([]const u8, state, "shell", 1) orelse return pushNilBool(state, false);
                             const cwd: ?[]const u8 = if (a.cwd.len > 0) a.cwd else null;
-                            const result = a.swarm.exec.runAndWait(.{
+                            const result = a.exec_pool.runAndWait(.{
                                 .cwd = cwd,
                                 .argv = &.{ "/bin/sh", "-c", cmd },
                             }) catch {
@@ -979,8 +979,8 @@ pub const Blitz = LuaType{
                                 c.lua_pushboolean(state, 0);
                                 return 2;
                             };
-                            defer a.swarm.exec.alloc.free(result.stdout);
-                            defer a.swarm.exec.alloc.free(result.stderr);
+                            defer a.exec_pool.alloc.free(result.stdout);
+                            defer a.exec_pool.alloc.free(result.stderr);
 
                             const success = result.ty == .success;
                             const output = if (success) result.stdout else if (result.stderr.len > 0) result.stderr else result.stdout;
@@ -1281,7 +1281,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
             .args = &.{ .{ .name = "role", .ty = LuaType.string }, .{ .name = "text", .ty = LuaType.string } },
             .fn_ptr = LuaFnBind((struct {
                 fn lua_fn(a: *r.app.App, role_str: []const u8, text: []const u8) !void {
-                    const role: prv.adapter.Role = if (std.mem.eql(u8, role_str, "system"))
+                    const role: r.app.ChatRole = if (std.mem.eql(u8, role_str, "system"))
                         .system
                     else if (std.mem.eql(u8, role_str, "user"))
                         .user
@@ -1306,8 +1306,8 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "text", .ty = LuaType.string } },
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App, agent_id: r.prv.Swarm.AgentId, text: []const u8) !void {
-                    const parts = [_]prv.adapter.ContentPart{.{ .text = text }};
+                fn lua_fn(a: *r.app.App, agent_id: r.AgentId, text: []const u8) !void {
+                    const parts = [_]r.sdk.Part{.{ .text = text }};
                     try a.cmd_queue.append(a.io, .{ .queue_agent_message = .{
                         .agent_id = agent_id,
                         .parts = &parts,
@@ -1331,7 +1331,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                     const vm = &a.lua_vm;
 
                     const SpawnArgs = struct {
-                        parent_id: ?r.prv.Swarm.AgentId = null,
+                        parent_id: ?r.AgentId = null,
                         prompt: []const u8,
                         agent_type: ?u32 = null,
                         fork: ?bool = null,
@@ -1363,16 +1363,17 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                         }
                         args.agent_type = @intCast(t);
                     }
-                    const parts = [_]prv.adapter.ContentPart{.{ .text = spawn.prompt }};
+                    const parts = [_]r.sdk.Part{.{ .text = spawn.prompt }};
                     args.prompt = &parts;
 
-                    const id = a.swarm.reserveFreeSlot() orelse {
+                    const id = a.registry.reserve() orelse {
                         c.lua_pushnil(state);
                         return 1;
                     };
                     args.agent_id = id;
 
                     a.cmd_queue.append(a.io, .{ .spawn_agent = args }) catch {
+                        a.registry.releaseReservation(id);
                         c.lua_pushnil(state);
                         return 1;
                     };
@@ -1401,11 +1402,12 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                         return 0;
                     };
                     const id = readAgentIdArg(state, "queue.await_agent", 1);
-                    const io = a.swarm.pool.io;
-                    const slot = a.swarm.getSlot(id) orelse {
+                    const io = a.io;
+                    if (a.registry.state(id) == null) {
                         c.lua_pushinteger(state, AWAIT_INVALID);
                         return 1;
-                    };
+                    }
+                    const slot = &a.registry.slots[id.index];
 
                     switch (slot.state.load(.acquire)) {
                         .complete => {
@@ -1431,10 +1433,11 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                     };
                     vm.vm_mu.lockUncancelable(io);
 
-                    const slot_now = a.swarm.getSlot(id) orelse {
+                    if (a.registry.state(id) == null) {
                         c.lua_pushinteger(state, AWAIT_CANCELED);
                         return 1;
-                    };
+                    }
+                    const slot_now = &a.registry.slots[id.index];
                     const code: c_int = switch (slot_now.state.load(.acquire)) {
                         .complete => AWAIT_COMPLETE,
                         .failed => AWAIT_FAILED,
@@ -1460,18 +1463,18 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                         return 0;
                     };
                     const id = readAgentIdArg(state, "queue.await_agent_result", 1);
-                    const agent = a.swarm.getAgent(id) orelse {
+                    const agent = a.registry.get(id) orelse {
                         _ = c.luaL_error(state, "queue.await_agent_result: agent not found");
                         return 0;
                     };
-                    if (agent.chat.messages.items.len == 0) {
+                    if (agent.history().len == 0) {
                         _ = c.luaL_error(state, "queue.await_agent_result: agent has no chat entries");
                         return 0;
                     }
 
-                    const last_msg = &agent.chat.messages.items[agent.chat.messages.items.len -| 1];
+                    const last_msg = &agent.history()[agent.history().len -| 1];
                     var total: usize = 0;
-                    for (last_msg.parts) |p| switch (p) {
+                    for (last_msg.parts()) |p| switch (p) {
                         .text => |t| total += t.len,
                         else => {},
                     };
@@ -1482,7 +1485,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
 
                     var b: c.luaL_Buffer = undefined;
                     c.luaL_buffinit(state, &b);
-                    for (last_msg.parts) |p| switch (p) {
+                    for (last_msg.parts()) |p| switch (p) {
                         .text => |t| c.luaL_addlstring(&b, t.ptr, t.len),
                         else => {},
                     };
@@ -2436,15 +2439,14 @@ fn readAnyArg(
 // ── Trampoline: Zig ToolFn → Lua function call ─────────────────────
 
 // Import provider types used in tool interface
-const prv = r.prv;
-
-const ToolContext = prv.tool.ToolContext;
-const ToolCall = prv.adapter.ToolCall;
-const ToolResult = prv.adapter.ToolResult;
-const Tool = prv.tool.Tool;
+const ToolContext = r.tools.ToolContext;
+const ToolCall = r.sdk.ToolCall;
+const ToolResult = r.sdk.ToolOutput;
+const Tool = r.tools.Tool;
 
 fn failedResult(call: ToolCall, msg: []const u8) ToolResult {
-    return .{ .call_id = call.id, .name = call.name, .content = msg, .is_error = true };
+    _ = call;
+    return .{ .content = msg, .is_error = true };
 }
 
 fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
@@ -2465,7 +2467,7 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
 
     // Build ctx bridge and push as arg 1
     var bridge = CtxBridge{
-        .cwd = ctx.cwd,
+        .cwd = ctx.base.cwd,
         .tool_ctx = ctx,
         .tool_call = call,
     };
@@ -2527,7 +2529,7 @@ fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) T
     c.lua_pop(L, 1);
 
     _ = c.lua_getfield(L, -1, "img");
-    var image: ?prv.adapter.ImageContent = null;
+    var image: ?r.sdk.ToolImage = null;
     if (c.lua_type(L, -1) == c.LUA_TTABLE) {
         _ = c.lua_getfield(L, -1, "media_type");
         var mt_len: usize = 0;
@@ -2545,14 +2547,15 @@ fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) T
         c.lua_pop(L, 1);
 
         if (data) |bytes| {
-            if (bytes.len > 0) image = .{ .media_type = media_type, .data = bytes };
+            if (bytes.len > 0) image = .{
+                .media_type = media_type,
+                .url = std.fmt.allocPrint(alloc, "data:{s};base64,{s}", .{ media_type, bytes }) catch "",
+            };
         }
     }
     c.lua_pop(L, 1);
 
     return .{
-        .call_id = call.id,
-        .name = call.name,
         .content = owned,
         .image = image,
         .exit_loop = exit_loop,
@@ -2566,7 +2569,7 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
 
     setFieldAny(L, -2, "cwd", bridge.cwd);
 
-    pushAgentId(L, bridge.tool_ctx.self_id);
+    pushAgentId(L, bridge.tool_ctx.base.self_id);
     setFieldPushed(L, -2, "agent_id");
 
     _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, state_ref);
@@ -2590,10 +2593,10 @@ fn pushCallTable(alloc: Allocator, L: *c.lua_State, call: ToolCall) void {
     setFieldAny(L, -2, "name", call.name);
 
     // Parse arguments JSON into Lua table
-    if (call.arguments.len > 0) {
-        pushJsonValue(alloc, L, call.arguments) catch {
+    if (call.input.len > 0) {
+        pushJsonValue(alloc, L, call.input) catch {
             // Fallback: raw string if JSON parse fails
-            _ = c.lua_pushlstring(L, call.arguments.ptr, call.arguments.len);
+            _ = c.lua_pushlstring(L, call.input.ptr, call.input.len);
         };
     } else {
         c.lua_newtable(L); // empty table for empty arguments
@@ -2634,7 +2637,7 @@ fn luaSetChildId(L: ?*c.lua_State) callconv(.c) c_int {
 /// Block on the perm event, then push (status_int, payload?) onto the Lua
 /// stack. payload is the chosen option string for .choice, the user message
 /// for .message, or nil otherwise. Returns 2 (status, payload).
-fn awaitPermAndPush(state: *c.lua_State, io: std.Io, req: *r.prv.Swarm.PermissionReq, options: []const []const u8) c_int {
+fn awaitPermAndPush(state: *c.lua_State, io: std.Io, req: *r.permissions.Request, options: []const []const u8) c_int {
     req.event.wait(io) catch {
         return pushStatusNil(state, REQ_STATUS_DENIED);
     };
@@ -2685,8 +2688,8 @@ fn luaAsk(L: ?*c.lua_State) callconv(.c) c_int {
         options.append(bridge.tool_ctx.alloc, readAnyValue([]const u8, state, -1).?) catch break;
     }
 
-    var req = r.prv.Swarm.PermissionReq{
-        .agent_id = bridge.tool_ctx.self_id,
+    var req = r.permissions.Request{
+        .agent_id = bridge.tool_ctx.base.self_id,
         .payload = .{ .ask = .{
             .header = header,
             .question = question,
@@ -2694,7 +2697,7 @@ fn luaAsk(L: ?*c.lua_State) callconv(.c) c_int {
         } },
     };
 
-    bridge.tool_ctx.swarm.requestPermission(&req);
+    bridge.tool_ctx.base.permissions.send(&req);
     return awaitPermAndPush(state, bridge.tool_ctx.io, &req, options.items);
 }
 
@@ -2711,15 +2714,15 @@ fn luaApprove(L: ?*c.lua_State) callconv(.c) c_int {
     const tool_name = readAnyValue([]const u8, state, 2).?;
     const tool_arguments = readAnyValue([]const u8, state, 3).?;
 
-    var req = r.prv.Swarm.PermissionReq{
-        .agent_id = bridge.tool_ctx.self_id,
+    var req = r.permissions.Request{
+        .agent_id = bridge.tool_ctx.base.self_id,
         .payload = .{ .call = .{
             .tool_name = tool_name,
             .tool_arguments = tool_arguments,
         } },
     };
 
-    bridge.tool_ctx.swarm.requestPermission(&req);
+    bridge.tool_ctx.base.permissions.send(&req);
     return awaitPermAndPush(state, bridge.tool_ctx.io, &req, &.{});
 }
 
@@ -2736,22 +2739,20 @@ fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
     const path = readAnyValue([]const u8, state, 2).?;
     const plan_text = readAnyValue([]const u8, state, 3).?;
 
-    var req = r.prv.Swarm.PermissionReq{
-        .agent_id = bridge.tool_ctx.self_id,
+    var req = r.permissions.Request{
+        .agent_id = bridge.tool_ctx.base.self_id,
         .payload = .{ .plan = .{
             .path = path,
             .plan_text = plan_text,
         } },
     };
 
-    bridge.tool_ctx.swarm.requestPermission(&req);
+    bridge.tool_ctx.base.permissions.send(&req);
     return awaitPermAndPush(state, bridge.tool_ctx.io, &req, &.{});
 }
 
-// ── blitz.queue.* — CommandQueue + Swarm reservation bindings ─────────
-
 /// Push AgentId as `{index, generation}` table.
-fn pushAgentId(L: *c.lua_State, id: r.prv.Swarm.AgentId) void {
+fn pushAgentId(L: *c.lua_State, id: r.AgentId) void {
     c.lua_createtable(L, 0, 2);
     setFieldAny(L, -2, "index", id.index);
     setFieldAny(L, -2, "generation", id.generation);
@@ -2759,7 +2760,7 @@ fn pushAgentId(L: *c.lua_State, id: r.prv.Swarm.AgentId) void {
 
 /// Read AgentId from table at `idx`. Reports a Lua error on shape mismatch.
 /// TODO: crash!
-fn readAgentIdArg(state: *c.lua_State, comptime fname: []const u8, idx: c_int) r.prv.Swarm.AgentId {
+fn readAgentIdArg(state: *c.lua_State, comptime fname: []const u8, idx: c_int) r.AgentId {
     if (c.lua_type(state, idx) != c.LUA_TTABLE) {
         _ = c.luaL_error(state, fname ++ ": agent_id must be a table {index, generation}");
         return .{ .index = 0, .generation = 0 };

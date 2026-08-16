@@ -1,10 +1,9 @@
-const prv = @import("provider");
 const r = @import("root.zig");
 const std = @import("std");
 
 pub const MAX_OPTIONS = 8;
 
-pub const AskTool = prv.tool.Tool{
+pub const AskTool = r.Tool{
     .def = .{
         .name = "ask_user",
         .description =
@@ -35,7 +34,7 @@ pub const Args = struct {
     options: []const []const u8,
 };
 
-fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const args = r.parseArgs(Args, ctx.alloc, call) orelse
         return r.errResult(call, "invalid JSON arguments: expected {header, question, options}");
 
@@ -44,7 +43,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     r.setToolStatusPrint(ctx, call, "question {s}", .{args.question});
 
-    const decision = ctx.requestPerm(call.id, .minor, .{ .ask = .{
+    const decision = ctx.requestPermission(call.id, .minor, .{ .ask = .{
         .header = args.header,
         .options = args.options,
         .question = args.question,

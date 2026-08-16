@@ -1,8 +1,7 @@
-const prv = @import("provider");
 const r = @import("root.zig");
 const std = @import("std");
 
-pub const AgentTool = prv.tool.Tool{
+pub const AgentTool = r.Tool{
     .def = .{
         .name = "agent",
         .description =
@@ -86,7 +85,7 @@ pub fn dynamic_def(alloc: std.mem.Allocator, agent_defs: []const ctxf.AgentMeta)
     };
 }
 
-fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         description: []const u8,
         prompt: []const u8,
@@ -98,21 +97,21 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     const parsed = std.json.parseFromSlice(
         Args,
         ctx.alloc,
-        call.arguments,
+        call.input,
         .{ .ignore_unknown_fields = true },
     ) catch return r.errResult(call, "invalid arguments");
     const args = parsed.value;
-    const app = ctx.swarm.context.cast(@import("../app.zig").App);
+    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     const agent_type = app.context_factory.findAgentType(args.agent_type) orelse
         return r.errResult(call, "unknown agent type");
 
     const cwd = if (args.cwd) |cwd|
-        std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, cwd }) catch
+        std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, cwd }) catch
             return r.errResult(call, "invalid cwd")
     else
-        ctx.cwd;
+        ctx.base.cwd;
 
-    const child_id = ctx.swarm.reserveFreeSlot() orelse
+    const child_id = ctx.base.registry.reserve() orelse
         return r.errResult(call, "No agent slots left");
 
     const prompt = std.fmt.allocPrint(ctx.alloc,
@@ -121,20 +120,20 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         \\{s}
     , .{ args.description, args.prompt }) catch return r.errResult(call, "out of memory");
 
-    const parts = ctx.alloc.alloc(prv.adapter.ContentPart, 1) catch
+    const parts = ctx.alloc.alloc(r.r.sdk.Part, 1) catch
         return r.errResult(call, "oom");
 
     parts[0] = .{ .text = prompt };
     app.cmd_queue.append(ctx.io, .{
         .spawn_agent = .{
             .agent_id = child_id,
-            .parent_id = ctx.self_id,
+            .parent_id = ctx.base.self_id,
             .agent_type = @intFromEnum(agent_type),
             .prompt = parts,
             .cwd = cwd,
         },
     }) catch {
-        ctx.swarm.releaseReservation(child_id);
+        ctx.base.registry.releaseReservation(child_id);
         return r.errResult(call, "command queue is full, inform user");
     };
 
@@ -150,28 +149,26 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
             .{child_id.pack()},
         ) catch return r.errResult(call, "oom");
 
-        return .{
-            .call_id = call.id,
-            .content = text,
-            .name = call.name,
-            .comp_strat = .keep,
-        };
+        return r.okResult(call, text);
     }
 
     return awaitChildResult(ctx, call, child_id, true);
 }
 
-fn addBgAgent(ctx: prv.tool.ToolContext, child_id: prv.Swarm.AgentId, description: []const u8) void {
-    const g = ctx.agent().bg_agents.lock(ctx.io);
+fn addBgAgent(ctx: r.ToolContext, child_id: r.r.AgentId, description: []const u8) void {
+    const agent = ctx.agent();
+    const g = agent.bg_agents.lock(ctx.io);
     defer g.unlock();
-    g.ptr.list.append(ctx.alloc, .{
+    const alloc = agent.state_arena.allocator();
+    const owned_description = alloc.dupe(u8, description) catch return;
+    g.ptr.list.append(alloc, .{
         .agent_id = child_id,
-        .description = description,
+        .description = owned_description,
         .status = .running,
     }) catch {};
 }
 
-fn dropBgAgent(ctx: prv.tool.ToolContext, child_id: prv.Swarm.AgentId) void {
+fn dropBgAgent(ctx: r.ToolContext, child_id: r.r.AgentId) void {
     const g = ctx.agent().bg_agents.lock(ctx.io);
     defer g.unlock();
     for (g.ptr.list.items, 0..) |bg, i| {
@@ -182,62 +179,50 @@ fn dropBgAgent(ctx: prv.tool.ToolContext, child_id: prv.Swarm.AgentId) void {
     }
 }
 
-fn childGone(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall, child_id: prv.Swarm.AgentId) prv.adapter.ToolResult {
+fn childGone(ctx: r.ToolContext, call: r.r.sdk.ToolCall, child_id: r.r.AgentId) r.r.sdk.ToolOutput {
     dropBgAgent(ctx, child_id);
     return r.errResult(call, "child agent spawn failed or was canceled");
 }
 
-fn bail(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall, child_id: prv.Swarm.AgentId, msg: []const u8) prv.adapter.ToolResult {
+fn bail(ctx: r.ToolContext, call: r.r.sdk.ToolCall, child_id: r.r.AgentId, msg: []const u8) r.r.sdk.ToolOutput {
     releaseChild(ctx, child_id);
     dropBgAgent(ctx, child_id);
     return r.errResult(call, msg);
 }
 
-fn releaseChild(ctx: prv.tool.ToolContext, child_id: prv.Swarm.AgentId) void {
-    const st = ctx.swarm.getSlotState(child_id) orelse return;
+fn releaseChild(ctx: r.ToolContext, child_id: r.r.AgentId) void {
+    const st = ctx.base.registry.state(child_id) orelse return;
     switch (st) {
-        .reserved => ctx.swarm.releaseReservation(child_id),
-        else => ctx.swarm.releaseAgent(child_id),
+        .reserved => ctx.base.registry.releaseReservation(child_id),
+        else => ctx.base.registry.release(child_id),
     }
 }
 
 fn awaitChildResult(
-    ctx: prv.tool.ToolContext,
-    call: prv.adapter.ToolCall,
-    child_id: prv.Swarm.AgentId,
+    ctx: r.ToolContext,
+    call: r.r.sdk.ToolCall,
+    child_id: r.r.AgentId,
     despawn: bool,
-) prv.adapter.ToolResult {
+) r.r.sdk.ToolOutput {
     while (true) {
-        const slot = ctx.swarm.getSlot(child_id) orelse return childGone(ctx, call, child_id);
-        const state = slot.state.load(.acquire);
+        const state = ctx.base.registry.state(child_id) orelse return childGone(ctx, call, child_id);
         if (state != .active and state != .reserved) break;
-
-        slot.event.wait(ctx.io) catch return bail(ctx, call, child_id, "canceled");
+        _ = ctx.base.registry.wait(child_id) catch return bail(ctx, call, child_id, "canceled");
         if (ctx.isCanceled()) return bail(ctx, call, child_id, "canceled");
-
-        const state2 = slot.state.load(.acquire);
-        if (state2 == .reserved or state2 == .active) {
-            slot.event.reset();
-        }
     }
 
-    const slot = ctx.swarm.getSlot(child_id) orelse return childGone(ctx, call, child_id);
-    const is_err = slot.state.load(.acquire) == .failed;
-    const text = prv.tool.extractChildResult(ctx.swarm, child_id);
+    const state = ctx.base.registry.state(child_id) orelse return childGone(ctx, call, child_id);
+    const is_err = state == .failed;
+    const text = extractChildResult(ctx.base.registry, child_id);
     const owned = ctx.alloc.dupe(u8, text) catch return bail(ctx, call, child_id, "oom");
 
     if (despawn) releaseChild(ctx, child_id);
     dropBgAgent(ctx, child_id);
 
-    return .{
-        .call_id = call.id,
-        .name = call.name,
-        .content = owned,
-        .is_error = is_err,
-    };
+    return .{ .content = owned, .is_error = is_err };
 }
 
-pub const AwaitAgent = prv.tool.Tool{
+pub const AwaitAgent = r.Tool{
     .def = .{
         .name = "await_agent",
         .description = "Wait for a agent to finish and read its result",
@@ -252,24 +237,24 @@ pub const AwaitAgent = prv.tool.Tool{
     .func = &run_await_agent,
 };
 
-fn run_await_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run_await_agent(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         agent_id: u32,
         despawn: bool = true,
     };
 
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid arguments");
 
-    const child_id = prv.Swarm.AgentId.unpack(args.agent_id);
+    const child_id = r.r.AgentId.unpack(args.agent_id);
 
     r.setToolStatusPrint(ctx, call, "waiting for agent {d}", .{args.agent_id});
 
     return awaitChildResult(ctx, call, child_id, args.despawn);
 }
 
-pub const CancelAgent = prv.tool.Tool{
+pub const CancelAgent = r.Tool{
     .def = .{
         .name = "cancel_agent",
         .description = "Cancel a running agent",
@@ -283,24 +268,39 @@ pub const CancelAgent = prv.tool.Tool{
     .func = &run_cancel_agent,
 };
 
-fn run_cancel_agent(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run_cancel_agent(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         agent_id: u32,
     };
 
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid arguments");
 
-    const child_id = prv.Swarm.AgentId.unpack(args.agent_id);
+    const child_id = r.r.AgentId.unpack(args.agent_id);
 
-    if (ctx.swarm.getSlot(child_id)) |slot| {
-        if (slot.state.load(.acquire) == .active) {
-            slot.agent.cancel();
-        }
+    if (ctx.base.registry.state(child_id) != null) {
+        const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+        app.cancelAgentPermissions(child_id);
+        ctx.base.registry.cancel(child_id);
         releaseChild(ctx, child_id);
     }
     dropBgAgent(ctx, child_id);
 
     return r.okResult(call, "agent canceled");
+}
+
+fn extractChildResult(registry: *r.r.agent_registry.Registry, child_id: r.r.AgentId) []const u8 {
+    const child = registry.get(child_id) orelse return "child agent not found";
+    var index = child.history().len;
+    while (index > 0) {
+        index -= 1;
+        const message = child.history()[index];
+        if (message.role != .assistant) continue;
+        for (message.parts()) |part| switch (part) {
+            .text => |text| return text,
+            else => {},
+        };
+    }
+    return "child produced no text output";
 }

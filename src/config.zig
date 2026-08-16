@@ -1,20 +1,18 @@
 const std = @import("std");
-const adapter = @import("adapter.zig");
+const models = @import("models");
 
 pub const MAX_PROVIDERS = 16;
 pub const ProviderHandle = enum(u32) { _ };
-pub const ReasoningEffort = adapter.ReasoningEffort;
+pub const ReasoningEffort = models.ReasoningEffort;
 
-pub fn parseReasoningEffort(value: []const u8) ?ReasoningEffort {
-    return std.meta.stringToEnum(ReasoningEffort, value);
-}
+pub const parseReasoningEffort = models.parseReasoningEffort;
 
 pub const Provider = struct {
     url: [512]u8 = undefined,
     url_len: usize = 0,
     key_envar: [128]u8 = undefined,
     key_len: usize = 0,
-    provider_config: adapter.ProviderConfig = .{ .openai = .{} },
+    provider_config: models.ProviderOptions = .{ .openai = .{} },
     thinking_type_buf: [16]u8 = undefined,
     thinking_type_len: usize = 0,
     reasoning_effort: ?ReasoningEffort = null,
@@ -28,10 +26,10 @@ pub const Provider = struct {
         return self.key_envar[0..self.key_len];
     }
 
-    pub fn setThinkingType(self: *Provider, s: []const u8) bool {
-        if (s.len > self.thinking_type_buf.len) return false;
-        @memcpy(self.thinking_type_buf[0..s.len], s);
-        self.thinking_type_len = s.len;
+    pub fn setThinkingType(self: *Provider, value: []const u8) bool {
+        if (value.len > self.thinking_type_buf.len) return false;
+        @memcpy(self.thinking_type_buf[0..value.len], value);
+        self.thinking_type_len = value.len;
         return true;
     }
 
@@ -51,46 +49,15 @@ pub const ModelEntry = struct {
     }
 };
 
-pub const MAX_DOCS = 32;
-
-pub const PathEntry = struct {
-    name: [128]u8 = undefined,
-    name_len: usize = 0,
-    description: [256]u8 = undefined,
-    desc_len: usize = 0,
-    location: [512]u8 = undefined,
-    loc_len: usize = 0,
-
-    pub fn getName(self: *const PathEntry) []const u8 {
-        return self.name[0..self.name_len];
-    }
-    pub fn getDescription(self: *const PathEntry) []const u8 {
-        return self.description[0..self.desc_len];
-    }
-    pub fn getLocation(self: *const PathEntry) []const u8 {
-        return self.location[0..self.loc_len];
-    }
-};
-
-// TODO: This should not live in the provider module
 pub const BlitzdenkCfg = struct {
     providers: [MAX_PROVIDERS]Provider = @splat(.{}),
     provider_count: u32 = 0,
     default_model: ModelEntry = .{},
 
-    /// Reserve the next provider slot. Caller fills url/key_envar/provider_config
-    /// (including the inline buffer for thinking.type) then calls
-    /// commitProvider to activate it. Returns null if the slot cap is reached or
-    /// url/key_envar exceed their buffers.
-    pub fn reserveProvider(
-        self: *BlitzdenkCfg,
-        url: []const u8,
-        key_envar: []const u8,
-    ) ?*Provider {
+    pub fn reserveProvider(self: *BlitzdenkCfg, url: []const u8, key_envar: []const u8) ?*Provider {
         if (self.provider_count >= MAX_PROVIDERS) return null;
         if (url.len > 512 or key_envar.len > 128) return null;
-
-        var slot = &self.providers[self.provider_count];
+        const slot = &self.providers[self.provider_count];
         slot.* = .{};
         @memcpy(slot.url[0..url.len], url);
         slot.url_len = url.len;
@@ -107,10 +74,9 @@ pub const BlitzdenkCfg = struct {
     }
 
     pub fn setModel(self: *BlitzdenkCfg, name: []const u8, handle: ProviderHandle) bool {
-        const idx = @intFromEnum(handle);
-        if (idx >= self.provider_count or !self.providers[idx].active) return false;
+        const index = @intFromEnum(handle);
+        if (index >= self.provider_count or !self.providers[index].active) return false;
         if (name.len > 256) return false;
-
         const entry = &self.default_model;
         @memcpy(entry.name[0..name.len], name);
         entry.name_len = name.len;
@@ -119,26 +85,20 @@ pub const BlitzdenkCfg = struct {
         return true;
     }
 
-    pub fn buildConfig(self: *const BlitzdenkCfg, env: *const std.process.Environ.Map) ?adapter.Config {
+    pub fn buildConfig(self: *const BlitzdenkCfg, env: *const std.process.Environ.Map) ?models.Config {
         const entry = &self.default_model;
         if (!entry.bound) return null;
-
-        const idx = @intFromEnum(entry.provider);
-        if (idx >= self.provider_count) return null;
-        const prov = &self.providers[idx];
-        if (!prov.active) return null;
-
-        const key = if (prov.key_len > 0)
-            env.get(prov.getKeyEnvar()) orelse return null
-        else
-            "";
-
+        const index = @intFromEnum(entry.provider);
+        if (index >= self.provider_count) return null;
+        const provider = &self.providers[index];
+        if (!provider.active) return null;
+        const key = if (provider.key_len > 0) env.get(provider.getKeyEnvar()) orelse return null else "";
         return .{
             .api_key = key,
             .model = entry.getName(),
-            .base_url = prov.getUrl(),
-            .reasoning_effort = prov.reasoning_effort,
-            .provider = prov.provider_config,
+            .base_url = provider.getUrl(),
+            .reasoning_effort = provider.reasoning_effort,
+            .provider = provider.provider_config,
         };
     }
 

@@ -1,6 +1,10 @@
 const std = @import("std");
 
-pub const prv = @import("provider");
+pub const context = @import("context.zig");
+pub const Tool = context.Definition;
+pub const ToolContext = context.Context;
+pub const ToolCall = r.sdk.ToolCall;
+pub const ToolResult = r.sdk.ToolOutput;
 pub const bash = @import("bash.zig");
 pub const read = @import("read.zig");
 pub const todos = @import("todo.zig");
@@ -20,16 +24,16 @@ pub const start = @import("start.zig");
 pub const MAX_DISPLAY_BYTES = 32 * 1024;
 pub const MAX_DISPLAY_LINES = 1000;
 
-pub fn fmtSpan(ctx: *r.prv.tool.ToolContext, comptime fmt: []const u8, args: anytype, style: tui.Style) r.tui.Span {
-    const app: *r.app.App = @ptrCast(@alignCast(ctx.swarm.context.ptr));
+pub fn fmtSpan(ctx: *ToolContext, comptime fmt: []const u8, args: anytype, style: tui.Style) r.tui.Span {
+    const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     return .{
         .content = std.fmt.allocPrint(app.sessionAlloc(), fmt, args) catch "",
         .style = style,
     };
 }
 
-pub fn setToolStatusPrint(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall, comptime fmt: []const u8, args: anytype) void {
-    const app: *r.app.App = @ptrCast(@alignCast(ctx.swarm.context.ptr));
+pub fn setToolStatusPrint(ctx: ToolContext, call: ToolCall, comptime fmt: []const u8, args: anytype) void {
+    const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     const alloc = app.sessionAlloc();
 
     const txt = std.fmt.allocPrint(alloc, fmt, args) catch return;
@@ -45,71 +49,67 @@ pub fn setToolStatusPrint(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolC
         spans[i] = .{ .content = text };
         lines[i] = .{ .spans = spans[i .. i + 1] };
     }
-    app.setToolStatus(ctx.self_id, call.id, lines) catch return;
+    app.setToolStatus(ctx.base.self_id, call.id, lines) catch return;
 }
 
 pub fn setToolStatusSpan(
-    ctx: r.prv.tool.ToolContext,
-    call: r.prv.adapter.ToolCall,
+    ctx: ToolContext,
+    call: ToolCall,
     span: r.tui.Span,
 ) !void {
     try setToolStatusParagraph(ctx, call, &.{&.{span}});
 }
 
 pub fn setToolStatusSpans(
-    ctx: r.prv.tool.ToolContext,
-    call: r.prv.adapter.ToolCall,
+    ctx: ToolContext,
+    call: ToolCall,
     spans: []const r.tui.Span,
 ) !void {
     try setToolStatusParagraph(ctx, call, &.{spans});
 }
 
-pub fn setToolStatusLine(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall, line: r.tui.Line) !void {
+pub fn setToolStatusLine(ctx: ToolContext, call: ToolCall, line: r.tui.Line) !void {
     try setToolStatusLines(ctx, call, &.{line});
 }
 
-pub fn setToolStatusLines(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall, lines: []const r.tui.Line) !void {
+pub fn setToolStatusLines(ctx: ToolContext, call: ToolCall, lines: []const r.tui.Line) !void {
     const inputs = try ctx.alloc.alloc(r.app.ToolStatusLineInput, lines.len);
     for (lines, 0..) |line, i| inputs[i] = .{ .spans = line.spans.items, .style = line.style };
-    const app = ctx.swarm.context.cast(r.app.App);
-    try app.setToolStatus(ctx.self_id, call.id, inputs);
+    const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    try app.setToolStatus(ctx.base.self_id, call.id, inputs);
 }
 
 pub fn setToolStatusParagraph(
-    ctx: r.prv.tool.ToolContext,
-    call: r.prv.adapter.ToolCall,
+    ctx: ToolContext,
+    call: ToolCall,
     lines: []const []const r.tui.Span,
 ) !void {
     const inputs = try ctx.alloc.alloc(r.app.ToolStatusLineInput, lines.len);
     for (lines, 0..) |spans, i| inputs[i] = .{ .spans = spans };
-    const app = ctx.swarm.context.cast(r.app.App);
-    try app.setToolStatus(ctx.self_id, call.id, inputs);
+    const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    try app.setToolStatus(ctx.base.self_id, call.id, inputs);
 }
 
-pub fn setToolChild(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall, child_id: r.prv.Swarm.AgentId) void {
-    const app = ctx.swarm.context.cast(r.app.App);
-    app.setToolChild(ctx.self_id, call.id, child_id) catch {};
+pub fn setToolChild(ctx: ToolContext, call: ToolCall, child_id: r.AgentId) void {
+    const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    app.setToolChild(ctx.base.self_id, call.id, child_id) catch {};
 }
 
-pub fn errResult(call: prv.adapter.ToolCall, msg: []const u8) prv.adapter.ToolResult {
+pub fn errResult(_: ToolCall, msg: []const u8) ToolResult {
     return .{
-        .call_id = call.id,
-        .name = call.name,
         .content = msg,
         .is_error = true,
     };
 }
 
-pub fn okResult(call: prv.adapter.ToolCall, content: []const u8) prv.adapter.ToolResult {
+pub fn okResult(_: ToolCall, content: []const u8) ToolResult {
     return .{
-        .call_id = call.id,
-        .name = call.name,
         .content = content,
     };
 }
 
-pub fn parseArgs(comptime T: type, alloc: std.mem.Allocator, call: prv.adapter.ToolCall) ?T {
-    const parsed = std.json.parseFromSlice(T, alloc, call.arguments, .{
+pub fn parseArgs(comptime T: type, alloc: std.mem.Allocator, call: ToolCall) ?T {
+    const parsed = std.json.parseFromSlice(T, alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return null;
     return parsed.value;

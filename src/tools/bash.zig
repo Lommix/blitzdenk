@@ -1,6 +1,6 @@
 const r = @import("root.zig");
-const prv = @import("provider");
 const std = @import("std");
+const exec = @import("exec");
 
 const blocked_commands = [_][]const u8{
     "dd",         "mkfs",      "fdisk",    "parted",
@@ -31,7 +31,7 @@ const Classification = enum {
     sudo,
 };
 
-pub const BashTool = prv.tool.Tool{
+pub const BashTool = r.Tool{
     .def = .{
         .name = "bash",
         .description =
@@ -50,7 +50,7 @@ pub const BashTool = prv.tool.Tool{
     .func = &run,
 };
 
-pub const CancelBackgroundCommand = prv.tool.Tool{
+pub const CancelBackgroundCommand = r.Tool{
     .def = .{
         .name = "cancel_process",
         .description = "cancel a background process which was spawned with the bash 'run_in_background' mode",
@@ -64,7 +64,7 @@ pub const CancelBackgroundCommand = prv.tool.Tool{
     .func = &run_cancel,
 };
 
-pub const ReadProcessTool = prv.tool.Tool{
+pub const ReadProcessTool = r.Tool{
     .def = .{
         .name = "read_process",
         .description =
@@ -83,7 +83,7 @@ pub const ReadProcessTool = prv.tool.Tool{
 
 /// Reverse-scan for the newest background task with this id, returning its
 /// handle. The returned handle stays valid until the task is removed.
-fn findHandle(ctx: prv.tool.ToolContext, id: u8) ?Handle {
+fn findHandle(ctx: r.ToolContext, id: u8) ?Handle {
     const g = ctx.agent().bg_tasks.lock(ctx.io);
     defer g.unlock();
     const items = g.ptr.list.items;
@@ -95,14 +95,14 @@ fn findHandle(ctx: prv.tool.ToolContext, id: u8) ?Handle {
     return null;
 }
 
-fn run_cancel(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run_cancel(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     r.setToolStatusPrint(ctx, call, "(Stopping Process)", .{});
 
     const Args = struct {
         id: u8,
     };
 
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch {
         return r.errResult(call, "invalid JSON arguments: expected {\"id\" : <process id>}");
@@ -126,16 +126,16 @@ fn run_cancel(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter
         }
     }
 
-    ctx.swarm.exec.cancel(handle);
+    ctx.base.exec_pool.cancel(handle);
     return r.okResult(call, "Command cancel successfull");
 }
 
-fn run_read_process(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run_read_process(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         id: u8,
     };
 
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch {
         return r.errResult(call, "invalid JSON arguments: expected {\"id\": <process id>}");
@@ -146,10 +146,10 @@ fn run_read_process(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.a
 
     r.setToolStatusPrint(ctx, call, "(Reading Process) {d}", .{args.id});
 
-    if (ctx.swarm.exec.poll(handle)) |maybe_res| {
+    if (ctx.base.exec_pool.poll(handle)) |maybe_res| {
         if (maybe_res) |res| {
-            defer ctx.swarm.exec.alloc.free(res.stdout);
-            defer ctx.swarm.exec.alloc.free(res.stderr);
+            defer ctx.base.exec_pool.alloc.free(res.stdout);
+            defer ctx.base.exec_pool.alloc.free(res.stderr);
             const content = formatBashResult(ctx.alloc, res.stdout, res.stderr, res.exit_code) catch "failed to read command pipe";
             return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
         }
@@ -157,9 +157,9 @@ fn run_read_process(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.a
         return r.errResult(call, "failed to read command output");
     }
 
-    const slot = &ctx.swarm.exec.slots[@intFromEnum(handle)];
-    slot.output_lock.lockUncancelable(ctx.swarm.exec.io);
-    defer slot.output_lock.unlock(ctx.swarm.exec.io);
+    const slot = &ctx.base.exec_pool.slots[@intFromEnum(handle)];
+    slot.output_lock.lockUncancelable(ctx.base.exec_pool.io);
+    defer slot.output_lock.unlock(ctx.base.exec_pool.io);
     const content = std.fmt.allocPrint(
         ctx.alloc,
         "<bash status=\"running\">\n<stdout>{s}</stdout>\n<stderr>{s}</stderr>\n</bash>",
@@ -168,22 +168,22 @@ fn run_read_process(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.a
     return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
 }
 
-pub const BackgroundTask = prv.agent.BackgroundTask;
-pub const BackgroundTaskList = prv.agent.BackgroundTaskList;
+pub const BackgroundTask = r.r.agent_state.BackgroundTask;
+pub const BackgroundTaskList = r.r.agent_state.BackgroundTaskList;
 
-const Handle = prv.exec.CmdPool.Handle;
+const Handle = exec.CmdPool.Handle;
 
-fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         command: []const u8,
         timeout: ?f64 = null,
         run_in_background: bool = false,
     };
 
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch {
-        std.log.err("[BAD CMD] {s}", .{call.arguments});
+        std.log.err("[BAD CMD] {s}", .{call.input});
         return r.errResult(call, "invalid JSON arguments: expected {\"command\": \"...\"}");
     };
 
@@ -191,8 +191,8 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     // Replace full cwd paths with "." for cleaner output (stack buffer)
     var buf: [512]u8 = undefined;
-    const cleaned_command_str = if (ctx.cwd.len > 0)
-        r.replaceAll(args.command, ctx.cwd, ".", &buf)
+    const cleaned_command_str = if (ctx.base.cwd.len > 0)
+        r.replaceAll(args.command, ctx.base.cwd, ".", &buf)
     else
         args.command;
 
@@ -209,9 +209,9 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     };
 
     if (need_perm) {
-        const decision = ctx.requestPerm(call.id, .always_check, .{ .call = .{
+        const decision = ctx.requestPermission(call.id, .always_check, .{ .call = .{
             .tool_name = call.name,
-            .tool_arguments = call.arguments,
+            .tool_arguments = call.input,
         } });
         switch (decision) {
             .approved => {},
@@ -231,17 +231,26 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
     if (args.run_in_background) {
-        const handle = ctx.swarm.exec.run(ctx.cwd, &.{ "/bin/sh", "-c", args.command }) catch
+        const handle = ctx.base.exec_pool.run(ctx.base.cwd, &.{ "/bin/sh", "-c", args.command }) catch
             return r.errResult(call, "failed to spawn command process");
 
         const id: u8 = @intFromEnum(handle);
         {
-            const g = ctx.agent().bg_tasks.lock(ctx.io);
+            const agent = ctx.agent();
+            const g = agent.bg_tasks.lock(ctx.io);
             defer g.unlock();
-            g.ptr.list.append(ctx.alloc, .{
+            const alloc = agent.state_arena.allocator();
+            const command = alloc.dupe(u8, args.command) catch {
+                ctx.base.exec_pool.cancel(handle);
+                return r.errResult(call, "oom");
+            };
+            g.ptr.list.append(alloc, .{
                 .handle = handle,
-                .command = args.command,
-            }) catch {};
+                .command = command,
+            }) catch {
+                ctx.base.exec_pool.cancel(handle);
+                return r.errResult(call, "oom");
+            };
         }
 
         const text = std.fmt.allocPrint(ctx.alloc, "Command running in background. Process ID: {d}", .{id}) catch return r.errResult(call, "oom");
@@ -256,11 +265,11 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         break :blk timeoutToMs(t);
     };
     const res = runWithDeadline(ctx, .{
-        .cwd = ctx.cwd,
+        .cwd = ctx.base.cwd,
         .argv = &.{ "/bin/sh", "-c", args.command },
     }, timeout_ms) catch |err| switch (err) {
         error.Timeout => {
-            const app = ctx.swarm.context.cast(@import("../app.zig").App);
+            const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
             r.setToolStatusParagraph(ctx, call, &.{
                 &.{.{ .content = cleaned_command_str[0..@min(cleaned_command_str.len, 248)] }},
                 &.{.{ .content = "Timeout reached!", .style = .{ .fg = app.theme.err } }},
@@ -272,8 +281,8 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         error.Canceled => return r.errResult(call, "canceled"),
         else => return r.errResult(call, "exec failed"),
     };
-    defer ctx.swarm.exec.alloc.free(res.stdout);
-    defer ctx.swarm.exec.alloc.free(res.stderr);
+    defer ctx.base.exec_pool.alloc.free(res.stdout);
+    defer ctx.base.exec_pool.alloc.free(res.stderr);
 
     const content = formatBashResult(ctx.alloc, res.stdout, res.stderr, res.exit_code) catch
         return r.errResult(call, "oom");
@@ -299,36 +308,37 @@ const RunError = error{ Timeout, Canceled, ExecFailed };
 /// the slot's done flag and the deadline at 25 ms intervals; cooperative
 /// cancellation via ctx.isCanceled() also unwinds.
 fn runWithDeadline(
-    ctx: prv.tool.ToolContext,
-    opts: prv.exec.CmdPool.RunOpts,
+    ctx: r.ToolContext,
+    opts: exec.CmdPool.RunOpts,
     deadline_ms: i64,
-) RunError!prv.exec.CmdResult {
-    const handle = ctx.swarm.exec.runWithOpts(opts) catch return error.ExecFailed;
-    const slot = &ctx.swarm.exec.slots[@intFromEnum(handle)];
+) RunError!exec.CmdResult {
+    const handle = ctx.base.exec_pool.runWithOpts(opts) catch return error.ExecFailed;
+    const slot = &ctx.base.exec_pool.slots[@intFromEnum(handle)];
 
-    const start_ms = prv.http.nowMs(ctx.io);
+    const start_ms: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(ctx.io, .real).nanoseconds, std.time.ns_per_ms));
     while (true) {
         if (slot.done.load(.acquire)) {
             slot.future.await(ctx.io) catch {};
-            const out = ctx.swarm.exec.alloc.dupe(u8, slot.stdout.items) catch {
-                ctx.swarm.exec.release(handle);
+            const out = ctx.base.exec_pool.alloc.dupe(u8, slot.stdout.items) catch {
+                ctx.base.exec_pool.release(handle);
                 return error.ExecFailed;
             };
-            const err = ctx.swarm.exec.alloc.dupe(u8, slot.stderr.items) catch {
-                ctx.swarm.exec.alloc.free(out);
-                ctx.swarm.exec.release(handle);
+            const err = ctx.base.exec_pool.alloc.dupe(u8, slot.stderr.items) catch {
+                ctx.base.exec_pool.alloc.free(out);
+                ctx.base.exec_pool.release(handle);
                 return error.ExecFailed;
             };
             const ty = slot.result_ty;
-            ctx.swarm.exec.release(handle);
+            ctx.base.exec_pool.release(handle);
             return .{ .stdout = out, .stderr = err, .ty = ty };
         }
         if (ctx.isCanceled()) {
-            ctx.swarm.exec.cancel(handle);
+            ctx.base.exec_pool.cancel(handle);
             return error.Canceled;
         }
-        if (prv.http.nowMs(ctx.io) - start_ms > deadline_ms) {
-            ctx.swarm.exec.cancel(handle);
+        const now_ms: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(ctx.io, .real).nanoseconds, std.time.ns_per_ms));
+        if (now_ms - start_ms > deadline_ms) {
+            ctx.base.exec_pool.cancel(handle);
             return error.Timeout;
         }
         std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(25), .real) catch return error.Canceled;

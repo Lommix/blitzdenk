@@ -83,7 +83,7 @@ pub const Chat = struct {
         const url = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{self.base_url});
         defer alloc.free(url);
 
-        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, params.timeout_ms);
+        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, requestOptions(params));
         defer alloc.free(response);
         return parseChatResponse(alloc, response);
     }
@@ -98,16 +98,13 @@ pub const Chat = struct {
         sctx: *model.StreamContext,
     ) anyerror!*model.GenerateResult {
         const self: *Chat = @ptrCast(@alignCast(ctx));
-        var arena = std.heap.ArenaAllocator.init(alloc);
-        defer arena.deinit();
-        const stream_alloc = arena.allocator();
+        const body = try jsonx.buildChatRequest(alloc, self.model_id, params, true);
+        const headers = try self.authHeaders(alloc, params.headers);
+        const url = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{self.base_url});
 
-        const body = try jsonx.buildChatRequest(stream_alloc, self.model_id, params, true);
-        const headers = try self.authHeaders(stream_alloc, params.headers);
-        const url = try std.fmt.allocPrint(stream_alloc, "{s}/chat/completions", .{self.base_url});
-
-        var live = LiveStream{ .alloc = stream_alloc, .sctx = sctx };
-        const sse_text = try jsonx.postSseWithRetry(stream_alloc, io, client, url, body, headers, max_retries, params.timeout_ms, &live, emitLiveEvent);
+        const request_options = requestOptions(params);
+        var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
+        const sse_text = try jsonx.postSseWithRetry(alloc, io, client, url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
         return parseChatStream(alloc, sse_text, &final_ctx);
     }
@@ -139,7 +136,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/embeddings", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client, url, w.written(), headers, max_retries, params.timeout_ms);
+        const response = try jsonx.postWithRetry(alloc, io, client, url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation });
         defer alloc.free(response);
         return parseEmbedResponse(alloc, response);
     }
@@ -174,10 +171,19 @@ pub const Chat = struct {
 
         const headers = try self.authHeaders(alloc, params.headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/images/generations", .{self.base_url});
-        const response = try jsonx.postWithRetry(alloc, io, client, url, w.written(), headers, max_retries, params.timeout_ms);
+        const response = try jsonx.postWithRetry(alloc, io, client, url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation });
         return parseImageResponse(alloc, response);
     }
 };
+
+fn requestOptions(params: model.GenerateParams) jsonx.RequestOptions {
+    return .{
+        .timeout_ms = params.timeout_ms,
+        .cancellation = params.cancellation,
+        .on_provider_error = params.on_provider_error,
+        .on_provider_error_ctx = params.on_provider_error_ctx,
+    };
+}
 
 fn aspectRatioSize(value: []const u8) []const u8 {
     if (std.mem.eql(u8, value, "1:1")) return "1024x1024";
@@ -189,6 +195,7 @@ fn aspectRatioSize(value: []const u8) []const u8 {
 const LiveStream = struct {
     alloc: std.mem.Allocator,
     sctx: *model.StreamContext,
+    options: jsonx.RequestOptions,
 };
 
 fn emitLive(ctx: ?*anyopaque, chunk: types.StreamChunk) void {
@@ -203,6 +210,7 @@ fn emitFinalTool(ctx: ?*anyopaque, chunk: types.StreamChunk) void {
 
 fn emitLiveEvent(ctx: ?*anyopaque, data: []const u8) !void {
     const live: *LiveStream = @ptrCast(@alignCast(ctx.?));
+    if (jsonx.reportStreamError(live.alloc, live.options, data)) |err| return err;
     const event = try std.fmt.allocPrint(live.alloc, "data: {s}\n", .{data});
     var event_ctx = model.StreamContext{ .emit = emitLive, .emit_ctx = live.sctx };
     _ = try parseChatStream(live.alloc, event, &event_ctx);
@@ -233,6 +241,14 @@ pub fn parseChatResponse(a: std.mem.Allocator, body: []const u8) !*model.Generat
                         if (msg.object.get("reasoning_content")) |c| {
                             if (c == .string) result.reasoning = try a.dupe(u8, c.string);
                         }
+                        if (result.reasoning.len == 0) {
+                            if (msg.object.get("reasoning")) |c| {
+                                if (c == .string) result.reasoning = try a.dupe(u8, c.string);
+                            }
+                        }
+                        if (msg.object.get("reasoning_details")) |details| {
+                            if (details == .array) result.reasoning_signature = try std.json.Stringify.valueAlloc(a, details, .{});
+                        }
                         if (msg.object.get("tool_calls")) |tcs| {
                             if (tcs == .array) {
                                 var calls: std.ArrayList(types.ToolCall) = .empty;
@@ -254,6 +270,7 @@ pub fn parseChatResponse(a: std.mem.Allocator, body: []const u8) !*model.Generat
                                             }
                                         }
                                     }
+                                    if (!isValidToolCall(a, id, name, input)) continue;
                                     try calls.append(a, .{
                                         .id = try a.dupe(u8, id),
                                         .name = try a.dupe(u8, name),
@@ -310,6 +327,7 @@ pub fn parseUsage(root: std.json.Value) types.Usage {
             }
         }
     }
+    usage.input_tokens -|= usage.cache_read_tokens;
     return usage;
 }
 
@@ -325,6 +343,11 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
     errdefer text.deinit(a);
     var reasoning: std.ArrayList(u8) = .empty;
     errdefer reasoning.deinit(a);
+    var reasoning_details: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (reasoning_details.items) |detail| a.free(detail);
+        reasoning_details.deinit(a);
+    }
     var calls: std.ArrayList(types.ToolCall) = .empty;
     errdefer {
         for (calls.items) |tc| {
@@ -368,6 +391,13 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
         if (choice.object.get("finish_reason")) |fr| {
             if (fr == .string) result.finish_reason = mapFinish(fr.string);
         }
+        if (choice.object.get("message")) |message| {
+            if (message == .object) {
+                if (message.object.get("tool_calls")) |tool_calls| {
+                    if (tool_calls == .array) try applyCompleteToolCalls(a, &calls, tool_calls.array.items);
+                }
+            }
+        }
         const delta = choice.object.get("delta") orelse continue;
         if (delta != .object) continue;
 
@@ -383,13 +413,20 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
                 sctx.send(.{ .type = .reasoning, .text = c.string });
             }
         }
+        if (delta.object.get("reasoning_details")) |details| {
+            if (details == .array) {
+                for (details.array.items) |detail| {
+                    try reasoning_details.append(a, try std.json.Stringify.valueAlloc(a, detail, .{}));
+                }
+            }
+        }
         if (delta.object.get("tool_calls")) |tcs| {
             if (tcs == .array) {
                 for (tcs.array.items) |tc| {
                     if (tc != .object) continue;
                     const index: usize = blk: {
-                        const v = tc.object.get("index") orelse break :blk 0;
-                        break :blk if (v == .integer) @intCast(v.integer) else 0;
+                        const v = tc.object.get("index") orelse break :blk if (calls.items.len == 0) 0 else calls.items.len - 1;
+                        break :blk if (v == .integer) @intCast(v.integer) else if (calls.items.len == 0) 0 else calls.items.len - 1;
                     };
                     var fn_obj: ?std.json.Value = null;
                     if (tc.object.get("function")) |f| {
@@ -416,7 +453,10 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
                         if (f.object.get("arguments")) |v| {
                             if (v == .string and v.string.len > 0) {
                                 const old = calls.items[index].input;
-                                calls.items[index].input = try std.mem.concat(a, u8, &.{ old, v.string });
+                                calls.items[index].input = if (isJsonObject(a, v.string))
+                                    try a.dupe(u8, v.string)
+                                else
+                                    try std.mem.concat(a, u8, &.{ old, v.string });
                                 if (old.len > 0) a.free(old);
                                 sctx.send(.{ .type = .tool_call_delta, .text = v.string });
                             }
@@ -427,15 +467,113 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
         }
     }
 
+    try normalizeTaggedReasoning(a, &text, &reasoning);
     result.text = try text.toOwnedSlice(a);
     result.reasoning = try reasoning.toOwnedSlice(a);
+    if (reasoning_details.items.len > 0) result.reasoning_signature = try encodeJsonArray(a, reasoning_details.items);
+    for (reasoning_details.items) |detail| a.free(detail);
+    reasoning_details.deinit(a);
+    reasoning_details = .empty;
+    var valid_calls: std.ArrayList(types.ToolCall) = .empty;
+    errdefer valid_calls.deinit(a);
     for (calls.items) |tc| {
-        if (tc.id.len > 0) {
+        if (isValidToolCall(a, tc.id, tc.name, tc.input)) {
             sctx.send(.{ .type = .tool_call, .tool_call_id = tc.id, .tool_name = tc.name, .tool_input = tc.input });
+            try valid_calls.append(a, tc);
+        } else {
+            a.free(tc.id);
+            a.free(tc.name);
+            a.free(tc.input);
         }
     }
-    result.tool_calls = try calls.toOwnedSlice(a);
+    calls.deinit(a);
+    calls = .empty;
+    result.tool_calls = try valid_calls.toOwnedSlice(a);
     return result;
+}
+
+fn isJsonObject(a: std.mem.Allocator, value: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, a, value, .{}) catch return false;
+    defer parsed.deinit();
+    return parsed.value == .object;
+}
+
+fn normalizeTaggedReasoning(a: std.mem.Allocator, text: *std.ArrayList(u8), reasoning: *std.ArrayList(u8)) !void {
+    const combined = try std.mem.concat(a, u8, &.{ reasoning.items, text.items });
+    defer a.free(combined);
+    const tags = [_]struct { open: []const u8, close: []const u8 }{
+        .{ .open = "<think>", .close = "</think>" },
+        .{ .open = "<thinking>", .close = "</thinking>" },
+    };
+    for (tags) |tag| {
+        const open = std.mem.indexOf(u8, combined, tag.open) orelse continue;
+        const content_start = open + tag.open.len;
+        const close_offset = std.mem.indexOf(u8, combined[content_start..], tag.close) orelse continue;
+        const close = content_start + close_offset;
+        reasoning.clearRetainingCapacity();
+        try reasoning.appendSlice(a, combined[content_start..close]);
+        text.clearRetainingCapacity();
+        try text.appendSlice(a, combined[0..open]);
+        try text.appendSlice(a, combined[close + tag.close.len ..]);
+        return;
+    }
+}
+
+fn applyCompleteToolCalls(a: std.mem.Allocator, calls: *std.ArrayList(types.ToolCall), values: []const std.json.Value) !void {
+    for (values) |value| {
+        if (value != .object) continue;
+        const id = stringField(value, "id") orelse "";
+        const function = value.object.get("function") orelse continue;
+        if (function != .object) continue;
+        const name = stringField(function, "name") orelse "";
+        const input = stringField(function, "arguments") orelse "";
+        var index: ?usize = null;
+        for (calls.items, 0..) |call, i| {
+            if (id.len > 0 and std.mem.eql(u8, call.id, id)) {
+                index = i;
+                break;
+            }
+        }
+        try calls.ensureUnusedCapacity(a, 1);
+        const complete: types.ToolCall = blk: {
+            const owned_id = try a.dupe(u8, id);
+            errdefer a.free(owned_id);
+            const owned_name = try a.dupe(u8, name);
+            errdefer a.free(owned_name);
+            const owned_input = try a.dupe(u8, input);
+            break :blk .{ .id = owned_id, .name = owned_name, .input = owned_input };
+        };
+        if (index) |i| {
+            a.free(calls.items[i].id);
+            a.free(calls.items[i].name);
+            a.free(calls.items[i].input);
+            calls.items[i] = complete;
+        } else {
+            calls.appendAssumeCapacity(complete);
+        }
+    }
+}
+
+fn stringField(value: std.json.Value, name: []const u8) ?[]const u8 {
+    if (value != .object) return null;
+    const field = value.object.get(name) orelse return null;
+    return if (field == .string) field.string else null;
+}
+
+fn isValidToolCall(a: std.mem.Allocator, id: []const u8, name: []const u8, input: []const u8) bool {
+    return id.len > 0 and name.len > 0 and isJsonObject(a, input);
+}
+
+fn encodeJsonArray(a: std.mem.Allocator, values: []const []const u8) ![]const u8 {
+    var w = std.Io.Writer.Allocating.init(a);
+    defer w.deinit();
+    try w.writer.writeByte('[');
+    for (values, 0..) |value, i| {
+        if (i > 0) try w.writer.writeByte(',');
+        try w.writer.writeAll(value);
+    }
+    try w.writer.writeByte(']');
+    return w.toOwnedSlice();
 }
 
 pub fn parseEmbedResponse(a: std.mem.Allocator, body: []const u8) !*types.EmbedResult {
@@ -507,4 +645,105 @@ pub fn parseImageResponse(a: std.mem.Allocator, body: []const u8) !*types.ImageR
     }
     result.images = try list.toOwnedSlice(a);
     return result;
+}
+
+fn discardChunk(_: ?*anyopaque, _: types.StreamChunk) void {}
+
+test "stream preserves parallel tool calls and replaces resent arguments" {
+    const body =
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_grep","function":{"name":"grep","arguments":"{\"pattern\":\""}},{"index":1,"id":"call_read","function":{"name":"read","arguments":"{\"path\":\""}}]}}]}
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"report\"}"}},{"index":1,"function":{"arguments":"src/report.zig\"}"}}]}}]}
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"pattern\":\"report\",\"case\":true}"}}]}}]}
+        \\data: [DONE]
+    ;
+    var stream = model.StreamContext{ .emit = discardChunk };
+    const result = try parseChatStream(std.testing.allocator, body, &stream);
+    defer {
+        result.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(result);
+    }
+    try std.testing.expectEqual(@as(usize, 2), result.tool_calls.len);
+    try std.testing.expectEqualStrings("call_grep", result.tool_calls[0].id);
+    try std.testing.expectEqualStrings("{\"pattern\":\"report\",\"case\":true}", result.tool_calls[0].input);
+    try std.testing.expectEqualStrings("call_read", result.tool_calls[1].id);
+    try std.testing.expectEqualStrings("{\"path\":\"src/report.zig\"}", result.tool_calls[1].input);
+}
+
+test "stream continues tool arguments without an index" {
+    const body =
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\"path\":\""}}]}}]}
+        \\data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"src/main.zig\"}"}}]}}]}
+    ;
+    var stream = model.StreamContext{ .emit = discardChunk };
+    const result = try parseChatStream(std.testing.allocator, body, &stream);
+    defer {
+        result.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
+    try std.testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.tool_calls[0].input);
+}
+
+test "stream filters malformed tool calls" {
+    const body =
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_bad","function":{"name":"grep","arguments":"{\"pattern\":\"foo\""}},{"index":1,"id":"call_ok","function":{"name":"read","arguments":"{\"path\":\"src/main.zig\"}"}}]}}]}
+        \\data: [DONE]
+    ;
+    var stream = model.StreamContext{ .emit = discardChunk };
+    const result = try parseChatStream(std.testing.allocator, body, &stream);
+    defer {
+        result.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
+    try std.testing.expectEqualStrings("call_ok", result.tool_calls[0].id);
+}
+
+test "stream deduplicates complete final tool calls" {
+    const body =
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\"path\":\""}}]}}]}
+        \\data: {"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","function":{"name":"read","arguments":"{\"path\":\"src/main.zig\"}"}}]},"finish_reason":"tool_calls"}]}
+        \\data: [DONE]
+    ;
+    var stream = model.StreamContext{ .emit = discardChunk };
+    const result = try parseChatStream(std.testing.allocator, body, &stream);
+    defer {
+        result.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
+    try std.testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.tool_calls[0].input);
+}
+
+test "reasoning details survive response replay" {
+    const body =
+        \\data: {"choices":[{"delta":{"reasoning_content":"think","reasoning_details":[{"type":"reasoning.text","text":"think"}]}}]}
+        \\data: {"choices":[{"delta":{"reasoning_content":"more","reasoning_details":[{"type":"reasoning.text","text":"more"}],"content":"answer"},"finish_reason":"stop"}]}
+        \\data: [DONE]
+    ;
+    var stream = model.StreamContext{ .emit = discardChunk };
+    const result = try parseChatStream(std.testing.allocator, body, &stream);
+    defer {
+        result.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(result);
+    }
+    try std.testing.expectEqualStrings("thinkmore", result.reasoning);
+    try std.testing.expectEqualStrings("[{\"type\":\"reasoning.text\",\"text\":\"think\"},{\"type\":\"reasoning.text\",\"text\":\"more\"}]", result.reasoning_signature);
+}
+
+test "stream keeps tagged reasoning across schema fields" {
+    const body =
+        \\data: {"choices":[{"delta":{"reasoning_content":"<thin"}}]}
+        \\data: {"choices":[{"delta":{"reasoning_content":"king>private "}}]}
+        \\data: {"choices":[{"delta":{"content":"tail</thin"}}]}
+        \\data: {"choices":[{"delta":{"content":"king>answer"}}]}
+    ;
+    var stream = model.StreamContext{ .emit = discardChunk };
+    const result = try parseChatStream(std.testing.allocator, body, &stream);
+    defer {
+        result.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(result);
+    }
+    try std.testing.expectEqualStrings("private tail", result.reasoning);
+    try std.testing.expectEqualStrings("answer", result.text);
 }

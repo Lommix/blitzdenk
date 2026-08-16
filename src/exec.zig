@@ -10,7 +10,6 @@
 //!   tool's bg-task inspection path.
 const std = @import("std");
 const builtin = @import("builtin");
-const log = std.log.scoped(.exec);
 
 const MAX_OUTPUT = 4 * 1024 * 1024;
 const SLOT_COUNT = 64;
@@ -597,7 +596,7 @@ pub const CmdPool = struct {
     pub fn runAndWaitTimeout(self: *Self, opts: RunOpts, timeout_ms: i64) !CmdResult {
         const handle = try self.runWithOpts(opts);
         const slot = &self.slots[@intFromEnum(handle)];
-        const start_ms = @import("http.zig").nowMs(self.io);
+        const start_ms = nowMs(self.io);
 
         while (true) {
             if (slot.done.load(.acquire)) {
@@ -611,7 +610,7 @@ pub const CmdPool = struct {
                 return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code };
             }
 
-            if (@import("http.zig").nowMs(self.io) - start_ms > timeout_ms) {
+            if (nowMs(self.io) - start_ms > timeout_ms) {
                 const out = try self.alloc.dupe(u8, "");
                 errdefer self.alloc.free(out);
                 const err = try self.alloc.dupe(u8, "");
@@ -626,6 +625,10 @@ pub const CmdPool = struct {
         }
     }
 };
+
+fn nowMs(io: std.Io) i64 {
+    return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
+}
 
 test "runAndWaitTimeout cancels long-running command and releases slot" {
     const testing = std.testing;

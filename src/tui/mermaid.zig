@@ -51,13 +51,13 @@ fn cp(comptime s: []const u8) u21 {
 const DiagramKind = enum { flow, sequence, class, state, er, none };
 
 pub fn render(alloc: std.mem.Allocator, width: u16, source: []const u8, out: *std.ArrayList(Line)) !void {
-    try renderWithOptions(alloc, source, out, .{ .width = width });
+    try renderWithOptions(alloc, alloc, source, out, .{ .width = width });
 }
 
-pub fn renderWithOptions(alloc: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Line), options: Options) !void {
+pub fn renderWithOptions(gpa: std.mem.Allocator, alloc: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Line), options: Options) !void {
     const src = std.mem.trim(u8, source, " \t\r\n");
     if (src.len == 0) return;
-    var arena = std.heap.ArenaAllocator.init(alloc);
+    var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const scratch = arena.allocator();
     switch (detectKind(src)) {
@@ -2176,7 +2176,7 @@ test "mermaid wraps long node labels without dropping text" {
     var out = std.ArrayList(Line).empty;
     defer deinitLines(alloc, &out);
 
-    try renderWithOptions(alloc,
+    try renderWithOptions(alloc, alloc,
         \\flowchart TD
         \\A[Alpha beta gamma delta epsilon zeta eta theta]
         \\
@@ -2256,7 +2256,7 @@ test "mermaid options apply shared colors and dotted glyphs" {
     var out = std.ArrayList(Line).empty;
     defer deinitLines(alloc, &out);
 
-    try renderWithOptions(alloc, "flowchart TD\nA[Alpha] -.-> B[Beta]\n", &out, .{
+    try renderWithOptions(alloc, alloc, "flowchart TD\nA[Alpha] -.-> B[Beta]\n", &out, .{
         .width = 32,
         .theme = .{ .strong = .{ .fg = .red } },
     });
@@ -2273,7 +2273,7 @@ test "mermaid options apply shared colors and dotted glyphs" {
 fn renderAllocationFailureCase(alloc: std.mem.Allocator) !void {
     var out = std.ArrayList(Line).empty;
     defer deinitLines(alloc, &out);
-    try renderWithOptions(alloc, "flowchart TD\nA[Alpha beta gamma delta] --> B[Beta]\n", &out, .{ .width = 32, .max_node_width = 12 });
+    try renderWithOptions(alloc, alloc, "flowchart TD\nA[Alpha beta gamma delta] --> B[Beta]\n", &out, .{ .width = 32, .max_node_width = 12 });
 }
 
 test "mermaid render cleans up every allocation failure" {

@@ -1,8 +1,7 @@
-const prv = @import("provider");
 const r = @import("root.zig");
 const std = @import("std");
 
-pub const PatchTool = prv.tool.Tool{
+pub const PatchTool = r.Tool{
     .def = .{
         .name = "patch",
         .description =
@@ -103,11 +102,11 @@ pub const PatchTool = prv.tool.Tool{
 
 const Args = struct { patch: []const u8 };
 
-fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const alloc = ctx.alloc;
     r.setToolStatusPrint(ctx, call, "patch", .{});
 
-    const args = (std.json.parseFromSlice(Args, alloc, call.arguments, .{
+    const args = (std.json.parseFromSlice(Args, alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call,
         \\invalid JSON arguments, expected `{"patch": "..."}`
@@ -144,7 +143,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
         const cmd_path = commandPath(cmd);
-        const resolved = std.fs.path.resolve(alloc, &.{ ctx.cwd, cmd_path }) catch
+        const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, cmd_path }) catch
             return r.errResult(call, "failed to resolve path");
 
         r.setToolStatusPrint(ctx, call, "patch {s}", .{cmd_path});
@@ -176,7 +175,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     // 3. Request permission for every command before touching disk.
     for (previews.items, patch.commands) |p, cmd| {
-        const decision = ctx.requestPerm(call.id, .always_check, .{ .diff = .{
+        const decision = ctx.requestPermission(call.id, .always_check, .{ .diff = .{
             .before = p.before,
             .after = p.after orelse "",
             .path = commandPath(cmd),
@@ -200,7 +199,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     for (patch.commands, abs_paths.items, 0..) |cmd, resolved, ci| {
         if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-        const abs_cmd = withResolvedPath(alloc, ctx.cwd, cmd, resolved) catch
+        const abs_cmd = withResolvedPath(alloc, ctx.base.cwd, cmd, resolved) catch
             return r.errResult(call, "failed to resolve path");
 
         r.setToolStatusPrint(ctx, call, "patch {s}", .{commandPath(cmd)});
@@ -257,7 +256,7 @@ const Preview = struct {
 /// Build a before/after preview for the permission prompt. Does not write
 /// anything. Allocates `before` and `after` from `alloc`; caller frees.
 fn buildPreview(
-    ctx: prv.tool.ToolContext,
+    ctx: r.ToolContext,
     abs_path: []const u8,
     cmd: PatchCommand,
     diag: *ApplyDiagnostics,
@@ -281,10 +280,10 @@ fn buildPreview(
     }
 }
 
-fn fileExistsViaExec(ctx: prv.tool.ToolContext, path: []const u8) !bool {
-    const res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "test", "-e", path } }) catch return false;
-    defer ctx.swarm.exec.alloc.free(res.stdout);
-    defer ctx.swarm.exec.alloc.free(res.stderr);
+fn fileExistsViaExec(ctx: r.ToolContext, path: []const u8) !bool {
+    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "test", "-e", path } }) catch return false;
+    defer ctx.base.exec_pool.alloc.free(res.stdout);
+    defer ctx.base.exec_pool.alloc.free(res.stderr);
     return res.ty == .success;
 }
 
@@ -318,7 +317,7 @@ fn applyErrorDescription(alloc: std.mem.Allocator, err: ApplyError, diag: *const
     };
 }
 
-fn updateFileStats(ctx: prv.tool.ToolContext, resolved: []const u8, cmd: PatchCommand) void {
+fn updateFileStats(ctx: r.ToolContext, resolved: []const u8, cmd: PatchCommand) void {
     var ts: std.posix.timespec = undefined;
     const now = if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) == 0)
         ts.sec
@@ -327,10 +326,11 @@ fn updateFileStats(ctx: prv.tool.ToolContext, resolved: []const u8, cmd: PatchCo
 
     const g = ctx.agent().file_stats.lock(ctx.io);
     defer g.unlock();
+    const alloc = ctx.agent().state_arena.allocator();
 
     switch (cmd) {
         .file_add => {
-            const e = g.ptr.getOrPut(ctx.alloc, resolved) catch return;
+            const e = r.r.agent_state.getOrPutFileStat(alloc, g.ptr, resolved) catch return;
             e.value_ptr.* = .{ .last_read = now, .last_write = now };
         },
         .file_delete => {
@@ -339,10 +339,10 @@ fn updateFileStats(ctx: prv.tool.ToolContext, resolved: []const u8, cmd: PatchCo
         .file_update => |u| {
             if (u.move_to) |move_to| {
                 _ = g.ptr.remove(resolved);
-                const e = g.ptr.getOrPut(ctx.alloc, move_to) catch return;
+                const e = r.r.agent_state.getOrPutFileStat(alloc, g.ptr, move_to) catch return;
                 e.value_ptr.* = .{ .last_read = now, .last_write = now };
             } else {
-                const e = g.ptr.getOrPut(ctx.alloc, resolved) catch return;
+                const e = r.r.agent_state.getOrPutFileStat(alloc, g.ptr, resolved) catch return;
                 if (!e.found_existing) e.value_ptr.last_read = now;
                 e.value_ptr.last_write = now;
             }
@@ -1156,7 +1156,7 @@ fn normalizeCommonUnicode(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
 /// Execute one PatchCommand through the exec pool using GNU coreutils.
 /// On failure, `diag` is populated with details.
 pub fn executeCommand(
-    ctx: prv.tool.ToolContext,
+    ctx: r.ToolContext,
     cmd: PatchCommand,
     diag: *ApplyDiagnostics,
 ) ApplyError!void {
@@ -1188,17 +1188,17 @@ pub fn executeCommand(
 }
 
 fn readFileViaExec(
-    ctx: prv.tool.ToolContext,
+    ctx: r.ToolContext,
     path: []const u8,
     missing_ok: bool,
     diag: ?*ApplyDiagnostics,
 ) ApplyError!?[]const u8 {
-    const res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "cat", path } }) catch {
+    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", path } }) catch {
         if (diag) |d| d.message = "read command failed to start";
         return ApplyError.ExecFailed;
     };
-    defer ctx.swarm.exec.alloc.free(res.stdout);
-    defer ctx.swarm.exec.alloc.free(res.stderr);
+    defer ctx.base.exec_pool.alloc.free(res.stdout);
+    defer ctx.base.exec_pool.alloc.free(res.stderr);
 
     if (res.ty != .success) {
         if (missing_ok and std.mem.indexOf(u8, res.stderr, "No such file") != null) return null;
@@ -1219,7 +1219,7 @@ fn readFileViaExec(
 }
 
 fn writeFileViaExec(
-    ctx: prv.tool.ToolContext,
+    ctx: r.ToolContext,
     path: []const u8,
     content: []const u8,
     diag: *ApplyDiagnostics,
@@ -1227,12 +1227,12 @@ fn writeFileViaExec(
     const command = try writeShellCommand(ctx.alloc, path);
     defer ctx.alloc.free(command);
 
-    const res = ctx.swarm.exec.runAndWait(.{
+    const res = ctx.base.exec_pool.runAndWait(.{
         .argv = &.{ "/bin/sh", "-c", command },
         .stdin_data = content,
     }) catch return ApplyError.ExecFailed;
-    defer ctx.swarm.exec.alloc.free(res.stdout);
-    defer ctx.swarm.exec.alloc.free(res.stderr);
+    defer ctx.base.exec_pool.alloc.free(res.stdout);
+    defer ctx.base.exec_pool.alloc.free(res.stderr);
 
     if (res.ty != .success) {
         diag.message = if (res.stderr.len > 0)
@@ -1243,10 +1243,10 @@ fn writeFileViaExec(
     }
 }
 
-fn deleteFileViaExec(ctx: prv.tool.ToolContext, path: []const u8, diag: *ApplyDiagnostics) ApplyError!void {
-    const res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "rm", path } }) catch return ApplyError.ExecFailed;
-    defer ctx.swarm.exec.alloc.free(res.stdout);
-    defer ctx.swarm.exec.alloc.free(res.stderr);
+fn deleteFileViaExec(ctx: r.ToolContext, path: []const u8, diag: *ApplyDiagnostics) ApplyError!void {
+    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "rm", path } }) catch return ApplyError.ExecFailed;
+    defer ctx.base.exec_pool.alloc.free(res.stdout);
+    defer ctx.base.exec_pool.alloc.free(res.stderr);
 
     if (res.ty != .success) {
         if (std.mem.indexOf(u8, res.stderr, "No such file") != null) {

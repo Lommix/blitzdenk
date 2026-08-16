@@ -50,11 +50,16 @@ pub const Part = union(enum) {
         name: []const u8,
         output: []const u8,
         is_error: bool = false,
+        exit_loop: bool = false,
     },
     file: struct {
         url: []const u8,
         media_type: []const u8,
         filename: []const u8,
+    },
+    provider_data: struct {
+        provider: []const u8,
+        data: []const u8,
     },
 
     pub fn textPart(text: []const u8) Part {
@@ -79,6 +84,10 @@ pub const Part = union(enum) {
 
     pub fn filePart(url: []const u8, media_type: []const u8, filename: []const u8) Part {
         return .{ .file = .{ .url = url, .media_type = media_type, .filename = filename } };
+    }
+
+    pub fn providerDataPart(provider: []const u8, data: []const u8) Part {
+        return .{ .provider_data = .{ .provider = provider, .data = data } };
     }
 };
 
@@ -139,6 +148,13 @@ pub const ToolResult = struct {
     tool_name: []const u8,
     output: []const u8,
     is_error: bool = false,
+    exit_loop: bool = false,
+    image: ?ToolImage = null,
+};
+
+pub const ToolImage = struct {
+    url: []const u8,
+    media_type: []const u8,
 };
 
 pub const Usage = struct {
@@ -290,6 +306,10 @@ pub fn freePart(alloc: std.mem.Allocator, part: Part) void {
             alloc.free(file.media_type);
             alloc.free(file.filename);
         },
+        .provider_data => |value| {
+            alloc.free(value.provider);
+            alloc.free(value.data);
+        },
     }
 }
 
@@ -346,7 +366,14 @@ pub const ImageResult = struct {
     }
 };
 
-pub const ToolExecuteFn = *const fn (ctx: ?*anyopaque, input: []const u8) anyerror![]const u8;
+pub const ToolOutput = struct {
+    content: []const u8,
+    is_error: bool = false,
+    exit_loop: bool = false,
+    image: ?ToolImage = null,
+};
+
+pub const ToolExecuteFn = *const fn (ctx: ?*anyopaque, alloc: std.mem.Allocator, io: std.Io, call: ToolCall) anyerror!ToolOutput;
 
 pub const Tool = struct {
     name: []const u8,
@@ -355,9 +382,9 @@ pub const Tool = struct {
     execute: ?ToolExecuteFn = null,
     execute_ctx: ?*anyopaque = null,
 
-    pub fn run(self: Tool, input: []const u8) anyerror![]const u8 {
+    pub fn run(self: Tool, alloc: std.mem.Allocator, io: std.Io, call: ToolCall) anyerror!ToolOutput {
         const exec = self.execute orelse return error.ToolHasNoExecute;
-        return exec(self.execute_ctx, input);
+        return exec(self.execute_ctx, alloc, io, call);
     }
 };
 

@@ -1,14 +1,12 @@
 const std = @import("std");
 const r = @import("root.zig");
-const prv = @import("provider");
-const apt = prv.adapter;
-const tc = prv.tool;
+const apt = r.r.sdk;
+const tc = r.r.tools;
 const Allocator = std.mem.Allocator;
 
-// Todo list state lives on the agent (prv.agent.TodoList). Re-export for callers.
-pub const TodoState = prv.agent.TodoState;
-pub const Todo = prv.agent.Todo;
-pub const TodoList = prv.agent.TodoList;
+pub const TodoState = r.r.agent_state.TodoState;
+pub const Todo = r.r.agent_state.Todo;
+pub const TodoList = r.r.agent_state.TodoList;
 
 // ── Tool Definitions ─────────────────────────────────────────────────
 pub const CreateTodoTool = tc.Tool{
@@ -94,15 +92,16 @@ pub const UpdateTodoStateTool = tc.Tool{
 
 // ── Tool Implementations ─────────────────────────────────────────────
 
-fn createTodo(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
+fn createTodo(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolOutput {
     const args = r.parseArgs(struct { subject: []const u8, description: []const u8 }, ctx.alloc, call) orelse
         return r.errResult(call, "invalid arguments: expected {\"description\": \"...\"}");
 
     r.setToolStatusPrint(ctx, call, "new todo {s}", .{args.subject});
 
-    const subject = ctx.alloc.dupe(u8, args.subject) catch
+    const state_alloc = ctx.agent().state_arena.allocator();
+    const subject = state_alloc.dupe(u8, args.subject) catch
         return r.errResult(call, "out of memory");
-    const description = ctx.alloc.dupe(u8, args.description) catch
+    const description = state_alloc.dupe(u8, args.description) catch
         return r.errResult(call, "out of memory");
 
     const id = blk: {
@@ -129,7 +128,7 @@ fn createTodo(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
     return r.okResult(call, msg);
 }
 
-fn getTodo(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
+fn getTodo(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolOutput {
     const args = r.parseArgs(struct { id: u32 }, ctx.alloc, call) orelse
         return r.errResult(call, "invalid arguments: expected {\"id\": <number>}");
 
@@ -157,8 +156,8 @@ fn getTodo(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
     return r.okResult(call, msg);
 }
 
-fn listTodos(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
-    const app = ctx.swarm.context.cast(@import("../app.zig").App);
+fn listTodos(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolOutput {
+    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     // Snapshot todos under lock so we can render outside it.
     const snap = blk: {
         const g = ctx.agent().todo_list.lock(ctx.io);
@@ -214,7 +213,7 @@ fn listTodos(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
     return r.okResult(call, allocating.written());
 }
 
-fn updateTodoState(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
+fn updateTodoState(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolOutput {
     const args = r.parseArgs(struct { id: u32, state: []const u8 }, ctx.alloc, call) orelse
         return r.errResult(call, "invalid arguments: expected {\"id\": <number>, \"state\": \"...\"}");
 
@@ -248,7 +247,7 @@ fn updateTodoDetail(ctx: tc.ToolContext, call: apt.ToolCall) apt.ToolResult {
     const args = r.parseArgs(struct { id: u32, description: []const u8 }, ctx.alloc, call) orelse
         return r.errResult(call, "invalid arguments: expected {\"id\": <number>, \"description\": \"...\"}");
 
-    const new_desc = ctx.alloc.dupe(u8, args.description) catch
+    const new_desc = ctx.agent().state_arena.allocator().dupe(u8, args.description) catch
         return r.errResult(call, "out of memory");
 
     const id = blk: {

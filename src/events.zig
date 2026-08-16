@@ -1,9 +1,9 @@
 const std = @import("std");
 const r = @import("root.zig");
-const AgentId = r.prv.Swarm.AgentId;
-const Role = r.prv.adapter.Role;
+const AgentId = r.AgentId;
+const Role = enum { system, user, agent };
 
-/// Events emitted by the app, swarm, and agent subsystems. The AppEvent
+/// Events emitted by the app and agent subsystems. The AppEvent
 /// union is the single source of truth — any code that needs to react to
 /// system state changes (e.g. Lua callbacks, logging, status-bar updates)
 /// should dispatch from a central `onEvent` call.
@@ -21,12 +21,9 @@ pub const AppEvent = union(enum) {
     tool_call_started: struct { agent_id: AgentId, call_id: []const u8, name: []const u8 },
     // TODO: emit from agent.zig — needs event bus accessible from Agent
     tool_call_complete: struct { agent_id: AgentId, call_id: []const u8, name: []const u8, is_error: bool },
-    // TODO: emit from swarm.zig recordBroadcast — needs event bus threaded through Swarm
     agent_broadcast: struct { id: AgentId, role: Role },
-    // TODO: emit from swarm.zig requestPermission — needs event bus threaded through Swarm
-    permission_requested: struct { call_id: ?[]const u8, level: r.prv.Swarm.PermissionLevel },
-    // TODO: emit from swarm.zig resolvePermission — needs event bus threaded through Swarm
-    permission_resolved: struct { call_id: ?[]const u8, state: r.prv.Swarm.PermissionState },
+    permission_requested: struct { call_id: ?[]const u8, level: r.permissions.Level },
+    permission_resolved: struct { call_id: ?[]const u8, state: r.permissions.State },
     user_message_sent: []const u8,
     mcp_tools_reloaded,
 };

@@ -1,11 +1,10 @@
-const prv = @import("provider");
 const r = @import("root.zig");
 const std = @import("std");
 
 // 4MB file edit limit
 pub const MAX_EDIT_SIZE: u32 = 1024 * 1024 * 4;
 
-pub const EditTool = prv.tool.Tool{
+pub const EditTool = r.Tool{
     .def = .{
         .name = "edit",
         .description =
@@ -34,7 +33,7 @@ pub const EditTool = prv.tool.Tool{
     .func = &run,
 };
 
-fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const alloc = ctx.alloc;
     const Args = struct {
         path: []const u8,
@@ -45,8 +44,8 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     r.setToolStatusPrint(ctx, call, "edit", .{});
 
-    const args = (std.json.parseFromSlice(Args, alloc, call.arguments, .{ .ignore_unknown_fields = true }) catch {
-        std.log.err("ARGs ERROR: {s}", .{call.arguments});
+    const args = (std.json.parseFromSlice(Args, alloc, call.input, .{ .ignore_unknown_fields = true }) catch {
+        std.log.err("ARGs ERROR: {s}", .{call.input});
         return r.errResult(call,
             \\invalid JSON arguments, expected `{"path": "...", "old_string": "...", "new_string": "...", "replace_all": ...}`
         );
@@ -57,7 +56,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     if (args.path.len == 0) return r.errResult(call, "path is empty");
     if (args.old_string.len == 0) return r.errResult(call, "oldText is empty");
 
-    const resolved = std.fs.path.resolve(alloc, &.{ ctx.cwd, args.path }) catch
+    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.path }) catch
         return r.errResult(call, "failed to resolve path");
 
     if (std.mem.eql(u8, args.old_string, args.new_string)) {
@@ -65,10 +64,10 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     }
 
     // Read current content.
-    const read_res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "cat", resolved } }) catch
+    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } }) catch
         return r.errResult(call, "failed to read file");
-    defer ctx.swarm.exec.alloc.free(read_res.stdout);
-    defer ctx.swarm.exec.alloc.free(read_res.stderr);
+    defer ctx.base.exec_pool.alloc.free(read_res.stdout);
+    defer ctx.base.exec_pool.alloc.free(read_res.stderr);
 
     if (read_res.ty != .success) {
         const msg = if (read_res.stderr.len > 0)
@@ -93,7 +92,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     }
     const new_content = replacement.?;
 
-    const decision = ctx.requestPerm(call.id, .always_check, .{ .diff = .{
+    const decision = ctx.requestPermission(call.id, .always_check, .{ .diff = .{
         .before = file_content,
         .after = new_content,
         .path = args.path,
@@ -114,12 +113,12 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-    const write_res = ctx.swarm.exec.runAndWait(.{
+    const write_res = ctx.base.exec_pool.runAndWait(.{
         .argv = &.{ "tee", resolved },
         .stdin_data = new_content,
     }) catch return r.errResult(call, "failed to start process");
-    defer ctx.swarm.exec.alloc.free(write_res.stdout);
-    defer ctx.swarm.exec.alloc.free(write_res.stderr);
+    defer ctx.base.exec_pool.alloc.free(write_res.stdout);
+    defer ctx.base.exec_pool.alloc.free(write_res.stderr);
 
     if (write_res.ty != .success) {
         const msg = if (write_res.stderr.len > 0)

@@ -2,6 +2,7 @@ const std = @import("std");
 const model = @import("../model.zig");
 const types = @import("../types.zig");
 const errors = @import("../errors.zig");
+const opts_mod = @import("../options.zig");
 
 pub fn buildChatRequest(
     a: std.mem.Allocator,
@@ -9,6 +10,15 @@ pub fn buildChatRequest(
     params: model.GenerateParams,
     stream: bool,
 ) ![]const u8 {
+    var invalid_calls: std.StringHashMapUnmanaged(void) = .empty;
+    defer invalid_calls.deinit(a);
+    for (params.messages) |msg| {
+        for (msg.parts()) |part| switch (part) {
+            .tool_call => |call| if (!isValidJsonObject(a, call.input)) try invalid_calls.put(a, call.id, {}),
+            else => {},
+        };
+    }
+
     var w = std.Io.Writer.Allocating.init(a);
     defer w.deinit();
     var s: std.json.Stringify = .{ .writer = &w.writer };
@@ -16,6 +26,8 @@ pub fn buildChatRequest(
     try s.beginObject();
     try s.objectField("model");
     try s.write(model_id);
+    try s.objectField("messages");
+    try s.beginArray();
     if (params.system.len > 0) {
         try s.beginObject();
         try s.objectField("role");
@@ -24,8 +36,6 @@ pub fn buildChatRequest(
         try s.write(params.system);
         try s.endObject();
     }
-    try s.objectField("messages");
-    try s.beginArray();
     for (params.messages) |msg| {
         if (msg.role == .tool) {
             for (msg.parts()) |part| {
@@ -33,6 +43,7 @@ pub fn buildChatRequest(
                     .tool_result => |result| result,
                     else => continue,
                 };
+                if (invalid_calls.contains(result.id)) continue;
                 try s.beginObject();
                 try s.objectField("role");
                 try s.write("tool");
@@ -72,6 +83,7 @@ pub fn buildChatRequest(
                         .tool_call => |call| call,
                         else => continue,
                     };
+                    if (invalid_calls.contains(call.id)) continue;
                     try s.beginObject();
                     try s.objectField("id");
                     try s.write(call.id);
@@ -87,6 +99,23 @@ pub fn buildChatRequest(
                     try s.endObject();
                 }
                 try s.endArray();
+            }
+            var reasoning_text: std.ArrayList(u8) = .empty;
+            defer reasoning_text.deinit(a);
+            var reasoning_signature: []const u8 = "";
+            for (msg.parts()) |part| switch (part) {
+                .reasoning => |reasoning| {
+                    try reasoning_text.appendSlice(a, reasoning.text);
+                    if (reasoning.signature.len > 0) reasoning_signature = reasoning.signature;
+                },
+                else => {},
+            };
+            if (std.ascii.indexOfIgnoreCase(model_id, "deepseek") != null) {
+                try s.objectField("reasoning_content");
+                try s.write(reasoning_text.items);
+            } else if (reasoning_signature.len > 0) {
+                try s.objectField("reasoning_details");
+                try writeRaw(&s, reasoning_signature);
             }
         }
         try s.endObject();
@@ -166,9 +195,9 @@ pub fn buildChatRequest(
         }
     }
     try writeProviderOptions(&s, params.provider_options);
+    try s.objectField("stream");
+    try s.write(stream);
     if (stream) {
-        try s.objectField("stream");
-        try s.write(true);
         try s.objectField("stream_options");
         try s.beginObject();
         try s.objectField("include_usage");
@@ -204,15 +233,7 @@ fn writePart(s: *std.json.Stringify, part: types.Part) !void {
             try s.endObject();
             try s.endObject();
         },
-        .reasoning => |reasoning| {
-            try s.beginObject();
-            try s.objectField("type");
-            try s.write("text");
-            try s.objectField("text");
-            try s.write(reasoning.text);
-            try s.endObject();
-        },
-        .file, .tool_call, .tool_result => {},
+        .file, .provider_data, .reasoning, .tool_call, .tool_result => {},
     }
 }
 
@@ -258,8 +279,15 @@ pub fn writeRaw(s: *std.json.Stringify, value: []const u8) !void {
     s.endWriteRaw();
 }
 
+fn isValidJsonObject(a: std.mem.Allocator, value: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, a, value, .{}) catch return false;
+    defer parsed.deinit();
+    return parsed.value == .object;
+}
+
 pub const HttpError = error{
     ApiError,
+    RateLimited,
     ContextOverflow,
     NetworkError,
     OutOfMemory,
@@ -268,6 +296,14 @@ pub const HttpError = error{
 const Response = struct {
     status: std.http.Status,
     body: []u8,
+    retry_after_ms: ?u64 = null,
+};
+
+pub const RequestOptions = struct {
+    timeout_ms: ?u64 = null,
+    cancellation: ?*opts_mod.CancellationToken = null,
+    on_provider_error: ?*const fn (ctx: ?*anyopaque, info: opts_mod.ProviderErrorInfo) void = null,
+    on_provider_error_ctx: ?*anyopaque = null,
 };
 
 pub fn postWithRetry(
@@ -278,18 +314,21 @@ pub fn postWithRetry(
     body: []const u8,
     headers: []const std.http.Header,
     max_retries: u32,
-    timeout_ms: ?u64,
+    options: RequestOptions,
 ) ![]u8 {
     var attempt: u32 = 0;
     while (true) {
-        const response = try postTimed(a, io, client, url, body, headers, timeout_ms);
+        if (options.cancellation) |token| try token.check();
+        const response = try postTimed(a, io, client, url, body, headers, options.timeout_ms, options.cancellation);
         if (@intFromEnum(response.status) < 400) return response.body;
         if (!isRetryableStatus(response.status) or attempt >= max_retries) {
             defer a.free(response.body);
-            return classifyError(response.body);
+            return reportError(a, response, options);
         }
+        if (notifyError(a, response, options, true, attempt + 1) == error.OutOfMemory) return error.OutOfMemory;
+        const retry_after_ms = response.retry_after_ms;
         a.free(response.body);
-        try sleepBackoff(io, attempt);
+        try sleepBackoff(io, attempt, retry_after_ms, options.cancellation);
         attempt += 1;
     }
 }
@@ -302,32 +341,126 @@ pub fn postSseWithRetry(
     body: []const u8,
     headers: []const std.http.Header,
     max_retries: u32,
-    timeout_ms: ?u64,
+    options: RequestOptions,
     event_ctx: ?*anyopaque,
     on_event: *const fn (?*anyopaque, []const u8) anyerror!void,
 ) ![]u8 {
     var attempt: u32 = 0;
     while (true) {
-        const response = try postSseTimed(a, io, client, url, body, headers, timeout_ms, event_ctx, on_event);
+        if (options.cancellation) |token| try token.check();
+        const response = try postSseTimed(a, io, client, url, body, headers, options.timeout_ms, options.cancellation, event_ctx, on_event);
         if (@intFromEnum(response.status) < 400) return response.body;
-        if (!isRetryableStatus(response.status) or attempt >= max_retries) return classifyError(response.body);
-        try sleepBackoff(io, attempt);
+        if (!isRetryableStatus(response.status) or attempt >= max_retries) {
+            defer a.free(response.body);
+            return reportError(a, response, options);
+        }
+        if (notifyError(a, response, options, true, attempt + 1) == error.OutOfMemory) return error.OutOfMemory;
+        const retry_after_ms = response.retry_after_ms;
+        a.free(response.body);
+        try sleepBackoff(io, attempt, retry_after_ms, options.cancellation);
         attempt += 1;
     }
 }
 
-fn sleepBackoff(io: std.Io, attempt: u32) !void {
+fn sleepBackoff(io: std.Io, attempt: u32, retry_after_ms: ?u64, cancellation: ?*opts_mod.CancellationToken) !void {
     const base_ms: u64 = 2000 * (@as(u64, 1) << @intCast(@min(attempt, 5)));
-    const capped = @min(base_ms, 60_000);
-    std.Io.sleep(io, .fromMilliseconds(@intCast(capped)), .awake) catch {};
+    const capped = @min(retry_after_ms orelse base_ms, 60_000);
+    const token = cancellation orelse {
+        std.Io.sleep(io, .fromMilliseconds(@intCast(capped)), .awake) catch {};
+        return;
+    };
+    const Selection = union(enum) { elapsed: void, canceled: void };
+    var buffer: [2]Selection = undefined;
+    var select = std.Io.Select(Selection).init(io, &buffer);
+    select.async(.elapsed, backoffTask, .{ io, capped });
+    select.async(.canceled, cancellationTask, .{ token, io });
+    switch (try select.await()) {
+        .elapsed => select.cancelDiscard(),
+        .canceled => {
+            select.cancelDiscard();
+            return error.Canceled;
+        },
+    }
+}
+
+fn backoffTask(io: std.Io, duration_ms: u64) void {
+    std.Io.sleep(io, .fromMilliseconds(@intCast(duration_ms)), .awake) catch {};
+}
+
+fn cancellationTask(token: *opts_mod.CancellationToken, io: std.Io) void {
+    token.wait(io) catch {};
 }
 
 fn isRetryableStatus(status: std.http.Status) bool {
     return status == .too_many_requests or @intFromEnum(status) >= 500;
 }
 
-fn classifyError(body: []const u8) HttpError {
-    return if (errors.isOverflow(body)) error.ContextOverflow else error.ApiError;
+fn reportError(a: std.mem.Allocator, response: Response, options: RequestOptions) HttpError {
+    return notifyError(a, response, options, false, 0);
+}
+
+fn notifyError(a: std.mem.Allocator, response: Response, options: RequestOptions, will_retry: bool, attempt: u32) HttpError {
+    var payload = errors.classify(a, response.status, response.body);
+    defer switch (payload) {
+        .api => |value| a.free(value.message),
+        .context_overflow => |value| a.free(value.message),
+        .network => {},
+    };
+    switch (payload) {
+        .api => |*value| value.retry_after_ms = response.retry_after_ms,
+        else => {},
+    }
+    if (options.on_provider_error) |callback| callback(options.on_provider_error_ctx, switch (payload) {
+        .api => |value| .{
+            .status_code = value.status_code,
+            .response_body = value.response_body,
+            .is_retryable = value.is_retryable,
+            .retry_after_ms = value.retry_after_ms,
+            .will_retry = will_retry,
+            .attempt = attempt,
+        },
+        .context_overflow => |value| .{
+            .status_code = @intFromEnum(response.status),
+            .response_body = value.response_body,
+            .is_retryable = false,
+            .context_overflow = true,
+            .will_retry = will_retry,
+            .attempt = attempt,
+        },
+        .network => unreachable,
+    });
+    return switch (payload) {
+        .context_overflow => error.ContextOverflow,
+        .api => if (response.status == .too_many_requests) error.RateLimited else error.ApiError,
+        .network => error.NetworkError,
+    };
+}
+
+pub fn reportStreamError(a: std.mem.Allocator, options: RequestOptions, body: []const u8) ?HttpError {
+    var parsed = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const event_type = blk: {
+        const value = parsed.value.object.get("type") orelse break :blk "";
+        break :blk if (value == .string) value.string else "";
+    };
+    const failed = parsed.value.object.get("error") != null or
+        std.mem.eql(u8, event_type, "error") or
+        std.mem.eql(u8, event_type, "response.failed") or
+        std.mem.eql(u8, event_type, "response.incomplete");
+    if (!failed) return null;
+    const context_overflow = errors.isOverflow(body);
+    const retryable = std.ascii.indexOfIgnoreCase(body, "rate_limit") != null or
+        std.ascii.indexOfIgnoreCase(body, "overloaded") != null or
+        std.ascii.indexOfIgnoreCase(body, "unavailable") != null;
+    if (options.on_provider_error) |callback| callback(options.on_provider_error_ctx, .{
+        .status_code = 0,
+        .response_body = body,
+        .is_retryable = retryable,
+        .context_overflow = context_overflow,
+    });
+    if (context_overflow) return error.ContextOverflow;
+    return if (std.ascii.indexOfIgnoreCase(body, "rate_limit") != null) error.RateLimited else error.ApiError;
 }
 
 fn timeoutTask(io: std.Io, timeout_ms: u64) void {
@@ -342,16 +475,19 @@ fn postTimed(
     body: []const u8,
     headers: []const std.http.Header,
     timeout_ms: ?u64,
+    cancellation: ?*opts_mod.CancellationToken,
 ) !Response {
-    const timeout = timeout_ms orelse return post(a, io, client, url, body, headers);
+    if (timeout_ms == null and cancellation == null) return post(a, io, client, url, body, headers);
     const Selection = union(enum) {
         response: anyerror!Response,
         timeout: void,
+        canceled: void,
     };
-    var buffer: [2]Selection = undefined;
+    var buffer: [3]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
     select.async(.response, post, .{ a, io, client, url, body, headers });
-    select.async(.timeout, timeoutTask, .{ io, timeout });
+    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout });
+    if (cancellation) |token| select.async(.canceled, cancellationTask, .{ token, io });
     switch (try select.await()) {
         .response => |response| {
             select.cancelDiscard();
@@ -360,6 +496,10 @@ fn postTimed(
         .timeout => {
             select.cancelDiscard();
             return error.Timeout;
+        },
+        .canceled => {
+            select.cancelDiscard();
+            return error.Canceled;
         },
     }
 }
@@ -390,21 +530,42 @@ fn post(
         a.destroy(c);
     };
 
-    var redirect_buf: [8 * 1024]u8 = undefined;
-    var out = std.Io.Writer.Allocating.init(a);
-    defer out.deinit();
-
-    const result = c.fetch(.{
-        .location = .{ .url = url },
-        .method = .POST,
-        .payload = body,
-        .redirect_buffer = &redirect_buf,
-        .response_writer = &out.writer,
-        .headers = .{ .content_type = .{ .override = "application/json" } },
+    const uri = std.Uri.parse(url) catch return error.NetworkError;
+    var req = c.request(.POST, uri, .{
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+            .accept_encoding = .omit,
+        },
         .extra_headers = headers,
     }) catch return error.NetworkError;
+    defer req.deinit();
 
-    return .{ .status = result.status, .body = try a.dupe(u8, out.written()) };
+    req.transfer_encoding = .{ .content_length = body.len };
+    var request_body = req.sendBodyUnflushed(&.{}) catch return error.NetworkError;
+    request_body.writer.writeAll(body) catch return error.NetworkError;
+    request_body.end() catch return error.NetworkError;
+    req.connection.?.flush() catch return error.NetworkError;
+
+    var redirect_buf: [8 * 1024]u8 = undefined;
+    var response = req.receiveHead(&redirect_buf) catch return error.NetworkError;
+    const status = response.head.status;
+    const retry_after_ms = retryAfterMs(response.head);
+    const reader = response.reader(&.{});
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(a);
+    var scratch: [16 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&scratch);
+    while (true) {
+        writer.end = 0;
+        _ = reader.stream(&writer, .limited(scratch.len)) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadFailed => return error.NetworkError,
+            error.WriteFailed => unreachable,
+        };
+        try output.appendSlice(a, scratch[0..writer.end]);
+    }
+
+    return .{ .status = status, .body = try output.toOwnedSlice(a), .retry_after_ms = retry_after_ms };
 }
 
 fn postSse(
@@ -452,6 +613,7 @@ fn postSse(
     var redirect_buf: [8 * 1024]u8 = undefined;
     var response = req.receiveHead(&redirect_buf) catch return error.NetworkError;
     const status = response.head.status;
+    const retry_after_ms = retryAfterMs(response.head);
     const reader = response.reader(&.{});
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(a);
@@ -482,7 +644,17 @@ fn postSse(
         }
     }
 
-    return .{ .status = status, .body = try output.toOwnedSlice(a) };
+    return .{ .status = status, .body = try output.toOwnedSlice(a), .retry_after_ms = retry_after_ms };
+}
+
+fn retryAfterMs(head: std.http.Client.Response.Head) ?u64 {
+    var it = head.iterateHeaders();
+    while (it.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "retry-after")) continue;
+        const seconds = std.fmt.parseUnsigned(u64, std.mem.trim(u8, header.value, " \t"), 10) catch return null;
+        return std.math.mul(u64, seconds, 1000) catch std.math.maxInt(u64);
+    }
+    return null;
 }
 
 fn postSseTimed(
@@ -493,18 +665,21 @@ fn postSseTimed(
     body: []const u8,
     headers: []const std.http.Header,
     timeout_ms: ?u64,
+    cancellation: ?*opts_mod.CancellationToken,
     event_ctx: ?*anyopaque,
     on_event: *const fn (?*anyopaque, []const u8) anyerror!void,
 ) !Response {
-    const timeout = timeout_ms orelse return postSse(a, io, client, url, body, headers, event_ctx, on_event);
+    if (timeout_ms == null and cancellation == null) return postSse(a, io, client, url, body, headers, event_ctx, on_event);
     const Selection = union(enum) {
         response: anyerror!Response,
         timeout: void,
+        canceled: void,
     };
-    var buffer: [2]Selection = undefined;
+    var buffer: [3]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
     select.async(.response, postSse, .{ a, io, client, url, body, headers, event_ctx, on_event });
-    select.async(.timeout, timeoutTask, .{ io, timeout });
+    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout });
+    if (cancellation) |token| select.async(.canceled, cancellationTask, .{ token, io });
     switch (try select.await()) {
         .response => |response| {
             select.cancelDiscard();
@@ -514,6 +689,10 @@ fn postSseTimed(
             select.cancelDiscard();
             return error.Timeout;
         },
+        .canceled => {
+            select.cancelDiscard();
+            return error.Canceled;
+        },
     }
 }
 
@@ -522,6 +701,156 @@ test "retryable statuses" {
     try std.testing.expect(isRetryableStatus(.internal_server_error));
     try std.testing.expect(!isRetryableStatus(.bad_request));
     try std.testing.expect(!isRetryableStatus(.unauthorized));
+}
+
+test "provider errors retain body rate classification and retry delay" {
+    const Capture = struct {
+        called: bool = false,
+        body_matches: bool = false,
+        status_code: u16 = 0,
+        retryable: bool = false,
+        retry_after_ms: ?u64 = null,
+        will_retry: bool = false,
+        attempt: u32 = 0,
+
+        fn receive(ctx: ?*anyopaque, info: opts_mod.ProviderErrorInfo) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.called = true;
+            self.body_matches = std.mem.eql(u8, info.response_body, "{\"error\":{\"message\":\"slow down\"}}");
+            self.status_code = info.status_code;
+            self.retryable = info.is_retryable;
+            self.retry_after_ms = info.retry_after_ms;
+            self.will_retry = info.will_retry;
+            self.attempt = info.attempt;
+        }
+    };
+    var capture = Capture{};
+    var body = "{\"error\":{\"message\":\"slow down\"}}".*;
+    const err = reportError(std.testing.allocator, .{
+        .status = .too_many_requests,
+        .body = &body,
+        .retry_after_ms = 3000,
+    }, .{
+        .on_provider_error = Capture.receive,
+        .on_provider_error_ctx = &capture,
+    });
+    try std.testing.expectEqual(error.RateLimited, err);
+    try std.testing.expect(capture.called);
+    try std.testing.expect(capture.body_matches);
+    try std.testing.expectEqual(@as(u16, 429), capture.status_code);
+    try std.testing.expect(capture.retryable);
+    try std.testing.expectEqual(@as(?u64, 3000), capture.retry_after_ms);
+    var retry_body = "{\"error\":{\"message\":\"slow down\"}}".*;
+    try std.testing.expectEqual(error.RateLimited, notifyError(std.testing.allocator, .{
+        .status = .too_many_requests,
+        .body = &retry_body,
+        .retry_after_ms = 3000,
+    }, .{
+        .on_provider_error = Capture.receive,
+        .on_provider_error_ctx = &capture,
+    }, true, 2));
+    try std.testing.expect(capture.will_retry);
+    try std.testing.expectEqual(@as(u32, 2), capture.attempt);
+}
+
+test "stream error events retain provider bodies" {
+    const Capture = struct {
+        body_matches: bool = false,
+        retryable: bool = false,
+
+        fn receive(ctx: ?*anyopaque, info: opts_mod.ProviderErrorInfo) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.body_matches = std.mem.indexOf(u8, info.response_body, "model unavailable") != null;
+            self.retryable = info.is_retryable;
+        }
+    };
+    var capture = Capture{};
+    const err = reportStreamError(std.testing.allocator, .{
+        .on_provider_error = Capture.receive,
+        .on_provider_error_ctx = &capture,
+    }, "{\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"model unavailable\"}}}");
+    try std.testing.expectEqual(error.ApiError, err.?);
+    try std.testing.expect(capture.body_matches);
+    try std.testing.expect(capture.retryable);
+}
+
+test "stream context overflow events retain their classification" {
+    const Capture = struct {
+        context_overflow: bool = false,
+
+        fn receive(ctx: ?*anyopaque, info: opts_mod.ProviderErrorInfo) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.context_overflow = info.context_overflow;
+        }
+    };
+    var capture = Capture{};
+    const err = reportStreamError(std.testing.allocator, .{
+        .on_provider_error = Capture.receive,
+        .on_provider_error_ctx = &capture,
+    }, "{\"type\":\"response.failed\",\"error\":{\"message\":\"maximum context length is 4096 tokens\"}}");
+    try std.testing.expectEqual(error.ContextOverflow, err.?);
+    try std.testing.expect(capture.context_overflow);
+}
+
+test "cancellation interrupts retry waits" {
+    const Fixture = struct {
+        fn cancel(token: *opts_mod.CancellationToken, io: std.Io) void {
+            std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+            token.cancel(io);
+        }
+    };
+    var token = opts_mod.CancellationToken{};
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    var cancel = std.Io.async(io, Fixture.cancel, .{ &token, io });
+    defer cancel.cancel(io);
+    try std.testing.expectError(error.Canceled, sleepBackoff(io, 0, null, &token));
+}
+
+test "cancellation interrupts HTTP reads" {
+    const Fixture = struct {
+        fn hang(server: *std.Io.net.Server, io: std.Io) void {
+            var stream = server.accept(io) catch return;
+            defer stream.close(io);
+            std.Io.sleep(io, .fromSeconds(60), .awake) catch {};
+        }
+
+        fn cancel(token: *opts_mod.CancellationToken, io: std.Io) void {
+            std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+            token.cancel(io);
+        }
+    };
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    var hanging = std.Io.async(io, Fixture.hang, .{ &server, io });
+    defer hanging.cancel(io);
+    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
+    defer std.testing.allocator.free(url);
+    var token = opts_mod.CancellationToken{};
+    var cancel = std.Io.async(io, Fixture.cancel, .{ &token, io });
+    defer cancel.cancel(io);
+    try std.testing.expectError(error.Canceled, postWithRetry(std.testing.allocator, io, null, url, "{}", &.{}, 0, .{ .cancellation = &token }));
+}
+
+test "chat request places system prompt in messages" {
+    const messages = [_]types.Message{
+        types.UserMessage("prompt"),
+        types.UserMessage("<system-reminder>cwd</system-reminder>"),
+    };
+    const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{
+        .system = "instructions",
+        .messages = &messages,
+    }, true);
+    defer std.testing.allocator.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const request_messages = parsed.value.object.get("messages").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), request_messages.len);
+    try std.testing.expectEqualStrings("system", request_messages[0].object.get("role").?.string);
+    try std.testing.expectEqualStrings("instructions", request_messages[0].object.get("content").?.string);
 }
 
 test "chat tool messages use OpenAI fields" {
@@ -534,6 +863,7 @@ test "chat tool messages use OpenAI fields" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tool_calls\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tool_call_id\":\"call_1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"tool_call\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":false") != null);
 }
 
 test "chat structured output and tool choice" {
@@ -544,4 +874,37 @@ test "chat structured output and tool choice" {
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"response_format\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"name\":\"weather\"") != null);
+}
+
+test "chat skips malformed tool calls and paired results" {
+    const messages = [_]types.Message{
+        .{ .role = .assistant, .content = &.{
+            types.Part.toolCallPart("call_bad", "grep", "{\"pattern\":\"foo\""),
+            types.Part.toolCallPart("call_ok", "read", "{\"path\":\"src/main.zig\"}"),
+        } },
+        .{ .role = .tool, .content = &.{
+            types.Part.toolResultPart("call_bad", "grep", "bad"),
+            types.Part.toolResultPart("call_ok", "read", "contents"),
+        } },
+    };
+    const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "call_ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "call_bad") == null);
+}
+
+test "chat replays provider reasoning fields" {
+    const messages = [_]types.Message{.{ .role = .assistant, .content = &.{
+        types.Part.reasoningPart("inspect the file", "[{\"type\":\"reasoning.text\",\"text\":\"inspect\"}]"),
+        types.Part.textPart("done"),
+    } }};
+    const deepseek = try buildChatRequest(std.testing.allocator, "Vendor/DeepSeek-V4-Pro", .{ .messages = &messages }, false);
+    defer std.testing.allocator.free(deepseek);
+    try std.testing.expect(std.mem.indexOf(u8, deepseek, "\"reasoning_content\":\"inspect the file\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, deepseek, "reasoning_details") == null);
+
+    const other = try buildChatRequest(std.testing.allocator, "qwen3-thinking", .{ .messages = &messages }, false);
+    defer std.testing.allocator.free(other);
+    try std.testing.expect(std.mem.indexOf(u8, other, "\"reasoning_details\":[{\"type\":\"reasoning.text\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, other, "reasoning_content") == null);
 }

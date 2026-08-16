@@ -1,6 +1,26 @@
 const std = @import("std");
 const types = @import("types.zig");
 
+pub const CancellationToken = struct {
+    event: std.Io.Event = .unset,
+
+    pub fn cancel(self: *CancellationToken, io: std.Io) void {
+        self.event.set(io);
+    }
+
+    pub fn isCancelled(self: *const CancellationToken) bool {
+        return self.event.isSet();
+    }
+
+    pub fn check(self: *const CancellationToken) !void {
+        if (self.isCancelled()) return error.Canceled;
+    }
+
+    pub fn wait(self: *CancellationToken, io: std.Io) !void {
+        try self.event.wait(io);
+    }
+};
+
 pub const ToolChoice = union(enum) {
     auto,
     none,
@@ -23,10 +43,21 @@ pub const ResponseInfo = struct {
     err: ?anyerror = null,
 };
 
+pub const ProviderErrorInfo = struct {
+    status_code: u16,
+    response_body: []const u8,
+    is_retryable: bool,
+    context_overflow: bool = false,
+    retry_after_ms: ?u64 = null,
+    will_retry: bool = false,
+    attempt: u32 = 0,
+};
+
 pub const StepInfo = struct {
     number: usize,
     text: []const u8 = "",
     tool_calls: []const types.ToolCall = &.{},
+    tool_results: []const types.ToolResult = &.{},
     finish_reason: types.FinishReason = .other,
     usage: types.Usage = .{},
 };
@@ -53,12 +84,37 @@ pub const ReminderInfo = struct {
     message_count: usize,
 };
 
+pub const PrepareStepInfo = struct {
+    number: usize,
+    messages: []const types.Message,
+};
+
+pub const PrepareStepResult = struct {
+    messages: []const types.Message = &.{},
+    replace: bool = false,
+};
+
+pub const StopInfo = struct {
+    step: usize,
+    messages: []const types.Message,
+    tool_results: []const types.ToolResult,
+};
+
 pub const Hooks = struct {
+    on_checkpoint: ?*const fn (ctx: ?*anyopaque, messages: []const types.Message) void = null,
+    on_checkpoint_ctx: ?*anyopaque = null,
+
+    on_prepare_step: ?*const fn (ctx: ?*anyopaque, info: PrepareStepInfo) anyerror!PrepareStepResult = null,
+    on_prepare_step_ctx: ?*anyopaque = null,
+
     on_request: ?*const fn (ctx: ?*anyopaque, info: RequestInfo) void = null,
     on_request_ctx: ?*anyopaque = null,
 
     on_response: ?*const fn (ctx: ?*anyopaque, info: ResponseInfo) void = null,
     on_response_ctx: ?*anyopaque = null,
+
+    on_provider_error: ?*const fn (ctx: ?*anyopaque, info: ProviderErrorInfo) void = null,
+    on_provider_error_ctx: ?*anyopaque = null,
 
     on_step_finish: ?*const fn (ctx: ?*anyopaque, step: StepInfo) void = null,
     on_step_finish_ctx: ?*anyopaque = null,
@@ -71,6 +127,9 @@ pub const Hooks = struct {
 
     on_reminder: ?*const fn (ctx: ?*anyopaque, info: ReminderInfo) ?[]const u8 = null,
     on_reminder_ctx: ?*anyopaque = null,
+
+    stop_when: ?*const fn (ctx: ?*anyopaque, info: StopInfo) bool = null,
+    stop_when_ctx: ?*anyopaque = null,
 };
 
 pub const StreamCallbacks = struct {
@@ -123,6 +182,7 @@ pub const GenerateOptions = struct {
     explicit_schema: ?[]const u8 = null,
 
     client: ?*std.http.Client = null,
+    cancellation: ?*CancellationToken = null,
 
     hooks: Hooks = .{},
     stream: StreamCallbacks = .{},
@@ -135,6 +195,7 @@ pub const EmbedOptions = struct {
     timeout_ms: ?u64 = null,
     headers: []const std.http.Header = &.{},
     client: ?*std.http.Client = null,
+    cancellation: ?*CancellationToken = null,
 };
 
 pub const ImageOptions = struct {
@@ -147,6 +208,7 @@ pub const ImageOptions = struct {
     timeout_ms: ?u64 = null,
     headers: []const std.http.Header = &.{},
     client: ?*std.http.Client = null,
+    cancellation: ?*CancellationToken = null,
 };
 
 test "generate options defaults" {

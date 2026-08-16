@@ -17,6 +17,7 @@ pub fn generateImage(
         .provider_options = opts.provider_options,
         .headers = opts.headers,
         .timeout_ms = opts.timeout_ms,
+        .cancellation = opts.cancellation,
     };
 
     const result = try m.image(alloc, io, params, opts.client, opts.max_retries);

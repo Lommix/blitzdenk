@@ -107,6 +107,7 @@ pub const MarkdownStreamRenderer = struct {
     };
 
     alloc: std.mem.Allocator,
+    gpa: std.mem.Allocator,
     width: u16,
     buffer: std.ArrayList(u8) = .empty,
     cursor: usize = 0, // parsed up to here
@@ -136,18 +137,18 @@ pub const MarkdownStreamRenderer = struct {
     skip_newline: bool = false,
 
     pub fn init(alloc: std.mem.Allocator, width: u16) Self {
-        return .{ .alloc = alloc, .width = width, .mermaid_options = .{ .width = width } };
+        return .{ .alloc = alloc, .gpa = alloc, .width = width, .mermaid_options = .{ .width = width } };
     }
 
     pub fn initWithTheme(alloc: std.mem.Allocator, width: u16, theme: HighlightTheme) Self {
-        return .{ .alloc = alloc, .width = width, .theme = theme, .mermaid_options = .{ .width = width, .theme = theme.mermaid } };
+        return .{ .alloc = alloc, .gpa = alloc, .width = width, .theme = theme, .mermaid_options = .{ .width = width, .theme = theme.mermaid } };
     }
 
-    pub fn initWithOptions(alloc: std.mem.Allocator, width: u16, theme: HighlightTheme, options: mermaid.Options) Self {
+    pub fn initWithOptions(gpa: std.mem.Allocator, alloc: std.mem.Allocator, width: u16, theme: HighlightTheme, options: mermaid.Options) Self {
         var mermaid_options = options;
         mermaid_options.width = width;
         mermaid_options.theme = theme.mermaid;
-        return .{ .alloc = alloc, .width = width, .theme = theme, .mermaid_options = mermaid_options };
+        return .{ .alloc = alloc, .gpa = gpa, .width = width, .theme = theme, .mermaid_options = mermaid_options };
     }
 
     pub fn deinit(self: *Self) void {
@@ -484,7 +485,7 @@ pub const MarkdownStreamRenderer = struct {
         var out: std.ArrayList(r.Line) = .empty;
         defer out.deinit(self.alloc);
         errdefer for (out.items) |*line| line.deinit(self.alloc);
-        try mermaid.renderWithOptions(self.alloc, source, &out, self.mermaid_options);
+        try mermaid.renderWithOptions(self.gpa, self.alloc, source, &out, self.mermaid_options);
         try self.pending.ensureUnusedCapacity(self.alloc, out.items.len);
         for (out.items) |line| self.pending.appendAssumeCapacity(line);
         out.items.len = 0;

@@ -1,8 +1,8 @@
-const prv = @import("provider");
+const exec = @import("exec");
 const r = @import("root.zig");
 const std = @import("std");
 
-pub const WriteTool = prv.tool.Tool{
+pub const WriteTool = r.Tool{
     .def = .{
         .name = "write",
         .description = "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
@@ -27,19 +27,19 @@ const Args = struct {
     content: []const u8,
 };
 
-fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const alloc = ctx.alloc;
-    const args = std.json.parseFromSliceLeaky(Args, alloc, call.arguments, .{
+    const args = std.json.parseFromSliceLeaky(Args, alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\", \"content\": \"...\"}");
 
     r.setToolStatusPrint(ctx, call, "write {s}", .{args.path});
     if (args.path.len == 0) return r.errResult(call, "path is empty");
 
-    const resolved = std.fs.path.resolve(alloc, &.{ ctx.cwd, args.path }) catch
+    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.path }) catch
         return r.errResult(call, "failed to resolve path");
 
-    const decision = ctx.requestPerm(call.id, .always_check, .{ .diff = .{
+    const decision = ctx.requestPermission(call.id, .always_check, .{ .diff = .{
         .before = null,
         .after = args.content,
         .path = args.path,
@@ -62,8 +62,8 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
     const res = runWrite(ctx, resolved, args.content) orelse
         return r.errResult(call, "failed to start process");
-    defer ctx.swarm.exec.alloc.free(res.stdout);
-    defer ctx.swarm.exec.alloc.free(res.stderr);
+    defer ctx.base.exec_pool.alloc.free(res.stdout);
+    defer ctx.base.exec_pool.alloc.free(res.stderr);
 
     if (res.ty != .success) {
         const msg = if (res.stderr.len > 0)
@@ -83,7 +83,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
 
         const g = ctx.agent().file_stats.lock(ctx.io);
         defer g.unlock();
-        const look = g.ptr.getOrPut(ctx.alloc, resolved) catch unreachable;
+        const look = r.r.agent_state.getOrPutFileStat(ctx.agent().state_arena.allocator(), g.ptr, resolved) catch unreachable;
         look.value_ptr.* = .{ .last_read = now, .last_write = now };
     }
 
@@ -92,16 +92,16 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     return r.okResult(call, msg);
 }
 
-fn runWrite(ctx: prv.tool.ToolContext, resolved: []const u8, content: []const u8) ?prv.exec.CmdResult {
+fn runWrite(ctx: r.ToolContext, resolved: []const u8, content: []const u8) ?exec.CmdResult {
     if (std.fs.path.dirname(resolved)) |dir| {
         const cmd_str = std.fmt.allocPrint(ctx.alloc, "mkdir -p {s} && tee {s}", .{ dir, resolved }) catch
             return null;
-        return ctx.swarm.exec.runAndWait(.{
+        return ctx.base.exec_pool.runAndWait(.{
             .argv = &.{ "/bin/sh", "-c", cmd_str },
             .stdin_data = content,
         }) catch null;
     }
-    return ctx.swarm.exec.runAndWait(.{
+    return ctx.base.exec_pool.runAndWait(.{
         .argv = &.{ "tee", resolved },
         .stdin_data = content,
     }) catch null;

@@ -4,17 +4,38 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const provider_mod = b.addModule("provider", .{
-        .root_source_file = b.path("src/provider/root.zig"),
-        .target = target,
-    });
-
     const blitz_sdk_dep = b.dependency("blitz_sdk", .{
         .target = target,
         .optimize = optimize,
     });
     const blitz_sdk_mod = blitz_sdk_dep.module("blitz-sdk");
-    _ = blitz_sdk_mod;
+    const models_mod = b.addModule("models", .{
+        .root_source_file = b.path("src/models.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "blitz-sdk", .module = blitz_sdk_mod }},
+    });
+
+    const exec_mod = b.addModule("exec", .{
+        .root_source_file = b.path("src/exec.zig"),
+        .target = target,
+    });
+    const agent_id_mod = b.addModule("agent-id", .{
+        .root_source_file = b.path("src/agent_id.zig"),
+        .target = target,
+    });
+    const agent_state_mod = b.addModule("agent-state", .{
+        .root_source_file = b.path("src/agent_state.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "exec", .module = exec_mod },
+            .{ .name = "agent-id", .module = agent_id_mod },
+        },
+    });
+    const permissions_mod = b.addModule("permissions", .{
+        .root_source_file = b.path("src/permissions.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "agent-id", .module = agent_id_mod }},
+    });
 
     // -- Lua 5.4 (vendored) — translated header + C sources fused into one module --
     const lua_c_mod = build_lua_c(b, target, optimize);
@@ -26,7 +47,12 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "provider", .module = provider_mod },
+                .{ .name = "blitz-sdk", .module = blitz_sdk_mod },
+                .{ .name = "exec", .module = exec_mod },
+                .{ .name = "agent-id", .module = agent_id_mod },
+                .{ .name = "agent-state", .module = agent_state_mod },
+                .{ .name = "models", .module = models_mod },
+                .{ .name = "permissions", .module = permissions_mod },
                 .{ .name = "c", .module = lua_c_mod },
             },
         }),
@@ -49,7 +75,12 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "provider", .module = provider_mod },
+                .{ .name = "blitz-sdk", .module = blitz_sdk_mod },
+                .{ .name = "exec", .module = exec_mod },
+                .{ .name = "agent-id", .module = agent_id_mod },
+                .{ .name = "agent-state", .module = agent_state_mod },
+                .{ .name = "models", .module = models_mod },
+                .{ .name = "permissions", .module = permissions_mod },
                 .{ .name = "c", .module = lua_c_mod },
             },
         }),
@@ -65,12 +96,6 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const mod_tests = b.addTest(.{
-        .root_module = provider_mod,
-    });
-
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
@@ -78,7 +103,6 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 }
 

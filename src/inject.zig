@@ -1,7 +1,7 @@
 const std = @import("std");
 const r = @import("root.zig");
 
-pub const ZigCallback = *const fn (w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) anyerror!void;
+pub const ZigCallback = *const fn (w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) anyerror!void;
 
 pub const Callback = union(enum) {
     zig: ZigCallback,
@@ -32,8 +32,8 @@ pub const InjectionsHooks = struct {
         return self;
     }
 
-    pub fn build(self: *const Self, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
-        const alloc = agent.arena.allocator();
+    pub fn build(self: *const Self, app: *r.app.App, agent: *r.agent.Agent) ![]const u8 {
+        const alloc = agent.injection_arena.allocator();
 
         var writer = std.Io.Writer.Allocating.init(alloc);
         var w = &writer.writer;
@@ -65,35 +65,28 @@ pub const InjectionsHooks = struct {
         try w.print("</system-reminder>\n", .{});
         try w.flush();
 
-        var parts = try alloc.alloc(r.prv.adapter.ContentPart, 1);
-        parts[0] = .{ .text = w.toArrayList().items };
-
-        try agent.chat.messages.append(alloc, .{
-            .role = .user,
-            .parts = parts,
-            .flags = .{ .allow_export = false },
-        });
+        return w.toArrayList().items;
     }
 };
 
-fn inject_cwd_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
-    const cwd = app.swarm.exec.effectiveCwd(if (agent.cwd.len > 0) agent.cwd else app.cwd);
+fn inject_cwd_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    const cwd = app.exec_pool.effectiveCwd(if (agent.cwd.len > 0) agent.cwd else app.cwd);
     if (cwd.len == 0) return;
     try w.print("[CWD] {s}\n", .{cwd});
 }
 
-fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.prv.agent.Agent) !void {
-    const res = app.swarm.exec.runAndWait(.{ .argv = &.{ "date", "+%Y-%m-%d %H:%M:%S %Z" } }) catch return;
-    defer app.swarm.exec.alloc.free(res.stdout);
-    defer app.swarm.exec.alloc.free(res.stderr);
+fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.Agent) !void {
+    const res = app.exec_pool.runAndWait(.{ .argv = &.{ "date", "+%Y-%m-%d %H:%M:%S %Z" } }) catch return;
+    defer app.exec_pool.alloc.free(res.stdout);
+    defer app.exec_pool.alloc.free(res.stderr);
     if (res.ty != .success or res.stdout.len == 0) return;
 
     const datetime = std.mem.trimEnd(u8, res.stdout, "\n");
 
-    const os_res = app.swarm.exec.runAndWait(.{ .argv = &.{ "uname", "-s" } }) catch null;
+    const os_res = app.exec_pool.runAndWait(.{ .argv = &.{ "uname", "-s" } }) catch null;
     defer if (os_res) |ores| {
-        app.swarm.exec.alloc.free(ores.stdout);
-        app.swarm.exec.alloc.free(ores.stderr);
+        app.exec_pool.alloc.free(ores.stdout);
+        app.exec_pool.alloc.free(ores.stderr);
     };
     const os_name = if (os_res) |ores|
         if (ores.ty == .success and ores.stdout.len > 0)
@@ -106,8 +99,8 @@ fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.prv.age
     try w.print("[TIME] {s} os={s}\n", .{ datetime, os_name });
 }
 
-fn inject_processes_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
-    if (agent.bg_tasks.tryLock(app.swarm.pool.io)) |g| blk: {
+fn inject_processes_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    if (agent.bg_tasks.tryLock(app.io)) |g| blk: {
         defer g.unlock();
         var i = g.ptr.list.items.len;
 
@@ -119,7 +112,7 @@ fn inject_processes_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.pr
         while (i > 0) {
             i -|= 1;
             const en = &g.ptr.list.items[i];
-            if (app.swarm.exec.isDone(en.handle)) {
+            if (app.exec_pool.isDone(en.handle)) {
                 try w.print("[BACKGROUND PROCESS] id: {d} cmd: {s} status: complete. Read the output with read_process\n", .{ @intFromEnum(en.handle), en.command });
             } else {
                 try w.print("[BACKGROUND PROCESS] id: {d} cmd: {s} status: working\n", .{ @intFromEnum(en.handle), en.command });
@@ -128,15 +121,15 @@ fn inject_processes_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.pr
     }
 }
 
-fn inject_bg_agents_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
-    if (agent.bg_agents.tryLock(app.swarm.pool.io)) |g| blk: {
+fn inject_bg_agents_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    if (agent.bg_agents.tryLock(app.io)) |g| blk: {
         defer g.unlock();
         var i = g.ptr.list.items.len;
         if (i == 0) break :blk;
         while (i > 0) {
             i -= 1;
             const bg = &g.ptr.list.items[i];
-            const state = if (app.swarm.getSlotState(bg.agent_id)) |s| s else .failed;
+            const state = if (app.registry.state(bg.agent_id)) |s| s else .failed;
             bg.status = switch (state) {
                 .complete => .complete,
                 .failed => .failed,
@@ -154,9 +147,10 @@ fn inject_bg_agents_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.pr
     }
 }
 
-fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.prv.agent.Agent) !void {
-    const under_half = (agent.max_allowed_tool_calls / 2) < agent.tool_call_count;
-    const tool_call_limit_reached = agent.tool_call_count >= agent.max_allowed_tool_calls;
+fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.agent.Agent) !void {
+    const count = agent.tool_call_count.load(.acquire);
+    const under_half = (agent.max_tool_calls / 2) < count;
+    const tool_call_limit_reached = count >= agent.max_tool_calls;
 
     if (tool_call_limit_reached) {
         try w.print("[BUDGET] Tool call limit reached. Summarize your findings and report back to the user\n", .{});
@@ -168,9 +162,9 @@ fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.prv.age
     }
 }
 
-fn inject_todo_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
+fn inject_todo_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
     var has_todos: bool = false;
-    if (agent.todo_list.tryLock(app.swarm.pool.io)) |g| {
+    if (agent.todo_list.tryLock(app.io)) |g| {
         defer g.unlock();
         var unfinished: u32 = 0;
 
@@ -194,18 +188,18 @@ fn inject_todo_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.age
     }
 }
 
-fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.prv.agent.Agent) !void {
+fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
 
     // mode main agent only
-    if (agent.swarm_id != app.main_agent_id) return;
+    if (app.mainAgent() != agent) return;
 
     const mode: r.ContextFactory.Mode = @enumFromInt(agent.mode_idx);
     const def = app.context_factory.getMode(mode);
-    const reminder = if (agent.flags.force_full_reminder)
+    const reminder = if (agent.force_full_reminder)
         def.prompt
     else
         def.sparse;
-    agent.flags.force_full_reminder = false;
+    agent.force_full_reminder = false;
 
     if (reminder.len == 0) return;
     _ = try w.print("<system-mode>{s}</system-mode>", .{reminder});

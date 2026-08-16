@@ -1,7 +1,7 @@
 const std = @import("std");
 const r = @import("root.zig");
 
-pub const LoadSkillTool = r.prv.tool.Tool{
+pub const LoadSkillTool = r.r.tools.Tool{
     .def = .{
         .name = "load_skill",
         .description =
@@ -23,19 +23,19 @@ pub const LoadSkillTool = r.prv.tool.Tool{
     .func = &run,
 };
 
-fn run(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adapter.ToolResult {
+fn run(ctx: r.r.tools.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         name: []const u8,
     };
 
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch {
         return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\"}");
     };
 
     r.setToolStatusPrint(ctx, call, "loading skill `{s}`", .{args.name});
-    const app = ctx.swarm.context.cast(r.r.app.App);
+    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
 
     if (app.context_factory.skill_dir) |dir| {
         var it = dir.iterate();

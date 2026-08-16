@@ -14,6 +14,8 @@ pub const PartType = types.PartType;
 pub const Message = types.Message;
 pub const ToolCall = types.ToolCall;
 pub const ToolResult = types.ToolResult;
+pub const ToolOutput = types.ToolOutput;
+pub const ToolImage = types.ToolImage;
 pub const Usage = types.Usage;
 pub const FinishReason = types.FinishReason;
 pub const StreamChunk = types.StreamChunk;
@@ -44,6 +46,7 @@ pub const ImageOptions = options.ImageOptions;
 pub const StreamCallbacks = options.StreamCallbacks;
 pub const Hooks = options.Hooks;
 pub const ToolChoice = options.ToolChoice;
+pub const CancellationToken = options.CancellationToken;
 
 pub const APIError = errors.APIError;
 pub const ContextOverflowError = errors.ContextOverflowError;

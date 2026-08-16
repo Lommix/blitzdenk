@@ -1,5 +1,4 @@
 const std = @import("std");
-const prv = @import("provider");
 const r = @import("root.zig");
 
 const log = std.log.scoped(.lsp);
@@ -17,7 +16,7 @@ pub const ServerConfig = struct {
 };
 
 pub const RegisteredTool = struct {
-    tool: prv.tool.Tool,
+    tool: r.tools.Tool,
     flags: r.ContextFactory.ToolFlags,
 };
 
@@ -152,8 +151,8 @@ const Args = struct {
     include_declaration: bool = false,
 };
 
-fn toolTrampoline(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+fn toolTrampoline(ctx: r.tools.ToolContext, call: r.sdk.ToolCall) r.sdk.ToolOutput {
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return errResult(call, "invalid JSON arguments");
 
@@ -171,15 +170,15 @@ fn toolTrampoline(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.ada
     return r.tools.okResult(call, r.tools.truncateOutputToOwned(ctx.alloc, content, r.tools.MAX_DISPLAY_BYTES, r.tools.MAX_DISPLAY_LINES));
 }
 
-fn runOp(ctx: prv.tool.ToolContext, client: *Client, args: Args) ![]const u8 {
+fn runOp(ctx: r.tools.ToolContext, client: *Client, args: Args) ![]const u8 {
     if (std.mem.eql(u8, args.op, "workspace_symbols")) {
         return client.workspaceSymbols(ctx.alloc, args.query orelse "");
     }
 
     const path = args.path orelse return error.PathRequired;
-    const resolved = try std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, path });
+    const resolved = try std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, path });
     const text = try readFileForLsp(ctx, resolved);
-    defer ctx.swarm.exec.alloc.free(text);
+    defer ctx.base.exec_pool.alloc.free(text);
     const uri = try pathToUri(ctx.alloc, resolved);
     try client.ensureDocument(uri, text);
 
@@ -188,7 +187,7 @@ fn runOp(ctx: prv.tool.ToolContext, client: *Client, args: Args) ![]const u8 {
     }
 
     const line = args.line orelse return error.LineRequired;
-    const column = try getWordColumnOffset(ctx.alloc, &ctx.swarm.exec, resolved, line, args.symbol orelse return error.WordRequired);
+    const column = try getWordColumnOffset(ctx.alloc, ctx.base.exec_pool, resolved, line, args.symbol orelse return error.WordRequired);
 
     const pos = Position{
         .line = if (line > 0) line - 1 else 0,
@@ -202,18 +201,18 @@ fn runOp(ctx: prv.tool.ToolContext, client: *Client, args: Args) ![]const u8 {
     return error.UnknownOperation;
 }
 
-fn readFileForLsp(ctx: prv.tool.ToolContext, resolved: []const u8) ![]const u8 {
-    const res = try ctx.swarm.exec.runAndWait(.{ .argv = &.{ "cat", resolved } });
-    defer ctx.swarm.exec.alloc.free(res.stderr);
+fn readFileForLsp(ctx: r.tools.ToolContext, resolved: []const u8) ![]const u8 {
+    const res = try ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } });
+    defer ctx.base.exec_pool.alloc.free(res.stderr);
     if (res.ty != .success) {
-        ctx.swarm.exec.alloc.free(res.stdout);
+        ctx.base.exec_pool.alloc.free(res.stdout);
         return error.ReadFailed;
     }
     return res.stdout;
 }
 
-fn errResult(call: prv.adapter.ToolCall, msg: []const u8) prv.adapter.ToolResult {
-    return .{ .call_id = call.id, .name = call.name, .content = msg, .is_error = true };
+fn errResult(_: r.sdk.ToolCall, msg: []const u8) r.sdk.ToolOutput {
+    return .{ .content = msg, .is_error = true };
 }
 
 const Position = struct {
@@ -699,7 +698,7 @@ fn intField(value: *const std.json.Value, key: []const u8) ?i64 {
     };
 }
 
-fn getWordColumnOffset(alloc: std.mem.Allocator, exec: *prv.exec.CmdPool, path: []const u8, line: u32, word: []const u8) !u32 {
+fn getWordColumnOffset(alloc: std.mem.Allocator, exec: *r.exec.CmdPool, path: []const u8, line: u32, word: []const u8) !u32 {
     const quoted_path = try shellQuote(alloc, path);
     defer alloc.free(quoted_path);
     const quoted_word = try shellQuote(alloc, word);
@@ -761,7 +760,7 @@ test "word offset" {
 
     var en = std.process.Environ.Map.init(std.testing.allocator);
     defer en.deinit();
-    var pool = prv.exec.CmdPool.init(std.testing.allocator, std.testing.io, &en);
+    var pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &en);
     defer pool.deinit();
 
     try std.testing.expectEqual(@as(u32, 7), try getWordColumnOffset(std.testing.allocator, &pool, path, 2, "needle"));

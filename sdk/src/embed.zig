@@ -89,6 +89,7 @@ fn embedManyInner(
                     .provider_options = opts.provider_options,
                     .headers = opts.headers,
                     .timeout_ms = opts.timeout_ms,
+                    .cancellation = opts.cancellation,
                 },
                 .client = opts.client,
                 .max_retries = opts.max_retries,

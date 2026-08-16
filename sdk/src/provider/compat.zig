@@ -81,7 +81,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, params.timeout_ms);
+        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, requestOptions(params));
         defer alloc.free(response);
         return openai.parseChatResponse(alloc, response);
     }
@@ -96,15 +96,12 @@ pub const Chat = struct {
         sctx: *model.StreamContext,
     ) anyerror!*model.GenerateResult {
         const self: *Chat = @ptrCast(@alignCast(ctx));
-        var arena = std.heap.ArenaAllocator.init(alloc);
-        defer arena.deinit();
-        const stream_alloc = arena.allocator();
-
-        const body = try jsonx.buildChatRequest(stream_alloc, self.model_id, params, true);
-        const headers = try self.authHeaders(stream_alloc, params.headers);
-        const url = try std.fmt.allocPrint(stream_alloc, "{s}/chat/completions", .{self.base_url});
-        var live = LiveStream{ .alloc = stream_alloc, .sctx = sctx };
-        const sse_text = try jsonx.postSseWithRetry(stream_alloc, io, client, url, body, headers, max_retries, params.timeout_ms, &live, emitLiveEvent);
+        const body = try jsonx.buildChatRequest(alloc, self.model_id, params, true);
+        const headers = try self.authHeaders(alloc, params.headers);
+        const url = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{self.base_url});
+        const request_options = requestOptions(params);
+        var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
+        const sse_text = try jsonx.postSseWithRetry(alloc, io, client, url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
         return openai.parseChatStream(alloc, sse_text, &final_ctx);
     }
@@ -134,14 +131,24 @@ pub const Chat = struct {
 
         const headers = try self.authHeaders(alloc, params.headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/embeddings", .{self.base_url});
-        const response = try jsonx.postWithRetry(alloc, io, client, url, w.written(), headers, max_retries, params.timeout_ms);
+        const response = try jsonx.postWithRetry(alloc, io, client, url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation });
         return openai.parseEmbedResponse(alloc, response);
     }
 };
 
+fn requestOptions(params: model.GenerateParams) jsonx.RequestOptions {
+    return .{
+        .timeout_ms = params.timeout_ms,
+        .cancellation = params.cancellation,
+        .on_provider_error = params.on_provider_error,
+        .on_provider_error_ctx = params.on_provider_error_ctx,
+    };
+}
+
 const LiveStream = struct {
     alloc: std.mem.Allocator,
     sctx: *model.StreamContext,
+    options: jsonx.RequestOptions,
 };
 
 fn emitLive(ctx: ?*anyopaque, chunk: types.StreamChunk) void {
@@ -156,6 +163,7 @@ fn emitFinalTool(ctx: ?*anyopaque, chunk: types.StreamChunk) void {
 
 fn emitLiveEvent(ctx: ?*anyopaque, data: []const u8) !void {
     const live: *LiveStream = @ptrCast(@alignCast(ctx.?));
+    if (jsonx.reportStreamError(live.alloc, live.options, data)) |err| return err;
     const event = try std.fmt.allocPrint(live.alloc, "data: {s}\n", .{data});
     var event_ctx = model.StreamContext{ .emit = emitLive, .emit_ctx = live.sctx };
     _ = try openai.parseChatStream(live.alloc, event, &event_ctx);

@@ -1,6 +1,5 @@
 const std = @import("std");
 const r = @import("root.zig");
-const prv = @import("provider");
 const text_utils = r.tui.text_utils;
 const log = std.log.scoped(.app);
 
@@ -9,6 +8,8 @@ pub const PROMPT_HISTORY_FILENAME = "prompt_history.json";
 pub const MAX_HISTORY = 32;
 pub const CONTEXT_LIMIT = 124 * 1024;
 const COMMAND_COMPLETION_ROWS = 8;
+
+pub const ChatRole = enum { system, user, agent };
 
 const builtin_command_completions: []const []const u8 = &.{
     ":clear",
@@ -95,24 +96,24 @@ pub const InputMode = union(enum) {
 };
 
 pub const QueuedMessage = struct {
-    agent_id: prv.Swarm.AgentId,
+    agent_id: r.AgentId,
     entry: ?ChatEntry = null,
-    parts: []const prv.adapter.ContentPart,
+    parts: []const r.sdk.Part,
 };
 
 pub const MessageQueue = struct {
     items: std.ArrayList(QueuedMessage) = .empty,
 
-    fn sameAgent(a: prv.Swarm.AgentId, b: prv.Swarm.AgentId) bool {
+    fn sameAgent(a: r.AgentId, b: r.AgentId) bool {
         return a.index == b.index and a.generation == b.generation;
     }
 
     pub fn push(
         self: *MessageQueue,
         alloc: std.mem.Allocator,
-        agent_id: prv.Swarm.AgentId,
+        agent_id: r.AgentId,
         entry: ?ChatEntry,
-        parts: []const prv.adapter.ContentPart,
+        parts: []const r.sdk.Part,
     ) !void {
         try self.items.append(alloc, .{
             .agent_id = agent_id,
@@ -121,7 +122,7 @@ pub const MessageQueue = struct {
         });
     }
 
-    pub fn popFor(self: *MessageQueue, agent_id: prv.Swarm.AgentId) ?QueuedMessage {
+    pub fn popFor(self: *MessageQueue, agent_id: r.AgentId) ?QueuedMessage {
         for (self.items.items, 0..) |item, i| {
             if (sameAgent(item.agent_id, agent_id)) {
                 return self.items.orderedRemove(i);
@@ -200,11 +201,11 @@ pub const Notifications = struct {
     };
 };
 
-const Locked = r.prv.agent.Locked;
+const Locked = r.agent_state.Locked;
 
 const ToolStatusEntry = struct {
     lines: std.ArrayList(r.tui.Line) = .empty,
-    child_id: ?prv.Swarm.AgentId = null,
+    child_id: ?r.AgentId = null,
     is_error: ?bool = null,
 };
 
@@ -219,15 +220,15 @@ const ToolStatusAgent = struct {
 };
 
 const ToolStatusStore = struct {
-    agents: [prv.Swarm.MAX_AGENTS]ToolStatusAgent = [_]ToolStatusAgent{.{}} ** prv.Swarm.MAX_AGENTS,
+    agents: [r.agent_registry.max_agents]ToolStatusAgent = [_]ToolStatusAgent{.{}} ** r.agent_registry.max_agents,
 
-    fn setResult(self: *ToolStatusStore, alloc: std.mem.Allocator, agent_id: prv.Swarm.AgentId, result: prv.adapter.ToolResult) !void {
+    fn setResult(self: *ToolStatusStore, alloc: std.mem.Allocator, agent_id: r.AgentId, result: r.sdk.ToolResult) !void {
         const agent = &self.agents[agent_id.index];
         if (agent.generation != agent_id.generation) agent.* = .{ .generation = agent_id.generation };
 
-        const entry = try agent.entries.getOrPut(alloc, result.call_id);
+        const entry = try agent.entries.getOrPut(alloc, result.tool_call_id);
         if (!entry.found_existing) {
-            entry.key_ptr.* = try alloc.dupe(u8, result.call_id);
+            entry.key_ptr.* = try alloc.dupe(u8, result.tool_call_id);
             entry.value_ptr.* = .{};
         }
         entry.value_ptr.is_error = result.is_error;
@@ -237,11 +238,11 @@ const ToolStatusStore = struct {
 pub const App = struct {
     gpa: std.mem.Allocator,
     /// app arena,
-    arena_app: prv.ThreadSafeArena,
+    arena_app: std.heap.ArenaAllocator,
     /// session arena,
-    arena_session: prv.ThreadSafeArena,
+    arena_session: std.heap.ArenaAllocator,
     /// streaming arena
-    arena_streaming_preview: prv.ThreadSafeArena,
+    arena_streaming_preview: std.heap.ArenaAllocator,
     /// frame render arena
     arena_frame: std.heap.ArenaAllocator,
     mu: std.Io.Mutex = .init,
@@ -251,14 +252,14 @@ pub const App = struct {
     input_scroll_offset: u16 = 0,
     // ---------------
     // async interface
-    permission_queue: Locked(std.ArrayList(*r.prv.Swarm.PermissionReq)),
-    broadcast_queue: Locked(std.ArrayList(r.prv.Swarm.BroadcastEntry)),
+    permission_queue: Locked(std.ArrayList(*r.permissions.Request)),
     tool_status_entries: Locked(ToolStatusStore) = .{},
     //-----------------
-    active_permission: ?*r.prv.Swarm.PermissionReq = null,
-    swarm: *prv.Swarm = undefined,
-    config: prv.config.BlitzdenkCfg = .{},
-    main_agent_id: ?prv.Swarm.AgentId = null,
+    active_permission: ?*r.permissions.Request = null,
+    registry: *r.agent_registry.Registry = undefined,
+    exec_pool: *r.exec.CmdPool = undefined,
+    config: r.config.BlitzdenkCfg = .{},
+    main_agent_id: ?r.AgentId = null,
     running: bool = false,
     frame_count: usize = 0,
     scroll_offset: usize = 0,
@@ -276,8 +277,11 @@ pub const App = struct {
     history: std.ArrayList(PromptEntry) = .empty,
     history_cursor: usize = 0,
     chat_entries: std.ArrayList(ChatEntry) = .empty,
-    broadcast_cursor: u64 = 0,
     streaming_entry: ?ChatEntry = null,
+    sdk_preview_text: std.ArrayList(u8) = .empty,
+    sdk_preview_reasoning: std.ArrayList(u8) = .empty,
+    sdk_preview_calls: std.ArrayList(ChatPart.ToolCallEntry) = .empty,
+    sdk_usage: r.sdk.Usage = .{},
     compaction_indicator_active: bool = false,
     compaction_completion_seen_count: usize = 0,
     current_plan_file: ?[]const u8 = null,
@@ -309,9 +313,9 @@ pub const App = struct {
 
         return App{
             .gpa = gpa,
-            .arena_app = .init(gpa, io),
-            .arena_session = .init(gpa, io),
-            .arena_streaming_preview = .init(gpa, io),
+            .arena_app = .init(gpa),
+            .arena_session = .init(gpa),
+            .arena_streaming_preview = .init(gpa),
             .arena_frame = .init(gpa),
             .context_factory = agent_factory,
             .io = io,
@@ -324,21 +328,18 @@ pub const App = struct {
             .permission_queue = .{
                 .value = try .initCapacity(gpa, 16),
             },
-            .broadcast_queue = .{
-                .value = try .initCapacity(gpa, 255),
-            },
         };
     }
 
     pub fn deinit(self: *App) void {
         // cleanup hanging processes
         if (self.main_agent_id) |id| blk: {
-            const a = self.swarm.getAgent(id) orelse break :blk;
+            const a = self.registry.get(id) orelse break :blk;
             // Agent is being torn down — no tools should be in flight, but
             // go through the lock anyway for consistency.
-            const g = a.bg_tasks.tryLock(self.swarm.pool.io) orelse break :blk;
+            const g = a.bg_tasks.tryLock(self.io) orelse break :blk;
             defer g.unlock();
-            for (g.ptr.list.items) |e| self.swarm.exec.cancel(e.handle);
+            for (g.ptr.list.items) |e| self.exec_pool.cancel(e.handle);
         }
 
         self.lsp_manager.deinit();
@@ -368,6 +369,30 @@ pub const App = struct {
         self.returnToText();
     }
 
+    pub fn cancelAgentPermissions(self: *App, id: r.AgentId) void {
+        if (self.active_permission) |req| {
+            if (req.agent_id.pack() == id.pack()) {
+                req.state = .denied;
+                req.event.set(self.io);
+                self.active_permission = null;
+            }
+        }
+
+        const g = self.permission_queue.lock(self.io);
+        defer g.unlock();
+        var index: usize = 0;
+        while (index < g.ptr.items.len) {
+            const req = g.ptr.items[index];
+            if (req.agent_id.pack() != id.pack()) {
+                index += 1;
+                continue;
+            }
+            req.state = .denied;
+            req.event.set(self.io);
+            _ = g.ptr.swapRemove(index);
+        }
+    }
+
     /// Session-scoped allocator. Wiped on reset.
     pub fn sessionAlloc(self: *App) std.mem.Allocator {
         return self.arena_session.allocator();
@@ -376,11 +401,11 @@ pub const App = struct {
     // TODO: refactor
     pub fn setToolStatus(
         self: *App,
-        agent_id: prv.Swarm.AgentId,
+        agent_id: r.AgentId,
         call_id: []const u8,
         lines: []const ToolStatusLineInput,
     ) !void {
-        if (agent_id.index >= prv.Swarm.MAX_AGENTS) return error.InvalidAgent;
+        if (agent_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
         const g = self.tool_status_entries.lock(self.io);
         defer g.unlock();
 
@@ -406,8 +431,8 @@ pub const App = struct {
         }
     }
 
-    pub fn setToolChild(self: *App, agent_id: prv.Swarm.AgentId, call_id: []const u8, child_id: prv.Swarm.AgentId) !void {
-        if (agent_id.index >= prv.Swarm.MAX_AGENTS or child_id.index >= prv.Swarm.MAX_AGENTS) return error.InvalidAgent;
+    pub fn setToolChild(self: *App, agent_id: r.AgentId, call_id: []const u8, child_id: r.AgentId) !void {
+        if (agent_id.index >= r.agent_registry.max_agents or child_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
         const g = self.tool_status_entries.lock(self.io);
         defer g.unlock();
 
@@ -425,8 +450,8 @@ pub const App = struct {
         res.value_ptr.child_id = child_id;
     }
 
-    pub fn setToolResult(self: *App, agent_id: prv.Swarm.AgentId, result: prv.adapter.ToolResult) !void {
-        if (agent_id.index >= prv.Swarm.MAX_AGENTS) return error.InvalidAgent;
+    pub fn setToolResult(self: *App, agent_id: r.AgentId, result: r.sdk.ToolResult) !void {
+        if (agent_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
         const g = self.tool_status_entries.lock(self.io);
         defer g.unlock();
         try g.ptr.setResult(self.sessionAlloc(), agent_id, result);
@@ -440,17 +465,23 @@ pub const App = struct {
     pub fn reset(self: *App) void {
         self.dropStreamingPreview();
         self.cancelPermissions();
-        self.swarm.cancelAll();
+        self.registry.cancelAll();
+        self.exec_pool.cancelAll();
 
         self.main_agent_id = null;
+        self.running = false;
         self.frame_count = 0;
         self.scroll_offset = 0;
         self.input_mode = .text;
         self.input_cursor = 0;
         self.streaming_entry = null;
+        self.sdk_preview_text = .empty;
+        self.sdk_preview_reasoning = .empty;
+        self.sdk_preview_calls = .empty;
+        self.sdk_usage = .{};
         self.compaction_indicator_active = false;
         self.compaction_completion_seen_count = 0;
-        self.swarm.reset();
+        self.registry.reset();
         self.screenshot_buf = null;
         self.dirty = true;
         _ = self.arena_session.reset(.free_all);
@@ -469,36 +500,18 @@ pub const App = struct {
         // cleanup
         self.tool_status_entries = .{};
         self.permission_queue.value.clearRetainingCapacity();
-        self.broadcast_queue.value.clearRetainingCapacity();
     }
 
     pub fn tick(self: *App) !void {
-
-        // --------------------------------------------------
-        // drain broadcoast
-        var saw_final_agent_broadcast = false;
-        {
-            const g = self.broadcast_queue.lock(self.io);
-            defer g.unlock();
-
-            for (g.ptr.items) |en| {
-                if (en.role == .agent) {
-                    self.dropStreamingPreview();
-                    saw_final_agent_broadcast = true;
-                }
-
-                const alloc = self.sessionAlloc();
-                if (renderableParts(alloc, en.agent_id, en.parts, en.plain_text)) |parts| {
-                    try self.appendChatEntry(alloc, .{
-                        .role = en.role,
-                        .parts = parts,
-                    });
-                }
-            }
-
-            g.ptr.clearRetainingCapacity();
+        for (&self.registry.slots, 0..) |*slot, index| {
+            const state = slot.state.load(.acquire);
+            if (state == .free or state == .reserved) continue;
+            const id = r.AgentId{ .index = @intCast(index), .generation = slot.generation };
+            var drain_context = RegistryDrainContext{ .app = self, .id = id };
+            _ = self.registry.drain(id, 64, &drain_context, applyRegistryEvent);
+            _ = self.registry.reap(id);
         }
-        if (!saw_final_agent_broadcast) self.syncStreamingPreview();
+        self.running = self.registry.countActive() > 0;
 
         // --------------------------------------------------
         // pop permission
@@ -541,8 +554,8 @@ pub const App = struct {
     pub fn reloadMcpTools(self: *App) !void {
         const alloc = self.sessionAlloc();
 
-        self.lua_vm.vm_mu.lockUncancelable(self.swarm.pool.io);
-        defer self.lua_vm.vm_mu.unlock(self.swarm.pool.io);
+        self.lua_vm.vm_mu.lockUncancelable(self.io);
+        defer self.lua_vm.vm_mu.unlock(self.io);
 
         const old_tools = self.mcp_manager.registeredTools();
         for (old_tools) |entry| self.context_factory.remove(entry.tool.def.name);
@@ -561,8 +574,8 @@ pub const App = struct {
     pub fn reloadLspTools(self: *App) !void {
         const alloc = self.sessionAlloc();
 
-        self.lua_vm.vm_mu.lockUncancelable(self.swarm.pool.io);
-        defer self.lua_vm.vm_mu.unlock(self.swarm.pool.io);
+        self.lua_vm.vm_mu.lockUncancelable(self.io);
+        defer self.lua_vm.vm_mu.unlock(self.io);
 
         const old_tools = self.lsp_manager.registeredTools();
         for (old_tools) |entry| self.context_factory.remove(entry.tool.def.name);
@@ -580,8 +593,8 @@ pub const App = struct {
     pub fn reloadLuaTools(self: *App) !void {
         const alloc = self.sessionAlloc();
 
-        self.lua_vm.vm_mu.lockUncancelable(self.swarm.pool.io);
-        defer self.lua_vm.vm_mu.unlock(self.swarm.pool.io);
+        self.lua_vm.vm_mu.lockUncancelable(self.io);
+        defer self.lua_vm.vm_mu.unlock(self.io);
 
         const tools = try self.lua_vm.getRegisteredTools(alloc);
         for (tools) |tool| try self.context_factory.add(alloc, tool, .all);
@@ -591,10 +604,10 @@ pub const App = struct {
     }
 
     fn refreshLiveAgentTools(self: *App) !void {
-        for (&self.swarm.slots) |*slot| {
+        for (&self.registry.slots, 0..) |*slot, index| {
             const state = slot.state.load(.acquire);
             if (state == .free or state == .reserved) continue;
-            try self.context_factory.refreshAgentTools(&slot.agent);
+            try self.context_factory.refreshAgentTools(&slot.agent.?, self.toolBase(.{ .index = @intCast(index), .generation = slot.generation }));
         }
     }
 
@@ -610,27 +623,50 @@ pub const App = struct {
         }) catch return;
     }
 
-    pub fn mainAgent(self: *const App) ?*prv.agent.Agent {
+    pub fn mainAgent(self: *const App) ?*r.agent.Agent {
         const id = self.main_agent_id orelse return null;
-        return self.swarm.getAgent(id);
+        return self.registry.get(id);
     }
 
-    pub fn configureAgent(self: *const App, agent: *prv.agent.Agent) !void {
-        if (agent.cwd.len == 0) agent.cwd = self.cwd;
-        try self.context_factory.configureAgent(agent);
+    pub fn configureAgent(self: *const App, id: r.AgentId, agent: *r.agent.Agent) !void {
+        try self.context_factory.configureAgent(agent, self.toolBase(id));
         agent.context_limit = self.default_context_limit;
+        agent.reminder_hook = buildReminderOpaque;
+        agent.reminder_hook_ctx = @ptrCast(@constCast(self));
+    }
+
+    pub fn toolBase(self: *const App, id: r.AgentId) r.tools.context.BaseContext {
+        const agent = self.registry.get(id).?;
+        return .{
+            .registry = self.registry,
+            .exec_pool = self.exec_pool,
+            .self_id = id,
+            .cwd = agent.cwd,
+            .permissions = .{ .ctx = @ptrCast(@constCast(self)), .request = requestPermissionOpaque },
+            .display = .{ .ctx = @ptrCast(@constCast(self)) },
+        };
+    }
+
+    fn requestPermissionOpaque(ctx: ?*anyopaque, request: *r.permissions.Request) void {
+        const self: *App = @ptrCast(@alignCast(ctx.?));
+        const queue = self.permission_queue.lock(self.io);
+        defer queue.unlock();
+        queue.ptr.append(self.gpa, request) catch {
+            request.state = .denied;
+            request.event.set(self.io);
+        };
     }
 
     pub fn contextPercent(self: *const App) f32 {
         const id = self.main_agent_id orelse return 0;
-        const slot = &self.swarm.slots[id.index];
+        const slot = &self.registry.slots[id.index];
         if (slot.generation != id.generation) return 0;
-        return slot.agent.getContextPercent();
+        return slot.agent.?.contextPercent();
     }
 
     pub fn isMainAgentCompacting(self: *const App) bool {
         const agent = self.mainAgent() orelse return false;
-        return agent.state == .compacting;
+        return agent.status == .compacting;
     }
 
     pub fn syncCompactionIndicator(self: *App) void {
@@ -638,12 +674,12 @@ pub const App = struct {
             self.compaction_indicator_active = false;
             return;
         };
-        const agent = self.swarm.getAgent(agent_id) orelse {
+        const agent = self.registry.get(agent_id) orelse {
             self.compaction_indicator_active = false;
             return;
         };
 
-        if (agent.state == .compacting) {
+        if (agent.status == .compacting) {
             if (!self.compaction_indicator_active) {
                 self.compaction_indicator_active = true;
                 self.event_bus.emit(self, .{ .compaction_started = .{ .id = agent_id } }) catch {};
@@ -663,12 +699,9 @@ pub const App = struct {
         self.dirty = true;
     }
 
-    pub fn genSystemRemindersOpaque(ptr: *anyopaque, agent: *prv.agent.Agent) void {
-        const self: *App = @ptrCast(@alignCast(ptr));
-
-        self.injection_hooks.build(self, agent) catch |err| {
-            log.err("failed reminder injection {any}", .{err});
-        };
+    fn buildReminderOpaque(ptr: ?*anyopaque, agent: *r.agent.Agent) anyerror!?[]const u8 {
+        const self: *App = @ptrCast(@alignCast(ptr.?));
+        return try self.injection_hooks.build(self, agent);
     }
 
     pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
@@ -790,11 +823,9 @@ pub const App = struct {
         }
     }
 
-    /// Set the swarm-side state for a permission. Tools poll this state to
-    /// decide whether to proceed. Clears `pending_perm` if it matches.
-    pub fn resolveActivePermission(self: *App, state: prv.Swarm.PermissionState) void {
+    pub fn resolveActivePermission(self: *App, state: r.permissions.State) void {
         if (self.active_permission) |perm| {
-            if (self.swarm.getSlotState(perm.agent_id) == .active) {
+            if (self.registry.state(perm.agent_id) == .active) {
                 perm.state = state;
                 perm.event.set(self.io);
             }
@@ -847,7 +878,7 @@ pub const App = struct {
     /// temp file and embeds its `file://` URL (masked as `[Image]`) instead of
     /// inserting the raw paste text. Reports the outcome with a notification.
     pub fn pasteImage(self: *App) void {
-        const img = r.clipboard.readImage(self.sessionAlloc(), &self.swarm.exec) catch null;
+        const img = r.clipboard.readImage(self.sessionAlloc(), self.exec_pool) catch null;
         if (img) |image| {
             defer self.sessionAlloc().free(image.data);
             const url = r.clipboard.saveImage(self.io, self.sessionAlloc(), image.data, image.ext) catch null;
@@ -866,7 +897,7 @@ pub const App = struct {
     /// Terminal paste event handler. Pastes the clipboard image if one is
     /// present, otherwise appends the raw paste `text`.
     pub fn pasteImageOrText(self: *App, text: []const u8) void {
-        const img = r.clipboard.readImage(self.sessionAlloc(), &self.swarm.exec) catch null;
+        const img = r.clipboard.readImage(self.sessionAlloc(), self.exec_pool) catch null;
         if (img) |image| {
             defer self.sessionAlloc().free(image.data);
             if (r.clipboard.saveImage(self.io, self.sessionAlloc(), image.data, image.ext) catch null) |u| {
@@ -887,7 +918,7 @@ pub const App = struct {
         const dupe = allocator.dupe(u8, text) catch return;
         self.history.append(allocator, .{
             .text = dupe,
-            .timestamp = std.Io.Clock.Timestamp.now(self.swarm.pool.io, .real).raw.nanoseconds,
+            .timestamp = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds,
         }) catch {
             allocator.free(dupe);
             return;
@@ -925,7 +956,7 @@ pub const App = struct {
     pub fn loadHistory(self: *App, allocator: std.mem.Allocator, config_dir_path: []const u8) void {
         const SaveFormat = struct { prompts: []const PromptEntry };
 
-        const io = self.swarm.pool.io;
+        const io = self.io;
         const abs_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ config_dir_path, PROMPT_HISTORY_FILENAME }) catch return;
         defer allocator.free(abs_path);
 
@@ -958,7 +989,7 @@ pub const App = struct {
     pub fn saveHistory(self: *const App, config_dir_path: []const u8) void {
         const SaveFormat = struct { prompts: []const PromptEntry };
 
-        const io = self.swarm.pool.io;
+        const io = self.io;
         var buf: [512]u8 = undefined;
         const abs_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ config_dir_path, PROMPT_HISTORY_FILENAME }) catch return;
 
@@ -977,21 +1008,16 @@ pub const App = struct {
         file_writer.interface.flush() catch return;
     }
 
-    pub fn popQueuedMessage(self: *App, agent_id: prv.Swarm.AgentId, alloc: std.mem.Allocator) ?[]const prv.adapter.ContentPart {
+    pub fn popQueuedMessage(self: *App, agent_id: r.AgentId, alloc: std.mem.Allocator) ?[]const r.sdk.Part {
         const queued = self.queued.popFor(agent_id) orelse return null;
 
         if (queued.entry) |entry| self.appendChatEntry(self.sessionAlloc(), entry) catch {};
 
-        const parts = alloc.alloc(prv.adapter.ContentPart, queued.parts.len) catch return null;
-        for (queued.parts, 0..) |*part, i| {
-            parts[i] = part.clone(alloc) catch return null;
-        }
-
-        self.swarm.recordBroadcast(agent_id, .user, parts);
-        return parts;
+        const messages = r.agent_run.cloneMessages(alloc, &.{.{ .role = .user, .content = queued.parts }}) catch return null;
+        return messages[0].content;
     }
 
-    pub fn popQueuedMessageOpaque(ptr: *anyopaque, agent_id: prv.Swarm.AgentId, alloc: std.mem.Allocator) ?[]const prv.adapter.ContentPart {
+    pub fn popQueuedMessageOpaque(ptr: *anyopaque, agent_id: r.AgentId, alloc: std.mem.Allocator) ?[]const r.sdk.Part {
         const self: *App = @ptrCast(@alignCast(ptr));
         return self.popQueuedMessage(agent_id, alloc);
     }
@@ -1001,8 +1027,8 @@ pub const App = struct {
     /// Returns null if no renderable parts remain.
     fn renderableParts(
         alloc: std.mem.Allocator,
-        agent_id: prv.Swarm.AgentId,
-        parts: []const prv.adapter.ContentPart,
+        agent_id: r.AgentId,
+        parts: []const r.sdk.Part,
         plain_text: bool,
     ) ?[]ChatPart {
         var out: std.ArrayList(ChatPart) = .empty;
@@ -1014,7 +1040,7 @@ pub const App = struct {
                     const dup = alloc.dupe(u8, trimmed) catch continue;
                     out.append(alloc, if (plain_text) .{ .plain_text = dup } else .{ .message = dup }) catch continue;
                 },
-                .thinking => |th| {
+                .reasoning => |th| {
                     const trimmed = std.mem.trim(u8, th.text, " \t\r\n");
                     if (trimmed.len == 0) continue;
                     const dup = alloc.dupe(u8, trimmed) catch continue;
@@ -1036,35 +1062,101 @@ pub const App = struct {
         return out.toOwnedSlice(alloc) catch null;
     }
 
-    /// Mirror the main agent's in-progress streaming message into a preview
-    /// chat entry. Called each frame so text accumulates visibly. The final
-    /// broadcast entry (pushed by the agent on stream finish) supersedes this
-    /// preview in drainBroadcast.
-    pub fn syncStreamingPreview(self: *App) void {
-        const main_id = self.main_agent_id orelse return;
-        const slot = &self.swarm.slots[main_id.index];
-        if (slot.state.load(.acquire) != .active) return;
-        const agent = &slot.agent;
-        const msg_idx = agent.streamingMessageIndex() orelse {
-            self.dropStreamingPreview();
-            return;
-        };
-        const msg = agent.chat.messages.items[msg_idx];
-        _ = self.arena_streaming_preview.reset(.free_all);
-        self.streaming_entry = null;
-        const alloc = self.arena_streaming_preview.allocator();
-        const slice = renderableParts(alloc, main_id, msg.parts, false) orelse {
-            self.dropStreamingPreview();
-            return;
-        };
-        sortChatParts(slice);
-
-        self.streaming_entry = .{ .role = .agent, .parts = slice };
-    }
-
     pub fn dropStreamingPreview(self: *App) void {
         self.streaming_entry = null;
         _ = self.arena_streaming_preview.reset(.free_all);
+    }
+
+    pub fn applyRunEvent(self: *App, agent_id: r.AgentId, event: r.agent_run.Event) !void {
+        const alloc = self.sessionAlloc();
+        switch (event) {
+            .text => |text| {
+                try self.sdk_preview_text.appendSlice(alloc, text);
+                try self.refreshSdkPreview(agent_id);
+            },
+            .reasoning => |reasoning| {
+                try self.sdk_preview_reasoning.appendSlice(alloc, reasoning);
+                try self.refreshSdkPreview(agent_id);
+            },
+            .tool => |chunk| {
+                if (chunk.type != .tool_call) return;
+                try self.sdk_preview_calls.append(alloc, .{
+                    .agent_id = agent_id,
+                    .call_id = try alloc.dupe(u8, chunk.tool_call_id),
+                    .tool_name = try alloc.dupe(u8, chunk.tool_name),
+                });
+                try self.refreshSdkPreview(agent_id);
+            },
+            .step => |step| {
+                self.sdk_usage.add(step.usage);
+                const status = self.tool_status_entries.lock(self.io);
+                defer status.unlock();
+                for (step.tool_results) |result| try status.ptr.setResult(alloc, agent_id, .{
+                    .tool_call_id = result.tool_call_id,
+                    .tool_name = result.tool_name,
+                    .output = result.output,
+                    .is_error = result.is_error,
+                });
+            },
+            .provider_error => |provider_error| {
+                if (provider_error.will_retry) return;
+                self.dropStreamingPreview();
+                const body = std.mem.trim(u8, provider_error.response_body, " \t\r\n");
+                const message = if (provider_error.status_code != 0)
+                    try std.fmt.allocPrint(alloc, "Provider error (HTTP {d})\n{s}", .{ provider_error.status_code, body })
+                else
+                    try std.fmt.allocPrint(alloc, "Provider error\n{s}", .{body});
+                const parts = try alloc.alloc(ChatPart, 1);
+                parts[0] = .{ .plain_text = message };
+                try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
+            },
+            .complete => |result| {
+                try self.event_bus.emit(self, .{ .agent_complete = agent_id });
+                self.dropStreamingPreview();
+                self.sdk_preview_text.clearRetainingCapacity();
+                self.sdk_preview_reasoning.clearRetainingCapacity();
+                self.sdk_preview_calls.clearRetainingCapacity();
+                var index = result.messages.len;
+                while (index > 0) {
+                    index -= 1;
+                    const message = result.messages[index];
+                    if (message.role != .assistant) continue;
+                    const parts = renderSdkParts(alloc, agent_id, message.parts(), false) orelse return;
+                    try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
+                    return;
+                }
+            },
+            .failed => |err| {
+                try self.event_bus.emit(self, .{ .agent_failed = .{ .id = agent_id, .err = @errorName(err) } });
+                self.dropStreamingPreview();
+                const parts = try alloc.alloc(ChatPart, 1);
+                parts[0] = .{ .plain_text = try std.fmt.allocPrint(alloc, "Agent failed: {s}", .{@errorName(err)}) };
+                try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
+            },
+        }
+        self.dirty = true;
+    }
+
+    fn refreshSdkPreview(self: *App, agent_id: r.AgentId) !void {
+        _ = self.arena_streaming_preview.reset(.free_all);
+        const alloc = self.arena_streaming_preview.allocator();
+        var parts: std.ArrayList(ChatPart) = .empty;
+        const reasoning = std.mem.trim(u8, self.sdk_preview_reasoning.items, " \t\r\n");
+        if (reasoning.len > 0) try parts.append(alloc, .{ .thinking = try alloc.dupe(u8, reasoning) });
+        const text = std.mem.trim(u8, self.sdk_preview_text.items, " \t\r\n");
+        if (text.len > 0) try parts.append(alloc, .{ .message = try alloc.dupe(u8, text) });
+        for (self.sdk_preview_calls.items) |call| try parts.append(alloc, .{ .tool_call = .{
+            .agent_id = agent_id,
+            .call_id = try alloc.dupe(u8, call.call_id),
+            .tool_name = try alloc.dupe(u8, call.tool_name),
+        } });
+        if (parts.items.len == 0) {
+            self.streaming_entry = null;
+            return;
+        }
+        const owned = try parts.toOwnedSlice(alloc);
+        sortChatParts(owned);
+        self.streaming_entry = .{ .role = .agent, .parts = owned };
     }
 
     pub fn appendChatEntry(self: *App, alloc: std.mem.Allocator, entry: ChatEntry) !void {
@@ -1102,7 +1194,7 @@ pub const App = struct {
 
     pub fn persist_permission_to_history(
         self: *App,
-        perm: *const r.prv.Swarm.PermissionReq,
+        perm: *const r.permissions.Request,
     ) !void {
         switch (perm.payload) {
             .diff => |diff| {
@@ -1136,7 +1228,7 @@ fn pushDiffLine(out: *std.ArrayList(r.tui.DiffLine), alloc: std.mem.Allocator, l
     }) catch return;
 }
 
-pub fn emitDiffLines(out: *std.ArrayList(r.tui.DiffLine), snap: prv.Swarm.ToolDiff, alloc: std.mem.Allocator) void {
+pub fn emitDiffLines(out: *std.ArrayList(r.tui.DiffLine), snap: r.permissions.ToolDiff, alloc: std.mem.Allocator) void {
     if (snap.before) |before| {
         const old_lines = splitLinesAlloc(before, alloc) orelse return;
         const new_lines = splitLinesAlloc(snap.after, alloc) orelse return;
@@ -1239,8 +1331,18 @@ fn emitAllOps(out: *std.ArrayList(r.tui.DiffLine), ops: []const DiffOp, base_lin
     }
 }
 
+const RegistryDrainContext = struct {
+    app: *App,
+    id: r.AgentId,
+};
+
+fn applyRegistryEvent(ctx: ?*anyopaque, event: r.agent_run.Event) void {
+    const value: *RegistryDrainContext = @ptrCast(@alignCast(ctx.?));
+    value.app.applyRunEvent(value.id, event) catch {};
+}
+
 pub const ChatEntry = struct {
-    role: prv.adapter.Role,
+    role: ChatRole,
     parts: []ChatPart,
 
     pub fn free(self: *ChatEntry, alloc: std.mem.Allocator) void {
@@ -1266,7 +1368,7 @@ pub const ChatEntry = struct {
         alloc.free(self.parts);
     }
 
-    pub fn userMessageSimple(alloc: std.mem.Allocator, role: prv.adapter.Role, msg: []const u8) !ChatEntry {
+    pub fn userMessageSimple(alloc: std.mem.Allocator, role: ChatRole, msg: []const u8) !ChatEntry {
         var parts = try alloc.alloc(ChatPart, 1);
         parts[0] = .{ .message = msg };
         return .{ .role = role, .parts = parts };
@@ -1287,7 +1389,7 @@ pub const ChatPart = union(enum) {
     };
 
     pub const ToolCallEntry = struct {
-        agent_id: prv.Swarm.AgentId,
+        agent_id: r.AgentId,
         call_id: []const u8,
         tool_name: []const u8,
     };
@@ -1314,6 +1416,36 @@ fn sortChatParts(parts: []ChatPart) void {
             return partRank(a) < partRank(b);
         }
     }.lessThan);
+}
+
+fn renderSdkParts(
+    alloc: std.mem.Allocator,
+    agent_id: r.AgentId,
+    parts: []const r.sdk.Part,
+    plain_text: bool,
+) ?[]ChatPart {
+    var out: std.ArrayList(ChatPart) = .empty;
+    for (parts) |part| switch (part) {
+        .text => |text| {
+            const trimmed = std.mem.trim(u8, text, " \t\r\n");
+            if (trimmed.len == 0) continue;
+            const owned = alloc.dupe(u8, trimmed) catch continue;
+            out.append(alloc, if (plain_text) .{ .plain_text = owned } else .{ .message = owned }) catch continue;
+        },
+        .reasoning => |reasoning| {
+            const trimmed = std.mem.trim(u8, reasoning.text, " \t\r\n");
+            if (trimmed.len == 0) continue;
+            out.append(alloc, .{ .thinking = alloc.dupe(u8, trimmed) catch continue }) catch continue;
+        },
+        .tool_call => |call| out.append(alloc, .{ .tool_call = .{
+            .agent_id = agent_id,
+            .call_id = alloc.dupe(u8, call.id) catch continue,
+            .tool_name = alloc.dupe(u8, call.name) catch continue,
+        } }) catch continue,
+        else => {},
+    };
+    if (out.items.len == 0) return null;
+    return out.toOwnedSlice(alloc) catch null;
 }
 
 fn splitLinesAlloc(text: []const u8, alloc: std.mem.Allocator) ?[]const []const u8 {
@@ -1503,7 +1635,7 @@ fn appendBuiltinCommandCompletions(prefix: []const u8, out: []?[]const u8, count
 fn appendLuaCommandCompletions(app: *App, prefix: []const u8, out: []?[]const u8, count: *usize) void {
     if (count.* >= out.len) return;
     if (!app.lua_vm.vm_mu.tryLock()) return;
-    defer app.lua_vm.vm_mu.unlock(app.swarm.pool.io);
+    defer app.lua_vm.vm_mu.unlock(app.io);
     app.lua_vm.appendCommandCompletions(prefix, out, count);
 }
 
@@ -1725,7 +1857,7 @@ fn renderStatusBar(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
 
     if (app.lua_status_bar_enabled) {
         if (app.lua_vm.vm_mu.tryLock()) {
-            defer app.lua_vm.vm_mu.unlock(app.swarm.pool.io);
+            defer app.lua_vm.vm_mu.unlock(app.io);
             if (app.lua_vm.renderStatusBar(&app.lua_status_bar_cache)) |status| {
                 app.lua_status_bar_cache_len = status.len;
             }
@@ -1745,10 +1877,10 @@ fn renderStatusBar(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     var cache_buf: [16]u8 = undefined;
     var ctx_buf: [8]u8 = undefined;
 
-    const usage = app.swarm.usage();
+    const usage = app.registry.usage();
     const in_str = formatTokenCount(&in_buf, usage.input_tokens);
     const out_str = formatTokenCount(&out_buf, usage.output_tokens);
-    const cache_str = formatTokenCount(&cache_buf, usage.cached_tokens);
+    const cache_str = formatTokenCount(&cache_buf, usage.cache_read_tokens + usage.cache_write_tokens);
     const ctx_str = std.fmt.bufPrint(&ctx_buf, "{d}%", .{ctx_pct}) catch "0%";
     const skip_str = if (app.flags.skip_permissions) "| AUTO APPROVAL" else "";
 
@@ -1874,7 +2006,7 @@ fn buildChatEntryParagraph(
             .message => |text| {
                 has_text = true;
                 var p = r.tui.Paragraph{};
-                try appendMarkdownText(&p, arena, text, inner_w, app.theme);
+                try appendMarkdownText(&p, app.gpa, arena, text, inner_w, app.theme);
                 const h = p.totalHeightLong(inner_w);
                 try out.append(arena, .{ .p = p, .h = h });
                 total.* += h;
@@ -1943,7 +2075,7 @@ fn buildToolGroupParagraph(
     defer statuses.unlock();
 
     for (calls) |call| {
-        const agent = app.swarm.getAgent(call.agent_id) orelse continue;
+        const agent = app.registry.get(call.agent_id) orelse continue;
         var line = r.tui.Line{};
 
         const status_agent = &statuses.ptr.agents[call.agent_id.index];
@@ -1951,7 +2083,7 @@ fn buildToolGroupParagraph(
             status_agent.entries.getPtr(call.call_id)
         else
             null;
-        const live_result: ?prv.adapter.ToolResult = findToolResult(agent, call.call_id) orelse agent.tool_call_done.get(call.call_id);
+        const live_result: ?r.sdk.ToolResult = findToolResult(agent, call.call_id);
         const is_error = if (live_result) |result| result.is_error else if (status) |entry| entry.is_error else null;
         if (is_error) |failed| {
             if (failed) {
@@ -1973,12 +2105,16 @@ fn buildToolGroupParagraph(
             }
 
             if (entry.child_id) |child_id| {
-                if (app.swarm.getAgent(child_id)) |child| {
-                    if (child.flags.is_thinking) try line.pushSpan(arena, .{ .content = "  thinking", .style = .{ .fg = app.theme.muted } });
-                    if (child.flags.is_calling) try line.pushSpan(arena, .{ .content = "  calling", .style = .{ .fg = app.theme.muted } });
-                    if (child.flags.is_writing) try line.pushSpan(arena, .{ .content = "  writing", .style = .{ .fg = app.theme.muted } });
-                    if (child.flags.is_waiting) try line.pushSpan(arena, .{ .content = "  retrying", .style = .{ .fg = app.theme.muted } });
-                    if (child.flags.is_thinking or child.flags.is_calling or child.flags.is_writing or child.flags.is_waiting) {
+                if (app.registry.get(child_id)) |child| {
+                    const activity = child.activity;
+                    if (activity != .idle) try line.pushSpan(arena, .{ .content = switch (activity) {
+                        .idle => "",
+                        .thinking => "  thinking",
+                        .writing => "  writing",
+                        .calling => "  calling",
+                        .retrying => "  retrying",
+                    }, .style = .{ .fg = app.theme.muted } });
+                    if (activity != .idle) {
                         try line.pushSpan(arena, .{ .content = " " });
                         try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
                     }
@@ -1986,10 +2122,10 @@ fn buildToolGroupParagraph(
             }
 
             if (entry.child_id) |child_id| {
-                if (app.swarm.getSlot(child_id)) |child_slot| {
-                    if (child_slot.tokens_per_sec > 0) {
+                if (app.registry.get(child_id)) |child| {
+                    if (child.tokens_per_second > 0) {
                         try line.pushSpan(arena, .{ .content = "  " });
-                        line.pushSpanPrint(arena, "{d}", .{@as(u32, @intFromFloat(child_slot.tokens_per_sec))}, .{ .fg = app.theme.text, .modifier = .{ .bold = true } }) catch {};
+                        line.pushSpanPrint(arena, "{d}", .{@as(u32, @intFromFloat(child.tokens_per_second))}, .{ .fg = app.theme.text, .modifier = .{ .bold = true } }) catch {};
                         line.pushSpanPrint(arena, " T/s", .{}, .{ .fg = app.theme.info }) catch {};
                     }
                 }
@@ -2010,7 +2146,7 @@ fn buildToolGroupParagraph(
             }
 
             const child_id = entry.child_id orelse continue;
-            if (child_id.index >= prv.Swarm.MAX_AGENTS) continue;
+            if (child_id.index >= r.agent_registry.max_agents) continue;
             const child_status = &statuses.ptr.agents[child_id.index];
             if (child_status.generation != child_id.generation) continue;
 
@@ -2097,7 +2233,7 @@ fn buildMessageParagraph(
             if (m.role == .user) {
                 appendPlainText(&p, arena, txt, .{});
             } else {
-                appendMarkdownText(&p, arena, txt, 0, app.theme) catch {};
+                appendMarkdownText(&p, app.gpa, arena, txt, 0, app.theme) catch {};
             }
         },
         .thinking => |txt| {
@@ -2112,13 +2248,19 @@ fn buildMessageParagraph(
 /// Scan chat history for a tool_result with the given call_id. Source of
 /// truth for "did this tool finish": `tool_call_done` is cleared right
 /// after commit, but the result lives on in the chat as a tool_result part.
-fn findToolResult(agent: *prv.agent.Agent, call_id: []const u8) ?prv.adapter.ToolResult {
-    var i = agent.chat.messages.items.len;
+fn findToolResult(agent: *r.agent.Agent, call_id: []const u8) ?r.sdk.ToolResult {
+    var i = agent.history().len;
     while (i > 0) {
         i -= 1;
-        const msg = agent.chat.messages.items[i];
-        for (msg.parts) |part| switch (part) {
-            .tool_result => |res| if (std.mem.eql(u8, res.call_id, call_id)) return res,
+        const msg = agent.history()[i];
+        for (msg.parts()) |part| switch (part) {
+            .tool_result => |res| if (std.mem.eql(u8, res.id, call_id)) return .{
+                .tool_call_id = res.id,
+                .tool_name = res.name,
+                .output = res.output,
+                .is_error = res.is_error,
+                .exit_loop = res.exit_loop,
+            },
             else => {},
         };
     }
@@ -2254,10 +2396,10 @@ fn markdownTheme(theme: Theme) r.tui.HighlightTheme {
     };
 }
 
-fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8, width: u16, theme: Theme) !void {
+fn appendMarkdownText(p: *r.tui.Paragraph, gpa: std.mem.Allocator, arena: std.mem.Allocator, raw: []const u8, width: u16, theme: Theme) !void {
     if (raw.len == 0) return;
     const md_theme = markdownTheme(theme);
-    var renderer = r.tui.MarkdownStreamRenderer.initWithOptions(arena, width, md_theme, .{});
+    var renderer = r.tui.MarkdownStreamRenderer.initWithOptions(gpa, arena, width, md_theme, .{});
     defer renderer.deinit();
     try renderer.feed(raw);
     renderer.finish();
@@ -2270,10 +2412,8 @@ fn appendMarkdownText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []cons
 fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
     if (area.width == 0 or area.height == 0) return 0;
 
-    var scratch = std.heap.ArenaAllocator.init(app.sessionAlloc());
-    defer scratch.deinit();
-    const alloc = scratch.allocator();
-    const maybe_agent: ?*prv.agent.Agent = if (app.main_agent_id) |id| app.swarm.getAgent(id) else null;
+    const alloc = app.arena_frame.allocator();
+    const maybe_agent: ?*r.agent.Agent = if (app.main_agent_id) |id| app.registry.get(id) else null;
 
     const inner_w: u16 = area.width;
     const inner_h: u16 = area.height;
@@ -2293,9 +2433,9 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
 
     // Failed agent path
     if (app.main_agent_id) |id| {
-        const slot = &app.swarm.slots[id.index];
+        const slot = &app.registry.slots[id.index];
         if (slot.state.load(.acquire) == .failed) {
-            const detail = if (slot.agent.last_error) |err| @errorName(err) else null;
+            const detail = if (slot.agent.?.last_error) |err| @errorName(err) else null;
 
             var para = r.tui.Paragraph{};
             try para.appendLineSpan(alloc, &.{
@@ -2398,16 +2538,19 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
     return @min(@as(usize, inner_h), consumed);
 }
 
-fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn renderMainProgress(app: *App, id: ?r.AgentId, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     if (area.width == 0 or area.height == 0) return;
 
     const aid = id orelse return;
-    const slot = &app.swarm.slots[aid.index];
+    const slot = &app.registry.slots[aid.index];
     const state = slot.state.load(.acquire);
     if (state != .active and state != .complete and state != .failed) return;
 
     const alloc = app.sessionAlloc();
-    const secs = @as(u32, @intFromFloat(slot.time_elapsed));
+    const agent = if (slot.agent) |*value| value else return;
+    const now: i128 = @intCast(std.Io.Timestamp.now(app.io, .real).nanoseconds);
+    const elapsed = @max(0, now - agent.run_started_ns);
+    const secs: u32 = @intCast(@divTrunc(elapsed, std.time.ns_per_s));
 
     var para = r.tui.Paragraph{
         .padding = .all(1),
@@ -2419,7 +2562,7 @@ fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: 
     var l = r.tui.Line{};
     if (state == .active) {
         const spinner_str = text_utils.spinnerDots(app.frame_count);
-        const exec_pool = app.swarm.exec;
+        const exec_pool = app.exec_pool;
         const ssh_suffix: []const u8 = if (exec_pool.ssh_active and exec_pool.ssh_target != null) " (SSH ON)" else "";
 
         var queued_buf: [64]u8 = undefined;
@@ -2431,16 +2574,13 @@ fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: 
         else
             std.fmt.bufPrint(&queued_buf, "({d} queued messages up)", .{queued_count}) catch "(queued messages up)";
 
-        const state_str: []const u8 = if (slot.agent.flags.is_thinking)
-            "thinking"
-        else if (slot.agent.flags.is_writing)
-            "writing"
-        else if (slot.agent.flags.is_calling)
-            "calling"
-        else if (slot.agent.flags.is_waiting)
-            "retrying"
-        else
-            "";
+        const state_str: []const u8 = switch (agent.activity) {
+            .idle => "",
+            .thinking => "thinking",
+            .writing => "writing",
+            .calling => "calling",
+            .retrying => "retrying",
+        };
 
         l.pushSpanPrint(alloc, "{s} (", .{spinner_str}, info) catch {};
         if (secs >= 60)
@@ -2448,7 +2588,7 @@ fn renderMainProgress(app: *App, id: ?prv.Swarm.AgentId, area: r.tui.Rect, buf: 
         else
             l.pushSpanPrint(alloc, "{d}s", .{secs}, hl) catch {};
         l.pushSpanPrint(alloc, ") Consuming Tokens at ", .{}, info) catch {};
-        l.pushSpanPrint(alloc, "{d} T/s", .{@as(u32, @intFromFloat(slot.tokens_per_sec))}, hl) catch {};
+        l.pushSpanPrint(alloc, "{d} T/s", .{@as(u32, @intFromFloat(agent.tokens_per_second))}, hl) catch {};
 
         if (state_str.len > 0) {
             l.pushSpanPrint(alloc, " while ", .{}, info) catch {};
@@ -2545,7 +2685,7 @@ fn renderPermissionWidget(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void 
     }
 }
 
-fn renderAskWidget(app: *App, req: *prv.Swarm.PermissionReq, inner: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, buf: *r.tui.Buffer) void {
     const args = req.payload.ask;
     const opts_len = @min(args.options.len, r.tools.ask.MAX_OPTIONS);
     const total_rows: usize = opts_len + 1; // + "enter message"
@@ -2600,7 +2740,7 @@ fn formatTokenCount(dest: []u8, count: u64) []const u8 {
 }
 
 test "myers diff - single line change" {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const old = [_][]const u8{ "aaa", "bbb", "ccc", "ddd" };
@@ -2616,7 +2756,7 @@ test "myers diff - single line change" {
 }
 
 test "myers diff - insertion only" {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const old = [_][]const u8{ "aaa", "bbb" };
@@ -2630,7 +2770,7 @@ test "myers diff - insertion only" {
 }
 
 test "myers diff - deletion only" {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const old = [_][]const u8{ "aaa", "xxx", "bbb" };
@@ -2644,7 +2784,7 @@ test "myers diff - deletion only" {
 }
 
 test "myers diff - identical" {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const old = [_][]const u8{ "aaa", "bbb" };
@@ -2656,7 +2796,7 @@ test "myers diff - identical" {
 }
 
 test "myers diff - completely different" {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const old = [_][]const u8{ "aaa", "bbb" };
@@ -2667,7 +2807,7 @@ test "myers diff - completely different" {
 }
 
 test "myers diff - empty old" {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const old = [_][]const u8{};
@@ -2680,7 +2820,7 @@ test "myers diff - empty old" {
 }
 
 test "myers diff - empty new" {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const old = [_][]const u8{ "aaa", "bbb" };
@@ -2693,7 +2833,7 @@ test "myers diff - empty new" {
 }
 
 test "emitDiffLines owns rendered content" {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
@@ -2724,7 +2864,7 @@ test "emitDiffLines owns rendered content" {
 
 test "persisted diff owns path" {
     var app: App = undefined;
-    app.arena_session = .init(std.testing.allocator, std.testing.io);
+    app.arena_session = .init(std.testing.allocator);
     defer app.arena_session.deinit();
     app.chat_entries = .empty;
 
@@ -2744,13 +2884,13 @@ test "renderableParts keeps streamed final parts together" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const parts = [_]prv.adapter.ContentPart{
-        .{ .thinking = .{ .text = " think " } },
+    const parts = [_]r.sdk.Part{
+        .{ .reasoning = .{ .text = " think ", .signature = "" } },
         .{ .text = " answer " },
-        .{ .tool_call = .{ .id = "call_1", .name = "bash", .arguments = "{}" } },
+        .{ .tool_call = .{ .id = "call_1", .name = "bash", .input = "{}" } },
     };
 
-    const agent_id: prv.Swarm.AgentId = .{ .index = 3, .generation = 7 };
+    const agent_id: r.AgentId = .{ .index = 3, .generation = 7 };
     const rendered = App.renderableParts(alloc, agent_id, &parts, false) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 3), rendered.len);
     try std.testing.expectEqualStrings("think", rendered[0].thinking);
@@ -2758,6 +2898,59 @@ test "renderableParts keeps streamed final parts together" {
     try std.testing.expectEqualStrings("call_1", rendered[2].tool_call.call_id);
     try std.testing.expectEqualStrings("bash", rendered[2].tool_call.tool_name);
     try std.testing.expectEqual(agent_id, rendered[2].tool_call.agent_id);
+}
+
+test "SDK run events preserve preview final rendering and usage" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.arena_streaming_preview = .init(std.testing.allocator);
+    defer app.arena_streaming_preview.deinit();
+    app.chat_entries = .empty;
+    app.streaming_entry = null;
+    app.sdk_preview_text = .empty;
+    app.sdk_preview_reasoning = .empty;
+    app.sdk_preview_calls = .empty;
+    app.sdk_usage = .{};
+    app.tool_status_entries = .{};
+    app.event_bus = .{};
+    app.dirty = false;
+
+    const agent_id = r.AgentId{ .index = 2, .generation = 4 };
+    try app.applyRunEvent(agent_id, .{ .reasoning = "plan " });
+    try app.applyRunEvent(agent_id, .{ .text = "answer" });
+    try app.applyRunEvent(agent_id, .{ .tool = .{
+        .type = .tool_call,
+        .tool_call_id = "call_1",
+        .tool_name = "read",
+        .tool_input = "{}",
+    } });
+    try std.testing.expectEqual(@as(usize, 3), app.streaming_entry.?.parts.len);
+    try std.testing.expectEqualStrings("plan", app.streaming_entry.?.parts[0].thinking);
+    try std.testing.expectEqualStrings("answer", app.streaming_entry.?.parts[1].message);
+    try std.testing.expectEqualStrings("call_1", app.streaming_entry.?.parts[2].tool_call.call_id);
+
+    try app.applyRunEvent(agent_id, .{ .step = .{
+        .number = 1,
+        .usage = .{ .input_tokens = 5, .output_tokens = 2, .total_tokens = 7 },
+        .tool_results = &.{.{ .tool_call_id = "call_1", .tool_name = "read", .output = "done" }},
+    } });
+    try std.testing.expectEqual(@as(u64, 7), app.sdk_usage.total_tokens);
+    const status = &app.tool_status_entries.value.agents[agent_id.index];
+    try std.testing.expectEqual(false, status.entries.get("call_1").?.is_error.?);
+
+    const final_parts = [_]r.sdk.Part{
+        r.sdk.Part.reasoningPart("plan", ""),
+        r.sdk.Part.textPart("answer"),
+        r.sdk.Part.toolCallPart("call_1", "read", "{}"),
+    };
+    const messages = [_]r.sdk.Message{.{ .role = .assistant, .content = &final_parts }};
+    var result = r.sdk.TextResult{ .messages = &messages };
+    try app.applyRunEvent(agent_id, .{ .complete = &result });
+    try std.testing.expect(app.streaming_entry == null);
+    try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 3), app.chat_entries.items[0].parts.len);
 }
 
 test "appendChatEntry sorts parts by rank" {
@@ -2787,7 +2980,7 @@ test "renderableParts preserves provider errors as plain text" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const parts = [_]prv.adapter.ContentPart{.{ .text = " {\"error\":\"model unavailable\"} " }};
+    const parts = [_]r.sdk.Part{.{ .text = " {\"error\":\"model unavailable\"} " }};
     const rendered = App.renderableParts(arena.allocator(), .{ .index = 0, .generation = 0 }, &parts, true) orelse return error.TestUnexpectedResult;
 
     try std.testing.expectEqual(@as(usize, 1), rendered.len);
@@ -2799,11 +2992,11 @@ test "ToolStatusStore retains terminal tool result" {
     defer arena.deinit();
 
     var store: ToolStatusStore = .{};
-    const agent_id: prv.Swarm.AgentId = .{ .index = 1, .generation = 2 };
+    const agent_id: r.AgentId = .{ .index = 1, .generation = 2 };
     try store.setResult(arena.allocator(), agent_id, .{
-        .call_id = "call_1",
-        .name = "bash",
-        .content = "failed",
+        .tool_call_id = "call_1",
+        .tool_name = "bash",
+        .output = "failed",
         .is_error = true,
     });
 
@@ -2818,7 +3011,7 @@ test "appendMarkdownText fills headline to width" {
     const alloc = arena.allocator();
 
     var p: r.tui.Paragraph = .{};
-    try appendMarkdownText(&p, alloc, "# Hi\n## Bye\n### Low\n", 20, .default);
+    try appendMarkdownText(&p, std.testing.allocator, alloc, "# Hi\n## Bye\n### Low\n", 20, .default);
 
     try std.testing.expectEqual(@as(usize, 3), p.lines.items.len);
 

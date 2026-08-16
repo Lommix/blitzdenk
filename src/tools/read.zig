@@ -1,4 +1,3 @@
-const prv = @import("provider");
 const r = @import("root.zig");
 const std = @import("std");
 
@@ -6,7 +5,7 @@ const std = @import("std");
 const READ_PADDING = 1;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
-pub const ReadTool = prv.tool.Tool{
+pub const ReadTool = r.Tool{
     .def = .{
         .name = "read",
         .description = "Read the contents of a file. For text files, output is truncated to " ++ std.fmt.comptimePrint("{d} lines or {d}KB", .{ r.MAX_DISPLAY_LINES, @divTrunc(r.MAX_DISPLAY_BYTES, 1024) }) ++
@@ -29,7 +28,7 @@ pub const ReadTool = prv.tool.Tool{
     .func = &run,
 };
 
-pub const ViewImageTool = prv.tool.Tool{
+pub const ViewImageTool = r.Tool{
     .def = .{
         .name = "view_image",
         .description = "Load an image from a local path or HTTP(S) URL into the model context. Supports PNG, JPEG, GIF, and WebP images up to 4 MB.",
@@ -47,17 +46,17 @@ pub const ViewImageTool = prv.tool.Tool{
     .func = &viewImage,
 };
 
-pub const Stat = prv.agent.FileStat;
-pub const FileStats = prv.agent.FileStats;
+pub const Stat = r.r.agent_state.FileStat;
+pub const FileStats = r.r.agent_state.FileStats;
 
-fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         path: []const u8,
         offset: ?u64 = null,
         limit: ?u64 = null,
     };
 
-    var args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+    var args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\"}");
 
@@ -72,17 +71,17 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     if (args.path.len == 0) return r.errResult(call, "path is empty");
 
     var buf: [512]u8 = undefined;
-    const rel_path = if (ctx.cwd.len > 0)
-        r.replaceAll(args.path, ctx.cwd, ".", &buf)
+    const rel_path = if (ctx.base.cwd.len > 0)
+        r.replaceAll(args.path, ctx.base.cwd, ".", &buf)
     else
         args.path;
 
-    const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, args.path }) catch
+    const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, args.path }) catch
         return r.errResult(call, "failed to resolve path");
 
     const full_read = args.offset == null and args.limit == null;
 
-    const app = ctx.swarm.context.cast(@import("../app.zig").App);
+    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var read_info: []const u8 = rel_path;
 
     if (args.limit) |l| {
@@ -101,10 +100,10 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     }) catch {};
 
     // Stat for mtime first so we can short-circuit unchanged re-reads.
-    const stat_res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "stat", "-c", "%Y", resolved } }) catch
+    const stat_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "stat", "-c", "%Y", resolved } }) catch
         return r.errResult(call, "failed to stat file");
-    defer ctx.swarm.exec.alloc.free(stat_res.stdout);
-    defer ctx.swarm.exec.alloc.free(stat_res.stderr);
+    defer ctx.base.exec_pool.alloc.free(stat_res.stdout);
+    defer ctx.base.exec_pool.alloc.free(stat_res.stderr);
 
     if (stat_res.ty != .success) {
         const msg = if (stat_res.stderr.len > 0)
@@ -120,7 +119,7 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
     {
         const g = ctx.agent().file_stats.lock(ctx.io);
         defer g.unlock();
-        const look = g.ptr.getOrPut(ctx.alloc, resolved) catch return r.errResult(call, "oom");
+        const look = r.r.agent_state.getOrPutFileStat(ctx.agent().state_arena.allocator(), g.ptr, resolved) catch return r.errResult(call, "oom");
         if (look.found_existing and full_read and mtime <= look.value_ptr.last_read) {
             return r.okResult(call, "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.");
         }
@@ -140,18 +139,18 @@ fn run(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolRe
         resolved, start_line, max_lines,
     }) catch return r.errResult(call, "out of memory");
 
-    const read_res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "/bin/sh", "-c", command } }) catch
+    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "/bin/sh", "-c", command } }) catch
         return r.errResult(call, "failed to read file");
-    defer ctx.swarm.exec.alloc.free(read_res.stdout);
-    defer ctx.swarm.exec.alloc.free(read_res.stderr);
+    defer ctx.base.exec_pool.alloc.free(read_res.stdout);
+    defer ctx.base.exec_pool.alloc.free(read_res.stderr);
 
     const out = read_res.toOwned(ctx.alloc) catch return r.errResult(call, "oom");
     return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
 }
 
-fn viewImage(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct { path: []const u8 };
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.arguments, .{
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\"}");
 
@@ -161,12 +160,12 @@ fn viewImage(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.
         std.mem.startsWith(u8, args.path, "https://");
 
     var display_buf: [512]u8 = undefined;
-    const display_path = if (!is_url and ctx.cwd.len > 0)
-        r.replaceAll(args.path, ctx.cwd, ".", &display_buf)
+    const display_path = if (!is_url and ctx.base.cwd.len > 0)
+        r.replaceAll(args.path, ctx.base.cwd, ".", &display_buf)
     else
         args.path;
 
-    const app = ctx.swarm.context.cast(@import("../app.zig").App);
+    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     r.setToolStatusSpans(ctx, call, &.{
         .{ .content = "view image ", .style = .{ .modifier = .{ .bold = true } } },
         .{ .content = display_path, .style = .{ .fg = app.theme.muted } },
@@ -175,11 +174,11 @@ fn viewImage(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.
     const raw = if (is_url)
         loadRemoteImage(ctx, args.path) catch |err| return r.errResult(call, imageLoadError(err, true))
     else blk: {
-        const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.cwd, args.path }) catch
+        const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, args.path }) catch
             return r.errResult(call, "failed to resolve image path");
         break :blk loadLocalImage(ctx, resolved) catch |err| return r.errResult(call, imageLoadError(err, false));
     };
-    defer ctx.swarm.exec.alloc.free(raw);
+    defer ctx.base.exec_pool.alloc.free(raw);
 
     const media_type = detectImageMediaType(raw) orelse
         return r.errResult(call, "unsupported image format; expected PNG, JPEG, GIF, or WebP");
@@ -188,12 +187,10 @@ fn viewImage(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.
     const encoded = ctx.alloc.alloc(u8, encoded_len) catch return r.errResult(call, "out of memory");
     _ = std.base64.standard.Encoder.encode(encoded, raw);
 
-    return .{
-        .call_id = call.id,
-        .name = call.name,
-        .content = "Loaded image",
-        .image = .{ .media_type = media_type, .data = encoded },
-    };
+    return .{ .content = "Loaded image", .image = .{
+        .url = std.fmt.allocPrint(ctx.alloc, "data:{s};base64,{s}", .{ media_type, encoded }) catch return r.errResult(call, "out of memory"),
+        .media_type = media_type,
+    } };
 }
 
 const ImageLoadError = error{
@@ -215,11 +212,11 @@ fn imageLoadError(err: anyerror, remote: bool) []const u8 {
     };
 }
 
-fn loadLocalImage(ctx: prv.tool.ToolContext, resolved: []const u8) ImageLoadError![]const u8 {
-    const size_res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "stat", "-c", "%s", resolved } }) catch
+fn loadLocalImage(ctx: r.ToolContext, resolved: []const u8) ImageLoadError![]const u8 {
+    const size_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "stat", "-c", "%s", resolved } }) catch
         return error.ReadFailed;
-    defer ctx.swarm.exec.alloc.free(size_res.stdout);
-    defer ctx.swarm.exec.alloc.free(size_res.stderr);
+    defer ctx.base.exec_pool.alloc.free(size_res.stdout);
+    defer ctx.base.exec_pool.alloc.free(size_res.stderr);
     if (size_res.ty != .success) return error.ReadFailed;
 
     const size_text = std.mem.trim(u8, size_res.stdout, " \t\r\n");
@@ -227,26 +224,26 @@ fn loadLocalImage(ctx: prv.tool.ToolContext, resolved: []const u8) ImageLoadErro
     if (size == 0) return error.EmptyImage;
     if (size > MAX_IMAGE_BYTES) return error.ImageTooLarge;
 
-    const read_res = ctx.swarm.exec.runAndWait(.{ .argv = &.{ "cat", "--", resolved } }) catch
+    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", "--", resolved } }) catch
         return error.ReadFailed;
-    defer ctx.swarm.exec.alloc.free(read_res.stderr);
+    defer ctx.base.exec_pool.alloc.free(read_res.stderr);
     if (read_res.ty != .success) {
-        ctx.swarm.exec.alloc.free(read_res.stdout);
+        ctx.base.exec_pool.alloc.free(read_res.stdout);
         return error.ReadFailed;
     }
     if (read_res.stdout.len == 0) {
-        ctx.swarm.exec.alloc.free(read_res.stdout);
+        ctx.base.exec_pool.alloc.free(read_res.stdout);
         return error.EmptyImage;
     }
     if (read_res.stdout.len > MAX_IMAGE_BYTES) {
-        ctx.swarm.exec.alloc.free(read_res.stdout);
+        ctx.base.exec_pool.alloc.free(read_res.stdout);
         return error.ImageTooLarge;
     }
     return read_res.stdout;
 }
 
-fn loadRemoteImage(ctx: prv.tool.ToolContext, url: []const u8) ImageLoadError![]const u8 {
-    const result = ctx.swarm.exec.runAndWaitTimeout(.{ .argv = &.{
+fn loadRemoteImage(ctx: r.ToolContext, url: []const u8) ImageLoadError![]const u8 {
+    const result = ctx.base.exec_pool.runAndWaitTimeout(.{ .argv = &.{
         "curl",
         "-fsSL",
         "--max-filesize",
@@ -254,22 +251,22 @@ fn loadRemoteImage(ctx: prv.tool.ToolContext, url: []const u8) ImageLoadError![]
         "--",
         url,
     } }, 30_000) catch return error.DownloadFailed;
-    defer ctx.swarm.exec.alloc.free(result.stderr);
+    defer ctx.base.exec_pool.alloc.free(result.stderr);
     if (result.ty == .timeout) {
-        ctx.swarm.exec.alloc.free(result.stdout);
+        ctx.base.exec_pool.alloc.free(result.stdout);
         return error.DownloadTimedOut;
     }
     if (result.ty != .success) {
-        ctx.swarm.exec.alloc.free(result.stdout);
+        ctx.base.exec_pool.alloc.free(result.stdout);
         if (result.exit_code == 63) return error.ImageTooLarge;
         return error.DownloadFailed;
     }
     if (result.stdout.len == 0) {
-        ctx.swarm.exec.alloc.free(result.stdout);
+        ctx.base.exec_pool.alloc.free(result.stdout);
         return error.EmptyImage;
     }
     if (result.stdout.len > MAX_IMAGE_BYTES) {
-        ctx.swarm.exec.alloc.free(result.stdout);
+        ctx.base.exec_pool.alloc.free(result.stdout);
         return error.ImageTooLarge;
     }
     return result.stdout;

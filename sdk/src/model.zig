@@ -21,12 +21,17 @@ pub const GenerateParams = struct {
     tool_choice: options.ToolChoice = .auto,
     response_format: ?types.ResponseFormat = null,
     timeout_ms: ?u64 = null,
+    cancellation: ?*options.CancellationToken = null,
+    on_provider_error: ?*const fn (ctx: ?*anyopaque, info: options.ProviderErrorInfo) void = null,
+    on_provider_error_ctx: ?*anyopaque = null,
 };
 
 pub const GenerateResult = struct {
     text: []const u8 = "",
     reasoning: []const u8 = "",
+    reasoning_signature: []const u8 = "",
     tool_calls: []const types.ToolCall = &.{},
+    provider_parts: []const types.Part = &.{},
     finish_reason: types.FinishReason = .other,
     usage: types.Usage = .{},
     response: types.ResponseMetadata = .{},
@@ -35,12 +40,15 @@ pub const GenerateResult = struct {
     pub fn deinit(self: *GenerateResult, alloc: std.mem.Allocator) void {
         alloc.free(self.text);
         alloc.free(self.reasoning);
+        alloc.free(self.reasoning_signature);
         for (self.tool_calls) |tc| {
             alloc.free(tc.id);
             alloc.free(tc.name);
             alloc.free(tc.input);
         }
         alloc.free(self.tool_calls);
+        for (self.provider_parts) |part| types.freePart(alloc, part);
+        alloc.free(self.provider_parts);
         alloc.free(self.response.id);
         alloc.free(self.response.model);
         self.* = .{};
@@ -52,6 +60,7 @@ pub const EmbedParams = struct {
     provider_options: ?std.json.Value = null,
     headers: []const std.http.Header = &.{},
     timeout_ms: ?u64 = null,
+    cancellation: ?*options.CancellationToken = null,
 };
 
 pub const ImageParams = struct {
@@ -62,6 +71,7 @@ pub const ImageParams = struct {
     provider_options: ?std.json.Value = null,
     headers: []const std.http.Header = &.{},
     timeout_ms: ?u64 = null,
+    cancellation: ?*options.CancellationToken = null,
 };
 
 pub const StreamContext = struct {

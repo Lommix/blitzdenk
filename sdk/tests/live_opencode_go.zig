@@ -4,8 +4,8 @@ const sdk = @import("blitz-sdk");
 const base_url = "https://opencode.ai/zen/go/v1";
 
 const WeatherTool = struct {
-    fn execute(_: ?*anyopaque, _: []const u8) anyerror![]const u8 {
-        return "{\"city\":\"Berlin\",\"temperature_c\":21,\"conditions\":\"clear\"}";
+    fn execute(_: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: sdk.ToolCall) anyerror!sdk.ToolOutput {
+        return .{ .content = "{\"city\":\"Berlin\",\"temperature_c\":21,\"conditions\":\"clear\"}" };
     }
 };
 

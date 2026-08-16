@@ -9,7 +9,8 @@ const ct = @cImport({
 });
 const r = @import("root.zig");
 const App = r.app.App;
-const BlitzdenkCfg = r.prv.config.BlitzdenkCfg;
+const BlitzdenkCfg = r.config.BlitzdenkCfg;
+
 const ChatEntry = r.app.ChatEntry;
 const lua = r.lua;
 const reg = r.ContextFactory;
@@ -17,8 +18,6 @@ const keys = r.keys;
 const util = r.util;
 const session = r.session;
 const tui = r.tui;
-const inbuilt = r.prv.inbuilt;
-const prv = r.prv;
 const tools = r.tools;
 
 // ----------------------------------------------------------------
@@ -251,7 +250,7 @@ pub fn run(
     const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;
 
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
-    const context_factory = try r.ContextFactory.init(arena, io, HOME);
+    const context_factory = try r.ContextFactory.init(gpa, io, HOME);
     context_factory.flags.skip_local_context_file = flags.no_context;
 
     var term = try tui.Terminal.init(arena, io);
@@ -259,74 +258,19 @@ pub fn run(
     defer term.deinit();
 
     var app = try App.init(io, gpa, context_factory, cwd);
-    const swarm = try gpa.create(prv.Swarm);
+    var registry = r.agent_registry.Registry.init(gpa, io);
+    var exec_pool = r.exec.CmdPool.init(gpa, io, env);
+    app.registry = &registry;
+    app.exec_pool = &exec_pool;
     defer {
-        swarm.deinit();
+        app.cancelPermissions();
+        registry.cancelAll();
+        exec_pool.cancelAll();
         app.deinit();
-        gpa.destroy(swarm);
+        registry.deinit();
+        exec_pool.deinit();
     }
-
-    try swarm.init(gpa, io, .{
-        .ptr = &app,
-        .broadcast = (struct {
-            fn func(ptr: *anyopaque, en: prv.Swarm.BroadcastEntry) void {
-                const a: *App = @ptrCast(@alignCast(ptr));
-
-                if (en.agent_id != a.main_agent_id) return;
-                if (en.role == .user) {
-                    for (en.parts) |part| switch (part) {
-                        .tool_result => |result| a.setToolResult(en.agent_id, result) catch {},
-                        else => {},
-                    };
-                    return;
-                }
-                if (en.role == .system) return;
-
-                const g = a.broadcast_queue.lock(a.io);
-                defer g.unlock();
-
-                g.ptr.appendBounded(en) catch return;
-            }
-        }).func,
-        .permission = (struct {
-            fn func(ptr: *anyopaque, en: *prv.Swarm.PermissionReq) void {
-                const a: *App = @ptrCast(@alignCast(ptr));
-                const g = a.permission_queue.lock(a.io);
-                defer g.unlock();
-
-                g.ptr.appendBounded(en) catch {
-                    en.state = .denied;
-                    en.event.set(a.io);
-                };
-            }
-        }).func,
-        .build_config = (struct {
-            fn func(ptr: *anyopaque, agent_type_idx: u8) anyerror!r.prv.Swarm.BuiltConfig {
-                const a: *App = @ptrCast(@alignCast(ptr));
-                const result = a.context_factory.buildAgentApiConfig(
-                    @enumFromInt(agent_type_idx),
-                    &a.config,
-                    a.swarm.exec.env,
-                );
-                return switch (result) {
-                    .config => |config| .{
-                        .config = try r.prv.adapter.cloneConfig(a.appAlloc(), config),
-                        .name = a.context_factory.agentName(@enumFromInt(agent_type_idx)),
-                    },
-                    .diagnostic => |diagnostic| switch (diagnostic) {
-                        .no_default_model => error.NoDefaultModel,
-                        .invalid_provider => error.InvalidProvider,
-                        .missing_api_key => error.MissingApiKey,
-                    },
-                };
-            }
-        }).func,
-        .gen_system_reminders = &App.genSystemRemindersOpaque,
-        .pop_queued_message = &App.popQueuedMessageOpaque,
-    }, env);
-
-    app.swarm = swarm;
-    swarm.report_enabled = flags.report or builtin.mode == .Debug;
+    registry.report_enabled = flags.report or builtin.mode == .Debug;
 
     // Lua VM holds an opaque pointer to App + a getter for the mutable cfg
     // (swarm.cfg is *const, so a sibling accessor unwraps the const).
@@ -406,20 +350,7 @@ pub fn run(
         }
 
         // TODO: cleanup state
-        if (app.running) {
-            if (!app.swarm.tickAll()) {
-                if (app.main_agent_id) |agent_id| {
-                    const slot_state = app.swarm.getSlotState(agent_id);
-                    if (slot_state == .failed) {
-                        try app.event_bus.emit(&app, .{ .agent_failed = .{ .id = agent_id, .err = "" } });
-                    } else {
-                        try app.event_bus.emit(&app, .{ .agent_complete = agent_id });
-                    }
-                }
-                app.running = false;
-            }
-            app.dirty = true;
-        }
+        if (app.running) app.dirty = true;
 
         // Drain new agent messages from broadcast into chat_entries
         // app.drainBroadcast();
@@ -437,14 +368,14 @@ pub fn run(
                 const is_ask = next.payload == .ask or next.payload == .plan;
 
                 // check permission level against flags
-                if (app.flags.skip_permissions and !app.swarm.exec.ssh_active and !is_ask) {
+                if (app.flags.skip_permissions and !app.exec_pool.ssh_active and !is_ask) {
                     try app.persist_permission_to_history(next);
                     next.state = .approved;
                     next.event.set(app.io);
                     continue;
                 }
 
-                if (app.swarm.getSlotState(next.agent_id) == .active) {
+                if (app.registry.state(next.agent_id) == .active) {
                     app.active_permission = next;
                     break :perm;
                 }
@@ -538,8 +469,8 @@ pub fn run(
                 }
 
                 if (app.main_agent_id) |id| {
-                    if (swarm.getAgent(id)) |agent| {
-                        try context_factory.refreshAgentTools(agent);
+                    if (registry.get(id)) |agent| {
+                        try context_factory.refreshAgentTools(agent, app.toolBase(id));
                     }
                 }
             }
@@ -774,29 +705,29 @@ pub fn run(
                                                 app.pushSystemMessage("Not yet implemented. You are on your own!", .{});
                                             },
                                             .ssh => |args| {
-                                                handleSshCommand(&app, &app.swarm.exec, gpa, args);
+                                                handleSshCommand(&app, app.exec_pool, gpa, args);
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
                                             .cd => |path| {
                                                 if (path.len > 0) {
-                                                    const base = app.swarm.exec.effectiveCwd(app.cwd);
+                                                    const base = app.exec_pool.effectiveCwd(app.cwd);
                                                     if (std.fs.path.resolve(app.appAlloc(), &.{ base, path })) |resolved| {
-                                                        if (app.swarm.exec.ssh_active) {
-                                                            if (app.swarm.exec.ssh_target) |*tar| {
-                                                                const new_remote = app.swarm.exec.alloc.dupe(u8, resolved) catch break;
+                                                        if (app.exec_pool.ssh_active) {
+                                                            if (app.exec_pool.ssh_target) |*tar| {
+                                                                const new_remote = app.exec_pool.alloc.dupe(u8, resolved) catch break;
                                                                 tar.cwd = new_remote;
                                                             }
                                                         }
                                                         app.cwd = resolved;
                                                         if (app.main_agent_id) |id| {
-                                                            if (app.swarm.getAgent(id)) |ag| ag.cwd = resolved;
+                                                            if (app.registry.get(id)) |ag| ag.setCwd(resolved) catch {};
                                                         }
                                                     } else |_| {}
                                                 }
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
                                             .ssh_off => {
-                                                app.swarm.exec.clearSsh();
+                                                app.exec_pool.clearSsh();
                                                 app.notifications.append(app.arena_app.allocator(), "SSH mode disabled", .{}) catch {};
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
@@ -811,17 +742,16 @@ pub fn run(
                                     if (config_lua) |info| app.saveHistory(info.dir_path);
                                     try app.event_bus.emit(&app, .{ .user_message_sent = input });
                                     if (app.main_agent_id) |agent_id| {
-                                        const ag = app.swarm.getAgent(agent_id).?;
-                                        const alloc = ag.arena.allocator();
+                                        const alloc = app.sessionAlloc();
                                         const len: usize = if (app.screenshot_buf != null) 2 else 1;
 
-                                        const parts = try alloc.alloc(prv.adapter.ContentPart, len);
+                                        const parts = try alloc.alloc(r.sdk.Part, len);
                                         parts[0] = .{ .text = input };
 
                                         if (app.screenshot_buf) |buf| {
                                             parts[1] = .{ .image = .{
+                                                .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{buf}),
                                                 .media_type = "image/png",
-                                                .data = buf,
                                             } };
                                         }
 
@@ -845,13 +775,13 @@ pub fn run(
                                 // state.pushChatMessage(.user, input);
 
                                 const alloc = gpa;
-                                const parts: []const prv.adapter.ContentPart = if (app.screenshot_buf) |img_data|
-                                    alloc.dupe(prv.adapter.ContentPart, &.{
+                                const parts: []const r.sdk.Part = if (app.screenshot_buf) |img_data|
+                                    alloc.dupe(r.sdk.Part, &.{
                                         .{ .text = input },
-                                        .{ .image = .{ .media_type = "image/png", .data = img_data } },
+                                        .{ .image = .{ .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{img_data}), .media_type = "image/png" } },
                                     }) catch break
                                 else
-                                    alloc.dupe(prv.adapter.ContentPart, &.{
+                                    alloc.dupe(r.sdk.Part, &.{
                                         .{ .text = input },
                                     }) catch break;
 
@@ -861,10 +791,12 @@ pub fn run(
 
                                 if (app.main_agent_id) |id| {
                                     try app.appendChatEntry(app.sessionAlloc(), chat_entry);
-                                    try app.swarm.runAgentWithMsg(id, parts);
+                                    const agent = app.registry.get(id).?;
+                                    try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
+                                    try app.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
                                 } else {
-                                    const id = app.swarm.reserveFreeSlot().?;
-                                    try app.cmd_queue.append(io, .{
+                                    const id = app.registry.reserve().?;
+                                    app.cmd_queue.append(io, .{
                                         .spawn_agent = .{
                                             .agent_id = id,
                                             .agent_type = @intFromEnum(reg.AgentType.general),
@@ -872,14 +804,17 @@ pub fn run(
                                             .chat_entry = chat_entry,
                                             .cwd = app.cwd,
                                         },
-                                    });
+                                    }) catch |err| {
+                                        app.registry.releaseReservation(id);
+                                        return err;
+                                    };
                                 }
 
                                 app.running = true;
                                 app.input_buffer.clearRetainingCapacity();
                             },
                             .passphrase => {
-                                handleSshUnlock(&app, &app.swarm.exec, gpa);
+                                handleSshUnlock(&app, app.exec_pool, gpa);
                             },
                         },
                         .esc => switch (app.input_mode) {
@@ -937,7 +872,7 @@ pub fn run(
 /// unlock a key into ssh-agent and retry.
 fn handleSshCommand(
     state: *App,
-    cmd_pool: *prv.exec.CmdPool,
+    cmd_pool: *r.exec.CmdPool,
     gpa: std.mem.Allocator,
     args: AppCommand.SshArgs,
 ) void {
@@ -955,7 +890,7 @@ fn handleSshCommand(
 
 /// Returns true iff a non-interactive ssh probe succeeds (key already loaded
 /// in agent). Returns false on any failure (auth, network, exit nonzero).
-fn sshProbe(cmd_pool: *prv.exec.CmdPool, gpa: std.mem.Allocator, user: []const u8, host: []const u8) bool {
+fn sshProbe(cmd_pool: *r.exec.CmdPool, gpa: std.mem.Allocator, user: []const u8, host: []const u8) bool {
     const target = std.fmt.allocPrint(gpa, "{s}@{s}", .{ user, host }) catch return false;
     defer gpa.free(target);
     const res = cmd_pool.runAndWait(.{
@@ -972,7 +907,7 @@ fn sshProbe(cmd_pool: *prv.exec.CmdPool, gpa: std.mem.Allocator, user: []const u
 /// 2. Run `setsid -w ssh-add` with env carrying the passphrase + SSH_ASKPASS.
 /// 3. On success, re-probe → setSsh → status. On failure → status with stderr.
 /// 4. Always zero passphrase + delete tempfile.
-fn handleSshUnlock(state: *App, cmd_pool: *prv.exec.CmdPool, gpa: std.mem.Allocator) void {
+fn handleSshUnlock(state: *App, cmd_pool: *r.exec.CmdPool, gpa: std.mem.Allocator) void {
     const pp = &state.input_mode.passphrase;
     const passphrase = pp.buf[0..pp.len];
     const user = pp.user;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const r = @import("root.zig");
 
-pub const StartMcpTool = r.prv.tool.Tool{
+pub const StartMcpTool = r.r.tools.Tool{
     .def = .{
         .name = "start_mcp",
         .description = "Start one configured MCP server by name and add its tools to this session.",
@@ -13,7 +13,7 @@ pub const StartMcpTool = r.prv.tool.Tool{
     .func = &startMcp,
 };
 
-pub const StartLspTool = r.prv.tool.Tool{
+pub const StartLspTool = r.r.tools.Tool{
     .def = .{
         .name = "start_lsp",
         .description = "Start one configured LSP server by name and add the lsp tool to this session.",
@@ -29,13 +29,13 @@ const StartArgs = struct {
     name: []const u8,
 };
 
-fn startMcp(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adapter.ToolResult {
-    const args = std.json.parseFromSliceLeaky(StartArgs, ctx.alloc, call.arguments, .{
+fn startMcp(ctx: r.r.tools.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+    const args = std.json.parseFromSliceLeaky(StartArgs, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments");
 
     r.setToolStatusPrint(ctx, call, "start MCP {s}", .{args.name});
-    const app = ctx.swarm.context.cast(r.r.app.App);
+    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     app.lua_vm.vm_mu.lockUncancelable(ctx.io);
     defer app.lua_vm.vm_mu.unlock(ctx.io);
     if (!app.lua_vm.hasMcp(args.name)) {
@@ -49,13 +49,13 @@ fn startMcp(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.ada
     return r.okResult(call, "MCP start requested; tools will be available on the next turn");
 }
 
-fn startLsp(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adapter.ToolResult {
-    const args = std.json.parseFromSliceLeaky(StartArgs, ctx.alloc, call.arguments, .{
+fn startLsp(ctx: r.r.tools.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+    const args = std.json.parseFromSliceLeaky(StartArgs, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments");
 
     r.setToolStatusPrint(ctx, call, "start LSP {s}", .{args.name});
-    const app = ctx.swarm.context.cast(r.r.app.App);
+    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     app.lua_vm.vm_mu.lockUncancelable(ctx.io);
     defer app.lua_vm.vm_mu.unlock(ctx.io);
     if (!app.lua_vm.hasLsp(args.name)) {

@@ -88,9 +88,9 @@ pub const Command = union(enum) {
     };
 
     pub const SpawnArgs = struct {
-        parent_id: ?r.prv.Swarm.AgentId = null,
-        agent_id: r.prv.Swarm.AgentId,
-        prompt: []const r.prv.adapter.ContentPart,
+        parent_id: ?r.AgentId = null,
+        agent_id: r.AgentId,
+        prompt: []const r.sdk.Part,
         agent_type: u8 = @intFromEnum(r.ContextFactory.AgentType.general),
         fork: bool = false,
         chat_entry: ?ChatEntry = null,
@@ -103,8 +103,8 @@ pub const Command = union(enum) {
     };
 
     pub const QueuedMessageArgs = struct {
-        agent_id: r.prv.Swarm.AgentId,
-        parts: []const r.prv.adapter.ContentPart,
+        agent_id: r.AgentId,
+        parts: []const r.sdk.Part,
         /// optional display message for render
         chat_entry: ?ChatEntry = null,
     };
@@ -123,7 +123,8 @@ pub const Command = union(enum) {
                     app.event_bus.emit(app, .{ .agent_cancelled = .{ .id = id } }) catch {};
                 }
                 app.cancelPermissions();
-                app.swarm.cancelAll();
+                app.registry.cancelAll();
+                app.exec_pool.cancelAll();
                 app.dropStreamingPreview();
 
                 if (app.streaming_entry) |*en| {
@@ -140,14 +141,14 @@ pub const Command = union(enum) {
 
                 app.mode = next_mode;
                 if (app.main_agent_id) |id| {
-                    const agent = app.swarm.getAgent(id).?;
+                    const agent = app.registry.get(id).?;
                     agent.mode_idx = m;
-                    agent.flags.force_full_reminder = true;
+                    agent.force_full_reminder = true;
                 }
             },
             .retry => {
                 if (app.main_agent_id) |id| {
-                    app.swarm.retryAgent(id);
+                    try app.registry.retry(id, .{ .max_steps = std.math.maxInt(usize) });
                     app.running = true;
                     app.auto_scroll = true;
                     app.scroll_offset = 0;
@@ -168,25 +169,23 @@ pub const Command = union(enum) {
             .queue_agent_message => |arg| {
                 const parts = try r.util.deepClone(@TypeOf(arg.parts), arg.parts, alloc);
                 const chat_entry = if (arg.chat_entry) |en| try r.util.deepClone(ChatEntry, en, alloc) else null;
-                try app.queued.push(alloc, arg.agent_id, chat_entry, parts);
+                if (chat_entry) |entry| try app.appendChatEntry(alloc, entry);
+                const agent = app.registry.get(arg.agent_id) orelse return;
+                try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
 
                 app.running = true;
                 app.auto_scroll = true;
                 app.scroll_offset = 0;
 
-                const state = app.swarm.getSlotState(arg.agent_id);
+                const state = app.registry.state(arg.agent_id);
                 if (state != .active) {
-                    try app.swarm.runAgent(arg.agent_id);
+                    try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
                 }
             },
             .compact => {
                 if (app.main_agent_id) |id| {
-                    const ag = app.swarm.getAgent(id).?;
                     try app.event_bus.emit(app, .{ .agent_complete = id });
-                    ag.requestCompaction();
-                    if (ag.state != .idle and ag.state != .complete) {
-                        app.swarm.wakeAgent(id);
-                    }
+                    _ = try app.registry.compact(id, false);
                     app.running = true;
                     app.auto_scroll = true;
                 }
@@ -206,22 +205,23 @@ pub const Command = union(enum) {
                 try app.reloadLspTools();
             },
             .spawn_agent => |arg| {
+                var model_config: ?r.models.Config = null;
                 if (!arg.fork) {
-                    if (app.swarm.getSlotState(arg.agent_id) != .reserved) return;
+                    if (app.registry.state(arg.agent_id) != .reserved) return;
                     switch (app.context_factory.buildAgentApiConfig(
                         @enumFromInt(arg.agent_type),
                         &app.config,
-                        app.swarm.exec.env,
+                        app.exec_pool.env,
                     )) {
-                        .config => {},
+                        .config => |config| model_config = config,
                         .diagnostic => |diagnostic| {
-                            app.swarm.releaseReservation(arg.agent_id);
+                            app.registry.releaseReservation(arg.agent_id);
                             if (arg.chat_entry) |en| {
                                 const entry = try r.util.deepClone(ChatEntry, en, alloc);
                                 try app.appendChatEntry(alloc, entry);
                             }
                             showProviderOnboarding(app, diagnostic);
-                            app.running = app.swarm.countActive() > 0;
+                            app.running = app.registry.countActive() > 0;
                             app.auto_scroll = true;
                             app.scroll_offset = 0;
                             app.dirty = true;
@@ -232,32 +232,32 @@ pub const Command = union(enum) {
 
                 var constructed = false;
                 errdefer if (constructed)
-                    app.swarm.releaseAgent(arg.agent_id)
+                    app.registry.release(arg.agent_id)
                 else
-                    app.swarm.releaseReservation(arg.agent_id);
+                    app.registry.releaseReservation(arg.agent_id);
 
-                if (arg.fork) {
-                    try app.swarm.forkAgentInSlot(arg.parent_id.?, arg.agent_id);
-                } else {
-                    try app.swarm.newAgentInSlot(
-                        arg.agent_id,
-                        arg.parent_id,
-                        arg.agent_type,
-                        @intFromEnum(app.mode),
-                    );
-                }
+                const cwd = if (arg.cwd.len > 0)
+                    arg.cwd
+                else if (arg.parent_id) |parent_id|
+                    if (app.registry.get(parent_id)) |parent| parent.cwd else app.cwd
+                else
+                    app.cwd;
+                const agent = if (arg.fork)
+                    try app.registry.activateFork(arg.agent_id, arg.parent_id.?)
+                else
+                    try app.registry.activate(arg.agent_id, model_config.?, .{ .identity = .{
+                        .type_idx = arg.agent_type,
+                        .mode_idx = @intFromEnum(app.mode),
+                        .name = app.context_factory.agentName(@enumFromInt(arg.agent_type)),
+                        .parent = if (arg.parent_id) |id| id.pack() else null,
+                        .depth = if (arg.parent_id) |id| app.registry.get(id).?.depth + 1 else 0,
+                        .cwd = cwd,
+                    }, .context_limit = app.default_context_limit });
                 constructed = true;
-                const agent = app.swarm.getAgent(arg.agent_id).?;
-                if (arg.cwd.len > 0) {
-                    agent.cwd = try alloc.dupe(u8, arg.cwd);
-                } else if (arg.parent_id) |pid| {
-                    if (app.swarm.getAgent(pid)) |p| agent.cwd = p.cwd;
-                }
-                if (agent.cwd.len == 0) agent.cwd = app.cwd;
-                try app.configureAgent(agent);
+                try app.configureAgent(arg.agent_id, agent);
 
                 if (app.context_factory.agents.get(@enumFromInt(arg.agent_type))) |meta| {
-                    agent.max_allowed_tool_calls = meta.default_tool_call_budget;
+                    agent.max_tool_calls = meta.default_tool_call_budget;
                 }
 
                 try app.event_bus.emit(app, .{
@@ -268,10 +268,10 @@ pub const Command = union(enum) {
                     if (app.main_agent_id) |ag_id| {
                         std.log.warn("Dropping active agent without reset!", .{});
                         app.chat_entries.clearRetainingCapacity();
-                        app.swarm.releaseAgent(ag_id);
+                        app.registry.release(ag_id);
                     }
                     app.main_agent_id = arg.agent_id;
-                    agent.max_iterations = std.math.maxInt(u32); // main agent = no limit
+                    agent.max_tool_calls = std.math.maxInt(u32);
                 }
 
                 if (arg.chat_entry) |en| {
@@ -279,8 +279,8 @@ pub const Command = union(enum) {
                     try app.appendChatEntry(alloc, entry);
                 }
 
-                const prompt = try r.util.deepClone(@TypeOf(arg.prompt), arg.prompt, alloc);
-                try app.swarm.runAgentWithMsg(arg.agent_id, prompt);
+                try agent.setMessages(&.{.{ .role = .user, .content = arg.prompt }});
+                try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
                 try app.event_bus.emit(app, .{ .agent_started = arg.agent_id });
                 app.running = true;
             },
@@ -328,8 +328,8 @@ pub const Command = union(enum) {
             .add_tool => |arg| {
                 app.context_factory.addAgentTool(arg.agent_type, arg.tool_name) catch return;
                 if (app.main_agent_id) |id| {
-                    if (app.swarm.getAgent(id)) |agent| {
-                        try app.context_factory.refreshAgentTools(agent);
+                    if (app.registry.get(id)) |agent| {
+                        try app.context_factory.refreshAgentTools(agent, app.toolBase(id));
                     }
                 }
             },
@@ -375,85 +375,4 @@ fn showProviderOnboarding(app: *App, diagnostic: r.ContextFactory.AgentConfigDia
             app.notifications.append(app.appAlloc(), "Missing required environment variable: {s}", .{name}) catch {};
         },
     }
-}
-
-test "handled spawn configuration failure keeps processing queued commands" {
-    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer test_arena.deinit();
-    const test_alloc = test_arena.allocator();
-
-    var factory = r.ContextFactory{
-        .prompt_arena = std.heap.ArenaAllocator.init(test_alloc),
-        .io = std.testing.io,
-        .config_dir = null,
-        .skill_dir = null,
-    };
-    defer factory.prompt_arena.deinit();
-    defer factory.loaded_tools.deinit(test_alloc);
-    factory.resetDefs();
-
-    var app = try App.init(std.testing.io, test_alloc, &factory, ".");
-    var env = std.process.Environ.Map.init(std.testing.allocator);
-    defer env.deinit();
-
-    var swarm: r.prv.Swarm = undefined;
-    try swarm.init(test_alloc, std.testing.io, .{
-        .ptr = &app,
-        .broadcast = (struct {
-            fn call(_: *anyopaque, _: r.prv.Swarm.BroadcastEntry) void {}
-        }).call,
-        .permission = (struct {
-            fn call(_: *anyopaque, _: *r.prv.Swarm.PermissionReq) void {}
-        }).call,
-        .build_config = (struct {
-            fn call(_: *anyopaque, _: u8) anyerror!r.prv.Swarm.BuiltConfig {
-                return error.UnexpectedConfigBuild;
-            }
-        }).call,
-        .gen_system_reminders = (struct {
-            fn call(_: *anyopaque, _: *r.prv.agent.Agent) void {}
-        }).call,
-        .pop_queued_message = (struct {
-            fn call(_: *anyopaque, _: r.prv.Swarm.AgentId, _: std.mem.Allocator) ?[]const r.prv.adapter.ContentPart {
-                return null;
-            }
-        }).call,
-    }, &env);
-    app.swarm = &swarm;
-    app.lua_vm.setApp(&app);
-    defer {
-        swarm.deinit();
-        app.deinit();
-    }
-
-    const id = swarm.reserveFreeSlot().?;
-    const entry = try ChatEntry.userMessageSimple(app.sessionAlloc(), .user, "hello");
-    try app.cmd_queue.append(std.testing.io, .{ .spawn_agent = .{
-        .agent_id = id,
-        .prompt = &.{.{ .text = "hello" }},
-        .chat_entry = entry,
-    } });
-
-    var later_command_ran = false;
-    try app.cmd_queue.append(std.testing.io, .{ .custom = .{
-        .ptr = &later_command_ran,
-        .func = (struct {
-            fn call(ptr: *anyopaque, _: *App) !void {
-                const ran: *bool = @ptrCast(@alignCast(ptr));
-                ran.* = true;
-            }
-        }).call,
-    } });
-
-    try app.cmd_queue.apply(std.testing.io, &app);
-
-    try std.testing.expect(later_command_ran);
-    try std.testing.expectEqual(@as(?r.prv.Swarm.AgentId, null), app.main_agent_id);
-    try std.testing.expectEqual(@as(?r.prv.Swarm.SlotState, null), swarm.getSlotState(id));
-    try std.testing.expect(!app.running);
-    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
-    try std.testing.expectEqual(r.prv.adapter.Role.user, app.chat_entries.items[0].role);
-    try std.testing.expectEqual(r.prv.adapter.Role.system, app.chat_entries.items[1].role);
-    try std.testing.expect(std.mem.indexOf(u8, app.chat_entries.items[1].parts[0].message, "~/.config/blitzdenk/blitz.lua") != null);
-    try std.testing.expect(app.notifications.hasVisible());
 }

@@ -4,7 +4,7 @@ const r = @import("root.zig");
 const SEARCH_TIMEOUT_MS = 10_000;
 const MAX_CONTEXT_LINES = 100;
 
-pub const GlobTool = r.prv.tool.Tool{
+pub const GlobTool = r.Tool{
     .def = .{
         .name = "glob",
         .description =
@@ -30,7 +30,7 @@ pub const GlobTool = r.prv.tool.Tool{
     .func = &runGlob,
 };
 
-pub const GrepTool = r.prv.tool.Tool{
+pub const GrepTool = r.Tool{
     .def = .{
         .name = "grep",
         .description =
@@ -74,8 +74,8 @@ const GrepArgs = struct {
     context: u32 = 0,
 };
 
-fn runGlob(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adapter.ToolResult {
-    const args = std.json.parseFromSliceLeaky(GlobArgs, ctx.alloc, call.arguments, .{
+fn runGlob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+    const args = std.json.parseFromSliceLeaky(GlobArgs, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments for glob");
 
@@ -88,7 +88,7 @@ fn runGlob(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adap
         return r.errResult(call, "failed to build glob command");
     argv.append(ctx.alloc, "--hidden") catch
         return r.errResult(call, "failed to build glob command");
-    appendIncludeGlob(ctx.alloc, &argv, ctx.cwd, args.path, args.pattern) catch
+    appendIncludeGlob(ctx.alloc, &argv, ctx.base.cwd, args.path, args.pattern) catch
         return r.errResult(call, "failed to build glob command");
     appendSearchPath(ctx.alloc, &argv, args.path) catch
         return r.errResult(call, "failed to build glob command");
@@ -101,8 +101,8 @@ fn runGlob(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adap
     });
 }
 
-fn runGrep(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adapter.ToolResult {
-    const args = std.json.parseFromSliceLeaky(GrepArgs, ctx.alloc, call.arguments, .{
+fn runGrep(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+    const args = std.json.parseFromSliceLeaky(GrepArgs, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments for grep");
 
@@ -124,7 +124,7 @@ fn runGrep(ctx: r.prv.tool.ToolContext, call: r.prv.adapter.ToolCall) r.prv.adap
 
     if (args.glob) |glob| {
         if (glob.len == 0) return r.errResult(call, "glob must not be empty");
-        appendIncludeGlob(ctx.alloc, &argv, ctx.cwd, args.path, glob) catch
+        appendIncludeGlob(ctx.alloc, &argv, ctx.base.cwd, args.path, glob) catch
             return r.errResult(call, "failed to build grep command");
     }
     argv.append(ctx.alloc, "--hidden") catch
@@ -224,13 +224,13 @@ const SearchFailureContext = struct {
 };
 
 fn runSearch(
-    ctx: r.prv.tool.ToolContext,
-    call: r.prv.adapter.ToolCall,
+    ctx: r.ToolContext,
+    call: r.r.sdk.ToolCall,
     search_argv: []const []const u8,
     failure: SearchFailureContext,
-) r.prv.adapter.ToolResult {
-    const raw = ctx.swarm.exec.runAndWaitTimeout(.{
-        .cwd = ctx.cwd,
+) r.r.sdk.ToolOutput {
+    const raw = ctx.base.exec_pool.runAndWaitTimeout(.{
+        .cwd = ctx.base.cwd,
         .argv = search_argv,
     }, SEARCH_TIMEOUT_MS) catch {
         const message = std.fmt.allocPrint(ctx.alloc, "{s} failed for pattern `{s}` in `{s}`: could not spawn search process", .{
@@ -238,8 +238,8 @@ fn runSearch(
         }) catch return r.errResult(call, "failed to spawn search process");
         return r.errResult(call, message);
     };
-    defer ctx.swarm.exec.alloc.free(raw.stdout);
-    defer ctx.swarm.exec.alloc.free(raw.stderr);
+    defer ctx.base.exec_pool.alloc.free(raw.stdout);
+    defer ctx.base.exec_pool.alloc.free(raw.stderr);
 
     if (raw.ty == .timeout) return r.errResult(call, "search timed out after 10 seconds; narrow path or globs and retry");
     // Ripgrep exit code 1 means the search completed successfully but found

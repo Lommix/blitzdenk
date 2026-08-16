@@ -81,7 +81,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/messages", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, params.timeout_ms);
+        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, requestOptions(params));
         defer alloc.free(response);
         return parseResponse(alloc, response);
     }
@@ -96,23 +96,30 @@ pub const Chat = struct {
         sctx: *model.StreamContext,
     ) anyerror!*model.GenerateResult {
         const self: *Chat = @ptrCast(@alignCast(ctx));
-        var arena = std.heap.ArenaAllocator.init(alloc);
-        defer arena.deinit();
-        const stream_alloc = arena.allocator();
-
-        const body = try buildRequest(stream_alloc, self.model_id, params, true);
-        const headers = try self.authHeaders(stream_alloc, params.headers);
-        const url = try std.fmt.allocPrint(stream_alloc, "{s}/messages", .{self.base_url});
-        var live = LiveStream{ .alloc = stream_alloc, .sctx = sctx };
-        const sse_text = try jsonx.postSseWithRetry(stream_alloc, io, client, url, body, headers, max_retries, params.timeout_ms, &live, emitLiveEvent);
+        const body = try buildRequest(alloc, self.model_id, params, true);
+        const headers = try self.authHeaders(alloc, params.headers);
+        const url = try std.fmt.allocPrint(alloc, "{s}/messages", .{self.base_url});
+        const request_options = requestOptions(params);
+        var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
+        const sse_text = try jsonx.postSseWithRetry(alloc, io, client, url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
         return parseStream(alloc, sse_text, &final_ctx);
     }
 };
 
+fn requestOptions(params: model.GenerateParams) jsonx.RequestOptions {
+    return .{
+        .timeout_ms = params.timeout_ms,
+        .cancellation = params.cancellation,
+        .on_provider_error = params.on_provider_error,
+        .on_provider_error_ctx = params.on_provider_error_ctx,
+    };
+}
+
 const LiveStream = struct {
     alloc: std.mem.Allocator,
     sctx: *model.StreamContext,
+    options: jsonx.RequestOptions,
 };
 
 fn emitLive(ctx: ?*anyopaque, chunk: types.StreamChunk) void {
@@ -127,6 +134,7 @@ fn emitFinalTool(ctx: ?*anyopaque, chunk: types.StreamChunk) void {
 
 fn emitLiveEvent(ctx: ?*anyopaque, data: []const u8) !void {
     const live: *LiveStream = @ptrCast(@alignCast(ctx.?));
+    if (jsonx.reportStreamError(live.alloc, live.options, data)) |err| return err;
     const event = try std.fmt.allocPrint(live.alloc, "data: {s}\n", .{data});
     var event_ctx = model.StreamContext{ .emit = emitLive, .emit_ctx = live.sctx };
     _ = try parseStream(live.alloc, event, &event_ctx);
@@ -138,6 +146,15 @@ fn buildRequest(
     params: model.GenerateParams,
     stream: bool,
 ) ![]const u8 {
+    var invalid_calls: std.StringHashMapUnmanaged(void) = .empty;
+    defer invalid_calls.deinit(a);
+    for (params.messages) |msg| {
+        for (msg.parts()) |part| switch (part) {
+            .tool_call => |call| if (!isJsonObject(a, call.input)) try invalid_calls.put(a, call.id, {}),
+            else => {},
+        };
+    }
+
     var w = std.Io.Writer.Allocating.init(a);
     defer w.deinit();
     var s: std.json.Stringify = .{ .writer = &w.writer };
@@ -165,13 +182,14 @@ fn buildRequest(
 
     try s.objectField("messages");
     try s.beginArray();
-    for (params.messages) |msg| {
+    for (params.messages, 0..) |msg, i| {
         if (msg.role == .system or msg.role == .developer) continue;
+        if (!hasContent(msg, &invalid_calls)) continue;
         try s.beginObject();
         try s.objectField("role");
         try s.write(if (msg.role == .assistant) "assistant" else "user");
         try s.objectField("content");
-        try writeContent(a, &s, msg);
+        try writeContent(&s, msg, &invalid_calls, params.prompt_caching and i + 1 == params.messages.len, params.cache_ttl);
         try s.endObject();
     }
     try s.endArray();
@@ -199,7 +217,7 @@ fn buildRequest(
     if (params.tools.len > 0) {
         try s.objectField("tools");
         try s.beginArray();
-        for (params.tools) |tool| {
+        for (params.tools, 0..) |tool, i| {
             try s.beginObject();
             try s.objectField("name");
             try s.write(tool.name);
@@ -207,6 +225,7 @@ fn buildRequest(
             try s.write(tool.description);
             try s.objectField("input_schema");
             try jsonx.writeRaw(&s, tool.input_schema);
+            if (params.prompt_caching and i + 1 == params.tools.len) try writeCacheControl(&s, params.cache_ttl);
             try s.endObject();
         }
         try s.endArray();
@@ -252,10 +271,8 @@ fn buildRequest(
     }
     try jsonx.writeProviderOptions(&s, params.provider_options);
 
-    if (stream) {
-        try s.objectField("stream");
-        try s.write(true);
-    }
+    try s.objectField("stream");
+    try s.write(stream);
     try s.endObject();
     return w.toOwnedSlice();
 }
@@ -272,10 +289,10 @@ fn writeCacheControl(s: *std.json.Stringify, ttl: ?[]const u8) !void {
     try s.endObject();
 }
 
-fn writeContent(a: std.mem.Allocator, s: *std.json.Stringify, msg: types.Message) !void {
-    _ = a;
+fn writeContent(s: *std.json.Stringify, msg: types.Message, invalid_calls: *const std.StringHashMapUnmanaged(void), cache: bool, ttl: ?[]const u8) !void {
+    const last = lastContentIndex(msg, invalid_calls);
     try s.beginArray();
-    for (msg.parts()) |part| {
+    for (msg.parts(), 0..) |part, i| {
         switch (part) {
             .text => |text| {
                 try s.beginObject();
@@ -283,9 +300,11 @@ fn writeContent(a: std.mem.Allocator, s: *std.json.Stringify, msg: types.Message
                 try s.write("text");
                 try s.objectField("text");
                 try s.write(text);
+                if (cache and last == i) try writeCacheControl(s, ttl);
                 try s.endObject();
             },
             .tool_call => |call| {
+                if (invalid_calls.contains(call.id)) continue;
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("tool_use");
@@ -295,9 +314,11 @@ fn writeContent(a: std.mem.Allocator, s: *std.json.Stringify, msg: types.Message
                 try s.write(call.name);
                 try s.objectField("input");
                 try jsonx.writeRaw(s, call.input);
+                if (cache and last == i) try writeCacheControl(s, ttl);
                 try s.endObject();
             },
             .tool_result => |result| {
+                if (invalid_calls.contains(result.id)) continue;
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("tool_result");
@@ -309,6 +330,7 @@ fn writeContent(a: std.mem.Allocator, s: *std.json.Stringify, msg: types.Message
                     try s.objectField("is_error");
                     try s.write(true);
                 }
+                if (cache and last == i) try writeCacheControl(s, ttl);
                 try s.endObject();
             },
             .reasoning => |reasoning| {
@@ -319,12 +341,37 @@ fn writeContent(a: std.mem.Allocator, s: *std.json.Stringify, msg: types.Message
                 try s.write(reasoning.text);
                 try s.objectField("signature");
                 try s.write(reasoning.signature);
+                if (cache and last == i) try writeCacheControl(s, ttl);
                 try s.endObject();
             },
             else => {},
         }
     }
     try s.endArray();
+}
+
+fn isJsonObject(a: std.mem.Allocator, value: []const u8) bool {
+    var parsed = std.json.parseFromSlice(std.json.Value, a, value, .{}) catch return false;
+    defer parsed.deinit();
+    return parsed.value == .object;
+}
+
+fn hasContent(msg: types.Message, invalid_calls: *const std.StringHashMapUnmanaged(void)) bool {
+    return lastContentIndex(msg, invalid_calls) != null;
+}
+
+fn lastContentIndex(msg: types.Message, invalid_calls: *const std.StringHashMapUnmanaged(void)) ?usize {
+    var index = msg.parts().len;
+    while (index > 0) {
+        index -= 1;
+        switch (msg.parts()[index]) {
+            .tool_call => |call| if (!invalid_calls.contains(call.id)) return index,
+            .tool_result => |result| if (!invalid_calls.contains(result.id)) return index,
+            .text, .reasoning => return index,
+            else => {},
+        }
+    }
+    return null;
 }
 
 fn parseResponse(a: std.mem.Allocator, body: []const u8) !*model.GenerateResult {
@@ -367,6 +414,12 @@ fn parseResponse(a: std.mem.Allocator, body: []const u8) !*model.GenerateResult 
                 } else if (std.mem.eql(u8, btype.string, "thinking")) {
                     if (block.object.get("thinking")) |t| {
                         if (t == .string) try reasoning.appendSlice(a, t.string);
+                    }
+                    if (block.object.get("signature")) |signature| {
+                        if (signature == .string) {
+                            a.free(result.reasoning_signature);
+                            result.reasoning_signature = try a.dupe(u8, signature.string);
+                        }
                     }
                 } else if (std.mem.eql(u8, btype.string, "tool_use")) {
                     var id: []const u8 = "";
@@ -431,7 +484,7 @@ fn parseUsage(root: std.json.Value) types.Usage {
     if (u.object.get("cache_creation_input_tokens")) |v| {
         if (v == .integer) usage.cache_write_tokens = @intCast(v.integer);
     }
-    usage.total_tokens = usage.input_tokens + usage.output_tokens;
+    usage.total_tokens = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens + usage.output_tokens;
     return usage;
 }
 
@@ -447,6 +500,8 @@ fn parseStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.StreamCo
     errdefer text.deinit(a);
     var reasoning: std.ArrayList(u8) = .empty;
     errdefer reasoning.deinit(a);
+    var reasoning_signature: []const u8 = "";
+    errdefer a.free(reasoning_signature);
     var calls: std.ArrayList(types.ToolCall) = .empty;
     errdefer {
         for (calls.items) |tc| {
@@ -484,7 +539,11 @@ fn parseStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.StreamCo
                     if (block.object.get("name")) |v| {
                         if (v == .string) name = v.string;
                     }
-                    try calls.append(a, .{ .id = try a.dupe(u8, id), .name = try a.dupe(u8, name), .input = "" });
+                    var input: []const u8 = "";
+                    if (block.object.get("input")) |value| {
+                        if (value == .object and value.object.count() > 0) input = try std.json.Stringify.valueAlloc(a, value, .{});
+                    }
+                    try calls.append(a, .{ .id = try a.dupe(u8, id), .name = try a.dupe(u8, name), .input = input });
                     sctx.send(.{ .type = .tool_call_streaming_start, .tool_call_id = id });
                 }
             }
@@ -505,6 +564,14 @@ fn parseStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.StreamCo
                     if (t == .string and t.string.len > 0) {
                         try reasoning.appendSlice(a, t.string);
                         sctx.send(.{ .type = .reasoning, .text = t.string });
+                    }
+                }
+            } else if (std.mem.eql(u8, dtype.string, "signature_delta")) {
+                if (delta.object.get("signature")) |signature| {
+                    if (signature == .string) {
+                        const old = reasoning_signature;
+                        reasoning_signature = try std.mem.concat(a, u8, &.{ old, signature.string });
+                        a.free(old);
                     }
                 }
             } else if (std.mem.eql(u8, dtype.string, "input_json_delta")) {
@@ -546,6 +613,8 @@ fn parseStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.StreamCo
 
     result.text = try text.toOwnedSlice(a);
     result.reasoning = try reasoning.toOwnedSlice(a);
+    result.reasoning_signature = reasoning_signature;
+    reasoning_signature = "";
     for (calls.items) |tc| {
         sctx.send(.{ .type = .tool_call, .tool_call_id = tc.id, .tool_name = tc.name, .tool_input = tc.input });
     }
@@ -566,4 +635,76 @@ test "tool continuation and structured output request" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"tool_use\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"tool_result\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"output_config\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":false") != null);
 }
+
+test "request filters malformed calls and preserves cache control" {
+    const messages = [_]types.Message{
+        .{ .role = .assistant, .content = &.{
+            types.Part.toolCallPart("toolu_bad", "grep", "{\"pattern\":\"foo\""),
+            types.Part.toolCallPart("toolu_ok", "read", "{\"path\":\"src/main.zig\"}"),
+        } },
+        .{ .role = .tool, .content = &.{
+            types.Part.toolResultPart("toolu_bad", "grep", "bad"),
+            types.Part.toolResultPart("toolu_ok", "read", "contents"),
+        } },
+    };
+    const tools = [_]types.Tool{.{ .name = "read", .input_schema = "{\"type\":\"object\"}" }};
+    const body = try buildRequest(std.testing.allocator, "claude-test", .{
+        .messages = &messages,
+        .tools = &tools,
+        .system = "system",
+        .prompt_caching = true,
+    }, false);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "toolu_ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "toolu_bad") == null);
+    var count: usize = 0;
+    var rest = body;
+    while (std.mem.indexOf(u8, rest, "cache_control")) |index| {
+        count += 1;
+        rest = rest[index + "cache_control".len ..];
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
+test "thinking signatures survive blocking and streaming responses" {
+    const blocking = try parseResponse(std.testing.allocator,
+        \\{"content":[{"type":"thinking","thinking":"plan","signature":"sig"}],"stop_reason":"end_turn"}
+    );
+    defer {
+        blocking.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(blocking);
+    }
+    try std.testing.expectEqualStrings("plan", blocking.reasoning);
+    try std.testing.expectEqualStrings("sig", blocking.reasoning_signature);
+
+    const streamed =
+        \\data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"plan"}}
+        \\data: {"type":"content_block_delta","delta":{"type":"signature_delta","signature":"sig"}}
+    ;
+    var stream = model.StreamContext{ .emit = discardChunk };
+    const result = try parseStream(std.testing.allocator, streamed, &stream);
+    defer {
+        result.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(result);
+    }
+    try std.testing.expectEqualStrings("plan", result.reasoning);
+    try std.testing.expectEqualStrings("sig", result.reasoning_signature);
+}
+
+test "stream seeds tool input from content block start" {
+    const body =
+        \\data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read","input":{"path":"src/main.zig"}}}
+    ;
+    var stream = model.StreamContext{ .emit = discardChunk };
+    const result = try parseStream(std.testing.allocator, body, &stream);
+    defer {
+        result.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
+    try std.testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.tool_calls[0].input);
+}
+
+fn discardChunk(_: ?*anyopaque, _: types.StreamChunk) void {}

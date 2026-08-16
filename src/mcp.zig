@@ -1,5 +1,4 @@
 const std = @import("std");
-const prv = @import("provider");
 const r = @import("root.zig");
 
 const log = std.log.scoped(.mcp);
@@ -15,7 +14,7 @@ pub const ServerConfig = struct {
 };
 
 pub const RegisteredTool = struct {
-    tool: prv.tool.Tool,
+    tool: r.tools.Tool,
     flags: r.ContextFactory.ToolFlags,
 };
 
@@ -119,28 +118,23 @@ pub const Manager = struct {
 
 var active_manager: ?*Manager = null;
 
-fn toolTrampoline(ctx: prv.tool.ToolContext, call: prv.adapter.ToolCall) prv.adapter.ToolResult {
+fn toolTrampoline(ctx: r.tools.ToolContext, call: r.sdk.ToolCall) r.sdk.ToolOutput {
     const manager = active_manager orelse return errResult(call, "MCP manager not initialized");
     const binding = manager.findBinding(call.name) orelse return errResult(call, "MCP tool binding not found");
     if (binding.client_index >= manager.clients.items.len) return errResult(call, "MCP client missing");
 
     r.tools.setToolStatusPrint(ctx, call, "MCP {s}", .{binding.remote_name});
     const client = &manager.clients.items[binding.client_index];
-    const content = client.callTool(binding.remote_name, call.arguments) catch |err| {
+    const content = client.callTool(binding.remote_name, call.input) catch |err| {
         const msg = std.fmt.allocPrint(ctx.alloc, "MCP tool call failed: {s}", .{@errorName(err)}) catch "MCP tool call failed";
         return errResult(call, msg);
     };
 
-    return .{
-        .call_id = call.id,
-        .name = call.name,
-        .content = content.text,
-        .is_error = content.is_error,
-    };
+    return .{ .content = content.text, .is_error = content.is_error };
 }
 
-fn errResult(call: prv.adapter.ToolCall, msg: []const u8) prv.adapter.ToolResult {
-    return .{ .call_id = call.id, .name = call.name, .content = msg, .is_error = true };
+fn errResult(_: r.sdk.ToolCall, msg: []const u8) r.sdk.ToolOutput {
+    return .{ .content = msg, .is_error = true };
 }
 
 const RemoteTool = struct {

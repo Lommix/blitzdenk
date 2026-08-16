@@ -79,13 +79,13 @@ fn run(
         history.deinit(alloc);
     }
 
+    try appendOwnedMessages(alloc, &history, opts.messages);
     if (opts.prompt.len > 0) {
         try history.append(alloc, .{
             .role = .user,
             .single = types.Part.textPart(try alloc.dupe(u8, opts.prompt)),
         });
     }
-    try appendOwnedMessages(alloc, &history, opts.messages);
 
     var steps: std.ArrayList(StepScratch) = .empty;
     errdefer {
@@ -104,6 +104,28 @@ fn run(
     while (step_no < opts.max_steps) {
         step_no += 1;
 
+        if (opts.cancellation) |token| try token.check();
+
+        if (opts.hooks.on_prepare_step) |f| {
+            const prepared = try f(opts.hooks.on_prepare_step_ctx, .{
+                .number = step_no,
+                .messages = history.items,
+            });
+            if (prepared.replace) {
+                var replacement: std.ArrayList(Message) = .empty;
+                errdefer {
+                    for (replacement.items) |msg| types.freeMessage(alloc, msg);
+                    replacement.deinit(alloc);
+                }
+                try appendOwnedMessages(alloc, &replacement, prepared.messages);
+                for (history.items) |msg| types.freeMessage(alloc, msg);
+                history.deinit(alloc);
+                history = replacement;
+            } else {
+                try appendOwnedMessages(alloc, &history, prepared.messages);
+            }
+        }
+
         if (opts.hooks.on_reminder) |f| {
             if (f(opts.hooks.on_reminder_ctx, .{ .step = step_no, .message_count = history.items.len })) |text| {
                 const owned = try alloc.dupe(u8, text);
@@ -114,6 +136,8 @@ fn run(
                 });
             }
         }
+
+        if (opts.hooks.on_checkpoint) |f| f(opts.hooks.on_checkpoint_ctx, history.items);
 
         if (opts.hooks.on_request) |f| {
             f(opts.hooks.on_request_ctx, .{
@@ -146,6 +170,9 @@ fn run(
                 .schema = value,
             } else null,
             .timeout_ms = opts.timeout_ms,
+            .cancellation = opts.cancellation,
+            .on_provider_error = opts.hooks.on_provider_error,
+            .on_provider_error_ctx = opts.hooks.on_provider_error_ctx,
         };
 
         const started = nowMs(io);
@@ -200,32 +227,41 @@ fn run(
             });
         }
 
-        if (result.tool_calls.len == 0) {
-            result.deinit(alloc);
-            alloc.destroy(result);
-            break;
-        }
-
-        if (step_no >= opts.max_steps) {
-            exhausted = true;
-            result.deinit(alloc);
-            alloc.destroy(result);
-            break;
-        }
-
-        const tool_results = try executeTools(alloc, io, opts, result.tool_calls, step_no);
-        defer {
+        const has_tools = result.tool_calls.len > 0;
+        const execute_tools = has_tools and step_no < opts.max_steps;
+        if (has_tools and !execute_tools) exhausted = true;
+        const tool_results: []types.ToolResult = if (execute_tools)
+            try executeTools(alloc, io, opts, result.tool_calls, step_no)
+        else
+            &.{};
+        defer if (execute_tools) {
             freeToolResults(alloc, tool_results);
             alloc.free(tool_results);
+        };
+        if (execute_tools) {
+            try appendToolMessages(alloc, &history, tool_results);
+            steps.items[steps.items.len - 1].tool_count = tool_results.len;
         }
-        try appendToolMessages(alloc, &history, tool_results);
-        steps.items[steps.items.len - 1].tool_count = tool_results.len;
+
+        var should_stop = false;
+        for (tool_results) |tool_result| {
+            if (tool_result.exit_loop) should_stop = true;
+        }
+        if (!should_stop) should_stop = if (opts.hooks.stop_when) |f|
+            f(opts.hooks.stop_when_ctx, .{
+                .step = step_no,
+                .messages = history.items,
+                .tool_results = tool_results,
+            })
+        else
+            false;
 
         if (opts.hooks.on_step_finish) |f| {
             f(opts.hooks.on_step_finish_ctx, .{
                 .number = step_no,
                 .text = result.text,
                 .tool_calls = result.tool_calls,
+                .tool_results = tool_results,
                 .finish_reason = result.finish_reason,
                 .usage = result.usage,
             });
@@ -243,6 +279,7 @@ fn run(
 
         result.deinit(alloc);
         alloc.destroy(result);
+        if (!execute_tools or should_stop) break;
     }
 
     var text: std.ArrayList(u8) = .empty;
@@ -368,6 +405,7 @@ fn clonePart(alloc: std.mem.Allocator, value: types.Part) !types.Part {
                 .name = name,
                 .output = try alloc.dupe(u8, result.output),
                 .is_error = result.is_error,
+                .exit_loop = result.exit_loop,
             } };
         },
         .file => |file| blk: {
@@ -376,6 +414,11 @@ fn clonePart(alloc: std.mem.Allocator, value: types.Part) !types.Part {
             const media_type = try alloc.dupe(u8, file.media_type);
             errdefer alloc.free(media_type);
             break :blk types.Part.filePart(url, media_type, try alloc.dupe(u8, file.filename));
+        },
+        .provider_data => |data| blk: {
+            const provider = try alloc.dupe(u8, data.provider);
+            errdefer alloc.free(provider);
+            break :blk types.Part.providerDataPart(provider, try alloc.dupe(u8, data.data));
         },
     };
 }
@@ -410,7 +453,9 @@ fn assistantParts(alloc: std.mem.Allocator, result: *const model.GenerateResult)
     if (result.reasoning.len > 0) {
         const text = try alloc.dupe(u8, result.reasoning);
         errdefer alloc.free(text);
-        try parts.append(alloc, types.Part.reasoningPart(text, ""));
+        const signature = try alloc.dupe(u8, result.reasoning_signature);
+        errdefer alloc.free(signature);
+        try parts.append(alloc, types.Part.reasoningPart(text, signature));
     }
     for (result.tool_calls) |tc| {
         const id = try alloc.dupe(u8, tc.id);
@@ -421,6 +466,7 @@ fn assistantParts(alloc: std.mem.Allocator, result: *const model.GenerateResult)
         errdefer alloc.free(input);
         try parts.append(alloc, types.Part.toolCallPart(id, name, input));
     }
+    for (result.provider_parts) |part| try parts.append(alloc, try clonePart(alloc, part));
     return parts.toOwnedSlice(alloc);
 }
 
@@ -450,12 +496,21 @@ fn stepToolResults(alloc: std.mem.Allocator, tool_msgs: []const Message) ![]cons
     for (tool_msgs) |msg| {
         for (msg.parts()) |part| {
             switch (part) {
-                .tool_result => |result| try results.append(alloc, .{
-                    .tool_call_id = result.id,
-                    .tool_name = result.name,
-                    .output = result.output,
-                    .is_error = result.is_error,
-                }),
+                .tool_result => |result| {
+                    var image: ?types.ToolImage = null;
+                    for (msg.parts()) |candidate| switch (candidate) {
+                        .image => |value| image = .{ .url = value.url, .media_type = value.media_type },
+                        else => {},
+                    };
+                    try results.append(alloc, .{
+                        .tool_call_id = result.id,
+                        .tool_name = result.name,
+                        .output = result.output,
+                        .is_error = result.is_error,
+                        .exit_loop = result.exit_loop,
+                        .image = image,
+                    });
+                },
                 else => {},
             }
         }
@@ -471,15 +526,20 @@ fn appendToolMessages(alloc: std.mem.Allocator, history: *std.ArrayList(Message)
         errdefer alloc.free(name);
         const output = try alloc.dupe(u8, tr.output);
         errdefer alloc.free(output);
-        try history.append(alloc, .{
-            .role = .tool,
-            .single = .{ .tool_result = .{
-                .id = id,
-                .name = name,
-                .output = output,
-                .is_error = tr.is_error,
-            } },
-        });
+        const part_count: usize = if (tr.image != null) 2 else 1;
+        const parts = try alloc.alloc(types.Part, part_count);
+        parts[0] = .{ .tool_result = .{
+            .id = id,
+            .name = name,
+            .output = output,
+            .is_error = tr.is_error,
+            .exit_loop = tr.exit_loop,
+        } };
+        if (tr.image) |image| parts[1] = .{ .image = .{
+            .url = try alloc.dupe(u8, image.url),
+            .media_type = try alloc.dupe(u8, image.media_type),
+        } };
+        try history.append(alloc, .{ .role = .tool, .content = parts });
     }
 }
 
@@ -488,6 +548,10 @@ fn freeToolResults(alloc: std.mem.Allocator, results: []const types.ToolResult) 
         alloc.free(tr.tool_call_id);
         alloc.free(tr.tool_name);
         alloc.free(tr.output);
+        if (tr.image) |image| {
+            alloc.free(image.url);
+            alloc.free(image.media_type);
+        }
     }
 }
 
@@ -512,38 +576,36 @@ fn executeTools(
         }
     } else {
         const Job = struct {
-            alloc: std.mem.Allocator,
-            io: std.Io,
-            opts: GenerateOptions,
-            call: types.ToolCall,
-            step: usize,
-            result: *types.ToolResult,
+            result: types.ToolResult,
 
-            fn run(job: *@This()) void {
-                const result = executeOne(job.alloc, job.io, job.opts, job.call, job.step) catch |err| types.ToolResult{
-                    .tool_call_id = job.alloc.dupe(u8, job.call.id) catch "",
-                    .tool_name = job.alloc.dupe(u8, job.call.name) catch "",
-                    .output = std.fmt.allocPrint(job.alloc, "error: tool execution failed: {s}", .{@errorName(err)}) catch "",
-                    .is_error = true,
+            fn run(a: std.mem.Allocator, io_: std.Io, options_: GenerateOptions, call_: types.ToolCall, step_: usize) anyerror!@This() {
+                const result_ = executeOne(a, io_, options_, call_, step_) catch |err| {
+                    if (err == error.Canceled) return err;
+                    return .{ .result = .{
+                        .tool_call_id = try a.dupe(u8, call_.id),
+                        .tool_name = try a.dupe(u8, call_.name),
+                        .output = try std.fmt.allocPrint(a, "error: tool execution failed: {s}", .{@errorName(err)}),
+                        .is_error = true,
+                    } };
                 };
-                job.result.* = result;
+                return .{ .result = result_ };
             }
         };
-        const jobs = try alloc.alloc(Job, calls.len);
-        errdefer alloc.free(jobs);
-        const threads = try alloc.alloc(std.Thread, calls.len);
-        errdefer alloc.free(threads);
-        var spawned: usize = 0;
+        const futures = try alloc.alloc(std.Io.Future(anyerror!Job), calls.len);
+        defer alloc.free(futures);
         for (calls, 0..) |tc, i| {
-            jobs[i] = .{ .alloc = alloc, .io = io, .opts = opts, .call = tc, .step = step, .result = &results[i] };
-            threads[spawned] = std.Thread.spawn(.{}, Job.run, .{&jobs[i]}) catch {
-                jobs[i].run();
-                continue;
-            };
-            spawned += 1;
+            futures[i] = std.Io.async(io, Job.run, .{ alloc, io, opts, tc, step });
         }
-        for (threads[0..spawned]) |*t| t.join();
-        completed = calls.len;
+        var awaited: usize = 0;
+        errdefer for (futures[awaited..]) |*future| {
+            if (future.cancel(io)) |job| freeToolResults(alloc, &.{job.result}) else |_| {}
+        };
+        for (futures) |*future| {
+            const job = try future.await(io);
+            results[awaited] = job.result;
+            awaited += 1;
+            completed = awaited;
+        }
     }
 
     return results;
@@ -556,6 +618,7 @@ fn executeOne(
     call: types.ToolCall,
     step: usize,
 ) !types.ToolResult {
+    if (opts.cancellation) |token| try token.check();
     const started = nowMs(io);
     if (opts.hooks.on_tool_call_start) |f| {
         f(opts.hooks.on_tool_call_start_ctx, .{
@@ -568,15 +631,20 @@ fn executeOne(
 
     var output: []const u8 = "error: unknown tool";
     var is_err = true;
+    var exit_loop = false;
+    var image: ?types.ToolImage = null;
     var exec_err: ?anyerror = error.UnknownTool;
     var err_buf: []u8 = &.{};
+    defer a.free(err_buf);
 
     for (opts.tools) |tool| {
         if (!std.mem.eql(u8, tool.name, call.name)) continue;
         if (tool.execute) |exec| {
-            if (exec(tool.execute_ctx, call.input)) |out| {
-                output = out;
-                is_err = false;
+            if (executeTool(a, io, opts.cancellation, exec, tool.execute_ctx, call)) |out| {
+                output = out.content;
+                is_err = out.is_error;
+                exit_loop = out.exit_loop;
+                image = out.image;
                 exec_err = null;
             } else |err| {
                 err_buf = std.fmt.allocPrint(a, "error: {s}", .{@errorName(err)}) catch "";
@@ -590,7 +658,7 @@ fn executeOne(
         }
         break;
     }
-    defer a.free(err_buf);
+    if (opts.cancellation) |token| try token.check();
 
     const id = try a.dupe(u8, call.id);
     errdefer a.free(id);
@@ -598,6 +666,10 @@ fn executeOne(
     errdefer a.free(name);
     const out = try a.dupe(u8, output);
     errdefer a.free(out);
+    const owned_image: ?types.ToolImage = if (image) |value| .{
+        .url = try a.dupe(u8, value.url),
+        .media_type = try a.dupe(u8, value.media_type),
+    } else null;
 
     const duration: u64 = @intCast(nowMs(io) - started);
     if (opts.hooks.on_tool_call) |f| {
@@ -617,7 +689,43 @@ fn executeOne(
         .tool_name = name,
         .output = out,
         .is_error = is_err,
+        .exit_loop = exit_loop,
+        .image = owned_image,
     };
+}
+
+fn executeTool(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    cancellation: ?*options.CancellationToken,
+    exec: types.ToolExecuteFn,
+    ctx: ?*anyopaque,
+    call: types.ToolCall,
+) !types.ToolOutput {
+    const token = cancellation orelse return exec(ctx, alloc, io, call);
+    const Selection = union(enum) { output: anyerror!types.ToolOutput, canceled: void };
+    var buffer: [2]Selection = undefined;
+    var select = std.Io.Select(Selection).init(io, &buffer);
+    try select.concurrent(.output, runToolCallback, .{ exec, ctx, alloc, io, call });
+    select.async(.canceled, cancellationTask, .{ token, io });
+    switch (try select.await()) {
+        .output => |output| {
+            select.cancelDiscard();
+            return output;
+        },
+        .canceled => {
+            select.cancelDiscard();
+            return error.Canceled;
+        },
+    }
+}
+
+fn runToolCallback(exec: types.ToolExecuteFn, ctx: ?*anyopaque, alloc: std.mem.Allocator, io: std.Io, call: types.ToolCall) !types.ToolOutput {
+    return exec(ctx, alloc, io, call);
+}
+
+fn cancellationTask(token: *options.CancellationToken, io: std.Io) void {
+    token.wait(io) catch {};
 }
 
 pub fn generateObject(

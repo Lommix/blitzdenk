@@ -2,7 +2,7 @@
 // (Wayland via wl-paste, X11 via xclip), writes it to a temp file under
 // `/tmp/blitz` and returns a `file://` URL. Text pastes are untouched.
 const std = @import("std");
-const prv = @import("provider");
+const exec = @import("exec");
 const util = @import("util.zig");
 
 /// Display token that stands in for a pasted-image URL in the input buffer.
@@ -101,7 +101,7 @@ fn urlEnd(buffer: []const u8, start: usize) usize {
     return i;
 }
 
-fn readMime(alloc: std.mem.Allocator, pool: *prv.exec.CmdPool, argv: []const []const u8, ext: []const u8) !?ImageData {
+fn readMime(alloc: std.mem.Allocator, pool: *exec.CmdPool, argv: []const []const u8, ext: []const u8) !?ImageData {
     const res = pool.runAndWaitTimeout(.{ .argv = argv, .force_local = true }, 1500) catch return null;
     defer pool.alloc.free(res.stdout);
     defer pool.alloc.free(res.stderr);
@@ -114,7 +114,7 @@ fn readMime(alloc: std.mem.Allocator, pool: *prv.exec.CmdPool, argv: []const []c
 /// Reads the first supported image type found on the clipboard.
 /// Returns `null` when the clipboard holds no image (or no tool is available).
 /// Caller frees `data`.
-pub fn readImage(alloc: std.mem.Allocator, pool: *prv.exec.CmdPool) !?ImageData {
+pub fn readImage(alloc: std.mem.Allocator, pool: *exec.CmdPool) !?ImageData {
     const env = pool.env;
 
     const attempts = [_]struct { mime: []const u8, ext: []const u8 }{
