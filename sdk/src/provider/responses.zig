@@ -3,6 +3,7 @@ const model = @import("../model.zig");
 const types = @import("../types.zig");
 const auth = @import("../auth.zig");
 const jsonx = @import("jsonx.zig");
+const log = std.log.scoped(.responses_provider);
 
 pub const default_base_url = "https://api.openai.com/v1";
 pub const api_key_env = "OPENAI_API_KEY";
@@ -405,7 +406,10 @@ fn parseResponse(a: std.mem.Allocator, body: []const u8) !*model.GenerateResult 
                 if (item != .object) continue;
                 const itype = item.object.get("type") orelse continue;
                 if (itype != .string) continue;
-                if (isInvalidFunctionCall(a, item)) continue;
+                if (isInvalidFunctionCall(a, item)) {
+                    logDroppedFunctionCall(item);
+                    continue;
+                }
                 try appendProviderPart(a, &provider_parts, item);
                 if (std.mem.eql(u8, itype.string, "message")) {
                     if (item.object.get("content")) |content| {
@@ -531,6 +535,10 @@ fn isInvalidFunctionCall(a: std.mem.Allocator, value: std.json.Value) bool {
     return std.mem.eql(u8, stringField(value, "type") orelse "", "function_call") and !isJsonObject(a, stringField(value, "arguments") orelse "");
 }
 
+fn logDroppedFunctionCall(value: std.json.Value) void {
+    jsonx.logDroppedToolCall(log, stringField(value, "call_id") orelse "", stringField(value, "name") orelse "", stringField(value, "arguments") orelse "");
+}
+
 fn appendProviderPart(a: std.mem.Allocator, parts: *std.ArrayList(types.Part), value: std.json.Value) !void {
     const raw = try stringifyValue(a, value);
     errdefer a.free(raw);
@@ -596,7 +604,10 @@ fn parseStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.StreamCo
             }
         } else if (std.mem.eql(u8, etype.string, "response.output_item.done")) {
             const item = event.object.get("item") orelse continue;
-            if (isInvalidFunctionCall(a, item)) continue;
+            if (isInvalidFunctionCall(a, item)) {
+                logDroppedFunctionCall(item);
+                continue;
+            }
             try appendProviderPart(a, &provider_parts, item);
             if (item == .object) {
                 const itype = item.object.get("type") orelse continue;

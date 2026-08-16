@@ -1,5 +1,6 @@
 const std = @import("std");
 const sdk = @import("blitz-sdk");
+const log = std.log.scoped(.agent_stream);
 
 pub const ProviderError = struct {
     status_code: u16,
@@ -160,37 +161,54 @@ pub const RunTask = struct {
         self.checkpoint_hook_ctx = checkpoint_hook_ctx;
         var result = sdk.streamText(self.arena.allocator(), self.io, self.model, options) catch |err| {
             self.failure = err;
-            if (!self.provider_error_seen.load(.acquire)) self.queue.append(.{ .failed = err }) catch {};
+            log.warn("stream failed: {s}", .{@errorName(err)});
+            if (!self.provider_error_seen.load(.acquire)) self.queue.append(.{ .failed = err }) catch |queue_err| {
+                log.err("dropped stream failure event {s}: {s}", .{ @errorName(err), @errorName(queue_err) });
+            };
             return;
         };
         const owned = self.arena.allocator().create(sdk.TextResult) catch {
             result.deinit(self.arena.allocator());
-            self.queue.append(.{ .failed = error.OutOfMemory }) catch {};
+            self.queue.append(.{ .failed = error.OutOfMemory }) catch |err| {
+                log.err("dropped out-of-memory stream failure event: {s}", .{@errorName(err)});
+            };
             return;
         };
         owned.* = result;
         self.result = owned;
-        self.queue.append(.{ .complete = owned }) catch {};
+        self.queue.append(.{ .complete = owned }) catch |err| {
+            log.err("dropped stream completion event: {s}", .{@errorName(err)});
+        };
     }
 
     fn onText(ctx: ?*anyopaque, delta: []const u8) void {
         const self: *RunTask = @ptrCast(@alignCast(ctx.?));
-        self.queue.append(.{ .text = delta }) catch {};
+        self.queue.append(.{ .text = delta }) catch |err| {
+            log.err("dropped text stream chunk ({d} bytes): {s}", .{ delta.len, @errorName(err) });
+        };
     }
 
     fn onReasoning(ctx: ?*anyopaque, delta: []const u8) void {
         const self: *RunTask = @ptrCast(@alignCast(ctx.?));
-        self.queue.append(.{ .reasoning = delta }) catch {};
+        self.queue.append(.{ .reasoning = delta }) catch |err| {
+            log.err("dropped reasoning stream chunk ({d} bytes): {s}", .{ delta.len, @errorName(err) });
+        };
     }
 
     fn onTool(ctx: ?*anyopaque, chunk: sdk.StreamChunk) void {
         const self: *RunTask = @ptrCast(@alignCast(ctx.?));
-        self.queue.append(.{ .tool = chunk }) catch {};
+        self.queue.append(.{ .tool = chunk }) catch |err| {
+            log.err("dropped tool stream chunk type={s} id={s} name={s} input_bytes={d}: {s}", .{
+                @tagName(chunk.type), chunk.tool_call_id, chunk.tool_name, chunk.tool_input.len, @errorName(err),
+            });
+        };
     }
 
     fn onStep(ctx: ?*anyopaque, step: sdk.options.StepInfo) void {
         const self: *RunTask = @ptrCast(@alignCast(ctx.?));
-        self.queue.append(.{ .step = step }) catch {};
+        self.queue.append(.{ .step = step }) catch |err| {
+            log.err("dropped step event step={d} calls={d} results={d}: {s}", .{ step.number, step.tool_calls.len, step.tool_results.len, @errorName(err) });
+        };
     }
 
     fn onProviderError(ctx: ?*anyopaque, info: sdk.options.ProviderErrorInfo) void {
@@ -207,7 +225,9 @@ pub const RunTask = struct {
             .retry_after_ms = info.retry_after_ms,
             .will_retry = info.will_retry,
             .attempt = info.attempt,
-        } }) catch {};
+        } }) catch |err| {
+            log.err("dropped provider error event status={d}: {s}", .{ info.status_code, @errorName(err) });
+        };
     }
 
     fn onCheckpoint(ctx: ?*anyopaque, messages: []const sdk.Message) void {
@@ -310,7 +330,8 @@ pub const OwnedOptions = struct {
     pub fn clone(alloc: std.mem.Allocator, value: sdk.GenerateOptions) !OwnedOptions {
         var arena = std.heap.ArenaAllocator.init(alloc);
         errdefer arena.deinit();
-        return .{ .arena = arena, .value = try cloneOptions(arena.allocator(), value) };
+        const cloned = try cloneOptions(arena.allocator(), value);
+        return .{ .arena = arena, .value = cloned };
     }
 
     pub fn deinit(self: *OwnedOptions) void {

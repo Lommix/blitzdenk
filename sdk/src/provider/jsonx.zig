@@ -4,6 +4,11 @@ const types = @import("../types.zig");
 const errors = @import("../errors.zig");
 const opts_mod = @import("../options.zig");
 
+pub fn logDroppedToolCall(comptime scope: type, id: []const u8, name: []const u8, input: []const u8) void {
+    const reason = if (id.len == 0) "missing id" else if (name.len == 0) "missing name" else "arguments are not a JSON object";
+    scope.warn("dropped tool call: {s}; id={s} name={s} arguments={s}", .{ reason, id, name, input[0..@min(input.len, 1024)] });
+}
+
 pub fn buildChatRequest(
     a: std.mem.Allocator,
     model_id: []const u8,
@@ -372,8 +377,9 @@ fn sleepBackoff(io: std.Io, attempt: u32, retry_after_ms: ?u64, cancellation: ?*
     const Selection = union(enum) { elapsed: void, canceled: void };
     var buffer: [2]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
-    select.async(.elapsed, backoffTask, .{ io, capped });
-    select.async(.canceled, cancellationTask, .{ token, io });
+    var done = std.atomic.Value(bool).init(false);
+    select.async(.elapsed, backoffTask, .{ io, capped, &done });
+    select.async(.canceled, opts_mod.CancellationToken.waitUntilDone, .{ token, &done, io });
     switch (try select.await()) {
         .elapsed => select.cancelDiscard(),
         .canceled => {
@@ -383,12 +389,9 @@ fn sleepBackoff(io: std.Io, attempt: u32, retry_after_ms: ?u64, cancellation: ?*
     }
 }
 
-fn backoffTask(io: std.Io, duration_ms: u64) void {
+fn backoffTask(io: std.Io, duration_ms: u64, done: *std.atomic.Value(bool)) void {
+    defer done.store(true, .release);
     std.Io.sleep(io, .fromMilliseconds(@intCast(duration_ms)), .awake) catch {};
-}
-
-fn cancellationTask(token: *opts_mod.CancellationToken, io: std.Io) void {
-    token.wait(io) catch {};
 }
 
 fn isRetryableStatus(status: std.http.Status) bool {
@@ -463,8 +466,14 @@ pub fn reportStreamError(a: std.mem.Allocator, options: RequestOptions, body: []
     return if (std.ascii.indexOfIgnoreCase(body, "rate_limit") != null) error.RateLimited else error.ApiError;
 }
 
-fn timeoutTask(io: std.Io, timeout_ms: u64) void {
+fn timeoutTask(io: std.Io, timeout_ms: u64, done: *std.atomic.Value(bool)) void {
+    defer done.store(true, .release);
     std.Io.sleep(io, .fromMilliseconds(@intCast(timeout_ms)), .awake) catch {};
+}
+
+fn postTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, done: *std.atomic.Value(bool)) !Response {
+    defer done.store(true, .release);
+    return post(a, io, client, url, body, headers);
 }
 
 fn postTimed(
@@ -485,9 +494,10 @@ fn postTimed(
     };
     var buffer: [3]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
-    select.async(.response, post, .{ a, io, client, url, body, headers });
-    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout });
-    if (cancellation) |token| select.async(.canceled, cancellationTask, .{ token, io });
+    var done = std.atomic.Value(bool).init(false);
+    select.async(.response, postTask, .{ a, io, client, url, body, headers, &done });
+    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout, &done });
+    if (cancellation) |token| select.async(.canceled, opts_mod.CancellationToken.waitUntilDone, .{ token, &done, io });
     switch (try select.await()) {
         .response => |response| {
             select.cancelDiscard();
@@ -638,7 +648,8 @@ fn postSse(
             const line = std.mem.trimEnd(u8, pending.items[0..end], "\r");
             if (std.mem.startsWith(u8, line, "data:")) {
                 const data = std.mem.trim(u8, line["data:".len..], " ");
-                if (data.len > 0 and !std.mem.eql(u8, data, "[DONE]")) try on_event(event_ctx, data);
+                if (std.mem.eql(u8, data, "[DONE]")) return .{ .status = status, .body = try output.toOwnedSlice(a), .retry_after_ms = retry_after_ms };
+                if (data.len > 0) try on_event(event_ctx, data);
             }
             try pending.replaceRange(a, 0, end + 1, "");
         }
@@ -677,9 +688,10 @@ fn postSseTimed(
     };
     var buffer: [3]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
-    select.async(.response, postSse, .{ a, io, client, url, body, headers, event_ctx, on_event });
-    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout });
-    if (cancellation) |token| select.async(.canceled, cancellationTask, .{ token, io });
+    var done = std.atomic.Value(bool).init(false);
+    select.async(.response, postSseTask, .{ a, io, client, url, body, headers, event_ctx, on_event, &done });
+    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout, &done });
+    if (cancellation) |token| select.async(.canceled, opts_mod.CancellationToken.waitUntilDone, .{ token, &done, io });
     switch (try select.await()) {
         .response => |response| {
             select.cancelDiscard();
@@ -694,6 +706,11 @@ fn postSseTimed(
             return error.Canceled;
         },
     }
+}
+
+fn postSseTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, event_ctx: ?*anyopaque, on_event: *const fn (?*anyopaque, []const u8) anyerror!void, done: *std.atomic.Value(bool)) !Response {
+    defer done.store(true, .release);
+    return postSse(a, io, client, url, body, headers, event_ctx, on_event);
 }
 
 test "retryable statuses" {
@@ -833,6 +850,42 @@ test "cancellation interrupts HTTP reads" {
     var cancel = std.Io.async(io, Fixture.cancel, .{ &token, io });
     defer cancel.cancel(io);
     try std.testing.expectError(error.Canceled, postWithRetry(std.testing.allocator, io, null, url, "{}", &.{}, 0, .{ .cancellation = &token }));
+}
+
+test "SSE done marker ends a response without waiting for connection close" {
+    const Fixture = struct {
+        fn serve(server: *std.Io.net.Server, io: std.Io) void {
+            var stream = server.accept(io) catch return;
+            defer stream.close(io);
+            var buffer: [1024]u8 = undefined;
+            var writer = stream.writer(io, &buffer);
+            writer.interface.writeAll(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n" ++
+                    "d\r\ndata: hello\n\n\r\n" ++
+                    "e\r\ndata: [DONE]\n\n\r\n",
+            ) catch return;
+            writer.interface.flush() catch return;
+            std.Io.sleep(io, .fromSeconds(60), .awake) catch {};
+        }
+
+        fn receive(ctx: ?*anyopaque, data: []const u8) !void {
+            const seen: *bool = @ptrCast(@alignCast(ctx.?));
+            seen.* = std.mem.eql(u8, data, "hello");
+        }
+    };
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    var serving = std.Io.async(io, Fixture.serve, .{ &server, io });
+    defer serving.cancel(io);
+    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
+    defer std.testing.allocator.free(url);
+    var seen = false;
+    const response = try postSseTimed(std.testing.allocator, io, null, url, "{}", &.{}, 100, null, &seen, Fixture.receive);
+    defer std.testing.allocator.free(response.body);
+    try std.testing.expect(seen);
 }
 
 test "chat request places system prompt in messages" {

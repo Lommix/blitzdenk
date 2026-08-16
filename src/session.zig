@@ -242,6 +242,7 @@ pub fn loadSession(a: *app.App, w: *std.Io.Reader) !void {
     }
 
     a.main_agent_id = id;
+    a.registry.slots[id.index].state.store(.complete, .release);
     a.dirty = true;
     a.running = false;
 }

@@ -430,3 +430,47 @@ test "sdk cancellation interrupts tool execution" {
         .cancellation = &token,
     }));
 }
+
+test "sdk successful tool execution does not wait for cancellation" {
+    const Fixture = struct {
+        calls: usize = 0,
+
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generateFn(ctx: *anyopaque, a: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            const result = try a.create(sdk.model.GenerateResult);
+            if (self.calls == 1) {
+                const calls = try a.alloc(sdk.ToolCall, 1);
+                calls[0] = .{ .id = try a.dupe(u8, "c1"), .name = try a.dupe(u8, "fast"), .input = try a.dupe(u8, "{}") };
+                result.* = .{ .tool_calls = calls, .finish_reason = .tool_calls };
+            } else {
+                result.* = .{ .text = try a.dupe(u8, "done"), .finish_reason = .stop };
+            }
+            return result;
+        }
+
+        fn stream(ctx: *anyopaque, a: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            return generateFn(ctx, a, io, params, client, retries);
+        }
+
+        fn tool(_: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: sdk.ToolCall) anyerror!sdk.ToolOutput {
+            return .{ .content = "done" };
+        }
+    };
+
+    var fixture = Fixture{};
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generateFn, .stream = Fixture.stream };
+    var token = sdk.CancellationToken{};
+    var result = try sdk.complete(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, .{
+        .prompt = "hi",
+        .tools = &.{.{ .name = "fast", .execute = Fixture.tool }},
+        .max_steps = 2,
+        .cancellation = &token,
+    });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("done", result.text);
+}

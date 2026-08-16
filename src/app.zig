@@ -278,9 +278,7 @@ pub const App = struct {
     history_cursor: usize = 0,
     chat_entries: std.ArrayList(ChatEntry) = .empty,
     streaming_entry: ?ChatEntry = null,
-    sdk_preview_text: std.ArrayList(u8) = .empty,
-    sdk_preview_reasoning: std.ArrayList(u8) = .empty,
-    sdk_preview_calls: std.ArrayList(ChatPart.ToolCallEntry) = .empty,
+    sdk_preview_parts: std.ArrayList(SdkPreviewPart) = .empty,
     sdk_preview_flushed: bool = false,
     sdk_usage: r.sdk.Usage = .{},
     compaction_indicator_active: bool = false,
@@ -473,9 +471,7 @@ pub const App = struct {
         self.input_mode = .text;
         self.input_cursor = 0;
         self.streaming_entry = null;
-        self.sdk_preview_text = .empty;
-        self.sdk_preview_reasoning = .empty;
-        self.sdk_preview_calls = .empty;
+        self.sdk_preview_parts = .empty;
         self.sdk_preview_flushed = false;
         self.sdk_usage = .{};
         self.compaction_indicator_active = false;
@@ -1046,31 +1042,50 @@ pub const App = struct {
         _ = self.arena_streaming_preview.reset(.free_all);
     }
 
+    fn appendSdkPreviewText(self: *App, alloc: std.mem.Allocator, kind: SdkPreviewPart.Kind, text: []const u8) !void {
+        if (self.sdk_preview_parts.items.len > 0) {
+            const last = &self.sdk_preview_parts.items[self.sdk_preview_parts.items.len - 1];
+            if (last.kind == kind) {
+                try last.text.appendSlice(alloc, text);
+                return;
+            }
+        }
+        var part = SdkPreviewPart{ .kind = kind };
+        try part.text.appendSlice(alloc, text);
+        try self.sdk_preview_parts.append(alloc, part);
+    }
+
     pub fn applyRunEvent(self: *App, agent_id: r.AgentId, event: r.agent_run.Event) !void {
         const alloc = self.sessionAlloc();
+        const is_main = if (self.main_agent_id) |id| id.pack() == agent_id.pack() else true;
         switch (event) {
             .text => |text| {
+                if (!is_main) return;
                 self.sdk_preview_flushed = false;
-                try self.sdk_preview_text.appendSlice(alloc, text);
+                try self.appendSdkPreviewText(alloc, .message, text);
                 try self.refreshSdkPreview(agent_id);
             },
             .reasoning => |reasoning| {
+                if (!is_main) return;
                 self.sdk_preview_flushed = false;
-                try self.sdk_preview_reasoning.appendSlice(alloc, reasoning);
+                try self.appendSdkPreviewText(alloc, .thinking, reasoning);
                 try self.refreshSdkPreview(agent_id);
             },
             .tool => |chunk| {
+                if (!is_main) return;
                 if (chunk.type != .tool_call) return;
                 self.sdk_preview_flushed = false;
-                try self.sdk_preview_calls.append(alloc, .{
-                    .agent_id = agent_id,
-                    .call_id = try alloc.dupe(u8, chunk.tool_call_id),
-                    .tool_name = try alloc.dupe(u8, chunk.tool_name),
+                try self.sdk_preview_parts.append(alloc, .{
+                    .kind = .tool_call,
+                    .call = .{
+                        .call_id = try alloc.dupe(u8, chunk.tool_call_id),
+                        .tool_name = try alloc.dupe(u8, chunk.tool_name),
+                    },
                 });
                 try self.refreshSdkPreview(agent_id);
             },
             .step => |step| {
-                self.sdk_usage.add(step.usage);
+                if (is_main) self.sdk_usage.add(step.usage);
                 const status = self.tool_status_entries.lock(self.io);
                 defer status.unlock();
                 for (step.tool_results) |result| try status.ptr.setResult(alloc, agent_id, .{
@@ -1082,7 +1097,9 @@ pub const App = struct {
             },
             .provider_error => |provider_error| {
                 if (provider_error.will_retry) return;
+                if (!is_main) return;
                 self.dropStreamingPreview();
+                self.sdk_preview_parts.clearRetainingCapacity();
                 const body = std.mem.trim(u8, provider_error.response_body, " \t\r\n");
                 const message = if (provider_error.status_code != 0)
                     try std.fmt.allocPrint(alloc, "Provider error (HTTP {d})\n{s}", .{ provider_error.status_code, body })
@@ -1094,11 +1111,14 @@ pub const App = struct {
             },
             .complete => |result| {
                 try self.event_bus.emit(self, .{ .agent_complete = agent_id });
+                if (!is_main) return;
                 const skip_final = self.sdk_preview_flushed;
+                if (!skip_final and self.streaming_entry != null) {
+                    try self.flushSdkPreview();
+                    return;
+                }
                 self.dropStreamingPreview();
-                self.sdk_preview_text.clearRetainingCapacity();
-                self.sdk_preview_reasoning.clearRetainingCapacity();
-                self.sdk_preview_calls.clearRetainingCapacity();
+                self.sdk_preview_parts.clearRetainingCapacity();
                 if (skip_final) return;
                 var index = result.messages.len;
                 while (index > 0) {
@@ -1112,7 +1132,9 @@ pub const App = struct {
             },
             .failed => |err| {
                 try self.event_bus.emit(self, .{ .agent_failed = .{ .id = agent_id, .err = @errorName(err) } });
+                if (!is_main) return;
                 self.dropStreamingPreview();
+                self.sdk_preview_parts.clearRetainingCapacity();
                 const parts = try alloc.alloc(ChatPart, 1);
                 parts[0] = .{ .plain_text = try std.fmt.allocPrint(alloc, "Agent failed: {s}", .{@errorName(err)}) };
                 try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
@@ -1125,26 +1147,31 @@ pub const App = struct {
         _ = self.arena_streaming_preview.reset(.free_all);
         const alloc = self.arena_streaming_preview.allocator();
         var parts: std.ArrayList(ChatPart) = .empty;
-        const reasoning = std.mem.trim(u8, self.sdk_preview_reasoning.items, " \t\r\n");
-        if (reasoning.len > 0) try parts.append(alloc, .{ .thinking = try alloc.dupe(u8, reasoning) });
-        const text = std.mem.trim(u8, self.sdk_preview_text.items, " \t\r\n");
-        if (text.len > 0) try parts.append(alloc, .{ .message = try alloc.dupe(u8, text) });
-        for (self.sdk_preview_calls.items) |call| try parts.append(alloc, .{ .tool_call = .{
-            .agent_id = agent_id,
-            .call_id = try alloc.dupe(u8, call.call_id),
-            .tool_name = try alloc.dupe(u8, call.tool_name),
-        } });
+        for (self.sdk_preview_parts.items) |item| switch (item.kind) {
+            .thinking => {
+                const trimmed = std.mem.trim(u8, item.text.items, " \t\r\n");
+                if (trimmed.len == 0) continue;
+                try parts.append(alloc, .{ .thinking = try alloc.dupe(u8, trimmed) });
+            },
+            .message => {
+                const trimmed = std.mem.trim(u8, item.text.items, " \t\r\n");
+                if (trimmed.len == 0) continue;
+                try parts.append(alloc, .{ .message = try alloc.dupe(u8, trimmed) });
+            },
+            .tool_call => try parts.append(alloc, .{ .tool_call = .{
+                .agent_id = agent_id,
+                .call_id = try alloc.dupe(u8, item.call.call_id),
+                .tool_name = try alloc.dupe(u8, item.call.tool_name),
+            } }),
+        };
         if (parts.items.len == 0) {
             self.streaming_entry = null;
             return;
         }
-        const owned = try parts.toOwnedSlice(alloc);
-        sortChatParts(owned);
-        self.streaming_entry = .{ .role = .agent, .parts = owned };
+        self.streaming_entry = .{ .role = .agent, .parts = try parts.toOwnedSlice(alloc) };
     }
 
     pub fn appendChatEntry(self: *App, alloc: std.mem.Allocator, entry: ChatEntry) !void {
-        sortChatParts(entry.parts);
         try self.chat_entries.append(alloc, entry);
     }
 
@@ -1152,9 +1179,7 @@ pub const App = struct {
         const entry = self.streaming_entry orelse return;
         const alloc = self.sessionAlloc();
         try self.appendChatEntry(alloc, try r.util.deepClone(ChatEntry, entry, alloc));
-        self.sdk_preview_text.clearRetainingCapacity();
-        self.sdk_preview_reasoning.clearRetainingCapacity();
-        self.sdk_preview_calls.clearRetainingCapacity();
+        self.sdk_preview_parts.clearRetainingCapacity();
         self.sdk_preview_flushed = true;
         self.dropStreamingPreview();
     }
@@ -1334,7 +1359,12 @@ const RegistryDrainContext = struct {
 
 fn applyRegistryEvent(ctx: ?*anyopaque, event: r.agent_run.Event) void {
     const value: *RegistryDrainContext = @ptrCast(@alignCast(ctx.?));
-    value.app.applyRunEvent(value.id, event) catch {};
+    value.app.applyRunEvent(value.id, event) catch |err| {
+        switch (event) {
+            .tool => |chunk| log.err("failed to apply tool stream event type={s} id={s} name={s}: {s}", .{ @tagName(chunk.type), chunk.tool_call_id, chunk.tool_name, @errorName(err) }),
+            else => log.err("failed to apply {s} stream event: {s}", .{ @tagName(event), @errorName(err) }),
+        }
+    };
 }
 
 pub const ChatEntry = struct {
@@ -1396,23 +1426,17 @@ pub const ChatPart = union(enum) {
     };
 };
 
-fn partRank(part: ChatPart) u8 {
-    return switch (part) {
-        .thinking => 0,
-        .message, .plain_text => 1,
-        .tool_call => 2,
-        .diff => 3,
-        .plan => 4,
-    };
-}
+const SdkPreviewCall = struct {
+    call_id: []const u8,
+    tool_name: []const u8,
+};
 
-fn sortChatParts(parts: []ChatPart) void {
-    std.mem.sort(ChatPart, parts, {}, struct {
-        fn lessThan(_: void, a: ChatPart, b: ChatPart) bool {
-            return partRank(a) < partRank(b);
-        }
-    }.lessThan);
-}
+const SdkPreviewPart = struct {
+    const Kind = enum { thinking, message, tool_call };
+    kind: Kind,
+    text: std.ArrayList(u8) = .empty,
+    call: SdkPreviewCall = .{ .call_id = "", .tool_name = "" },
+};
 
 fn renderSdkParts(
     alloc: std.mem.Allocator,
@@ -1966,6 +1990,23 @@ fn collapseToolPadding(
     total.* -= old_next_h - next.h;
 }
 
+fn appendToolGroup(
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(RenderParagraphItem),
+    total: *usize,
+    app: *App,
+    calls: *std.ArrayList(ChatPart.ToolCallEntry),
+    inner_w: u16,
+) !void {
+    if (calls.items.len == 0) return;
+    std.mem.reverse(ChatPart.ToolCallEntry, calls.items);
+    const para = try buildToolGroupParagraph(app, arena, calls.items, inner_w);
+    try out.append(arena, para);
+    total.* += para.h;
+    collapseToolPadding(out, total, inner_w);
+    calls.clearRetainingCapacity();
+}
+
 /// Build one r.tui.Paragraph per ChatEntry. Allocations live in `arena`; do not
 /// deinit the result. All paragraphs use `reverse = true` so the chat-area
 /// caller can stack them bottom-up.
@@ -1990,51 +2031,51 @@ fn buildChatEntryParagraph(
     for (0..entry.parts.len) |i| {
         const part = entry.parts[entry.parts.len - i - 1];
         switch (part) {
-            .thinking => |text| {
-                if (app.flags.show_thinking) {
-                    var p = r.tui.Paragraph{};
-                    try p.appendText(arena, text, .{ .fg = app.theme.muted });
-                    const h = p.totalHeightLong(inner_w);
-                    try out.append(arena, .{ .p = p, .h = h });
-                    total.* += h;
+            .tool_call => |call| try tool_call_list.append(arena, call),
+            else => {
+                try appendToolGroup(arena, out, total, app, &tool_call_list, inner_w);
+                switch (part) {
+                    .thinking => |text| {
+                        if (app.flags.show_thinking) {
+                            var p = r.tui.Paragraph{};
+                            try p.appendText(arena, text, .{ .fg = app.theme.muted });
+                            const h = p.totalHeightLong(inner_w);
+                            try out.append(arena, .{ .p = p, .h = h });
+                            total.* += h;
+                        }
+                    },
+                    .message => |text| {
+                        has_text = true;
+                        var p = r.tui.Paragraph{};
+                        try appendMarkdownText(&p, app.gpa, arena, text, inner_w, app.theme);
+                        const h = p.totalHeightLong(inner_w);
+                        try out.append(arena, .{ .p = p, .h = h });
+                        total.* += h;
+                    },
+                    .plain_text => |text| {
+                        has_text = true;
+                        var p = r.tui.Paragraph{};
+                        try p.appendText(arena, text, .{});
+                        const h = p.totalHeightLong(inner_w);
+                        try out.append(arena, .{ .p = p, .h = h });
+                        total.* += h;
+                    },
+                    .plan => |p| {
+                        _ = p;
+                    },
+                    .diff => |diff| {
+                        const p = buildDiffParagraph(arena, app, diff);
+                        const h = p.totalHeightLong(inner_w);
+                        try out.append(arena, .{ .p = p, .h = h });
+                        total.* += h;
+                    },
+                    .tool_call => unreachable,
                 }
             },
-            .message => |text| {
-                has_text = true;
-                var p = r.tui.Paragraph{};
-                try appendMarkdownText(&p, app.gpa, arena, text, inner_w, app.theme);
-                const h = p.totalHeightLong(inner_w);
-                try out.append(arena, .{ .p = p, .h = h });
-                total.* += h;
-            },
-            .plain_text => |text| {
-                has_text = true;
-                var p = r.tui.Paragraph{};
-                try p.appendText(arena, text, .{});
-                const h = p.totalHeightLong(inner_w);
-                try out.append(arena, .{ .p = p, .h = h });
-                total.* += h;
-            },
-            .plan => |p| {
-                _ = p;
-            },
-            .diff => |diff| {
-                const p = buildDiffParagraph(arena, app, diff);
-                const h = p.totalHeightLong(inner_w);
-                try out.append(arena, .{ .p = p, .h = h });
-                total.* += h;
-            },
-            .tool_call => |call| try tool_call_list.append(arena, call),
         }
     }
 
-    if (tool_call_list.items.len > 0) {
-        std.mem.reverse(ChatPart.ToolCallEntry, tool_call_list.items);
-        const para = try buildToolGroupParagraph(app, arena, tool_call_list.items, inner_w);
-        try out.append(arena, para);
-        total.* += para.h;
-        collapseToolPadding(out, total, inner_w);
-    }
+    try appendToolGroup(arena, out, total, app, &tool_call_list, inner_w);
 
     const show_header = entry.role != .agent or has_text;
     if (show_header) {
@@ -2546,7 +2587,7 @@ fn renderMainProgress(app: *App, id: ?r.AgentId, area: r.tui.Rect, buf: *r.tui.B
     const alloc = app.sessionAlloc();
     const agent = if (slot.agent) |*value| value else return;
     const now: i128 = @intCast(std.Io.Timestamp.now(app.io, .real).nanoseconds);
-    const elapsed = @max(0, now - agent.run_started_ns);
+    const elapsed = if (agent.run_started_ns == 0) 0 else @max(0, now - agent.run_started_ns);
     const secs: u32 = @intCast(@divTrunc(elapsed, std.time.ns_per_s));
 
     var para = r.tui.Paragraph{
@@ -2866,10 +2907,9 @@ test "persisted diff owns path" {
     app.arena_streaming_preview = .init(std.testing.allocator);
     defer app.arena_streaming_preview.deinit();
     app.chat_entries = .empty;
-    app.sdk_preview_text = .empty;
-    app.sdk_preview_reasoning = .empty;
-    app.sdk_preview_calls = .empty;
+    app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
+    app.main_agent_id = null;
     app.event_bus = .{};
     app.dirty = false;
 
@@ -2930,12 +2970,11 @@ test "SDK run events preserve preview final rendering and usage" {
     defer app.arena_streaming_preview.deinit();
     app.chat_entries = .empty;
     app.streaming_entry = null;
-    app.sdk_preview_text = .empty;
-    app.sdk_preview_reasoning = .empty;
-    app.sdk_preview_calls = .empty;
+    app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
     app.sdk_usage = .{};
     app.tool_status_entries = .{};
+    app.main_agent_id = null;
     app.event_bus = .{};
     app.dirty = false;
 
@@ -2975,7 +3014,96 @@ test "SDK run events preserve preview final rendering and usage" {
     try std.testing.expectEqual(@as(usize, 3), app.chat_entries.items[0].parts.len);
 }
 
-test "appendChatEntry sorts parts by rank" {
+test "SDK preview coalesces same-type deltas and keeps part order" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.arena_streaming_preview = .init(std.testing.allocator);
+    defer app.arena_streaming_preview.deinit();
+    app.chat_entries = .empty;
+    app.streaming_entry = null;
+    app.sdk_preview_parts = .empty;
+    app.sdk_preview_flushed = false;
+    app.sdk_usage = .{};
+    app.tool_status_entries = .{};
+    app.main_agent_id = null;
+    app.event_bus = .{};
+    app.dirty = false;
+
+    const agent_id = r.AgentId{ .index = 1, .generation = 1 };
+    try app.applyRunEvent(agent_id, .{ .reasoning = "plan " });
+    try app.applyRunEvent(agent_id, .{ .reasoning = "more" });
+    try app.applyRunEvent(agent_id, .{ .tool = .{
+        .type = .tool_call,
+        .tool_call_id = "call_1",
+        .tool_name = "read",
+        .tool_input = "{}",
+    } });
+    try app.applyRunEvent(agent_id, .{ .reasoning = " after " });
+    try app.applyRunEvent(agent_id, .{ .text = "answer " });
+    try app.applyRunEvent(agent_id, .{ .text = "tail" });
+    try app.applyRunEvent(agent_id, .{ .tool = .{
+        .type = .tool_call,
+        .tool_call_id = "call_2",
+        .tool_name = "write",
+        .tool_input = "{}",
+    } });
+
+    const parts = app.streaming_entry.?.parts;
+    try std.testing.expectEqual(@as(usize, 5), parts.len);
+    try std.testing.expectEqualStrings("plan more", parts[0].thinking);
+    try std.testing.expectEqualStrings("call_1", parts[1].tool_call.call_id);
+    try std.testing.expectEqualStrings("after", parts[2].thinking);
+    try std.testing.expectEqualStrings("answer tail", parts[3].message);
+    try std.testing.expectEqualStrings("call_2", parts[4].tool_call.call_id);
+}
+
+test "subagent events preserve the main tool call preview" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.arena_streaming_preview = .init(std.testing.allocator);
+    defer app.arena_streaming_preview.deinit();
+    app.chat_entries = .empty;
+    app.streaming_entry = null;
+    app.sdk_preview_parts = .empty;
+    app.sdk_preview_flushed = false;
+    app.sdk_usage = .{};
+    app.tool_status_entries = .{};
+    app.event_bus = .{};
+    app.dirty = false;
+
+    const main_id = r.AgentId{ .index = 1, .generation = 1 };
+    const child_id = r.AgentId{ .index = 2, .generation = 1 };
+    app.main_agent_id = main_id;
+    try app.applyRunEvent(main_id, .{ .tool = .{
+        .type = .tool_call,
+        .tool_call_id = "agent_1",
+        .tool_name = "agent",
+        .tool_input = "{}",
+    } });
+    try app.applyRunEvent(child_id, .{ .reasoning = "working" });
+    try app.applyRunEvent(child_id, .{ .text = "done" });
+    try app.applyRunEvent(child_id, .{ .step = .{
+        .number = 1,
+        .tool_results = &.{
+            .{ .tool_call_id = "child_1", .tool_name = "read", .output = "" },
+            .{ .tool_call_id = "child_2", .tool_name = "search", .output = "" },
+            .{ .tool_call_id = "child_3", .tool_name = "edit", .output = "" },
+            .{ .tool_call_id = "child_4", .tool_name = "bash", .output = "" },
+        },
+    } });
+    var result = r.sdk.TextResult{};
+    try app.applyRunEvent(child_id, .{ .complete = &result });
+
+    try std.testing.expectEqual(@as(usize, 1), app.streaming_entry.?.parts.len);
+    try std.testing.expectEqualStrings("agent_1", app.streaming_entry.?.parts[0].tool_call.call_id);
+    try std.testing.expectEqual(@as(usize, 4), app.tool_status_entries.value.agents[child_id.index].entries.count());
+}
+
+test "appendChatEntry preserves parts order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -2992,9 +3120,9 @@ test "appendChatEntry sorts parts by rank" {
 
     const entry = app.chat_entries.items[0];
     try std.testing.expectEqual(@as(usize, 4), entry.parts.len);
-    try std.testing.expectEqualStrings("think", entry.parts[0].thinking);
+    try std.testing.expectEqualStrings("call_1", entry.parts[0].tool_call.call_id);
     try std.testing.expectEqualStrings("answer", entry.parts[1].message);
-    try std.testing.expectEqualStrings("call_1", entry.parts[2].tool_call.call_id);
+    try std.testing.expectEqualStrings("think", entry.parts[2].thinking);
     try std.testing.expectEqualStrings("call_2", entry.parts[3].tool_call.call_id);
 }
 

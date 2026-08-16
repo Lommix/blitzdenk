@@ -4,6 +4,7 @@ const model = @import("../model.zig");
 const auth = @import("../auth.zig");
 const errors = @import("../errors.zig");
 const jsonx = @import("jsonx.zig");
+const log = std.log.scoped(.openai_provider);
 
 pub const default_base_url = "https://api.openai.com/v1";
 pub const api_key_env = "OPENAI_API_KEY";
@@ -270,7 +271,10 @@ pub fn parseChatResponse(a: std.mem.Allocator, body: []const u8) !*model.Generat
                                             }
                                         }
                                     }
-                                    if (!isValidToolCall(a, id, name, input)) continue;
+                                    if (!isValidToolCall(a, id, name, input)) {
+                                        jsonx.logDroppedToolCall(log, id, name, input);
+                                        continue;
+                                    }
                                     try calls.append(a, .{
                                         .id = try a.dupe(u8, id),
                                         .name = try a.dupe(u8, name),
@@ -453,7 +457,7 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
                         if (f.object.get("arguments")) |v| {
                             if (v == .string and v.string.len > 0) {
                                 const old = calls.items[index].input;
-                                calls.items[index].input = if (isJsonObject(a, v.string))
+                                calls.items[index].input = if (isJsonObject(a, old) and isJsonObject(a, v.string))
                                     try a.dupe(u8, v.string)
                                 else
                                     try std.mem.concat(a, u8, &.{ old, v.string });
@@ -481,6 +485,7 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
             sctx.send(.{ .type = .tool_call, .tool_call_id = tc.id, .tool_name = tc.name, .tool_input = tc.input });
             try valid_calls.append(a, tc);
         } else {
+            jsonx.logDroppedToolCall(log, tc.id, tc.name, tc.input);
             a.free(tc.id);
             a.free(tc.name);
             a.free(tc.input);
@@ -682,6 +687,22 @@ test "stream continues tool arguments without an index" {
     }
     try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
     try std.testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.tool_calls[0].input);
+}
+
+test "stream preserves complete JSON fragments inside tool arguments" {
+    const body =
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"edit","arguments":"{\"patch\":\"before "}}]}}]}
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}
+        \\data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":" after\"}"}}]}}]}
+    ;
+    var stream = model.StreamContext{ .emit = discardChunk };
+    const result = try parseChatStream(std.testing.allocator, body, &stream);
+    defer {
+        result.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
+    try std.testing.expectEqualStrings("{\"patch\":\"before {} after\"}", result.tool_calls[0].input);
 }
 
 test "stream filters malformed tool calls" {

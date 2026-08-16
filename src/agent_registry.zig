@@ -5,6 +5,7 @@ const agent_id = @import("agent-id");
 const agent_run = @import("agent_run.zig");
 const models = @import("models");
 const report = @import("report.zig");
+const log = std.log.scoped(.agent_registry);
 
 pub const max_agents = agent_id.max_agents;
 pub const AgentId = agent_id.AgentId;
@@ -157,8 +158,8 @@ pub const Registry = struct {
     pub fn run(self: *Registry, id: AgentId, options: sdk.GenerateOptions) !void {
         const slot = self.slotFor(id) orelse return error.AgentNotFound;
         const agent = if (slot.agent) |*value| value else return error.AgentNotFound;
+        if (slot.state.load(.acquire) != .active) slot.event.reset();
         try agent.start(options);
-        slot.event.reset();
         slot.state.store(.active, .release);
     }
 
@@ -291,7 +292,8 @@ pub const Registry = struct {
     fn observeEvent(ctx: ?*anyopaque, event: agent_run.Event) void {
         const drain_context: *DrainContext = @ptrCast(@alignCast(ctx.?));
         drain_context.handler(drain_context.ctx, event);
-        drain_context.agent.observe(event) catch {
+        drain_context.agent.observe(event) catch |err| {
+            log.err("failed to observe {s} stream event: {s}", .{ @tagName(event), @errorName(err) });
             drain_context.agent.last_error = error.OutOfMemory;
             drain_context.agent.status = .failed;
         };
@@ -334,6 +336,33 @@ test "registry reset preserves queued reservations" {
     try std.testing.expect(registry.state(existing) == null);
     try std.testing.expectEqual(SlotState.reserved, registry.state(queued).?);
     registry.releaseReservation(queued);
+}
+
+test "starting a reserved agent preserves an existing waiter" {
+    const Fixture = struct {
+        fn discard(_: ?*anyopaque, _: agent_run.Event) void {}
+    };
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    var registry = Registry.init(std.testing.allocator, io);
+    defer registry.deinit();
+    const id = registry.reserve().?;
+    var waiting = std.Io.async(io, Registry.wait, .{ &registry, id });
+    while (@atomicLoad(std.Io.Event, &registry.slots[id.index].event, .acquire) != .waiting) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    _ = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    try registry.run(id, .{ .max_steps = 0 });
+    while (registry.state(id) == .active) {
+        _ = registry.drain(id, 64, null, Fixture.discard);
+        _ = registry.reap(id);
+        if (registry.state(id) == .active) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(SlotState.complete, try waiting.await(io));
+    registry.release(id);
 }
 
 test "registry owns and forks SDK agents" {
