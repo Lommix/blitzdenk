@@ -269,49 +269,49 @@ fn writeContent(a: std.mem.Allocator, s: *std.json.Stringify, msg: types.Message
     _ = a;
     try s.beginArray();
     for (msg.parts()) |part| {
-        switch (part.type) {
-            .text => {
+        switch (part) {
+            .text => |text| {
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("text");
                 try s.objectField("text");
-                try s.write(part.text);
+                try s.write(text);
                 try s.endObject();
             },
-            .tool_call => {
+            .tool_call => |call| {
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("tool_use");
                 try s.objectField("id");
-                try s.write(part.tool_call_id);
+                try s.write(call.id);
                 try s.objectField("name");
-                try s.write(part.tool_name);
+                try s.write(call.name);
                 try s.objectField("input");
-                try jsonx.writeRaw(s, part.tool_input);
+                try jsonx.writeRaw(s, call.input);
                 try s.endObject();
             },
-            .tool_result => {
+            .tool_result => |result| {
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("tool_result");
                 try s.objectField("tool_use_id");
-                try s.write(part.tool_call_id);
+                try s.write(result.id);
                 try s.objectField("content");
-                try s.write(part.tool_output);
-                if (std.mem.startsWith(u8, part.tool_output, "error:")) {
+                try s.write(result.output);
+                if (result.is_error or std.mem.startsWith(u8, result.output, "error:")) {
                     try s.objectField("is_error");
                     try s.write(true);
                 }
                 try s.endObject();
             },
-            .reasoning => {
+            .reasoning => |reasoning| {
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("thinking");
                 try s.objectField("thinking");
-                try s.write(part.text);
+                try s.write(reasoning.text);
                 try s.objectField("signature");
-                try s.write(part.signature);
+                try s.write(reasoning.signature);
                 try s.endObject();
             },
             else => {},

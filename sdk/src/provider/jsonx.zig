@@ -29,14 +29,17 @@ pub fn buildChatRequest(
     for (params.messages) |msg| {
         if (msg.role == .tool) {
             for (msg.parts()) |part| {
-                if (part.type != .tool_result) continue;
+                const result = switch (part) {
+                    .tool_result => |result| result,
+                    else => continue,
+                };
                 try s.beginObject();
                 try s.objectField("role");
                 try s.write("tool");
                 try s.objectField("tool_call_id");
-                try s.write(part.tool_call_id);
+                try s.write(result.id);
                 try s.objectField("content");
-                try s.write(part.tool_output);
+                try s.write(result.output);
                 try s.endObject();
             }
             continue;
@@ -47,30 +50,39 @@ pub fn buildChatRequest(
         try s.objectField("content");
         try s.beginArray();
         for (msg.parts()) |part| {
-            if (part.type != .tool_call and part.type != .tool_result) try writePart(&s, part);
+            switch (part) {
+                .tool_call, .tool_result => {},
+                else => try writePart(&s, part),
+            }
         }
         try s.endArray();
         if (msg.role == .assistant) {
             var has_calls = false;
             for (msg.parts()) |part| {
-                if (part.type == .tool_call) has_calls = true;
+                switch (part) {
+                    .tool_call => has_calls = true,
+                    else => {},
+                }
             }
             if (has_calls) {
                 try s.objectField("tool_calls");
                 try s.beginArray();
                 for (msg.parts()) |part| {
-                    if (part.type != .tool_call) continue;
+                    const call = switch (part) {
+                        .tool_call => |call| call,
+                        else => continue,
+                    };
                     try s.beginObject();
                     try s.objectField("id");
-                    try s.write(part.tool_call_id);
+                    try s.write(call.id);
                     try s.objectField("type");
                     try s.write("function");
                     try s.objectField("function");
                     try s.beginObject();
                     try s.objectField("name");
-                    try s.write(part.tool_name);
+                    try s.write(call.name);
                     try s.objectField("arguments");
-                    try s.write(part.tool_input);
+                    try s.write(call.input);
                     try s.endObject();
                     try s.endObject();
                 }
@@ -168,38 +180,39 @@ pub fn buildChatRequest(
 }
 
 fn writePart(s: *std.json.Stringify, part: types.Part) !void {
-    switch (part.type) {
-        .text => {
+    switch (part) {
+        .text => |text| {
             try s.beginObject();
             try s.objectField("type");
             try s.write("text");
             try s.objectField("text");
-            try s.write(part.text);
+            try s.write(text);
             try s.endObject();
         },
-        .image => {
+        .image => |image| {
             try s.beginObject();
             try s.objectField("type");
             try s.write("image_url");
             try s.objectField("image_url");
             try s.beginObject();
             try s.objectField("url");
-            try s.write(part.url);
-            if (part.detail.len > 0) {
+            try s.write(image.url);
+            if (image.detail.len > 0) {
                 try s.objectField("detail");
-                try s.write(part.detail);
+                try s.write(image.detail);
             }
             try s.endObject();
             try s.endObject();
         },
-        else => {
+        .reasoning => |reasoning| {
             try s.beginObject();
             try s.objectField("type");
             try s.write("text");
             try s.objectField("text");
-            try s.write(part.text);
+            try s.write(reasoning.text);
             try s.endObject();
         },
+        .file, .tool_call, .tool_result => {},
     }
 }
 

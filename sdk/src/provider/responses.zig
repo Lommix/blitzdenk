@@ -148,14 +148,17 @@ fn buildRequest(
         if (msg.role == .system) continue;
         if (msg.role == .tool) {
             for (msg.parts()) |part| {
-                if (part.type != .tool_result) continue;
+                const result = switch (part) {
+                    .tool_result => |result| result,
+                    else => continue,
+                };
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("function_call_output");
                 try s.objectField("call_id");
-                try s.write(part.tool_call_id);
+                try s.write(result.id);
                 try s.objectField("output");
-                try s.write(part.tool_output);
+                try s.write(result.output);
                 try s.endObject();
             }
             continue;
@@ -170,16 +173,19 @@ fn buildRequest(
         }
         if (msg.role == .assistant) {
             for (msg.parts()) |part| {
-                if (part.type != .tool_call) continue;
+                const call = switch (part) {
+                    .tool_call => |call| call,
+                    else => continue,
+                };
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("function_call");
                 try s.objectField("call_id");
-                try s.write(part.tool_call_id);
+                try s.write(call.id);
                 try s.objectField("name");
-                try s.write(part.tool_name);
+                try s.write(call.name);
                 try s.objectField("arguments");
-                try s.write(part.tool_input);
+                try s.write(call.input);
                 try s.endObject();
             }
         }

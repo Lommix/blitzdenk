@@ -333,29 +333,51 @@ fn run(
 }
 
 fn clonePart(alloc: std.mem.Allocator, value: types.Part) !types.Part {
-    var result = value;
-    result.text = try alloc.dupe(u8, value.text);
-    errdefer alloc.free(result.text);
-    result.url = try alloc.dupe(u8, value.url);
-    errdefer alloc.free(result.url);
-    result.media_type = try alloc.dupe(u8, value.media_type);
-    errdefer alloc.free(result.media_type);
-    result.filename = try alloc.dupe(u8, value.filename);
-    errdefer alloc.free(result.filename);
-    result.detail = try alloc.dupe(u8, value.detail);
-    errdefer alloc.free(result.detail);
-    result.tool_call_id = try alloc.dupe(u8, value.tool_call_id);
-    errdefer alloc.free(result.tool_call_id);
-    result.tool_name = try alloc.dupe(u8, value.tool_name);
-    errdefer alloc.free(result.tool_name);
-    result.tool_input = try alloc.dupe(u8, value.tool_input);
-    errdefer alloc.free(result.tool_input);
-    result.tool_output = try alloc.dupe(u8, value.tool_output);
-    errdefer alloc.free(result.tool_output);
-    result.signature = try alloc.dupe(u8, value.signature);
-    errdefer alloc.free(result.signature);
-    result.cache_control = try alloc.dupe(u8, value.cache_control);
-    return result;
+    return switch (value) {
+        .text => |text| types.Part.textPart(try alloc.dupe(u8, text)),
+        .reasoning => |reasoning| blk: {
+            const text = try alloc.dupe(u8, reasoning.text);
+            errdefer alloc.free(text);
+            break :blk types.Part.reasoningPart(text, try alloc.dupe(u8, reasoning.signature));
+        },
+        .image => |image| blk: {
+            const url = try alloc.dupe(u8, image.url);
+            errdefer alloc.free(url);
+            const media_type = try alloc.dupe(u8, image.media_type);
+            errdefer alloc.free(media_type);
+            break :blk .{ .image = .{
+                .url = url,
+                .media_type = media_type,
+                .detail = try alloc.dupe(u8, image.detail),
+            } };
+        },
+        .tool_call => |call| blk: {
+            const id = try alloc.dupe(u8, call.id);
+            errdefer alloc.free(id);
+            const name = try alloc.dupe(u8, call.name);
+            errdefer alloc.free(name);
+            break :blk types.Part.toolCallPart(id, name, try alloc.dupe(u8, call.input));
+        },
+        .tool_result => |result| blk: {
+            const id = try alloc.dupe(u8, result.id);
+            errdefer alloc.free(id);
+            const name = try alloc.dupe(u8, result.name);
+            errdefer alloc.free(name);
+            break :blk .{ .tool_result = .{
+                .id = id,
+                .name = name,
+                .output = try alloc.dupe(u8, result.output),
+                .is_error = result.is_error,
+            } };
+        },
+        .file => |file| blk: {
+            const url = try alloc.dupe(u8, file.url);
+            errdefer alloc.free(url);
+            const media_type = try alloc.dupe(u8, file.media_type);
+            errdefer alloc.free(media_type);
+            break :blk types.Part.filePart(url, media_type, try alloc.dupe(u8, file.filename));
+        },
+    };
 }
 
 fn appendOwnedMessages(alloc: std.mem.Allocator, history: *std.ArrayList(Message), messages: []const Message) !void {
@@ -383,12 +405,12 @@ fn assistantParts(alloc: std.mem.Allocator, result: *const model.GenerateResult)
     if (result.text.len > 0) {
         const text = try alloc.dupe(u8, result.text);
         errdefer alloc.free(text);
-        try parts.append(alloc, .{ .type = .text, .text = text });
+        try parts.append(alloc, types.Part.textPart(text));
     }
     if (result.reasoning.len > 0) {
         const text = try alloc.dupe(u8, result.reasoning);
         errdefer alloc.free(text);
-        try parts.append(alloc, .{ .type = .reasoning, .text = text });
+        try parts.append(alloc, types.Part.reasoningPart(text, ""));
     }
     for (result.tool_calls) |tc| {
         const id = try alloc.dupe(u8, tc.id);
@@ -397,19 +419,17 @@ fn assistantParts(alloc: std.mem.Allocator, result: *const model.GenerateResult)
         errdefer alloc.free(name);
         const input = try alloc.dupe(u8, tc.input);
         errdefer alloc.free(input);
-        try parts.append(alloc, .{
-            .type = .tool_call,
-            .tool_call_id = id,
-            .tool_name = name,
-            .tool_input = input,
-        });
+        try parts.append(alloc, types.Part.toolCallPart(id, name, input));
     }
     return parts.toOwnedSlice(alloc);
 }
 
 fn assistantReasoning(msg: Message) []const u8 {
     for (msg.parts()) |part| {
-        if (part.type == .reasoning) return part.text;
+        switch (part) {
+            .reasoning => |reasoning| return reasoning.text,
+            else => {},
+        }
     }
     return "";
 }
@@ -417,8 +437,10 @@ fn assistantReasoning(msg: Message) []const u8 {
 fn stepToolCalls(alloc: std.mem.Allocator, msg: Message) ![]const types.ToolCall {
     var calls: std.ArrayList(types.ToolCall) = .empty;
     for (msg.parts()) |part| {
-        if (part.type != .tool_call) continue;
-        try calls.append(alloc, .{ .id = part.tool_call_id, .name = part.tool_name, .input = part.tool_input });
+        switch (part) {
+            .tool_call => |call| try calls.append(alloc, .{ .id = call.id, .name = call.name, .input = call.input }),
+            else => {},
+        }
     }
     return calls.toOwnedSlice(alloc);
 }
@@ -427,13 +449,15 @@ fn stepToolResults(alloc: std.mem.Allocator, tool_msgs: []const Message) ![]cons
     var results: std.ArrayList(types.ToolResult) = .empty;
     for (tool_msgs) |msg| {
         for (msg.parts()) |part| {
-            if (part.type != .tool_result) continue;
-            try results.append(alloc, .{
-                .tool_call_id = part.tool_call_id,
-                .tool_name = part.tool_name,
-                .output = part.tool_output,
-                .is_error = part.is_error,
-            });
+            switch (part) {
+                .tool_result => |result| try results.append(alloc, .{
+                    .tool_call_id = result.id,
+                    .tool_name = result.name,
+                    .output = result.output,
+                    .is_error = result.is_error,
+                }),
+                else => {},
+            }
         }
     }
     return results.toOwnedSlice(alloc);
@@ -449,13 +473,12 @@ fn appendToolMessages(alloc: std.mem.Allocator, history: *std.ArrayList(Message)
         errdefer alloc.free(output);
         try history.append(alloc, .{
             .role = .tool,
-            .single = .{
-                .type = .tool_result,
-                .tool_call_id = id,
-                .tool_name = name,
-                .tool_output = output,
+            .single = .{ .tool_result = .{
+                .id = id,
+                .name = name,
+                .output = output,
                 .is_error = tr.is_error,
-            },
+            } },
         });
     }
 }

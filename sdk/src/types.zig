@@ -29,68 +29,60 @@ pub const Role = enum {
     }
 };
 
-pub const PartType = enum {
-    text,
-    reasoning,
-    image,
-    tool_call,
-    tool_result,
-    file,
-};
-
-pub const Part = struct {
-    type: PartType,
-
-    text: []const u8 = "",
-
-    url: []const u8 = "",
-    media_type: []const u8 = "",
-    filename: []const u8 = "",
-    detail: []const u8 = "",
-
-    tool_call_id: []const u8 = "",
-    tool_name: []const u8 = "",
-    tool_input: []const u8 = "",
-    tool_output: []const u8 = "",
-
-    signature: []const u8 = "",
-    cache_control: []const u8 = "",
-    is_error: bool = false,
+pub const Part = union(enum) {
+    text: []const u8,
+    reasoning: struct {
+        text: []const u8,
+        signature: []const u8,
+    },
+    image: struct {
+        url: []const u8,
+        media_type: []const u8,
+        detail: []const u8 = "",
+    },
+    tool_call: struct {
+        id: []const u8,
+        name: []const u8,
+        input: []const u8,
+    },
+    tool_result: struct {
+        id: []const u8,
+        name: []const u8,
+        output: []const u8,
+        is_error: bool = false,
+    },
+    file: struct {
+        url: []const u8,
+        media_type: []const u8,
+        filename: []const u8,
+    },
 
     pub fn textPart(text: []const u8) Part {
-        return .{ .type = .text, .text = text };
+        return .{ .text = text };
     }
 
     pub fn reasoningPart(text: []const u8, signature: []const u8) Part {
-        return .{ .type = .reasoning, .text = text, .signature = signature };
+        return .{ .reasoning = .{ .text = text, .signature = signature } };
     }
 
     pub fn imagePart(url: []const u8, media_type: []const u8) Part {
-        return .{ .type = .image, .url = url, .media_type = media_type };
+        return .{ .image = .{ .url = url, .media_type = media_type } };
     }
 
     pub fn toolCallPart(id: []const u8, name: []const u8, input: []const u8) Part {
-        return .{
-            .type = .tool_call,
-            .tool_call_id = id,
-            .tool_name = name,
-            .tool_input = input,
-        };
+        return .{ .tool_call = .{ .id = id, .name = name, .input = input } };
     }
 
     pub fn toolResultPart(id: []const u8, name: []const u8, output: []const u8) Part {
-        return .{
-            .type = .tool_result,
-            .tool_call_id = id,
-            .tool_name = name,
-            .tool_output = output,
-        };
+        return .{ .tool_result = .{ .id = id, .name = name, .output = output } };
     }
 
     pub fn filePart(url: []const u8, media_type: []const u8, filename: []const u8) Part {
-        return .{ .type = .file, .url = url, .media_type = media_type, .filename = filename };
+        return .{ .file = .{ .url = url, .media_type = media_type, .filename = filename } };
     }
 };
+
+pub const PartType = std.meta.Tag(Part);
 
 pub const Message = struct {
     role: Role,
@@ -104,7 +96,10 @@ pub const Message = struct {
 
     pub fn text(self: Message) []const u8 {
         for (self.parts()) |p| {
-            if (p.type == .text) return p.text;
+            switch (p) {
+                .text => |value| return value,
+                else => {},
+            }
         }
         return "";
     }
@@ -269,17 +264,33 @@ pub const TextResult = struct {
 };
 
 pub fn freePart(alloc: std.mem.Allocator, part: Part) void {
-    alloc.free(part.text);
-    alloc.free(part.url);
-    alloc.free(part.media_type);
-    alloc.free(part.filename);
-    alloc.free(part.detail);
-    alloc.free(part.tool_call_id);
-    alloc.free(part.tool_name);
-    alloc.free(part.tool_input);
-    alloc.free(part.tool_output);
-    alloc.free(part.signature);
-    alloc.free(part.cache_control);
+    switch (part) {
+        .text => |text| alloc.free(text),
+        .reasoning => |reasoning| {
+            alloc.free(reasoning.text);
+            alloc.free(reasoning.signature);
+        },
+        .image => |image| {
+            alloc.free(image.url);
+            alloc.free(image.media_type);
+            alloc.free(image.detail);
+        },
+        .tool_call => |call| {
+            alloc.free(call.id);
+            alloc.free(call.name);
+            alloc.free(call.input);
+        },
+        .tool_result => |result| {
+            alloc.free(result.id);
+            alloc.free(result.name);
+            alloc.free(result.output);
+        },
+        .file => |file| {
+            alloc.free(file.url);
+            alloc.free(file.media_type);
+            alloc.free(file.filename);
+        },
+    }
 }
 
 pub fn freeMessage(alloc: std.mem.Allocator, msg: Message) void {
@@ -362,7 +373,7 @@ test "message builders" {
 
     const t = ToolMessage("call_1", "weather", "sunny");
     try std.testing.expectEqual(Role.tool, t.role);
-    try std.testing.expectEqualStrings("call_1", t.parts()[0].tool_call_id);
+    try std.testing.expectEqualStrings("call_1", t.parts()[0].tool_result.id);
 
     const d = DeveloperMessage("dev");
     try std.testing.expectEqual(Role.developer, d.role);

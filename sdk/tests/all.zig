@@ -53,9 +53,9 @@ test "sdk smoke: tool loop with fake model" {
                 try std.testing.expectEqual(@as(usize, 3), params.messages.len);
                 try std.testing.expectEqual(types.Role.user, params.messages[0].role);
                 try std.testing.expectEqual(types.Role.assistant, params.messages[1].role);
-                try std.testing.expectEqual(types.PartType.tool_call, params.messages[1].parts()[0].type);
+                try std.testing.expectEqual(types.PartType.tool_call, std.meta.activeTag(params.messages[1].parts()[0]));
                 try std.testing.expectEqual(types.Role.tool, params.messages[2].role);
-                try std.testing.expectEqual(types.PartType.tool_result, params.messages[2].parts()[0].type);
+                try std.testing.expectEqual(types.PartType.tool_result, std.meta.activeTag(params.messages[2].parts()[0]));
                 result.* = .{ .text = try a.dupe(u8, "done"), .finish_reason = .stop };
             }
             return result;
