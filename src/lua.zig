@@ -332,13 +332,6 @@ const McpServerDef = LuaType{ .table_def = .{ .name = "BlitzMcpServerDef", .fiel
     .{ .name = "args", .ty = StringListDef, .optional = true },
     .{ .name = "tools_prefix", .ty = LuaType.string, .optional = true },
 } } };
-const LspServerDef = LuaType{ .table_def = .{ .name = "BlitzLspServerDef", .fields = &.{
-    .{ .name = "name", .ty = LuaType.string },
-    .{ .name = "command", .ty = LuaType.string },
-    .{ .name = "args", .ty = StringListDef, .optional = true },
-    .{ .name = "root", .ty = LuaType.string, .optional = true },
-    .{ .name = "language_id", .ty = LuaType.string, .optional = true },
-} } };
 const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fields = &.{
     .{ .name = "parent_id", .ty = AgentIdDef, .optional = true },
     .{ .name = "prompt", .ty = LuaType.string },
@@ -350,7 +343,6 @@ pub const Blitz = LuaType{
         .name = "Blitz",
         .fields = &.{
             .{ .name = "mcp", .ty = BlitzMcp },
-            .{ .name = "lsp", .ty = BlitzLsp },
             .{ .name = "json", .ty = BlitzJson },
             .{ .name = "queue", .ty = BlitzQueue },
             .{ .name = "tools", .ty = BlitzToolDef },
@@ -1029,8 +1021,6 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "GREP", .ty = LuaType.string, .value = .{ .string = tl.search.GrepTool.def.name } },
             .{ .name = "LOADSKILL", .ty = LuaType.string, .value = .{ .string = tl.skill.LoadSkillTool.def.name } },
             .{ .name = "START_MCP", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },
-            .{ .name = "START_LSP", .ty = LuaType.string, .value = .{ .string = tl.start.StartLspTool.def.name } },
-            .{ .name = "LSP", .ty = LuaType.string, .value = .{ .string = r.lsp.TOOL_NAME } },
         },
     },
 };
@@ -1122,61 +1112,6 @@ const BlitzMcp = LuaType{
                                 try a.cmd_queue.append(a.io, .reload_mcp);
                             }
                         }).lua_fn, "mcp.enable"),
-                    },
-                },
-            },
-        },
-    },
-};
-
-const BlitzLsp = LuaType{
-    .table_def = .{
-        .name = "BlitzLsp",
-        .fields = &.{
-            .{
-                .name = "add",
-                .desc = "Register an LSP stdio server. Disabled until explicitly enabled.",
-                .ty = LuaType{
-                    .function = .{
-                        .args = &.{.{ .name = "def", .ty = LspServerDef }},
-                        .ret = &LuaInteger,
-                        .fn_ptr = LuaFnBind((struct {
-                            const Args = struct {
-                                name: []const u8,
-                                command: []const u8,
-                                args: ?[][]const u8,
-                                language_id: ?[]const u8,
-                                root: ?[]const u8,
-                            };
-                            fn lua_fn(a: *r.app.App, args: Args) !u32 {
-                                try a.lua_vm.lsp_entries.appendBounded(.{
-                                    .name = args.name,
-                                    .args = args.args orelse &.{},
-                                    .root = args.root orelse "",
-                                    .language_id = args.language_id orelse "",
-                                    .command = args.command,
-                                });
-
-                                return @intCast(a.lua_vm.lsp_entries.items.len);
-                            }
-                        }).lua_fn, "add"),
-                    },
-                },
-            },
-            .{
-                .name = "enable",
-                .desc = "Enable an LSP server for this session.",
-                .ty = LuaType{
-                    .function = .{
-                        .args = &.{.{ .name = "lsp_id", .ty = LuaType.integer }},
-                        .fn_ptr = LuaFnBind((struct {
-                            fn lua_fn(a: *r.app.App, lsp_id: u32) !void {
-                                const vm = &a.lua_vm;
-                                if (lsp_id == 0 or lsp_id > vm.lsp_entries.items.len) return error.InvalidLspId;
-                                vm.lsp_entries.items[lsp_id - 1].enabled = true;
-                                try a.cmd_queue.append(a.io, .reload_lsp);
-                            }
-                        }).lua_fn, "lsp.enable"),
                     },
                 },
             },
@@ -1916,8 +1851,6 @@ const MAX_LUA_BINDS = 64;
 const MAX_LUA_COMMANDS = 64;
 const MAX_LUA_MCP_SERVERS = 16;
 const MAX_LUA_MCP_ARGS = 32;
-const MAX_LUA_LSP_SERVERS = 16;
-const MAX_LUA_LSP_ARGS = 32;
 const STDOUT_BUF_CAP = 1024 * 1024 * 16;
 
 pub const LuaMcpServerEntry = struct {
@@ -1925,15 +1858,6 @@ pub const LuaMcpServerEntry = struct {
     command: []const u8,
     args: [][]const u8,
     tools_prefix: []const u8,
-    enabled: bool = false,
-};
-
-pub const LuaLspServerEntry = struct {
-    name: []const u8,
-    command: []const u8,
-    args: [][]const u8,
-    root: []const u8,
-    language_id: []const u8,
     enabled: bool = false,
 };
 
@@ -1945,7 +1869,6 @@ pub const LuaVm = struct {
     bind_entries: std.ArrayList(LuaBindEntry) = .empty,
     command_entries: std.ArrayList(LuaCommandEntry) = .empty,
     mcp_entries: std.ArrayList(LuaMcpServerEntry) = .empty,
-    lsp_entries: std.ArrayList(LuaLspServerEntry) = .empty,
     stdout_buf: std.ArrayList(u8) = .empty,
     last_error: [512]u8 = undefined,
     last_error_len: usize = 0,
@@ -1979,7 +1902,6 @@ pub const LuaVm = struct {
         try self.bind_entries.ensureTotalCapacity(arena, MAX_LUA_BINDS);
         try self.command_entries.ensureTotalCapacity(arena, MAX_LUA_COMMANDS);
         try self.mcp_entries.ensureTotalCapacity(arena, MAX_LUA_MCP_SERVERS);
-        try self.lsp_entries.ensureTotalCapacity(arena, MAX_LUA_LSP_SERVERS);
         try self.stdout_buf.ensureTotalCapacity(arena, STDOUT_BUF_CAP);
     }
 
@@ -2058,14 +1980,12 @@ pub const LuaVm = struct {
         self.bind_entries = .empty;
         self.command_entries = .empty;
         self.mcp_entries = .empty;
-        self.lsp_entries = .empty;
         self.stdout_buf = .empty;
         self.prepareArenaLists() catch return error.LuaInitFailed;
         self.tool_entries.clearRetainingCapacity();
         self.bind_entries.clearRetainingCapacity();
         self.command_entries.clearRetainingCapacity();
         self.mcp_entries.clearRetainingCapacity();
-        self.lsp_entries.clearRetainingCapacity();
         self.stdout_buf.clearRetainingCapacity();
         if (self.app) |a| {
             a.config.resetProviders();
@@ -2166,38 +2086,16 @@ pub const LuaVm = struct {
         };
     }
 
-    fn lspToConfig(entry: *LuaLspServerEntry) @import("lsp.zig").ServerConfig {
-        return .{
-            .name = entry.name,
-            .command = entry.command,
-            .args = entry.args,
-            .root = entry.root,
-            .language_id = entry.language_id,
-        };
-    }
-
     pub fn getEnabledMcpServers(self: *LuaVm, alloc: Allocator) ![]@import("mcp.zig").ServerConfig {
         return collectEnabledServers(LuaMcpServerEntry, @import("mcp.zig").ServerConfig, mcpToConfig, self.mcp_entries.items, alloc);
-    }
-
-    pub fn getEnabledLspServers(self: *LuaVm, alloc: Allocator) ![]@import("lsp.zig").ServerConfig {
-        return collectEnabledServers(LuaLspServerEntry, @import("lsp.zig").ServerConfig, lspToConfig, self.lsp_entries.items, alloc);
     }
 
     pub fn disableAllMcp(self: *LuaVm) void {
         for (self.mcp_entries.items) |*entry| entry.enabled = false;
     }
 
-    pub fn disableAllLsp(self: *LuaVm) void {
-        for (self.lsp_entries.items) |*entry| entry.enabled = false;
-    }
-
     pub fn hasMcp(self: *LuaVm, name: []const u8) bool {
         return self.findMcp(name) != null;
-    }
-
-    pub fn hasLsp(self: *LuaVm, name: []const u8) bool {
-        return self.findLsp(name) != null;
     }
 
     pub fn enableMcp(self: *LuaVm, name: []const u8) bool {
@@ -2206,31 +2104,16 @@ pub const LuaVm = struct {
         return true;
     }
 
-    pub fn enableLsp(self: *LuaVm, name: []const u8) bool {
-        const entry = self.findLsp(name) orelse return false;
-        entry.enabled = true;
-        return true;
-    }
-
     pub fn publishAvailableSystems(self: *LuaVm, factory: *r.ContextFactory) !void {
         var mcp_names: [MAX_LUA_MCP_SERVERS][]const u8 = undefined;
-        var lsp_names: [MAX_LUA_LSP_SERVERS][]const u8 = undefined;
 
         for (self.mcp_entries.items, 0..) |*entry, i| mcp_names[i] = entry.name;
-        for (self.lsp_entries.items, 0..) |*entry, i| lsp_names[i] = entry.name;
 
-        try factory.setAvailableSystems(mcp_names[0..self.mcp_entries.items.len], lsp_names[0..self.lsp_entries.items.len]);
+        try factory.setAvailableSystems(mcp_names[0..self.mcp_entries.items.len]);
     }
 
     fn findMcp(self: *LuaVm, name: []const u8) ?*LuaMcpServerEntry {
         for (self.mcp_entries.items) |*entry| {
-            if (std.mem.eql(u8, entry.name, name)) return entry;
-        }
-        return null;
-    }
-
-    fn findLsp(self: *LuaVm, name: []const u8) ?*LuaLspServerEntry {
-        for (self.lsp_entries.items) |*entry| {
             if (std.mem.eql(u8, entry.name, name)) return entry;
         }
         return null;

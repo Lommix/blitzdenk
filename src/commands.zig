@@ -64,9 +64,7 @@ pub const Command = union(enum) {
     scroll_down: usize,
     compact,
     reload_mcp,
-    reload_lsp,
     start_mcp: StartArgs,
-    start_lsp: StartArgs,
     custom: CustomCmd,
     load_session: []const u8,
     save_session: []const u8,
@@ -193,16 +191,9 @@ pub const Command = union(enum) {
             .reload_mcp => {
                 try app.reloadMcpTools();
             },
-            .reload_lsp => {
-                try app.reloadLspTools();
-            },
             .start_mcp => |arg| {
                 if (!app.lua_vm.enableMcp(arg.name)) return;
                 try app.reloadMcpTools();
-            },
-            .start_lsp => |arg| {
-                if (!app.lua_vm.enableLsp(arg.name)) return;
-                try app.reloadLspTools();
             },
             .spawn_agent => |arg| {
                 var model_config: ?r.models.Config = null;

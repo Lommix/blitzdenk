@@ -10,7 +10,7 @@ Configure, override and extend in Lua. Single binary, no supply chain, bare meta
 - All IO goes through GNU core utils (ls, tee, cat, etc.)
 - Optional SSH layer: Since IO is core utils, slapping SSH in front is free.
 - Small: 5MB native binary, less than 200MB ram usage.
-- MCP, LSP and Skill support.
+- MCP and Skill support.
 - Multi-provider: Any OpenAI or Anthropic chat/response schema supported, including local AI.
 - LuaApi: Code your own tools, system prompts, modes, commands and loops.
 

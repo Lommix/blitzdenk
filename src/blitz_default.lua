@@ -47,7 +47,6 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
     -- blitz.tools.UPDATE_TODO_STATE,
     -- blitz.tools.EDIT,
     -- blitz.tools.WRITE,
-	-- blitz.tools.START_LSP,
 	-- blitz.tools.START_MCP,
 })
 

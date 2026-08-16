@@ -43,7 +43,7 @@
             </figure>
             <p>
                 Blitzdenk is a coding and research harness for POSIX systems. It is configured and extended from Lua:
-                providers, models, tools, agents, modes, commands, keybinds, MCP servers, LSP servers, event listeners,
+                providers, models, tools, agents, modes, commands, keybinds, MCP servers, event listeners,
                 and status UI all live in
                 <code>blitz.lua</code>
                 .
@@ -77,7 +77,7 @@
                 </li>
                 <li>
                     Built-in tools for shell, read, write, edit, glob, grep, patching, tasks, user questions, skills,
-                    agents, MCP, LSP, and SSH mode.
+                    agents, MCP, and SSH mode.
                 </li>
                 <li>Custom agents with their own prompts, tools, model, provider, and effort.</li>
                 <li>
@@ -96,11 +96,6 @@
                 </li>
                 <li>Event listeners for agent lifecycle, tool calls, permissions, compaction, and user messages.</li>
                 <li>MCP stdio servers exposed as dynamic tools.</li>
-                <li>
-                    LSP stdio servers exposed through the
-                    <code>lsp</code>
-                    tool.
-                </li>
                 <li>Session save/load and prompt history.</li>
                 <li>Context tracking, token usage display, and compaction.</li>
                 <li>Optional SSH mode that routes shell and file tools through a remote target.</li>
@@ -116,7 +111,7 @@
                 <li>APIs may still move while the harness is evolving.</li>
                 <li>Config examples are expected to be copied and edited.</li>
                 <li>Web search/fetch are not built in; define them in Lua if you want them.</li>
-                <li>MCP and LSP are configured from Lua and loaded per session.</li>
+                <li>MCP is configured from Lua and loaded per session.</li>
                 <li>The docs intentionally avoid duplicating the generated Lua API reference.</li>
             </ul>
         </section>
@@ -193,7 +188,7 @@ blitz help</code></pre>
                 </tr>
             </table>
             <p>
-                The global config is where providers, tools, agents, keybinds, commands, MCP servers, and LSP servers
+                The global config is where providers, tools, agents, keybinds, commands, and MCP servers
                 are configured. A project-local
                 <code>blitz.lua</code>
                 is useful for repository-specific prompts or tools.
@@ -357,14 +352,6 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
                     </td>
                 </tr>
                 <tr>
-                    <td>LSP</td>
-                    <td>
-                        <code>blitz.lsp.add</code>
-                        ,
-                        <code>blitz.lsp.enable</code>
-                    </td>
-                </tr>
-                <tr>
                     <td>JSON and shell</td>
                     <td>
                         <code>blitz.json.encode</code>
@@ -436,10 +423,9 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
     blitz.tools.GLOB,
     blitz.tools.GREP,
     blitz.tools.LOADSKILL,
-    blitz.tools.START_LSP,
     blitz.tools.START_MCP,
 })</code></pre>
-            <h2>MCP and LSP</h2>
+            <h2>MCP</h2>
             <pre><code>blitz.mcp.add({
     name = "playwright",
     command = "npx",
@@ -450,14 +436,6 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
         "--executable-path=/usr/bin/chromium",
     },
     tools_prefix = "pw_",
-})
-
-blitz.lsp.add({
-    name = "zig",
-    command = "zls",
-    root = ".",
-    language_id = "zig",
-    args = {},
 })</code></pre>
             <h2>Custom tool results</h2>
             <p>

@@ -29,7 +29,6 @@ pub const general_default_tool_set = .{
     r.tools.search.GrepTool,
     r.tools.skill.LoadSkillTool,
     r.tools.start.StartMcpTool,
-    r.tools.start.StartLspTool,
 };
 
 pub const AgentDef = struct {
@@ -147,8 +146,6 @@ modes: std.EnumArray(Mode, ?ModeDef) = .initFill(null),
 // ---
 available_mcp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
 available_mcp_count: usize = 0,
-available_lsp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
-available_lsp_count: usize = 0,
 // Arena holds definitions set from Lua. Reset on hot-reload so the
 // factory keeps using the embedded defaults until lua re-installs them.
 prompt_arena: std.heap.ArenaAllocator,
@@ -391,7 +388,6 @@ pub fn resetDefs(self: *Self) void {
     self.mode_counter = 2;
     self.agent_counter = 3;
     self.available_mcp_count = 0;
-    self.available_lsp_count = 0;
     self.agents = .initFill(null);
     self.modes = .initFill(null);
 
@@ -418,7 +414,6 @@ pub fn resetDefs(self: *Self) void {
             r.tools.todos.CreateTodoTool.def.name,
             r.tools.ask.AskTool.def.name,
             r.tools.start.StartMcpTool.def.name,
-            r.tools.start.StartLspTool.def.name,
         }),
     });
 
@@ -434,18 +429,13 @@ pub fn add(self: *Self, alloc: std.mem.Allocator, tool: r.tools.Tool, flags: Too
     try self.loaded_tools.append(alloc, .{ .tool = tool, .flags = flags });
 }
 
-pub fn setAvailableSystems(self: *Self, mcp_names: []const []const u8, lsp_names: []const []const u8) !void {
+pub fn setAvailableSystems(self: *Self, mcp_names: []const []const u8) !void {
     const alloc = self.prompt_arena.allocator();
     self.available_mcp_count = 0;
-    self.available_lsp_count = 0;
 
     for (mcp_names[0..@min(mcp_names.len, MAX_AVAILABLE_SYSTEMS)]) |name| {
         self.available_mcp_names[self.available_mcp_count] = try alloc.dupe(u8, name);
         self.available_mcp_count += 1;
-    }
-    for (lsp_names[0..@min(lsp_names.len, MAX_AVAILABLE_SYSTEMS)]) |name| {
-        self.available_lsp_names[self.available_lsp_count] = try alloc.dupe(u8, name);
-        self.available_lsp_count += 1;
     }
 }
 
@@ -694,17 +684,6 @@ pub fn build_system_prompt(
             \\
         );
         for (self.available_mcp_names[0..self.available_mcp_count]) |name| {
-            try w.print("- name: \"{s}\"\n", .{name});
-        }
-    }
-
-    if (self.available_lsp_count > 0 and self.agentHasTool(agent_type, r.tools.start.StartLspTool.def.name)) {
-        try w.writeAll(
-            \\
-            \\# Available lsp:
-            \\
-        );
-        for (self.available_lsp_names[0..self.available_lsp_count]) |name| {
             try w.print("- name: \"{s}\"\n", .{name});
         }
     }

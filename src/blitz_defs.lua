@@ -13,19 +13,6 @@
 ---Enable an MCP server for this session.
 ---@field enable fun(mcp_id: integer)
 
----@class BlitzLspServerDef
----@field name string
----@field command string
----@field args? string[]
----@field root? string
----@field language_id? string
-
----@class BlitzLsp
----Register an LSP stdio server. Disabled until explicitly enabled.
----@field add fun(def: BlitzLspServerDef): integer
----Enable an LSP server for this session.
----@field enable fun(lsp_id: integer)
-
 ---@class BlitzJson
 ---Encode a Lua value as JSON.
 ---Supports nil, booleans, numbers, strings, and tables.
@@ -90,8 +77,6 @@
 ---@field GREP string
 ---@field LOADSKILL string
 ---@field START_MCP string
----@field START_LSP string
----@field LSP string
 
 ---@class BlitzEventDef
 ---Emitted after the active session is reset.
@@ -236,7 +221,6 @@
 
 ---@class Blitz
 ---@field mcp BlitzMcp
----@field lsp BlitzLsp
 ---@field json BlitzJson
 ---@field queue BlitzQueue
 ---@field tools BlitzToolDef

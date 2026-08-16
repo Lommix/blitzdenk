@@ -281,6 +281,7 @@ pub const App = struct {
     sdk_preview_text: std.ArrayList(u8) = .empty,
     sdk_preview_reasoning: std.ArrayList(u8) = .empty,
     sdk_preview_calls: std.ArrayList(ChatPart.ToolCallEntry) = .empty,
+    sdk_preview_flushed: bool = false,
     sdk_usage: r.sdk.Usage = .{},
     compaction_indicator_active: bool = false,
     compaction_completion_seen_count: usize = 0,
@@ -295,7 +296,6 @@ pub const App = struct {
     lua_status_bar_cache: [512]u8 = undefined,
     lua_status_bar_cache_len: usize = 0,
     mcp_manager: r.mcp.Manager,
-    lsp_manager: r.lsp.Manager,
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
     injection_hooks: r.inject.InjectionsHooks = .{},
@@ -323,7 +323,6 @@ pub const App = struct {
             .cmd_queue = try r.cmd.CommandQueue.init(gpa),
             .lua_vm = lua_vm,
             .mcp_manager = r.mcp.Manager.init(gpa, agent_factory.io),
-            .lsp_manager = r.lsp.Manager.init(gpa, agent_factory.io),
             .injection_hooks = try r.inject.InjectionsHooks.init(gpa),
             .permission_queue = .{
                 .value = try .initCapacity(gpa, 16),
@@ -342,7 +341,6 @@ pub const App = struct {
             for (g.ptr.list.items) |e| self.exec_pool.cancel(e.handle);
         }
 
-        self.lsp_manager.deinit();
         self.mcp_manager.deinit();
         self.arena_streaming_preview.deinit();
         self.lua_vm.deinit();
@@ -478,6 +476,7 @@ pub const App = struct {
         self.sdk_preview_text = .empty;
         self.sdk_preview_reasoning = .empty;
         self.sdk_preview_calls = .empty;
+        self.sdk_preview_flushed = false;
         self.sdk_usage = .{};
         self.compaction_indicator_active = false;
         self.compaction_completion_seen_count = 0;
@@ -570,26 +569,6 @@ pub const App = struct {
         self.event_bus.emit(self, .mcp_tools_reloaded) catch {};
         self.dirty = true;
     }
-
-    pub fn reloadLspTools(self: *App) !void {
-        const alloc = self.sessionAlloc();
-
-        self.lua_vm.vm_mu.lockUncancelable(self.io);
-        defer self.lua_vm.vm_mu.unlock(self.io);
-
-        const old_tools = self.lsp_manager.registeredTools();
-        for (old_tools) |entry| self.context_factory.remove(entry.tool.def.name);
-
-        const servers = try self.lua_vm.getEnabledLspServers(alloc);
-        self.lsp_manager.loadServers(servers);
-
-        const new_tools = self.lsp_manager.registeredTools();
-        for (new_tools) |entry| try self.context_factory.add(alloc, entry.tool, entry.flags);
-
-        try self.refreshLiveAgentTools();
-        self.dirty = true;
-    }
-
     pub fn reloadLuaTools(self: *App) !void {
         const alloc = self.sessionAlloc();
 
@@ -1071,15 +1050,18 @@ pub const App = struct {
         const alloc = self.sessionAlloc();
         switch (event) {
             .text => |text| {
+                self.sdk_preview_flushed = false;
                 try self.sdk_preview_text.appendSlice(alloc, text);
                 try self.refreshSdkPreview(agent_id);
             },
             .reasoning => |reasoning| {
+                self.sdk_preview_flushed = false;
                 try self.sdk_preview_reasoning.appendSlice(alloc, reasoning);
                 try self.refreshSdkPreview(agent_id);
             },
             .tool => |chunk| {
                 if (chunk.type != .tool_call) return;
+                self.sdk_preview_flushed = false;
                 try self.sdk_preview_calls.append(alloc, .{
                     .agent_id = agent_id,
                     .call_id = try alloc.dupe(u8, chunk.tool_call_id),
@@ -1112,10 +1094,12 @@ pub const App = struct {
             },
             .complete => |result| {
                 try self.event_bus.emit(self, .{ .agent_complete = agent_id });
+                const skip_final = self.sdk_preview_flushed;
                 self.dropStreamingPreview();
                 self.sdk_preview_text.clearRetainingCapacity();
                 self.sdk_preview_reasoning.clearRetainingCapacity();
                 self.sdk_preview_calls.clearRetainingCapacity();
+                if (skip_final) return;
                 var index = result.messages.len;
                 while (index > 0) {
                     index -= 1;
@@ -1164,6 +1148,17 @@ pub const App = struct {
         try self.chat_entries.append(alloc, entry);
     }
 
+    fn flushSdkPreview(self: *App) !void {
+        const entry = self.streaming_entry orelse return;
+        const alloc = self.sessionAlloc();
+        try self.appendChatEntry(alloc, try r.util.deepClone(ChatEntry, entry, alloc));
+        self.sdk_preview_text.clearRetainingCapacity();
+        self.sdk_preview_reasoning.clearRetainingCapacity();
+        self.sdk_preview_calls.clearRetainingCapacity();
+        self.sdk_preview_flushed = true;
+        self.dropStreamingPreview();
+    }
+
     pub fn render_permission_preview(
         self: *App,
         arena: std.mem.Allocator,
@@ -1198,6 +1193,7 @@ pub const App = struct {
     ) !void {
         switch (perm.payload) {
             .diff => |diff| {
+                try self.flushSdkPreview();
                 const alloc = self.sessionAlloc();
                 var parts = try alloc.alloc(r.app.ChatPart, 1);
 
@@ -2033,6 +2029,7 @@ fn buildChatEntryParagraph(
     }
 
     if (tool_call_list.items.len > 0) {
+        std.mem.reverse(ChatPart.ToolCallEntry, tool_call_list.items);
         const para = try buildToolGroupParagraph(app, arena, tool_call_list.items, inner_w);
         try out.append(arena, para);
         total.* += para.h;
@@ -2866,7 +2863,22 @@ test "persisted diff owns path" {
     var app: App = undefined;
     app.arena_session = .init(std.testing.allocator);
     defer app.arena_session.deinit();
+    app.arena_streaming_preview = .init(std.testing.allocator);
+    defer app.arena_streaming_preview.deinit();
     app.chat_entries = .empty;
+    app.sdk_preview_text = .empty;
+    app.sdk_preview_reasoning = .empty;
+    app.sdk_preview_calls = .empty;
+    app.sdk_preview_flushed = false;
+    app.event_bus = .{};
+    app.dirty = false;
+
+    var preview_parts = [_]ChatPart{.{ .tool_call = .{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .call_id = "call_1",
+        .tool_name = "edit",
+    } }};
+    app.streaming_entry = .{ .role = .agent, .parts = &preview_parts };
 
     const path = try std.testing.allocator.dupe(u8, "demo.txt");
     defer std.testing.allocator.free(path);
@@ -2876,7 +2888,16 @@ test "persisted diff owns path" {
     });
 
     @memset(path, 'x');
-    try std.testing.expectEqualStrings("demo.txt", app.chat_entries.items[0].parts[0].diff.path);
+    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
+    try std.testing.expectEqualStrings("call_1", app.chat_entries.items[0].parts[0].tool_call.call_id);
+    try std.testing.expectEqualStrings("demo.txt", app.chat_entries.items[1].parts[0].diff.path);
+    try std.testing.expect(app.streaming_entry == null);
+
+    const final_parts = [_]r.sdk.Part{r.sdk.Part.toolCallPart("call_1", "edit", "{}")};
+    const messages = [_]r.sdk.Message{.{ .role = .assistant, .content = &final_parts }};
+    var result = r.sdk.TextResult{ .messages = &messages };
+    try app.applyRunEvent(.{ .index = 0, .generation = 0 }, .{ .complete = &result });
+    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
 }
 
 test "renderableParts keeps streamed final parts together" {
@@ -2912,6 +2933,7 @@ test "SDK run events preserve preview final rendering and usage" {
     app.sdk_preview_text = .empty;
     app.sdk_preview_reasoning = .empty;
     app.sdk_preview_calls = .empty;
+    app.sdk_preview_flushed = false;
     app.sdk_usage = .{};
     app.tool_status_entries = .{};
     app.event_bus = .{};
