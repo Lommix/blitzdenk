@@ -31,6 +31,13 @@ pub const Chat = struct {
         };
     }
 
+    pub fn deinit(self: *Chat, alloc: std.mem.Allocator) void {
+        alloc.free(self.model_id);
+        alloc.free(self.api_key);
+        alloc.free(self.base_url);
+        auth.freeHeaders(alloc, self.extra_headers);
+    }
+
     pub fn languageModel(self: *Chat) model.LanguageModel {
         return .{ .ctx = self, .vtable = &vtable };
     }

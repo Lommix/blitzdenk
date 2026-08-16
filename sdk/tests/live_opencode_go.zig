@@ -97,10 +97,12 @@ test "OpenCode Go multi-turn user input with reminder hook" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var chat = try sdk.compat.Chat.init(alloc, env.get("OPENCODE_CHAT_MODEL") orelse "mimo-v2.5", .{
+    var chat = try sdk.compat.Chat.init(std.testing.allocator, env.get("OPENCODE_CHAT_MODEL") orelse "mimo-v2.5", .{
         .api_key = key,
         .base_url = base_url,
     });
+
+    defer chat.deinit(std.testing.allocator);
     const language_model = chat.languageModel();
 
     const hooks = sdk.Hooks{ .on_reminder = ReminderHook.onReminder };

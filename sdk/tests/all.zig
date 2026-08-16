@@ -14,6 +14,19 @@ test {
     _ = sdk.provider;
 }
 
+test "provider chats deinit owned configuration" {
+    const headers = [_]std.http.Header{.{ .name = "x-test", .value = "value" }};
+
+    inline for (.{ sdk.openai.Chat, sdk.responses.Chat, sdk.anthropic.Chat, sdk.compat.Chat }) |Chat| {
+        var chat = try Chat.init(std.testing.allocator, "model", .{
+            .api_key = "key",
+            .base_url = "https://example.com",
+            .headers = &headers,
+        });
+        chat.deinit(std.testing.allocator);
+    }
+}
+
 test "sdk smoke: tool loop with fake model" {
     const types = sdk.types;
     const model = sdk.model;
