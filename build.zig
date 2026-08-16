@@ -9,6 +9,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const blitz_sdk_dep = b.dependency("blitz_sdk", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const blitz_sdk_mod = blitz_sdk_dep.module("blitz-sdk");
+    _ = blitz_sdk_mod;
+
     // -- Lua 5.4 (vendored) — translated header + C sources fused into one module --
     const lua_c_mod = build_lua_c(b, target, optimize);
 
