@@ -7,7 +7,13 @@ local novita = blitz.add_provider({
 	type = "openai",
 	url = "https://api.novita.ai/openai/v1",
 	key_envar = "NOVITA_API_KEY",
-	temperature = 0.7,
+	max_tokens = 32000,
+})
+
+local opencode = blitz.add_provider({
+	type = "openai",
+	url = "https://opencode.ai/zen/go/v1",
+	key_envar = "OPENCODE_API_KEY",
 	max_tokens = 32000,
 })
 
@@ -39,14 +45,8 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.AGENT,
 	blitz.tools.AWAIT_AGENT,
 	blitz.tools.CANCEL_AGENT,
-	blitz.tools.GLOB,
-	blitz.tools.GREP,
-	blitz.tools.LOADSKILL,
-    -- blitz.tools.CREATE_TODO,
-    -- blitz.tools.LIST_TODOS,
-    -- blitz.tools.UPDATE_TODO_STATE,
-    -- blitz.tools.EDIT,
-    -- blitz.tools.WRITE,
+	-- blitz.tools.EDIT,
+	-- blitz.tools.WRITE,
 	-- blitz.tools.START_MCP,
 })
 
@@ -201,7 +201,6 @@ Keep it under 10 lines unless the question genuinely needs more.
 	model = default_model,
 	provider = novita,
 	tools = {
-		blitz.tools.LOADSKILL,
 		blitz.tools.GLOB,
 		blitz.tools.GREP,
 		blitz.tools.READ,
@@ -265,7 +264,6 @@ items. Do not overstate severity. Tone: matter-of-fact, no flattery, no filler.
 	model = default_model,
 	provider = novita,
 	tools = {
-		blitz.tools.LOADSKILL,
 		blitz.tools.GLOB,
 		blitz.tools.GREP,
 		blitz.tools.READ,
