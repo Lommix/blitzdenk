@@ -2836,8 +2836,8 @@ fn askPermissionInputHeight(options_len: usize, header: []const u8, question: []
     const max_area = area_height -| 1;
     var header_buf: [256]u8 = undefined;
     const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ header, question }) catch question;
-    const q_rows = @min(text_utils.wrappedRowCount(header_line, area_width -| 3), max_area -| total_rows -| 2);
-    return @min(total_rows +| q_rows +| 2, max_area);
+    const q_rows = @min(text_utils.wrappedRowCount(header_line, area_width -| 3), max_area -| total_rows -| 3);
+    return @min(total_rows +| q_rows +| 3, max_area);
 }
 
 fn formatTokenCount(dest: []u8, count: u64) []const u8 {

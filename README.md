@@ -1,18 +1,18 @@
 # Blitzdenk
 
-Coding and research harness for posix systems. No dependencies, just Zig and vendored Lua.
-Configure, override and extend in Lua. Single binary, no supply chain, bare metal.
+Universal Coding harness for posix. No deps, no chain, vendored Lua.
+Extend in Lua with hot reload. Let the harness code itself.
 
 ![screenshot](docs/assets/screen.jpg)
 
 ## Core features and patterns
 
 - All IO goes through GNU core utils (ls, tee, cat, etc.)
-- Optional SSH layer: Since IO is core utils, slapping SSH in front is free.
-- Small: 5MB native binary, less than 200MB ram usage.
+- Optional SSH layer: Execute remote.
 - MCP and Skill support.
 - Multi-provider: Any OpenAI or Anthropic chat/response schema supported, including local AI.
-- LuaApi: Code your own tools, system prompts, modes, commands and loops.
+- Mermaid diagram render in tui.
+- Lua hot reload. Agents can code tools and debug them at the same time.
 
 ## Install
 
@@ -85,6 +85,7 @@ blitz.set_model_agent(blitz.AGENT_GENERAL, "deepseek/deepseek-v4-pro", "max", no
 
 ## Documentation
 
+Ask the agent, once the provider is set up. The `blitzdenk-lua.md` skill contains all information required.
 [or take a look at my configuration](https://github.com/Lommix/dotfiles/blob/master/config/blitzdenk/blitz.lua).
 
 ## Contribution
