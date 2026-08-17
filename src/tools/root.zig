@@ -7,7 +7,6 @@ pub const ToolCall = r.sdk.ToolCall;
 pub const ToolResult = r.sdk.ToolOutput;
 pub const bash = @import("bash.zig");
 pub const read = @import("read.zig");
-pub const todos = @import("todo.zig");
 pub const ask = @import("ask.zig");
 pub const agent = @import("agent.zig");
 pub const edit = @import("edit.zig");

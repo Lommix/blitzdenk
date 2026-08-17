@@ -48,7 +48,6 @@ pub const Agent = struct {
     queued_messages: std.ArrayList(sdk.Message) = .empty,
     bg_tasks: state.Locked(state.BackgroundTaskList) = .{},
     bg_agents: state.Locked(state.BackgroundAgentList) = .{},
-    todo_list: state.Locked(state.TodoList) = .{},
     tool_display: state.Locked(std.StringHashMapUnmanaged(state.ToolDisplay)) = .{},
     compaction: compact.State = .{},
     messages: ?agent_run.OwnedMessages = null,
@@ -649,10 +648,9 @@ test "agent adopts compacted SDK history and preserves durable tool state" {
     const big = "x" ** 70_000;
     try agent.setMessages(&.{ sdk.SystemMessage("system"), sdk.UserMessage(big), sdk.UserMessage("recent") });
     {
-        const todos = agent.todo_list.lock(agent.io);
-        todos.ptr.count = 1;
-        todos.ptr.todos[0] = .{ .id = 1, .subject = "subject", .description = "description", .state = .pending };
-        todos.unlock();
+        const bg = agent.bg_agents.lock(agent.io);
+        bg.ptr.list.append(agent.alloc, .{ .agent_id = .{ .index = 1, .generation = 1 }, .description = "subject", .status = .running }) catch unreachable;
+        bg.unlock();
     }
     var outcome = compact.Outcome{
         .messages = try compact.installSummary(std.testing.allocator, agent.history(), "summary"),
@@ -670,8 +668,9 @@ test "agent adopts compacted SDK history and preserves durable tool state" {
     try std.testing.expectEqual(false, agent.compaction.completed_continue_after.?);
     try std.testing.expect(std.mem.endsWith(u8, agent.history()[agent.history().len - 1].text(), "summary"));
     {
-        const todos = agent.todo_list.lock(agent.io);
-        try std.testing.expectEqual(@as(usize, 1), todos.ptr.count);
-        todos.unlock();
+        const bg = agent.bg_agents.lock(agent.io);
+        try std.testing.expectEqual(@as(usize, 1), bg.ptr.list.items.len);
+        bg.ptr.list.deinit(agent.alloc);
+        bg.unlock();
     }
 }

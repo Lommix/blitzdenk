@@ -23,49 +23,6 @@ pub const BackgroundAgentList = struct {
     list: std.ArrayList(BackgroundAgent) = .empty,
 };
 
-pub const TodoState = enum {
-    pending,
-    in_progress,
-    done,
-
-    pub fn fromString(value: []const u8) ?TodoState {
-        return std.meta.stringToEnum(TodoState, value);
-    }
-
-    pub fn toString(self: TodoState) []const u8 {
-        return @tagName(self);
-    }
-
-    pub fn icon(self: TodoState) []const u8 {
-        return switch (self) {
-            .pending => "[ ]",
-            .in_progress => "[~]",
-            .done => "[x]",
-        };
-    }
-};
-
-pub const Todo = struct {
-    id: u32,
-    subject: []const u8,
-    description: []const u8,
-    state: TodoState,
-};
-
-pub const TodoList = struct {
-    pub const max_todos = 64;
-    todos: [max_todos]Todo = undefined,
-    count: usize = 0,
-    next_id: u32 = 1,
-
-    pub fn findById(self: *TodoList, id: u32) ?*Todo {
-        for (self.todos[0..self.count]) |*todo| {
-            if (todo.id == id) return todo;
-        }
-        return null;
-    }
-};
-
 pub fn Guard(comptime T: type) type {
     return struct {
         ptr: *T,

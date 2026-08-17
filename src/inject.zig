@@ -21,7 +21,6 @@ pub const InjectionsHooks = struct {
             &inject_datetime_information,
             &inject_cwd_information,
             &inject_mode_information,
-            &inject_todo_information,
             &inject_budget_information,
             &inject_processes_information,
             &inject_bg_agents_information,
@@ -159,32 +158,6 @@ fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.agent.A
 
     if (under_half) {
         try w.print("[BUDGET] Half of your tool call budget is used up. Consider Summarizing your findings\n", .{});
-    }
-}
-
-fn inject_todo_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
-    var has_todos: bool = false;
-    if (agent.todo_list.tryLock(app.io)) |g| {
-        defer g.unlock();
-        var unfinished: u32 = 0;
-
-        for (g.ptr.todos[0..g.ptr.count]) |t| {
-            if (t.state != .done) unfinished += 1;
-        }
-
-        for (g.ptr.todos[0..g.ptr.count]) |t| {
-            switch (t.state) {
-                .in_progress => {
-                    try w.print("[ACTIVE TODO] id:{d} subject: {s}\n{s}\n", .{ t.id, t.subject, t.description });
-                    has_todos = true;
-                },
-                .pending => {
-                    try w.print("[PENDING TODO] id:{d} subject: {s}\n", .{ t.id, t.subject });
-                    has_todos = true;
-                },
-                else => {},
-            }
-        }
     }
 }
 
