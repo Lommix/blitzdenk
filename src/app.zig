@@ -1239,7 +1239,7 @@ pub const App = struct {
         try self.chat_entries.append(alloc, entry);
     }
 
-    fn flushSdkPreview(self: *App) !void {
+    pub fn flushSdkPreview(self: *App) !void {
         const entry = self.streaming_entry orelse return;
         const alloc = self.sessionAlloc();
         try self.appendChatEntry(alloc, try r.util.deepClone(ChatEntry, entry, alloc));

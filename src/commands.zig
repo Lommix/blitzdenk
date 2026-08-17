@@ -171,6 +171,7 @@ pub const Command = union(enum) {
             .queue_agent_message => |arg| {
                 const parts = try r.util.deepClone(@TypeOf(arg.parts), arg.parts, alloc);
                 const chat_entry = if (arg.chat_entry) |en| try r.util.deepClone(ChatEntry, en, alloc) else null;
+                if (app.streaming_entry != null) try app.flushSdkPreview();
                 if (chat_entry) |entry| try app.appendChatEntry(alloc, entry);
                 const agent = app.registry.get(arg.agent_id) orelse return;
                 try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
