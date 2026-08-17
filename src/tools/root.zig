@@ -12,7 +12,6 @@ pub const ask = @import("ask.zig");
 pub const agent = @import("agent.zig");
 pub const edit = @import("edit.zig");
 pub const write = @import("write.zig");
-pub const parse = @import("htmlparser.zig");
 pub const reg = @import("../context_factory.zig");
 pub const patch = @import("patch.zig");
 pub const r = @import("../root.zig");

@@ -718,19 +718,6 @@ pub const Blitz = LuaType{
                 },
             },
             .{
-                .name = "html_to_markdown",
-                .desc = "Convert HTML to markdown using the built-in parser.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{.{ .name = "html", .ty = LuaType.string }},
-                    .ret = &LuaString,
-                    .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(a: *r.app.App, html: []const u8) ![]const u8 {
-                            return tl.parse.htmlToMarkdown(a.lua_vm.luaArena(), html);
-                        }
-                    }).lua_fn, "html_to_markdown"),
-                } },
-            },
-            .{
                 .name = "add_command",
                 .desc =
                 \\Bind a colon command to a Lua callback.

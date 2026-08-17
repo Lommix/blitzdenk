@@ -162,30 +162,6 @@ pub fn main(init: std.process.Init) !void {
     };
 
     switch (cmd) {
-        .debug => |debug_cmd| {
-            switch (debug_cmd) {
-                .webfetch => |uri| {
-                    const result = try std.process.run(init.arena.allocator(), init.io, .{
-                        .argv = &.{
-                            "chromium",
-                            "--headless",
-                            "--disable-gpu",
-                            "--virtual-time-budget=2000",
-                            "--dump-dom",
-                            uri,
-                        },
-                        .stdout_limit = .limited(2 * 1024 * 1024),
-                    });
-
-                    if (result.stdout.len == 0) {
-                        std.debug.print("curl returned empty response\n", .{});
-                        return;
-                    }
-                    const md = try tools.parse.htmlToMarkdown(init.arena.allocator(), result.stdout);
-                    std.debug.print("=== MARKDOWN OUTPUT ===\n{s}\n=== END ===\n", .{md});
-                },
-            }
-        },
         .run => |cwd_arg| {
             var cwd_buffer: [std.posix.PATH_MAX]u8 = undefined;
             const len = try std.Io.Dir.cwd().realPathFile(init.io, cwd_arg, &cwd_buffer);
@@ -223,8 +199,6 @@ pub fn main(init: std.process.Init) !void {
                 \\/any/path            start tui in rel path to current cwd (optional)
                 \\help                 display this
                 \\prompt "STRING"      run in current cwd with initial input
-                \\debug
-                \\  webfetch URL       test webfetch
                 \\
                 \\Flags:
                 \\  --log              write debug.log in path
@@ -1127,12 +1101,7 @@ pub const CliArgs = struct {
 pub const CliCommand = union(enum) {
     run: []const u8, // '.', './', /full/path/to/dir
     prompt: []const u8, // prefill input in CWD
-    debug: DebugCmd,
     help,
-
-    pub const DebugCmd = union(enum) {
-        webfetch: []const u8,
-    };
 
     pub const ParseResult = union(enum) {
         cmd: CliCommand,
@@ -1152,16 +1121,6 @@ pub const CliCommand = union(enum) {
         }
 
         if (std.mem.eql(u8, head, "help")) return .{ .cmd = .help };
-
-        if (std.mem.eql(u8, head, "debug")) {
-            if (rest.len == 0) return .{ .err = "missing debug command" };
-            const sub = rest[0];
-            if (std.mem.eql(u8, sub, "webfetch")) {
-                if (rest.len < 2) return .{ .err = "webfetch requires url" };
-                return .{ .cmd = .{ .debug = .{ .webfetch = rest[1] } } };
-            }
-            return .{ .err = "unknown debug command" };
-        }
 
         return .{ .cmd = .{ .run = head } };
     }

@@ -86,7 +86,7 @@ pub const PatchTool = r.Tool{
         \\
         ,
         .prompt_snippet = "Apply a patch to one or more files",
-        .prompt_guidelines = "Use patch for multi-file changes; edit or write for single files.",
+        .prompt_guidelines = "Use patch for edit, write and delete in text files",
         .parameters_schema =
         \\{
         \\  "type": "object",

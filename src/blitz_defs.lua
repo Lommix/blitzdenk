@@ -262,8 +262,6 @@
 ---Bind a vim-style key combo to a Lua callback.
 ---Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
 ---@field bind fun(key: string, func: function)
----Convert HTML to markdown using the built-in parser.
----@field html_to_markdown fun(html: string): string
 ---Bind a colon command to a Lua callback.
 ---Example: blitz.add_command(":help", function(args) end)
 ---@field add_command fun(command: string, func: function)
