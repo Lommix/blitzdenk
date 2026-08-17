@@ -6,12 +6,9 @@ pub const AgentTool = r.Tool{
         .name = "agent",
         .description =
         \\Launch a new agent to handle complex, multistep tasks autonomously.
-        \\When using the Agent tool, you must specify an agent_type parameter to select which agent type to use.
-        \\By default the tool blocks until the sub-agent finishes and returns its final message as the tool result. Set "run_in_background": true to spawn it in the background instead: the tool returns immediately with the agent id, and the result is read later with the await_agent tool.
         \\
         ,
         .prompt_snippet = "Launch a subagent",
-        .prompt_guidelines = "Launch multiple agents concurrently whenever possible.",
         .parameters_schema =
         \\{
         \\  "type": "object",
@@ -19,7 +16,7 @@ pub const AgentTool = r.Tool{
         \\      "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
         \\      "prompt": {"type": "string", "description": "The task for the agent to perform"},
         \\      "agent_type": {"type": "string", "enum": {AGENT_LIST}, "description": "The type of specialized agent to use for this task"},
-        \\      "cwd": {"type": "string", "description": "The working directoy of the agent"},
+        \\      "cwd": {"type": "string", "description": "The working directoy of the agent. Defaults to current"},
         \\      "run_in_background": {"type": "boolean", "default": false, "description": "If true, spawn in the background and return immediately with the agent id; read the result later with await_agent. If false (default), block until the agent finishes and return its final message."}
         \\  },
         \\  "required": ["description","prompt","agent_type"]

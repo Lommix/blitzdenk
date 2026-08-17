@@ -249,11 +249,29 @@ pub const Registry = struct {
         return result;
     }
 
-    pub fn usageByModel(self: *const Registry, alloc: std.mem.Allocator) ![]ModelUsage {
-        const keys = self.model_usage.keys();
-        const values = self.model_usage.values();
-        const result = try alloc.alloc(ModelUsage, keys.len);
-        for (keys, values, result) |model, value, *entry| entry.* = .{ .model = model, .usage = value };
+    pub fn usageByModel(self: *Registry, alloc: std.mem.Allocator) ![]ModelUsage {
+        var by_model: std.StringArrayHashMapUnmanaged(sdk.Usage) = .empty;
+        defer by_model.deinit(alloc);
+        for (self.model_usage.keys(), self.model_usage.values()) |model, value| {
+            try by_model.put(alloc, model, value);
+        }
+        for (&self.slots) |*slot| {
+            const agent = if (slot.agent) |*value| value else continue;
+            const added = usageDifference(agent.usage, slot.accounted_usage);
+            if (std.meta.eql(added, .{})) continue;
+            const model = agent.model.languageModel().modelId();
+            const gop = try by_model.getOrPut(alloc, model);
+            if (!gop.found_existing) {
+                gop.key_ptr.* = alloc.dupe(u8, model) catch {
+                    _ = by_model.pop();
+                    return error.OutOfMemory;
+                };
+                gop.value_ptr.* = .{};
+            }
+            gop.value_ptr.*.add(added);
+        }
+        const result = try alloc.alloc(ModelUsage, by_model.count());
+        for (by_model.keys(), by_model.values(), result) |model, value, *entry| entry.* = .{ .model = model, .usage = value };
         return result;
     }
 
@@ -416,6 +434,27 @@ test "registry owns and forks SDK agents" {
     defer std.testing.allocator.free(by_model);
     try std.testing.expectEqual(@as(usize, 1), by_model.len);
     try std.testing.expectEqualStrings("model", by_model[0].model);
+    try std.testing.expectEqual(@as(u64, 7), by_model[0].usage.total_tokens);
+}
+
+test "usageByModel includes live unaccounted slot usage" {
+    var registry = Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const id = registry.reserve().?;
+    const parent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .name = "parent", .cwd = "/tmp" } });
+    parent.usage = .{ .input_tokens = 5, .output_tokens = 2, .total_tokens = 7 };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const by_model = try registry.usageByModel(arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), by_model.len);
+    try std.testing.expectEqualStrings("model", by_model[0].model);
+    try std.testing.expectEqual(@as(u64, 5), by_model[0].usage.input_tokens);
+    try std.testing.expectEqual(@as(u64, 2), by_model[0].usage.output_tokens);
     try std.testing.expectEqual(@as(u64, 7), by_model[0].usage.total_tokens);
 }
 
