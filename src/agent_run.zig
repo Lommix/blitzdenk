@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const sdk = @import("blitz-sdk");
 const log = std.log.scoped(.agent_stream);
 
@@ -172,7 +173,7 @@ pub const RunTask = struct {
         self.checkpoint_hook_ctx = checkpoint_hook_ctx;
         var result = sdk.streamText(self.arena.allocator(), self.io, self.model, options) catch |err| {
             self.failure = err;
-            log.warn("stream failed: {s}", .{@errorName(err)});
+            if (!builtin.is_test) log.warn("stream failed: {s}", .{@errorName(err)});
             if (!self.provider_error_seen.load(.acquire)) self.queue.append(.{ .failed = err }) catch |queue_err| {
                 log.err("dropped stream failure event {s}: {s}", .{ @errorName(err), @errorName(queue_err) });
             };
