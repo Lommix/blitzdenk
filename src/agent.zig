@@ -70,6 +70,7 @@ pub const Agent = struct {
     retry_count: u32 = 0,
     retry_after_ms: ?u64 = null,
     run_started_ns: i128 = 0,
+    stream_started_ns: i128 = 0,
     stream_output_bytes: u64 = 0,
     tokens_per_second: f32 = 0,
     max_tool_calls: u32 = 64,
@@ -341,11 +342,13 @@ pub const Agent = struct {
             .complete => {
                 self.status = .complete;
                 self.activity = .idle;
+                self.tokens_per_second = 0;
                 self.endStream();
             },
             .failed => |err| {
                 self.last_error = err;
                 self.status = if (err == error.Canceled) .canceled else .failed;
+                self.tokens_per_second = 0;
                 self.endStream();
             },
         }
@@ -533,7 +536,8 @@ pub const Agent = struct {
     fn recordOutput(self: *Agent, bytes: usize) void {
         self.stream_output_bytes += bytes;
         const now: i128 = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
-        const elapsed = now - self.run_started_ns;
+        if (self.stream_started_ns == 0) self.stream_started_ns = now;
+        const elapsed = now - self.stream_started_ns;
         if (elapsed <= 0) return;
         const tokens = self.stream_output_bytes / 3;
         self.tokens_per_second = @floatCast(@as(f64, @floatFromInt(tokens)) * @as(f64, std.time.ns_per_s) / @as(f64, @floatFromInt(elapsed)));
@@ -541,7 +545,7 @@ pub const Agent = struct {
 
     fn endStream(self: *Agent) void {
         self.stream_output_bytes = 0;
-        self.tokens_per_second = 0;
+        self.stream_started_ns = 0;
     }
 };
 
