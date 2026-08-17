@@ -342,45 +342,6 @@ fn getAgentMut(self: *Self, agent_type: AgentType) ?*AgentDef {
     return if (self.agents.getPtr(agent_type).*) |*def| def else null;
 }
 
-// No alloc iter
-pub const SkillIter = struct {
-    dir_itr: std.Io.Dir.Iterator,
-    path_buf: [std.fs.max_path_bytes]u8 = undefined,
-    header_buf: [4096]u8 = undefined,
-    io: std.Io,
-
-    pub const Entry = struct {
-        path: []const u8,
-        name: []const u8,
-        description: []const u8,
-
-        pub fn toOwned(self: *const Entry, alloc: std.mem.Allocator) !Entry {
-            return .{
-                .name = try alloc.dupe(u8, self.name),
-                .description = try alloc.dupe(u8, self.description),
-                .path = try alloc.dupe(u8, self.path),
-            };
-        }
-    };
-
-    pub fn next(self: *SkillIter) ?Entry {
-        while (true) {
-            const entry = self.dir_itr.next(self.io) catch return null orelse return null;
-            if (entry.kind != .file) continue;
-
-            const len = self.dir_itr.reader.dir.realPathFile(self.io, entry.name, &self.path_buf) catch continue;
-            const path = self.path_buf[0..len];
-
-            const meta = loadSkillMeta(self.io, path, &self.header_buf) orelse continue;
-            return .{
-                .path = path,
-                .name = meta.name,
-                .description = meta.description,
-            };
-        }
-    }
-};
-
 /// Restore embedded defaults and free any Lua-installed definitions.
 pub fn resetDefs(self: *Self) void {
     _ = self.prompt_arena.reset(.retain_capacity);
@@ -731,10 +692,6 @@ pub fn build_system_prompt(
 pub const SkillMeta = struct {
     name: []const u8,
     description: []const u8,
-    license: ?[]const u8 = null,
-    compatibility: ?[]const u8 = null,
-    metadata: ?[]const []const u8 = null,
-    allowed_tools: ?[]const u8 = null,
 };
 
 /// Reads only the yaml header from `path` into `buf`. Returned slices point into `buf`,
@@ -787,12 +744,6 @@ fn parseSkillMeta(raw: []u8) ?SkillMeta {
             meta.name = val;
         } else if (std.mem.eql(u8, key, "description")) {
             meta.description = val;
-        } else if (std.mem.eql(u8, key, "license")) {
-            meta.license = if (val.len > 0) val else null;
-        } else if (std.mem.eql(u8, key, "compatibility")) {
-            meta.compatibility = if (val.len > 0) val else null;
-        } else if (std.mem.eql(u8, key, "allowed_tools")) {
-            meta.allowed_tools = if (val.len > 0) val else null;
         }
     }
 
@@ -839,37 +790,12 @@ fn parseYamlBlock(block: []u8, literal: bool) []const u8 {
     return std.mem.trim(u8, block[0..out], " \t\r\n");
 }
 
-/// Reads only the markdown content after the yaml header from `path`.
-/// Caller owns the returned slice.
-pub fn loadSkillContent(alloc: std.mem.Allocator, io: std.Io, path: []const u8) ?[]u8 {
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
-    defer file.close(io);
-
-    const stat = file.stat(io) catch return null;
-    const size: usize = std.math.cast(usize, stat.size) orelse return null;
-    const raw = alloc.alloc(u8, size) catch return null;
-    defer alloc.free(raw);
-
-    var read_buf: [256]u8 = undefined;
-    var file_reader = file.reader(io, &read_buf);
-    const n = file_reader.interface.readSliceShort(raw) catch return null;
-    if (n != raw.len) return null;
-    if (!std.mem.startsWith(u8, raw, "---\n")) return null;
-
-    const header_end = std.mem.indexOf(u8, raw[4..], "\n---") orelse return null;
-    var content_start = 4 + header_end + "\n---".len;
-    if (content_start < raw.len and raw[content_start] == '\r') content_start += 1;
-    if (content_start < raw.len and raw[content_start] == '\n') content_start += 1;
-    return alloc.dupe(u8, raw[content_start..]) catch return null;
-}
-
 test "skill meta parses folded yaml description" {
     var raw = ("---\n" ++
         "name: ponytail-audit\n" ++
         "description: >\n" ++
         "  Whole-repo audit for over-engineering. Like ponytail-review, but scans the\n" ++
         "  entire codebase instead of a diff.\n" ++
-        "license: MIT\n" ++
         "---\n" ++
         "body\n").*;
 
@@ -879,7 +805,6 @@ test "skill meta parses folded yaml description" {
         "Whole-repo audit for over-engineering. Like ponytail-review, but scans the entire codebase instead of a diff.",
         meta.description,
     );
-    try std.testing.expectEqualStrings("MIT", meta.license.?);
 }
 
 test "agent defaults can be replaced with an empty tool list" {
