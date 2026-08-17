@@ -21,22 +21,9 @@ const tui = r.tui;
 const tools = r.tools;
 
 // ----------------------------------------------------------------
-pub const LUA_DEFAULT_FILE = @embedFile("blitz_default.lua");
-pub const LUA_META_FILE = @embedFile("blitz_defs.lua");
-pub const DEFAULT_CONFIG_PATH = ".config/blitzdenk/";
+pub const DEFAULT_CONFIG_PATH = r.defaults.CONFIG_DIR;
 pub const DEFAULT_CACHE_PATH = "cache.zon";
 pub const DEFAULT_LUA_CONFIG = "blitz.lua";
-pub const DEFAULT_LUA_META = "meta.lua";
-pub const DEFAULT_LUARC = ".luarc.json";
-pub const LUARC_CONTENT =
-    \\{
-    \\  "workspace": {
-    \\    "library": [
-    \\      "meta.lua"
-    \\    ]
-    \\  }
-    \\}
-;
 
 test {
     std.testing.refAllDecls(@This());
@@ -87,39 +74,9 @@ fn ensureConfigLua(alloc: std.mem.Allocator, io: std.Io, env: *const std.process
     var home_dir = try std.Io.Dir.openDirAbsolute(io, HOME, .{});
     defer home_dir.close(io);
 
-    const rel_path = DEFAULT_CONFIG_PATH ++ DEFAULT_LUA_CONFIG;
+    r.defaults.ensure(io, home_dir);
 
-    _ = home_dir.statFile(io, rel_path, .{}) catch |err| {
-        if (err == error.FileNotFound) {
-            var buf: [2048]u8 = undefined;
-            try home_dir.createDirPath(io, DEFAULT_CONFIG_PATH);
-
-            // meta file (blitz_defs.lua type hints)
-            const meta_rel = DEFAULT_CONFIG_PATH ++ DEFAULT_LUA_META;
-            const mf = try home_dir.createFile(io, meta_rel, .{});
-            defer mf.close(io);
-            var mw = mf.writer(io, &buf);
-            try mw.interface.writeAll(LUA_META_FILE);
-            try mw.interface.flush();
-
-            // .luarc.json for lua-ls autocomplete
-            const luarc_rel = DEFAULT_CONFIG_PATH ++ DEFAULT_LUARC;
-            const lf = try home_dir.createFile(io, luarc_rel, .{});
-            defer lf.close(io);
-            var lw = lf.writer(io, &buf);
-            try lw.interface.writeAll(LUARC_CONTENT);
-            try lw.interface.flush();
-
-            // config file
-            const f = try home_dir.createFile(io, rel_path, .{});
-            defer f.close(io);
-            var writer = f.writer(io, &buf);
-            try writer.interface.writeAll(LUA_DEFAULT_FILE);
-            try writer.interface.flush();
-        } else return err;
-    };
-
-    const abs_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ HOME, rel_path });
+    const abs_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ HOME, DEFAULT_CONFIG_PATH ++ DEFAULT_LUA_CONFIG });
     const dir_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ HOME, DEFAULT_CONFIG_PATH });
     return .{ .abs_path = abs_path, .dir_path = dir_path };
 }

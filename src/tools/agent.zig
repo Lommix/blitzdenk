@@ -17,7 +17,7 @@ pub const AgentTool = r.Tool{
         \\      "prompt": {"type": "string", "description": "The task for the agent to perform"},
         \\      "agent_type": {"type": "string", "enum": {AGENT_LIST}, "description": "The type of specialized agent to use for this task"},
         \\      "cwd": {"type": "string", "description": "The working directoy of the agent. Defaults to current"},
-        \\      "run_in_background": {"type": "boolean", "default": false, "description": "If true, spawn in the background and return immediately with the agent id; read the result later with await_agent. If false (default), block until the agent finishes and return its final message."}
+        \\      "run_in_background": {"type": "boolean", "default": false, "description": "If true, spawn in the background and return immediately with the agent id"}
         \\  },
         \\  "required": ["description","prompt","agent_type"]
         \\}

@@ -3,6 +3,7 @@ pub const VERSION = "0.3.4";
 pub const sdk = @import("blitz-sdk");
 pub const models = @import("models");
 pub const config = @import("config.zig");
+pub const defaults = @import("defaults.zig");
 pub const app = @import("app.zig");
 pub const agent = @import("agent.zig");
 pub const AgentId = @import("agent-id").AgentId;
