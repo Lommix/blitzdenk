@@ -340,7 +340,10 @@ pub fn run(
                 const is_ask = next.payload == .ask or next.payload == .plan;
 
                 // check permission level against flags
-                if (app.flags.skip_permissions and !app.exec_pool.ssh_active and !is_ask) {
+                app.mu.lockUncancelable(app.io);
+                const skip_permissions = app.flags.skip_permissions;
+                app.mu.unlock(app.io);
+                if (skip_permissions and !app.exec_pool.ssh_active and !is_ask) {
                     try app.persist_permission_to_history(next);
                     next.state = .approved;
                     next.event.set(app.io);
@@ -505,7 +508,9 @@ pub fn run(
                             .cursor_up => {},
                             .cursor_down => {},
                             .toggle_skip => {
+                                app.mu.lockUncancelable(app.io);
                                 app.flags.skip_permissions = !app.flags.skip_permissions;
+                                app.mu.unlock(app.io);
                                 app.dirty = true;
                                 continue;
                             },

@@ -650,6 +650,7 @@ pub const App = struct {
             .cwd = agent.cwd,
             .permissions = .{ .ctx = @ptrCast(@constCast(self)), .request = requestPermissionOpaque },
             .display = .{ .ctx = @ptrCast(@constCast(self)) },
+            .app = @ptrCast(@constCast(self)),
         };
     }
 
@@ -711,6 +712,9 @@ pub const App = struct {
     }
 
     pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+        refreshLuaStatusBar(app);
+        app.mu.lockUncancelable(app.io);
+        defer app.mu.unlock(app.io);
         _ = app.arena_frame.reset(.free_all);
         const frame_alloc = app.arena_frame.allocator();
         buf.fill(area, .{ .style = .{ .bg = app.theme.overlay } });
@@ -1907,13 +1911,6 @@ fn renderStatusBar(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     }
 
     if (app.lua_status_bar_enabled) {
-        if (app.lua_vm.vm_mu.tryLock()) {
-            defer app.lua_vm.vm_mu.unlock(app.io);
-            if (app.lua_vm.renderStatusBar(&app.lua_status_bar_cache)) |status| {
-                app.lua_status_bar_cache_len = status.len;
-            }
-        }
-
         if (app.lua_status_bar_cache_len > 0) {
             renderCenteredStatusText(app, area, buf, app.lua_status_bar_cache[0..app.lua_status_bar_cache_len]);
             return;
@@ -1942,6 +1939,16 @@ fn renderStatusBar(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     ) catch " ?? ";
 
     renderCenteredStatusText(app, area, buf, status);
+}
+
+fn refreshLuaStatusBar(app: *App) void {
+    if (!app.lua_status_bar_enabled) return;
+    if (app.lua_vm.vm_mu.tryLock()) {
+        defer app.lua_vm.vm_mu.unlock(app.io);
+        if (app.lua_vm.renderStatusBar(&app.lua_status_bar_cache)) |status| {
+            app.lua_status_bar_cache_len = status.len;
+        }
+    }
 }
 
 fn statusTextWidth(text: []const u8) u16 {

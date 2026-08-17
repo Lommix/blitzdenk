@@ -19,6 +19,7 @@ pub const BaseContext = struct {
     cwd: []const u8,
     permissions: permissions.Handler = .{},
     display: Display = .{},
+    app: ?*anyopaque = null,
 };
 
 pub const Context = struct {
