@@ -317,10 +317,16 @@ pub const Command = union(enum) {
                 app.dirty = true;
             },
             .add_tool => |arg| {
+                app.lua_vm.vm_mu.lockUncancelable(app.io);
+                defer app.lua_vm.vm_mu.unlock(app.io);
                 app.context_factory.addAgentTool(arg.agent_type, arg.tool_name) catch return;
                 if (app.main_agent_id) |id| {
                     if (app.registry.get(id)) |agent| {
-                        try app.context_factory.refreshAgentTools(agent, app.toolBase(id));
+                        if (agent.task != null) {
+                            agent.markToolsDirty();
+                        } else {
+                            try app.context_factory.refreshAgentTools(agent, app.toolBase(id));
+                        }
                     }
                 }
             },

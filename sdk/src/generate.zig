@@ -71,9 +71,10 @@ fn run(
     alloc: std.mem.Allocator,
     io: std.Io,
     chat: model.LanguageModel,
-    opts: GenerateOptions,
+    opts_in: GenerateOptions,
     sctx: ?*model.StreamContext,
 ) !types.TextResult {
+    var opts = opts_in;
     var history: std.ArrayList(Message) = .empty;
     errdefer {
         for (history.items) |msg| types.freeMessage(alloc, msg);
@@ -125,6 +126,7 @@ fn run(
             } else {
                 try appendOwnedMessages(alloc, &history, prepared.messages);
             }
+            if (prepared.tools) |fresh| opts.tools = fresh;
         }
 
         if (opts.hooks.on_reminder) |f| {

@@ -87,6 +87,9 @@ pub const Agent = struct {
     tool_call_hook_ctx: ?*anyopaque = null,
     stop_hook: ?StopHook = null,
     stop_hook_ctx: ?*anyopaque = null,
+    tools_refresh_hook: ?*const fn (?*anyopaque, *Agent) anyerror!void = null,
+    tools_refresh_hook_ctx: ?*anyopaque = null,
+    tools_dirty: std.atomic.Value(bool) = .init(false),
     task: ?agent_run.RunTask = null,
     compact_task: ?compact.Task = null,
     resume_options: ?agent_run.OwnedOptions = null,
@@ -180,6 +183,10 @@ pub const Agent = struct {
 
     pub fn setTools(self: *Agent, tools: []const sdk.Tool) !void {
         if (self.task != null) return error.RunInProgress;
+        try self.setToolsLive(tools);
+    }
+
+    pub fn setToolsLive(self: *Agent, tools: []const sdk.Tool) !void {
         _ = self.tool_arena.reset(.free_all);
         self.tools = &.{};
         const alloc = self.tool_arena.allocator();
@@ -192,6 +199,10 @@ pub const Agent = struct {
             .execute_ctx = tool.execute_ctx,
         };
         self.tools = cloned;
+    }
+
+    pub fn markToolsDirty(self: *Agent) void {
+        self.tools_dirty.store(true, .release);
     }
 
     pub fn history(self: *const Agent) []const sdk.Message {
@@ -415,18 +426,31 @@ pub const Agent = struct {
             try hook(self.prepare_hook_ctx, info)
         else
             sdk.options.PrepareStepResult{};
+
+        var refreshed_tools: ?[]const sdk.Tool = null;
+        if (self.tools_dirty.swap(false, .acq_rel)) {
+            if (self.tools_refresh_hook) |hook| {
+                hook(self.tools_refresh_hook_ctx, self) catch |err| {
+                    std.log.scoped(.agent).warn("tool refresh failed: {s}", .{@errorName(err)});
+                };
+            }
+            refreshed_tools = self.tools;
+        }
+
         const reminder = if (info.number > 0)
             if (self.reminder_hook) |hook| try hook(self.reminder_hook_ctx, self) else null
         else
             null;
-        if (self.queued_messages.items.len == 0 and reminder == null) return upstream;
+        if (self.queued_messages.items.len == 0 and reminder == null) {
+            return .{ .messages = upstream.messages, .replace = upstream.replace, .tools = refreshed_tools };
+        }
         const alloc = self.injection_arena.allocator();
         const combined = try alloc.alloc(sdk.Message, upstream.messages.len + self.queued_messages.items.len + @intFromBool(reminder != null));
         @memcpy(combined[0..upstream.messages.len], upstream.messages);
         @memcpy(combined[upstream.messages.len..][0..self.queued_messages.items.len], self.queued_messages.items);
         if (reminder) |text| combined[combined.len - 1] = sdk.UserMessage(text);
         self.queued_messages.clearRetainingCapacity();
-        return .{ .messages = combined, .replace = upstream.replace };
+        return .{ .messages = combined, .replace = upstream.replace, .tools = refreshed_tools };
     }
 
     fn toolCall(ctx: ?*anyopaque, info: sdk.options.ToolCallInfo) void {

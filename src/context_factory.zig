@@ -462,6 +462,14 @@ pub fn configureAgent(
 }
 
 pub fn refreshAgentTools(self: *const Self, agent: *r.agent.Agent, base: r.tools.context.BaseContext) !void {
+    try self.refreshAgentToolsInternal(agent, base, false);
+}
+
+pub fn refreshAgentToolsLive(self: *const Self, agent: *r.agent.Agent, base: r.tools.context.BaseContext) !void {
+    try self.refreshAgentToolsInternal(agent, base, true);
+}
+
+fn refreshAgentToolsInternal(self: *const Self, agent: *r.agent.Agent, base: r.tools.context.BaseContext, live: bool) !void {
     const alloc = agent.state_arena.allocator();
     var definitions: [MAX_AGENT_TOOLS]r.tools.Tool = undefined;
     var count: usize = 0;
@@ -489,7 +497,7 @@ pub fn refreshAgentTools(self: *const Self, agent: *r.agent.Agent, base: r.tools
         definitions[count] = tool;
         count += 1;
     }
-    try r.tools.context.install(agent, base, definitions[0..count]);
+    if (live) try r.tools.context.installLive(agent, base, definitions[0..count]) else try r.tools.context.install(agent, base, definitions[0..count]);
 }
 
 fn findLoaded(self: *const Self, name: []const u8) ?r.tools.Tool {

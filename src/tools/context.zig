@@ -85,6 +85,14 @@ const Binding = struct {
 };
 
 pub fn install(agent: *agent_mod.Agent, base: BaseContext, definitions: []const Definition) !void {
+    try installInternal(agent, base, definitions, false);
+}
+
+pub fn installLive(agent: *agent_mod.Agent, base: BaseContext, definitions: []const Definition) !void {
+    try installInternal(agent, base, definitions, true);
+}
+
+fn installInternal(agent: *agent_mod.Agent, base: BaseContext, definitions: []const Definition, live: bool) !void {
     const alloc = agent.state_arena.allocator();
     const bindings = try alloc.alloc(Binding, definitions.len);
     const tools = try alloc.alloc(sdk.Tool, definitions.len);
@@ -98,7 +106,7 @@ pub fn install(agent: *agent_mod.Agent, base: BaseContext, definitions: []const 
             .execute_ctx = &bindings[index],
         };
     }
-    try agent.setTools(tools);
+    if (live) try agent.setToolsLive(tools) else try agent.setTools(tools);
 }
 
 fn trampoline(ctx: ?*anyopaque, alloc: std.mem.Allocator, io: std.Io, call: sdk.ToolCall) anyerror!sdk.ToolOutput {

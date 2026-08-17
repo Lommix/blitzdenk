@@ -269,6 +269,10 @@ pub const App = struct {
     context_factory: *r.ContextFactory,
     theme: Theme = .default,
     cwd: []const u8,
+    lua_config_dir: ?[]const u8 = null,
+    lua_config_abs: ?[]const u8 = null,
+    lua_reload_requested: std.atomic.Value(bool) = .init(false),
+    lua_reload_failed: std.atomic.Value(bool) = .init(false),
     remote_cwd: []const u8 = "/",
     flags: AppFlags = .{},
     default_context_limit: u32 = CONTEXT_LIMIT,
@@ -578,12 +582,37 @@ pub const App = struct {
         self.dirty = true;
     }
 
-    fn refreshLiveAgentTools(self: *App) !void {
+    pub fn refreshLiveAgentTools(self: *App) !void {
         for (&self.registry.slots, 0..) |*slot, index| {
             const state = slot.state.load(.acquire);
             if (state == .free or state == .reserved) continue;
-            try self.context_factory.refreshAgentTools(&slot.agent.?, self.toolBase(.{ .index = @intCast(index), .generation = slot.generation }));
+            const agent = &slot.agent.?;
+            if (agent.task != null) {
+                agent.markToolsDirty();
+            } else {
+                try self.context_factory.refreshAgentTools(agent, self.toolBase(.{ .index = @intCast(index), .generation = slot.generation }));
+            }
         }
+    }
+
+    pub fn requestLuaReload(self: *App) void {
+        self.lua_reload_requested.store(true, .release);
+    }
+
+    pub fn markLuaReloadDone(self: *App) void {
+        self.lua_reload_requested.store(false, .release);
+    }
+
+    fn refreshRunningAgentTools(ctx: ?*anyopaque, agent: *r.agent.Agent) anyerror!void {
+        const self: *App = @ptrCast(@alignCast(ctx.?));
+        while (self.lua_reload_requested.load(.acquire)) {
+            std.Io.sleep(self.io, .fromMilliseconds(1), .awake) catch {};
+        }
+        if (self.lua_reload_failed.load(.acquire)) return;
+        self.lua_vm.vm_mu.lockUncancelable(self.io);
+        defer self.lua_vm.vm_mu.unlock(self.io);
+        const id = self.registry.idForAgent(agent) orelse return error.AgentNotFound;
+        try self.context_factory.refreshAgentToolsLive(agent, self.toolBase(id));
     }
 
     pub fn pushSystemMessage(self: *App, comptime fmt: []const u8, args: anytype) void {
@@ -608,6 +637,8 @@ pub const App = struct {
         agent.context_limit = self.default_context_limit;
         agent.reminder_hook = buildReminderOpaque;
         agent.reminder_hook_ctx = @ptrCast(@constCast(self));
+        agent.tools_refresh_hook = refreshRunningAgentTools;
+        agent.tools_refresh_hook_ctx = @ptrCast(@constCast(self));
     }
 
     pub fn toolBase(self: *const App, id: r.AgentId) r.tools.context.BaseContext {

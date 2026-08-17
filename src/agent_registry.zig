@@ -132,6 +132,15 @@ pub const Registry = struct {
         };
     }
 
+    pub fn idForAgent(self: *Registry, target: *const agent_mod.Agent) ?AgentId {
+        for (&self.slots, 0..) |*slot, index| {
+            if (slot.agent) |*agent| {
+                if (agent == target) return .{ .index = @intCast(index), .generation = slot.generation };
+            }
+        }
+        return null;
+    }
+
     pub fn state(self: *Registry, id: AgentId) ?SlotState {
         const slot = self.slotFor(id) orelse return null;
         const value = slot.state.load(.acquire);

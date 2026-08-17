@@ -216,6 +216,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         };
 
         updateFileStats(ctx, resolved, abs_cmd);
+        r.markConfigTouched(ctx, resolved);
         applied += 1;
     }
 

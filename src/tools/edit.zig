@@ -128,6 +128,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, msg);
     }
 
+    r.markConfigTouched(ctx, resolved);
+
     return r.okResult(call, std.fmt.allocPrint(alloc, "edit applied to {s}", .{args.path}) catch "edit applied successfully");
 }
 

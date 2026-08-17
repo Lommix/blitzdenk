@@ -96,6 +96,7 @@ pub const PrepareStepInfo = struct {
 pub const PrepareStepResult = struct {
     messages: []const types.Message = &.{},
     replace: bool = false,
+    tools: ?[]const types.Tool = null,
 };
 
 pub const StopInfo = struct {

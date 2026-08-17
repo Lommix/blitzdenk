@@ -262,6 +262,10 @@ pub fn run(
     var exec_pool = r.exec.CmdPool.init(gpa, io, env);
     app.registry = &registry;
     app.exec_pool = &exec_pool;
+    if (config_lua) |info| {
+        app.lua_config_dir = info.dir_path;
+        app.lua_config_abs = info.abs_path;
+    }
     defer {
         app.cancelPermissions();
         registry.cancelAll();
@@ -385,7 +389,8 @@ pub fn run(
 
         // Lua hot-reload: poll mtime every ~1s (cwd blitz.lua + config dir)
         reload_tick +%= 1;
-        if (reload_tick >= 60) {
+        const reload_requested = app.lua_reload_requested.load(.acquire);
+        if (reload_tick >= 60 or reload_requested) {
             reload_tick = 0;
             const new_cwd_mtime: i128 = blk: {
                 const stat = std.Io.Dir.cwd().statFile(io, "blitz.lua", .{}) catch break :blk 0;
@@ -393,7 +398,7 @@ pub fn run(
             };
             const new_config_mtime: i128 = if (config_lua) |info| scanDirMaxMtime(io, info.dir_path) else 0;
 
-            if (new_cwd_mtime != cwd_lua_mtime or new_config_mtime != config_lua_mtime) blk: {
+            if (reload_requested or new_cwd_mtime != cwd_lua_mtime or new_config_mtime != config_lua_mtime) blk: {
                 // Tool worker may currently hold
                 // vm_mu. Skip this tick if busy — mtime stays unchanged so we retry.
                 if (!app.lua_vm.vm_mu.tryLock()) break :blk;
@@ -436,12 +441,20 @@ pub fn run(
                 try context_factory.resetLoadedTools(arena);
                 lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
                     std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
+                    if (reload_requested) {
+                        app.lua_reload_failed.store(true, .release);
+                        app.markLuaReloadDone();
+                    }
                     break :blk;
                 };
                 for (lua_tools) |tool| try context_factory.add(arena, tool, .all);
 
                 const reloaded_mcp_servers = app.lua_vm.getEnabledMcpServers(arena) catch |err| {
                     std.log.scoped(.mcp).err("failed to load MCP server defs {any}", .{err});
+                    if (reload_requested) {
+                        app.lua_reload_failed.store(true, .release);
+                        app.markLuaReloadDone();
+                    }
                     break :blk;
                 };
                 app.mcp_manager.loadServers(reloaded_mcp_servers);
@@ -454,11 +467,9 @@ pub fn run(
                     try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn } });
                 }
 
-                if (app.main_agent_id) |id| {
-                    if (registry.get(id)) |agent| {
-                        try context_factory.refreshAgentTools(agent, app.toolBase(id));
-                    }
-                }
+                if (reload_requested) app.lua_reload_failed.store(false, .release);
+                try app.refreshLiveAgentTools();
+                if (reload_requested) app.markLuaReloadDone();
             }
         }
 

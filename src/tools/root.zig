@@ -95,6 +95,23 @@ pub fn setToolChild(ctx: ToolContext, call: ToolCall, child_id: r.AgentId) void 
     app.setToolChild(ctx.base.self_id, call.id, child_id) catch {};
 }
 
+pub fn markConfigTouched(ctx: ToolContext, resolved: []const u8) void {
+    const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    if (app.lua_config_abs) |abs| {
+        if (std.mem.eql(u8, resolved, abs)) {
+            app.requestLuaReload();
+            ctx.agent().markToolsDirty();
+            return;
+        }
+    }
+    if (app.lua_config_dir) |dir| {
+        if (std.mem.startsWith(u8, resolved, dir)) {
+            app.requestLuaReload();
+            ctx.agent().markToolsDirty();
+        }
+    }
+}
+
 pub fn errResult(_: ToolCall, msg: []const u8) ToolResult {
     return .{
         .content = msg,
