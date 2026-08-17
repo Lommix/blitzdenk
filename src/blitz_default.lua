@@ -53,40 +53,90 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 ---------------------------------------------------------------------------------------------------
 --- Commands
 ---------------------------------------------------------------------------------------------------
+blitz.add_command("/compact", function()
+	blitz.cmd.compact()
+end)
+
 blitz.add_command("/plan", function(rem)
-	blitz.cmd.reset_session()
-	blitz.cmd.spawn_agent({
-		agent_type = blitz.AGENT_GENERAL,
-		prompt = [[
-        Before making ANY edits, explain your implementation plan to the user and await their go-ahead. If the plan
-        requires an unexpected structural change the user may have overlooked, use your ask tool with options on how to
-        handle this case.
+	local main_id = blitz.get_main_agent()
+	local prompt = [[
+        You are in collaborative explore-plan mode. Do NOT make any edits and do NOT present a final plan yet.
+        Interview the user relentlessly about every aspect of the task until you reach a shared understanding,
+        walking down each branch of the design tree and resolving dependencies between decisions one by one.
 
-        This is the request:
+        Rules:
+        - Ask ONE question at a time (step by step), using your ask tool with a recommendation for each question.
+        - If a question can be answered by exploring the codebase, explore the codebase instead of asking.
+        - Keep questions concrete and decision-oriented; always offer a recommended answer.
+        - When the user answers, follow up on the next unresolved decision — never skip ahead to a plan.
+        - Only after all material unknowns are resolved, summarize the shared understanding and present the
+          implementation plan, then await the user's explicit go-ahead before any edit.
 
-        ]] .. rem,
-	})
+        This is the request to explore:
+
+        ]] .. rem
+
+	if main_id == nil then
+		blitz.cmd.reset_session()
+		blitz.cmd.spawn_agent({
+			agent_type = blitz.AGENT_GENERAL,
+			prompt = prompt,
+		})
+	else
+		blitz.cmd.queue_agent_message(main_id, prompt)
+	end
 	blitz.cmd.push_chat_entry("user", "[PLAN]: " .. rem)
 end)
 
+blitz.add_command("/show", function(rem)
+	local main_id = blitz.get_main_agent()
+	local prompt = [[
+        Explain the answer in a visual way using short and precise mermaid diagrams
+        (flow, sequence, class, er, state) in markdown code blocks ```mermaid ... ``` whenever a diagram
+        clarifies the explanation better than text alone.
+
+
+        Task:
+
+        ]] .. rem
+
+	if main_id == nil then
+		blitz.cmd.reset_session()
+		blitz.cmd.spawn_agent({
+			agent_type = blitz.AGENT_GENERAL,
+			prompt = prompt,
+		})
+	else
+		blitz.cmd.queue_agent_message(main_id, prompt)
+	end
+	blitz.cmd.push_chat_entry("user", "[DEBUG]: " .. rem)
+end)
+
 blitz.add_command("/team", function(rem)
-	blitz.cmd.reset_session()
-	blitz.cmd.spawn_agent({
-		agent_type = blitz.AGENT_GENERAL,
-		prompt = [[
+	local main_id = blitz.get_main_agent()
+	local prompt = [[
         Congratulations! You were just promoted to the team lead agent. You no longer read or write code. Your new job is to
-        orchestrate a team of Agents to complete the task. You may start up to 3 agents at the same time. They are your new eyes and hands.
+        orchestrate a team of agents to complete the task. You may start up to 3 agents at the same time. They are your new eyes and hands.
 
         You follow this pattern:
 
-        explore -> plan -> build -> review -> update -> review
+        explore -> plan -> build -> review -> update -> review -> finalize
 
         Each review step must be aware of the original intent of the task.
 
         This is the task:
 
-        ]] .. rem,
-	})
+        ]] .. rem
+
+	if main_id == nil then
+		blitz.cmd.reset_session()
+		blitz.cmd.spawn_agent({
+			agent_type = blitz.AGENT_GENERAL,
+			prompt = prompt,
+		})
+	else
+		blitz.cmd.queue_agent_message(main_id, prompt)
+	end
 	blitz.set_mode_prompt_sparse(blitz.MODE_EXEC, "You are the team lead agent")
 	blitz.cmd.push_chat_entry("user", "[TEAM]: " .. rem)
 end)
