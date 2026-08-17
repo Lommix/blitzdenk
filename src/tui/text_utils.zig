@@ -162,6 +162,13 @@ pub fn renderWrappedText(buf: *Buffer, text: []const u8, x: u16, y: u16, width: 
     return row;
 }
 
+pub fn wrappedRowCount(text: []const u8, width: usize) u16 {
+    var iter = LineIterator{ .text = text, .width = width };
+    var count: u16 = 0;
+    while (iter.next() != null) count += 1;
+    return count;
+}
+
 pub fn renderError(buf: *Buffer, last_error: ?anyerror, detail: ?[]const u8, x: u16, y: u16, width: u16, height: u16) void {
     const err_text: []const u8 = if (last_error) |err| @errorName(err) else "unknown error";
     var err_buf: [128]u8 = undefined;

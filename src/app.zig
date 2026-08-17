@@ -740,7 +740,7 @@ pub const App = struct {
                 .perm_select => {
                     const entry = app.active_permission orelse break :blk 5;
                     if (entry.payload == .ask) {
-                        break :blk askPermissionInputHeight(entry.payload.ask.options.len, area.height);
+                        break :blk askPermissionInputHeight(entry.payload.ask.options.len, entry.payload.ask.header, entry.payload.ask.question, area.width, area.height);
                     }
                     break :blk 6; // .call, .diff, .plan all have header + options
                 },
@@ -2804,15 +2804,16 @@ fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, bu
         else => 0,
     };
 
-    // Line 0: "[header] question"
+    // Line 0+: "[header] question" (wrapped)
     var header_buf: [256]u8 = undefined;
     const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ args.header, args.question }) catch args.question;
-    buf.setStringMax(inner.x + 1, inner.y, header_line, .{ .fg = app.theme.info }, inner.width -| 1);
+    const max_q_rows = inner.height -| @as(u16, @intCast(total_rows)) -| 1;
+    const q_rows = text_utils.renderWrappedText(buf, header_line, inner.x + 1, inner.y, inner.width -| 1, max_q_rows, .{ .fg = app.theme.info });
 
     // Options and "enter message" tail.
     var row: usize = 0;
     while (row < total_rows) : (row += 1) {
-        const y = inner.y +| @as(u16, @intCast(row + 1));
+        const y = inner.y +| @as(u16, @intCast(row + 1)) +| q_rows;
         if (y >= inner.y +| inner.height) break;
 
         const selected = cur_sel == @as(u8, @intCast(row));
@@ -2826,9 +2827,14 @@ fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, bu
     }
 }
 
-fn askPermissionInputHeight(options_len: usize, area_height: u16) u16 {
+fn askPermissionInputHeight(options_len: usize, header: []const u8, question: []const u8, area_width: u16, area_height: u16) u16 {
     const opts: u16 = @intCast(@min(options_len, r.tools.ask.MAX_OPTIONS));
-    return @min(opts +| 4, area_height -| 1);
+    const total_rows = opts +| 1;
+    const max_area = area_height -| 1;
+    var header_buf: [256]u8 = undefined;
+    const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ header, question }) catch question;
+    const q_rows = @min(text_utils.wrappedRowCount(header_line, area_width -| 3), max_area -| total_rows -| 2);
+    return @min(total_rows +| q_rows +| 2, max_area);
 }
 
 fn formatTokenCount(dest: []u8, count: u64) []const u8 {
