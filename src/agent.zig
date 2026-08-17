@@ -70,8 +70,7 @@ pub const Agent = struct {
     retry_count: u32 = 0,
     retry_after_ms: ?u64 = null,
     run_started_ns: i128 = 0,
-    approximate_output_bytes: u64 = 0,
-    turn_output_tokens: u64 = 0,
+    stream_output_bytes: u64 = 0,
     tokens_per_second: f32 = 0,
     max_tool_calls: u32 = 64,
     tool_call_count: std.atomic.Value(u32) = .init(0),
@@ -266,9 +265,7 @@ pub const Agent = struct {
         self.retry_count = 0;
         self.retry_after_ms = null;
         self.run_started_ns = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
-        self.approximate_output_bytes = 0;
-        self.turn_output_tokens = 0;
-        self.tokens_per_second = 0;
+        self.endStream();
         var run_options = options;
         if (run_options.system.len == 0) run_options.system = self.system_prompt;
         if (run_options.prompt.len > 0) {
@@ -319,10 +316,10 @@ pub const Agent = struct {
             .step => |step| {
                 self.usage.add(step.usage);
                 self.context_tokens = step.usage.input_tokens + step.usage.cache_read_tokens + step.usage.cache_write_tokens;
-                self.turn_output_tokens += step.usage.output_tokens;
-                self.updateTokenRate();
+                self.endStream();
             },
             .provider_error => |provider_error| {
+                self.endStream();
                 _ = self.error_arena.reset(.free_all);
                 self.last_provider_error = null;
                 self.last_provider_error = .{
@@ -343,10 +340,12 @@ pub const Agent = struct {
             .complete => {
                 self.status = .complete;
                 self.activity = .idle;
+                self.endStream();
             },
             .failed => |err| {
                 self.last_error = err;
                 self.status = if (err == error.Canceled) .canceled else .failed;
+                self.endStream();
             },
         }
     }
@@ -531,16 +530,17 @@ pub const Agent = struct {
     }
 
     fn recordOutput(self: *Agent, bytes: usize) void {
-        self.approximate_output_bytes += bytes;
-        self.updateTokenRate();
-    }
-
-    fn updateTokenRate(self: *Agent) void {
+        self.stream_output_bytes += bytes;
         const now: i128 = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
         const elapsed = now - self.run_started_ns;
         if (elapsed <= 0) return;
-        const tokens = @max(self.turn_output_tokens, self.approximate_output_bytes / 3);
+        const tokens = self.stream_output_bytes / 3;
         self.tokens_per_second = @floatCast(@as(f64, @floatFromInt(tokens)) * @as(f64, std.time.ns_per_s) / @as(f64, @floatFromInt(elapsed)));
+    }
+
+    fn endStream(self: *Agent) void {
+        self.stream_output_bytes = 0;
+        self.tokens_per_second = 0;
     }
 };
 
