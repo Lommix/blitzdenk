@@ -15,6 +15,7 @@ pub const Event = union(enum) {
     text: []const u8,
     reasoning: []const u8,
     tool: sdk.StreamChunk,
+    tool_done: sdk.options.ToolCallInfo,
     step: sdk.options.StepInfo,
     provider_error: ProviderError,
     complete: *sdk.TextResult,
@@ -71,6 +72,8 @@ pub const RunTask = struct {
     options: sdk.GenerateOptions,
     checkpoint_hook: ?*const fn (?*anyopaque, []const sdk.Message) void = null,
     checkpoint_hook_ctx: ?*anyopaque = null,
+    tool_call_hook: ?*const fn (?*anyopaque, sdk.options.ToolCallInfo) void = null,
+    tool_call_hook_ctx: ?*anyopaque = null,
     result: ?*sdk.TextResult = null,
     checkpoint: ?OwnedMessages = null,
     failure: ?anyerror = null,
@@ -151,6 +154,10 @@ pub const RunTask = struct {
         };
         options.hooks.on_step_finish = onStep;
         options.hooks.on_step_finish_ctx = self;
+        self.tool_call_hook = options.hooks.on_tool_call;
+        self.tool_call_hook_ctx = options.hooks.on_tool_call_ctx;
+        options.hooks.on_tool_call = onToolDone;
+        options.hooks.on_tool_call_ctx = self;
         options.hooks.on_provider_error = onProviderError;
         options.hooks.on_provider_error_ctx = self;
         const checkpoint_hook = options.hooks.on_checkpoint;
@@ -201,6 +208,14 @@ pub const RunTask = struct {
             log.err("dropped tool stream chunk type={s} id={s} name={s} input_bytes={d}: {s}", .{
                 @tagName(chunk.type), chunk.tool_call_id, chunk.tool_name, chunk.tool_input.len, @errorName(err),
             });
+        };
+    }
+
+    fn onToolDone(ctx: ?*anyopaque, info: sdk.options.ToolCallInfo) void {
+        const self: *RunTask = @ptrCast(@alignCast(ctx.?));
+        if (self.tool_call_hook) |hook| hook(self.tool_call_hook_ctx, info);
+        self.queue.append(.{ .tool_done = info }) catch |err| {
+            log.err("dropped tool done event id={s} name={s}: {s}", .{ info.tool_call_id, info.tool_name, @errorName(err) });
         };
     }
 
@@ -274,6 +289,16 @@ fn cloneEvent(alloc: std.mem.Allocator, event: Event) !Event {
                 .id = try alloc.dupe(u8, response.id),
                 .model = try alloc.dupe(u8, response.model),
             } else null,
+            .err = value.err,
+        } },
+        .tool_done => |value| .{ .tool_done = .{
+            .tool_call_id = try alloc.dupe(u8, value.tool_call_id),
+            .tool_name = try alloc.dupe(u8, value.tool_name),
+            .step = value.step,
+            .input = try alloc.dupe(u8, value.input),
+            .output = try alloc.dupe(u8, value.output),
+            .is_error = value.is_error,
+            .duration_ms = value.duration_ms,
             .err = value.err,
         } },
         .step => |value| .{ .step = .{
@@ -578,9 +603,9 @@ test "run task retains the latest SDK checkpoint on context overflow" {
     task.start();
     task.wait();
     try std.testing.expectEqual(error.ContextOverflow, task.failure.?);
-    try std.testing.expectEqual(@as(usize, 1), task.queue.count());
+    try std.testing.expectEqual(@as(usize, 2), task.queue.count());
     var saw_result = false;
-    _ = task.queue.drain(1, &saw_result, Fixture.collect);
+    _ = task.queue.drain(2, &saw_result, Fixture.collect);
     try std.testing.expect(saw_result);
     var checkpoint = task.takeCheckpoint().?;
     defer checkpoint.deinit();

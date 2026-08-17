@@ -685,6 +685,7 @@ fn executeOne(
             .step = step,
             .input = call.input,
             .output = output,
+            .is_error = is_err,
             .duration_ms = duration,
             .err = exec_err,
         });

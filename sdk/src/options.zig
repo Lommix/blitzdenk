@@ -79,6 +79,7 @@ pub const ToolCallInfo = struct {
     step: usize,
     input: []const u8 = "",
     output: []const u8 = "",
+    is_error: bool = false,
     duration_ms: u64 = 0,
     err: ?anyerror = null,
 };

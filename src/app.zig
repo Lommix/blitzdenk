@@ -1119,6 +1119,14 @@ pub const App = struct {
                 });
                 try self.refreshSdkPreview(agent_id);
             },
+            .tool_done => |info| {
+                try self.setToolResult(agent_id, .{
+                    .tool_call_id = info.tool_call_id,
+                    .tool_name = info.tool_name,
+                    .output = info.output,
+                    .is_error = info.is_error,
+                });
+            },
             .step => |step| {
                 if (is_main) self.sdk_usage.add(step.usage);
                 const status = self.tool_status_entries.lock(self.io);

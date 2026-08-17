@@ -313,6 +313,7 @@ pub const Agent = struct {
                 self.activity = .calling;
                 self.recordOutput(tool.text.len + tool.tool_input.len + tool.tool_output.len);
             },
+            .tool_done => {},
             .step => |step| {
                 self.usage.add(step.usage);
                 self.context_tokens = step.usage.input_tokens + step.usage.cache_read_tokens + step.usage.cache_write_tokens;
