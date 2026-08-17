@@ -20,6 +20,7 @@ pub const clipboard = @import("clipboard.zig");
 pub const keys = @import("keys.zig");
 pub const events = @import("events.zig");
 pub const lua = @import("lua.zig");
+pub const lua_state = @import("lua_state.zig");
 pub const mcp = @import("mcp.zig");
 pub const tools = @import("tools/root.zig");
 pub const tui = @import("tui/root.zig");

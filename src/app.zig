@@ -301,6 +301,7 @@ pub const App = struct {
     keymap: r.keys.KeyMap = .{},
     cmd_queue: r.cmd.CommandQueue,
     lua_vm: r.lua.LuaVm,
+    lua_state: r.lua_state.Store = .{},
     lua_status_bar_enabled: bool = false,
     lua_status_bar_cache: [512]u8 = undefined,
     lua_status_bar_cache_len: usize = 0,
@@ -352,6 +353,7 @@ pub const App = struct {
 
         self.mcp_manager.deinit();
         self.lua_vm.deinit();
+        self.lua_state.deinit(self.gpa);
         self.cmd_queue.deinit();
         self.injection_hooks.deinit(self.gpa);
         self.permission_queue.value.deinit(self.gpa);
@@ -507,6 +509,7 @@ pub const App = struct {
         self.queued = .{};
         self.context_factory.resetLoadedTools() catch {};
         self.lua_vm.disableAllMcp();
+        self.lua_state.reset(self.io, self.gpa);
         self.event_bus.emit(self, .session_reset) catch {};
         self.reloadMcpTools() catch {};
         self.reloadLuaTools() catch {};

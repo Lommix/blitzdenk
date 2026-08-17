@@ -215,6 +215,15 @@
 ---@field role_agent? string
 ---@field role_system? string
 
+---@class BlitzState
+---Set a value in the shared state. Pass nil to delete the key.
+---Returns true on success, or nil,false on a non-string key or unsupported value type.
+---Tables must have a contiguous 1..n array part and string-only keys.
+---@field set fun(key: string, value: any)
+---Get a value from the shared state. Returns nil if the key is missing,
+---or nil,false on a non-string key.
+---@field get fun(key: string)
+
 ---@class Blitz
 ---@field mcp BlitzMcp
 ---@field json BlitzJson
@@ -291,6 +300,7 @@
 ---@field shell fun(cmd: string): any
 ---Push a new popup notification with a lifetime of 8s to the top right corner.
 ---@field push_notification fun(message: string)
+---@field state BlitzState
 
 ---@type Blitz
 blitz = {}

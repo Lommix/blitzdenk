@@ -7,6 +7,7 @@ const keys = @import("keys.zig");
 const tl = @import("tools/root.zig");
 const log = std.log.scoped(.lua);
 const r = @import("root.zig");
+const lua_state = @import("lua_state.zig");
 const lua = @This();
 
 pub const REQ_STATUS_PENDING: c_int = 0;
@@ -1008,6 +1009,7 @@ pub const Blitz = LuaType{
                     }).lua_fn, "push_notification"),
                 } },
             },
+            .{ .name = "state", .ty = BlitzState },
         },
     },
 };
@@ -1173,6 +1175,141 @@ const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
         }).lua_fn,
     } } },
 } } };
+
+const BlitzState = LuaType{ .table_def = .{ .name = "BlitzState", .fields = &.{
+    .{
+        .name = "set",
+        .desc =
+        \\Set a value in the shared state. Pass nil to delete the key.
+        \\Returns true on success, or nil,false on a non-string key or unsupported value type.
+        \\Tables must have a contiguous 1..n array part and string-only keys.
+        ,
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "key", .ty = LuaType.string }, .{ .name = "value", .ty = LuaType.any } },
+            .fn_ptr = &luaStateSet,
+        } },
+    },
+    .{
+        .name = "get",
+        .desc =
+        \\Get a value from the shared state. Returns nil if the key is missing,
+        \\or nil,false on a non-string key.
+        ,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "key", .ty = LuaType.string }},
+            .fn_ptr = &luaStateGet,
+        } },
+    },
+} } };
+
+fn luaStateSet(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const a = getAppFromRegistry(state) orelse return pushNilBool(state, false);
+    if (c.lua_type(state, 1) != c.LUA_TSTRING) return pushNilBool(state, false);
+    var klen: usize = 0;
+    const key = c.lua_tolstring(state, 1, &klen) orelse return pushNilBool(state, false);
+    const key_slice = key[0..klen];
+    if (c.lua_type(state, 2) == c.LUA_TNIL) {
+        a.lua_state.set(a.io, a.gpa, key_slice, null) catch return pushNilBool(state, false);
+        c.lua_pushboolean(state, 1);
+        return 1;
+    }
+    const value = stateValueFromLua(a.gpa, state, 2, 1) catch return pushNilBool(state, false);
+    a.lua_state.set(a.io, a.gpa, key_slice, value) catch {
+        lua_state.freeValue(a.gpa, value);
+        return pushNilBool(state, false);
+    };
+    c.lua_pushboolean(state, 1);
+    return 1;
+}
+
+fn luaStateGet(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const a = getAppFromRegistry(state) orelse return pushNilBool(state, false);
+    if (c.lua_type(state, 1) != c.LUA_TSTRING) return pushNilBool(state, false);
+    var klen: usize = 0;
+    const key = c.lua_tolstring(state, 1, &klen) orelse return pushNilBool(state, false);
+    const value = a.lua_state.get(a.gpa, a.io, key[0..klen]) catch return pushNilBool(state, false);
+    if (value) |v| {
+        defer lua_state.freeValue(a.gpa, v);
+        pushStateValue(state, v);
+        return 1;
+    }
+    c.lua_pushnil(state);
+    return 1;
+}
+
+fn stateValueFromLua(alloc: Allocator, L: *c.lua_State, idx: c_int, depth: u32) anyerror!lua_state.Value {
+    return switch (c.lua_type(L, idx)) {
+        c.LUA_TBOOLEAN => .{ .boolean = c.lua_toboolean(L, idx) != 0 },
+        c.LUA_TNUMBER => if (c.lua_isinteger(L, idx) != 0)
+            .{ .integer = @intCast(c.lua_tointegerx(L, idx, null)) }
+        else
+            .{ .number = c.lua_tonumberx(L, idx, null) },
+        c.LUA_TSTRING => blk: {
+            var len: usize = 0;
+            const s = c.lua_tolstring(L, idx, &len) orelse return error.UnsupportedValue;
+            break :blk .{ .string = try alloc.dupe(u8, s[0..len]) };
+        },
+        c.LUA_TTABLE => .{ .table = try stateTableFromLua(alloc, L, idx, depth) },
+        else => error.UnsupportedValue,
+    };
+}
+
+fn stateTableFromLua(alloc: Allocator, L: *c.lua_State, idx: c_int, depth: u32) anyerror!lua_state.Table {
+    if (depth > MAX_STATE_DEPTH) return error.UnsupportedValue;
+    if (c.lua_checkstack(L, 4) == 0) return error.UnsupportedValue;
+    const abs = c.lua_absindex(L, idx);
+    var out: lua_state.Table = .{};
+    errdefer lua_state.freeValue(alloc, .{ .table = out });
+
+    const n: i64 = @intCast(c.lua_rawlen(L, abs));
+    try out.array.ensureTotalCapacity(alloc, @intCast(n));
+    var i: i64 = 1;
+    while (i <= n) : (i += 1) {
+        _ = c.lua_rawgeti(L, abs, i);
+        defer c.lua_pop(L, 1);
+        out.array.appendAssumeCapacity(try stateValueFromLua(alloc, L, -1, depth + 1));
+    }
+
+    c.lua_pushnil(L);
+    while (c.lua_next(L, abs) != 0) {
+        defer c.lua_pop(L, 1);
+        if (c.lua_type(L, -2) == c.LUA_TNUMBER) {
+            if (c.lua_isinteger(L, -2) == 0) return error.UnsupportedValue;
+            const k = c.lua_tointegerx(L, -2, null);
+            if (k >= 1 and k <= n) continue;
+            return error.UnsupportedValue;
+        }
+        if (c.lua_type(L, -2) != c.LUA_TSTRING) return error.UnsupportedValue;
+        var klen: usize = 0;
+        const k = c.lua_tolstring(L, -2, &klen) orelse return error.UnsupportedValue;
+        try lua_state.mapPut(alloc, &out.map, k[0..klen], try stateValueFromLua(alloc, L, -1, depth + 1));
+    }
+    return out;
+}
+
+fn pushStateValue(L: *c.lua_State, value: lua_state.Value) void {
+    switch (value) {
+        .boolean => |b| c.lua_pushboolean(L, @intFromBool(b)),
+        .integer => |i| c.lua_pushinteger(L, @intCast(i)),
+        .number => |n| c.lua_pushnumber(L, n),
+        .string => |s| _ = c.lua_pushlstring(L, s.ptr, s.len),
+        .table => |t| {
+            c.lua_createtable(L, @intCast(t.array.items.len), @intCast(t.map.count()));
+            for (t.array.items, 0..) |item, i| {
+                pushStateValue(L, item);
+                c.lua_rawseti(L, -2, @intCast(i + 1));
+            }
+            var it = t.map.iterator();
+            while (it.next()) |entry| {
+                _ = c.lua_pushlstring(L, entry.key_ptr.ptr, entry.key_ptr.len);
+                pushStateValue(L, entry.value_ptr.*);
+                c.lua_rawset(L, -3);
+            }
+        },
+    }
+}
 
 const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
     .{
@@ -1905,6 +2042,7 @@ const MAX_LUA_MCP_SERVERS = 16;
 const MAX_LUA_MCP_ARGS = 32;
 const STDOUT_BUF_CAP = 1024 * 1024 * 16;
 const CANCELLATION_HOOK_INTERVAL = 10000;
+const MAX_STATE_DEPTH: u32 = 64;
 
 pub const LuaMcpServerEntry = struct {
     name: []const u8,
@@ -3069,4 +3207,64 @@ test "tool VMs resolve their owner and isolate globals" {
     _ = c.lua_getglobal(vm2.L, "tool_shared_global");
     try std.testing.expectEqual(c.LUA_TNIL, c.lua_type(vm2.L, -1));
     c.lua_pop(vm2.L, 1);
+}
+
+test "state values round-trip through the Lua stack" {
+    const L = c.luaL_newstate() orelse return error.LuaInitFailed;
+    defer c.lua_close(L);
+
+    c.lua_createtable(L, 3, 2);
+    c.lua_pushinteger(L, 1);
+    c.lua_rawseti(L, -2, 1);
+    c.lua_pushinteger(L, 2);
+    c.lua_rawseti(L, -2, 2);
+    c.lua_pushnumber(L, 3.5);
+    c.lua_rawseti(L, -2, 3);
+    c.lua_pushboolean(L, 1);
+    c.lua_setfield(L, -2, "flag");
+    _ = c.lua_pushliteral(L, "hi");
+    c.lua_setfield(L, -2, "name");
+
+    const value = try stateValueFromLua(std.testing.allocator, L, -1, 1);
+    defer lua_state.freeValue(std.testing.allocator, value);
+
+    try std.testing.expectEqual(@as(usize, 3), value.table.array.items.len);
+    try std.testing.expectEqual(@as(i64, 1), value.table.array.items[0].integer);
+    try std.testing.expectEqual(@as(i64, 2), value.table.array.items[1].integer);
+    try std.testing.expectEqual(@as(f64, 3.5), value.table.array.items[2].number);
+    try std.testing.expect(value.table.map.get("flag").?.boolean);
+    try std.testing.expectEqualStrings("hi", value.table.map.get("name").?.string);
+
+    c.lua_pop(L, 1);
+    pushStateValue(L, value);
+    const round = try stateValueFromLua(std.testing.allocator, L, -1, 1);
+    defer lua_state.freeValue(std.testing.allocator, round);
+    try std.testing.expectEqual(@as(i64, 1), round.table.array.items[0].integer);
+    try std.testing.expectEqual(@as(f64, 3.5), round.table.array.items[2].number);
+    try std.testing.expectEqualStrings("hi", round.table.map.get("name").?.string);
+}
+
+test "state conversion rejects cyclic tables" {
+    const L = c.luaL_newstate() orelse return error.LuaInitFailed;
+    defer c.lua_close(L);
+
+    c.lua_createtable(L, 0, 1);
+    c.lua_pushvalue(L, -1);
+    c.lua_setfield(L, -2, "self");
+
+    try std.testing.expectError(error.UnsupportedValue, stateValueFromLua(std.testing.allocator, L, -1, 1));
+}
+
+test "state conversion rejects non-integer numeric keys" {
+    const L = c.luaL_newstate() orelse return error.LuaInitFailed;
+    defer c.lua_close(L);
+
+    c.lua_createtable(L, 1, 0);
+    _ = c.lua_pushliteral(L, "a");
+    c.lua_rawseti(L, -2, 1);
+    c.lua_pushnumber(L, 1.5);
+    _ = c.lua_pushliteral(L, "b");
+    c.lua_rawset(L, -3);
+
+    try std.testing.expectError(error.UnsupportedValue, stateValueFromLua(std.testing.allocator, L, -1, 1));
 }
