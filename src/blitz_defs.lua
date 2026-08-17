@@ -75,7 +75,6 @@
 ---@field CANCEL_AGENT string
 ---@field GLOB string
 ---@field GREP string
----@field LOADSKILL string
 ---@field START_MCP string
 
 ---@class BlitzEventDef

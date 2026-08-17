@@ -27,7 +27,6 @@ pub const general_default_tool_set = .{
     r.tools.ask.AskTool,
     r.tools.search.GlobTool,
     r.tools.search.GrepTool,
-    r.tools.skill.LoadSkillTool,
     r.tools.start.StartMcpTool,
 };
 
@@ -644,44 +643,42 @@ pub fn build_system_prompt(
         }
     }
 
-    if (self.agentHasTool(agent_type, r.tools.skill.LoadSkillTool.def.name)) {
-        if (self.skill_dir) |skill_dir| {
-            var it = skill_dir.iterate();
-            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            var header_buf: [4096]u8 = undefined;
-            var wrote_skill_header = false;
+    if (self.skill_dir) |skill_dir| {
+        var it = skill_dir.iterate();
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var header_buf: [4096]u8 = undefined;
+        var wrote_skill_header = false;
 
-            while (try it.next(self.io)) |entry| {
-                if (entry.kind != .file) continue;
-                if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
+        while (try it.next(self.io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
 
-                const len = try skill_dir.realPathFile(self.io, entry.name, &path_buf);
-                const path = path_buf[0..len];
+            const len = try skill_dir.realPathFile(self.io, entry.name, &path_buf);
+            const path = path_buf[0..len];
 
-                const skill = loadSkillMeta(self.io, path, &header_buf) orelse {
-                    std.log.err("failed to load skill header for '{s}'", .{entry.name});
-                    continue;
-                };
+            const skill = loadSkillMeta(self.io, path, &header_buf) orelse {
+                std.log.err("failed to load skill header for '{s}'", .{entry.name});
+                continue;
+            };
 
-                if (!wrote_skill_header) {
-                    _ = try w.write(
-                        \\
-                        \\# Available skills:
-                        \\
-                        \\Load a skill when the task matches its trigger rules.
-                        \\Skills provide specialized tooling, domain knowledge, and behavioral guidance.
-                        \\
-                    );
-                    wrote_skill_header = true;
-                }
-
-                try w.print(
-                    \\  - name: "{s}"
-                    \\    description: "{s}"
+            if (!wrote_skill_header) {
+                _ = try w.write(
                     \\
+                    \\# Available skills:
                     \\
-                , .{ skill.name, skill.description });
+                    \\Read the skill when the task matches its trigger rules.
+                    \\Skills provide specialized tooling, domain knowledge, and behavioral guidance.
+                    \\
+                );
+                wrote_skill_header = true;
             }
+
+            try w.print(
+                \\  - name: "{s}"
+                \\    description: "{s}"
+                \\    location: "{s}"
+                \\
+            , .{ skill.name, skill.description, path });
         }
     }
 

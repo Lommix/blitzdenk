@@ -73,20 +73,6 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, msg);
     }
 
-    // Register written file in FileStats so subsequent edit calls don't block
-    {
-        var ts: std.posix.timespec = undefined;
-        const now = if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) == 0)
-            ts.sec
-        else
-            0;
-
-        const g = ctx.agent().file_stats.lock(ctx.io);
-        defer g.unlock();
-        const look = r.r.agent_state.getOrPutFileStat(ctx.agent().state_arena.allocator(), g.ptr, resolved) catch unreachable;
-        look.value_ptr.* = .{ .last_read = now, .last_write = now };
-    }
-
     const msg = std.fmt.allocPrint(ctx.alloc, "Successfully wrote {d} bytes to {s}", .{ args.content.len, args.path }) catch
         "write failed";
     return r.okResult(call, msg);

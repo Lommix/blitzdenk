@@ -46,7 +46,6 @@ pub const Agent = struct {
     state_arena: std.heap.ArenaAllocator,
     injection_mutex: std.Io.Mutex = .init,
     queued_messages: std.ArrayList(sdk.Message) = .empty,
-    file_stats: state.Locked(state.FileStats) = .{},
     bg_tasks: state.Locked(state.BackgroundTaskList) = .{},
     bg_agents: state.Locked(state.BackgroundAgentList) = .{},
     todo_list: state.Locked(state.TodoList) = .{},
@@ -212,8 +211,13 @@ pub const Agent = struct {
     pub fn queueMessages(self: *Agent, messages: []const sdk.Message) !void {
         self.injection_mutex.lockUncancelable(self.io);
         defer self.injection_mutex.unlock(self.io);
-        const cloned = try agent_run.cloneMessages(self.injection_arena.allocator(), messages);
-        try self.queued_messages.appendSlice(self.injection_arena.allocator(), cloned);
+        if (self.queued_messages.items.len == 0) {
+            _ = self.injection_arena.reset(.free_all);
+            self.queued_messages = .empty;
+        }
+        const alloc = self.injection_arena.allocator();
+        const cloned = try agent_run.cloneMessages(alloc, messages);
+        try self.queued_messages.appendSlice(alloc, cloned);
     }
 
     pub fn queueReminder(self: *Agent, text: []const u8) !void {
@@ -492,9 +496,6 @@ pub const Agent = struct {
             self.compaction.last_compacted_estimate = self.context_tokens;
             self.compaction.must_progress_past_message_count = self.history().len;
             self.compaction.resetInFlight();
-            const file_stats = self.file_stats.lock(self.io);
-            file_stats.ptr.* = .{};
-            file_stats.unlock();
             const display = self.tool_display.lock(self.io);
             display.ptr.clearRetainingCapacity();
             display.unlock();
@@ -648,11 +649,6 @@ test "agent adopts compacted SDK history and preserves durable tool state" {
     const big = "x" ** 70_000;
     try agent.setMessages(&.{ sdk.SystemMessage("system"), sdk.UserMessage(big), sdk.UserMessage("recent") });
     {
-        const files = agent.file_stats.lock(agent.io);
-        try files.ptr.put(agent.state_arena.allocator(), "file", .{ .last_read = 1, .last_write = 0 });
-        files.unlock();
-    }
-    {
         const todos = agent.todo_list.lock(agent.io);
         todos.ptr.count = 1;
         todos.ptr.todos[0] = .{ .id = 1, .subject = "subject", .description = "description", .state = .pending };
@@ -673,11 +669,6 @@ test "agent adopts compacted SDK history and preserves durable tool state" {
     try std.testing.expectEqual(@as(u64, 12), agent.usage.total_tokens);
     try std.testing.expectEqual(false, agent.compaction.completed_continue_after.?);
     try std.testing.expect(std.mem.endsWith(u8, agent.history()[agent.history().len - 1].text(), "summary"));
-    {
-        const files = agent.file_stats.lock(agent.io);
-        try std.testing.expectEqual(@as(usize, 0), files.ptr.count());
-        files.unlock();
-    }
     {
         const todos = agent.todo_list.lock(agent.io);
         try std.testing.expectEqual(@as(usize, 1), todos.ptr.count);

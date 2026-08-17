@@ -46,9 +46,6 @@ pub const ViewImageTool = r.Tool{
     .func = &viewImage,
 };
 
-pub const Stat = r.r.agent_state.FileStat;
-pub const FileStats = r.r.agent_state.FileStats;
-
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         path: []const u8,
@@ -79,8 +76,6 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, args.path }) catch
         return r.errResult(call, "failed to resolve path");
 
-    const full_read = args.offset == null and args.limit == null;
-
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var read_info: []const u8 = rel_path;
 
@@ -98,37 +93,6 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         .{ .content = "read ", .style = .{ .modifier = .{ .bold = true } } },
         .{ .content = read_info, .style = .{ .fg = app.theme.muted } },
     }) catch {};
-
-    // Stat for mtime first so we can short-circuit unchanged re-reads.
-    const stat_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "stat", "-c", "%Y", resolved } }) catch
-        return r.errResult(call, "failed to stat file");
-    defer ctx.base.exec_pool.alloc.free(stat_res.stdout);
-    defer ctx.base.exec_pool.alloc.free(stat_res.stderr);
-
-    if (stat_res.ty != .success) {
-        const msg = if (stat_res.stderr.len > 0)
-            ctx.alloc.dupe(u8, stat_res.stderr) catch "stat failed"
-        else
-            "stat failed";
-        return r.errResult(call, msg);
-    }
-
-    const trimmed = std.mem.trim(u8, stat_res.stdout, " \t\r\n");
-    const mtime = std.fmt.parseInt(i64, trimmed, 10) catch return r.errResult(call, "failed to parse mtime stat");
-
-    {
-        const g = ctx.agent().file_stats.lock(ctx.io);
-        defer g.unlock();
-        const look = r.r.agent_state.getOrPutFileStat(ctx.agent().state_arena.allocator(), g.ptr, resolved) catch return r.errResult(call, "oom");
-        if (look.found_existing and full_read and mtime <= look.value_ptr.last_read) {
-            return r.okResult(call, "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.");
-        }
-        if (!look.found_existing) {
-            look.value_ptr.* = .{ .last_read = mtime, .last_write = 0 };
-        } else {
-            look.value_ptr.last_read = mtime;
-        }
-    }
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 

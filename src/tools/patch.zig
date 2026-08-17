@@ -215,7 +215,6 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
             return r.errResult(call, msg);
         };
 
-        updateFileStats(ctx, resolved, abs_cmd);
         r.markConfigTouched(ctx, resolved);
         applied += 1;
     }
@@ -316,39 +315,6 @@ fn applyErrorDescription(alloc: std.mem.Allocator, err: ApplyError, diag: *const
         error.InvalidCommand => "invalid command",
         else => try std.fmt.allocPrint(alloc, "{s}", .{@errorName(err)}),
     };
-}
-
-fn updateFileStats(ctx: r.ToolContext, resolved: []const u8, cmd: PatchCommand) void {
-    var ts: std.posix.timespec = undefined;
-    const now = if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) == 0)
-        ts.sec
-    else
-        0;
-
-    const g = ctx.agent().file_stats.lock(ctx.io);
-    defer g.unlock();
-    const alloc = ctx.agent().state_arena.allocator();
-
-    switch (cmd) {
-        .file_add => {
-            const e = r.r.agent_state.getOrPutFileStat(alloc, g.ptr, resolved) catch return;
-            e.value_ptr.* = .{ .last_read = now, .last_write = now };
-        },
-        .file_delete => {
-            _ = g.ptr.remove(resolved);
-        },
-        .file_update => |u| {
-            if (u.move_to) |move_to| {
-                _ = g.ptr.remove(resolved);
-                const e = r.r.agent_state.getOrPutFileStat(alloc, g.ptr, move_to) catch return;
-                e.value_ptr.* = .{ .last_read = now, .last_write = now };
-            } else {
-                const e = r.r.agent_state.getOrPutFileStat(alloc, g.ptr, resolved) catch return;
-                if (!e.found_existing) e.value_ptr.last_read = now;
-                e.value_ptr.last_write = now;
-            }
-        },
-    }
 }
 
 pub const Patch = struct {

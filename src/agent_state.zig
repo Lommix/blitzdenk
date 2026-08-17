@@ -2,22 +2,6 @@ const std = @import("std");
 const exec = @import("exec");
 const AgentId = @import("agent-id").AgentId;
 
-pub const FileStat = struct {
-    last_read: i64,
-    last_write: i64,
-};
-
-pub const FileStats = std.StringHashMapUnmanaged(FileStat);
-
-pub fn getOrPutFileStat(alloc: std.mem.Allocator, stats: *FileStats, path: []const u8) !FileStats.GetOrPutResult {
-    const entry = try stats.getOrPut(alloc, path);
-    if (!entry.found_existing) entry.key_ptr.* = alloc.dupe(u8, path) catch |err| {
-        _ = stats.remove(path);
-        return err;
-    };
-    return entry;
-}
-
 pub const BackgroundTask = struct {
     handle: exec.CmdPool.Handle,
     command: []const u8,
@@ -110,21 +94,6 @@ pub fn Locked(comptime T: type) type {
             return .{ .ptr = &self.value, .mutex = &self.mutex, .io = io };
         }
     };
-}
-
-test "file stats own keys beyond a tool call" {
-    var stats: FileStats = .empty;
-    defer {
-        var iterator = stats.keyIterator();
-        while (iterator.next()) |key| std.testing.allocator.free(key.*);
-        stats.deinit(std.testing.allocator);
-    }
-    var call_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    const path = try call_arena.allocator().dupe(u8, "src/main.zig");
-    const entry = try getOrPutFileStat(std.testing.allocator, &stats, path);
-    entry.value_ptr.* = .{ .last_read = 1, .last_write = 0 };
-    call_arena.deinit();
-    try std.testing.expectEqual(@as(i64, 1), stats.get("src/main.zig").?.last_read);
 }
 
 pub const ToolDisplay = struct {

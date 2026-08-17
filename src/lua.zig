@@ -1019,7 +1019,6 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "CANCEL_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.CancelAgent.def.name } },
             .{ .name = "GLOB", .ty = LuaType.string, .value = .{ .string = tl.search.GlobTool.def.name } },
             .{ .name = "GREP", .ty = LuaType.string, .value = .{ .string = tl.search.GrepTool.def.name } },
-            .{ .name = "LOADSKILL", .ty = LuaType.string, .value = .{ .string = tl.skill.LoadSkillTool.def.name } },
             .{ .name = "START_MCP", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },
         },
     },
