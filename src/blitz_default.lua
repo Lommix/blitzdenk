@@ -54,8 +54,8 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 --- Commands
 ---------------------------------------------------------------------------------------------------
 blitz.add_command("/plan", function(rem)
-	blitz.queue.reset_session()
-	blitz.queue.spawn_agent({
+	blitz.cmd.reset_session()
+	blitz.cmd.spawn_agent({
 		agent_type = blitz.AGENT_GENERAL,
 		prompt = [[
         Before making ANY edits, explain your implementation plan to the user and await their go-ahead. If the plan
@@ -66,12 +66,12 @@ blitz.add_command("/plan", function(rem)
 
         ]] .. rem,
 	})
-	blitz.queue.push_chat_entry("user", "[PLAN]: " .. rem)
+	blitz.cmd.push_chat_entry("user", "[PLAN]: " .. rem)
 end)
 
 blitz.add_command("/team", function(rem)
-	blitz.queue.reset_session()
-	blitz.queue.spawn_agent({
+	blitz.cmd.reset_session()
+	blitz.cmd.spawn_agent({
 		agent_type = blitz.AGENT_GENERAL,
 		prompt = [[
         Congratulations! You were just promoted to the team lead agent. You no longer read or write code. Your new job is to
@@ -88,7 +88,7 @@ blitz.add_command("/team", function(rem)
         ]] .. rem,
 	})
 	blitz.set_mode_prompt_sparse(blitz.MODE_EXEC, "You are the team lead agent")
-	blitz.queue.push_chat_entry("user", "[TEAM]: " .. rem)
+	blitz.cmd.push_chat_entry("user", "[TEAM]: " .. rem)
 end)
 
 blitz.add_command("/review", function()
@@ -98,15 +98,15 @@ blitz.add_command("/review", function()
 		"Start two challenger agents reviewing the current diff, one for correctness and one for edge cases. Communicate the original task and intent of the change. Confirm their findings and fix critical issues."
 
 	if main_id == nil then
-		blitz.queue.reset_session()
-		blitz.queue.spawn_agent({
+		blitz.cmd.reset_session()
+		blitz.cmd.spawn_agent({
 			agent_type = blitz.AGENT_GENERAL,
 			prompt = prompt,
 		})
 	else
-		blitz.queue.queue_agent_message(main_id, prompt)
+		blitz.cmd.queue_agent_message(main_id, prompt)
 	end
-	blitz.queue.push_chat_entry("user", "[starting review]")
+	blitz.cmd.push_chat_entry("user", "[starting review]")
 end)
 
 ---------------------------------------------------------------------------------------------------

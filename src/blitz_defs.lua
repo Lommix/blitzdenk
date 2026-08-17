@@ -31,7 +31,7 @@
 ---@field agent_type? integer
 ---@field fork? boolean
 
----@class BlitzQueue
+---@class BlitzCmd
 ---Reset the active session.
 ---@field reset_session fun()
 ---Cancel all in-flight agent work and drop streaming preview.
@@ -218,7 +218,7 @@
 ---@class Blitz
 ---@field mcp BlitzMcp
 ---@field json BlitzJson
----@field queue BlitzQueue
+---@field cmd BlitzCmd
 ---@field tools BlitzToolDef
 ---@field events BlitzEventDef
 ---@field AGENT_GENERAL integer

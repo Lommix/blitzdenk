@@ -344,7 +344,7 @@ pub const Blitz = LuaType{
         .fields = &.{
             .{ .name = "mcp", .ty = BlitzMcp },
             .{ .name = "json", .ty = BlitzJson },
-            .{ .name = "queue", .ty = BlitzQueue },
+            .{ .name = "cmd", .ty = BlitzCmd },
             .{ .name = "tools", .ty = BlitzToolDef },
             .{ .name = "events", .ty = BlitzEventDef },
             .{ .name = "AGENT_GENERAL", .ty = LuaType.integer, .value = .{ .integer = 0 } },
@@ -1174,7 +1174,7 @@ const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
     } } },
 } } };
 
-const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
+const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
     .{
         .name = "reset_session",
         .desc = "Reset the active session.",
@@ -1185,7 +1185,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                         if (try isToolVm(state)) return;
                         try a.cmd_queue.append(a.io, .reset_session);
                     }
-                }).lua_fn, "queue.reset_session"),
+                }).lua_fn, "cmd.reset_session"),
             },
         },
     },
@@ -1198,7 +1198,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                     if (try isToolVm(state)) return;
                     try a.cmd_queue.append(a.io, .cancel);
                 }
-            }).lua_fn, "queue.cancel"),
+            }).lua_fn, "cmd.cancel"),
         } },
     },
     .{
@@ -1210,7 +1210,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                     if (try isToolVm(state)) return;
                     try a.cmd_queue.append(a.io, .retry);
                 }
-            }).lua_fn, "queue.retry"),
+            }).lua_fn, "cmd.retry"),
         } },
     },
     .{
@@ -1222,7 +1222,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                     if (try isToolVm(state)) return;
                     try a.cmd_queue.append(a.io, .compact);
                 }
-            }).lua_fn, "queue.compact"),
+            }).lua_fn, "cmd.compact"),
         } },
     },
     .{
@@ -1249,7 +1249,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                         .parts = parts,
                     } });
                 }
-            }).lua_fn, "queue.push_chat_entry"),
+            }).lua_fn, "cmd.push_chat_entry"),
         } },
     },
     .{
@@ -1266,7 +1266,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                         .parts = &parts,
                     } });
                 }
-            }).lua_fn, "queue.queue_agent_message"),
+            }).lua_fn, "cmd.queue_agent_message"),
         } },
     },
     .{
@@ -1278,11 +1278,11 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
                     const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "queue.spawn_agent: app not initialized");
+                        _ = c.luaL_error(state, "cmd.spawn_agent: app not initialized");
                         return 0;
                     };
                     const vm = fromState(state) orelse {
-                        _ = c.luaL_error(state, "queue.spawn_agent: no active lua vm");
+                        _ = c.luaL_error(state, "cmd.spawn_agent: no active lua vm");
                         return 0;
                     };
 
@@ -1293,7 +1293,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                         fork: ?bool = null,
                     };
 
-                    const spawn = switch (readAnyValueAlloc(SpawnArgs, state, "queue.spawn_agent", 1, vm.luaArena())) {
+                    const spawn = switch (readAnyValueAlloc(SpawnArgs, state, "cmd.spawn_agent", 1, vm.luaArena())) {
                         .ok => |v| v,
                         .err => |msg| {
                             _ = c.luaL_error(state, "%s", msg.ptr);
@@ -1302,7 +1302,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                     };
 
                     if ((spawn.fork orelse false) and spawn.parent_id == null) {
-                        _ = c.luaL_error(state, "queue.spawn_agent: fork=true requires parent_id");
+                        _ = c.luaL_error(state, "cmd.spawn_agent: fork=true requires parent_id");
                         return 0;
                     }
 
@@ -1314,7 +1314,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                     };
                     if (spawn.agent_type) |t| {
                         if (t > std.math.maxInt(u8)) {
-                            _ = c.luaL_error(state, "queue.spawn_agent: agent_type out of range");
+                            _ = c.luaL_error(state, "cmd.spawn_agent: agent_type out of range");
                             return 0;
                         }
                         args.agent_type = @intCast(t);
@@ -1350,14 +1350,14 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
                     const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "queue.await_agent: app not initialized");
+                        _ = c.luaL_error(state, "cmd.await_agent: app not initialized");
                         return 0;
                     };
                     const vm = fromState(state) orelse {
-                        _ = c.luaL_error(state, "queue.await_agent: no active lua vm");
+                        _ = c.luaL_error(state, "cmd.await_agent: no active lua vm");
                         return 0;
                     };
-                    const id = readAgentIdArg(state, "queue.await_agent", 1);
+                    const id = readAgentIdArg(state, "cmd.await_agent", 1);
                     const io = a.io;
                     if (a.registry.state(id) == null) {
                         c.lua_pushinteger(state, AWAIT_INVALID);
@@ -1415,16 +1415,16 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
                     const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "queue.await_agent_result: app not initialized");
+                        _ = c.luaL_error(state, "cmd.await_agent_result: app not initialized");
                         return 0;
                     };
-                    const id = readAgentIdArg(state, "queue.await_agent_result", 1);
+                    const id = readAgentIdArg(state, "cmd.await_agent_result", 1);
                     const agent = a.registry.get(id) orelse {
-                        _ = c.luaL_error(state, "queue.await_agent_result: agent not found");
+                        _ = c.luaL_error(state, "cmd.await_agent_result: agent not found");
                         return 0;
                     };
                     if (agent.history().len == 0) {
-                        _ = c.luaL_error(state, "queue.await_agent_result: agent has no chat entries");
+                        _ = c.luaL_error(state, "cmd.await_agent_result: agent has no chat entries");
                         return 0;
                     }
 
@@ -1490,7 +1490,7 @@ const BlitzQueue = LuaType{ .table_def = .{ .name = "BlitzQueue", .fields = &.{
                         .data = data,
                     } });
                 }
-            }).lua_fn, "queue.attach_screenshot"),
+            }).lua_fn, "cmd.attach_screenshot"),
         } },
     },
 } } };
@@ -3043,7 +3043,7 @@ test "LuaType defines recursive Lua globals" {
     try std.testing.expectEqual(c.LUA_TTABLE, c.lua_getglobal(state, "blitz"));
     try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "register_tool"));
     c.lua_pop(state, 1);
-    try std.testing.expectEqual(c.LUA_TTABLE, c.lua_getfield(state, -1, "queue"));
+    try std.testing.expectEqual(c.LUA_TTABLE, c.lua_getfield(state, -1, "cmd"));
     try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "await_agent"));
 }
 

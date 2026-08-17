@@ -85,8 +85,6 @@ blitz.set_model_agent(blitz.AGENT_GENERAL, "deepseek/deepseek-v4-pro", "max", no
 
 ## Documentation
 
-[checkout the github pages 'getting started' and examples](https://lommix.github.io/blitzdenk/)
-
 [or take a look at my configuration](https://github.com/Lommix/dotfiles/blob/master/config/blitzdenk/blitz.lua).
 
 ## Contribution
