@@ -236,6 +236,7 @@ pub fn run(
     var exec_pool = r.exec.CmdPool.init(gpa, io, env);
     app.registry = &registry;
     app.exec_pool = &exec_pool;
+    registry.exec_pool = &exec_pool;
     if (config_lua) |info| {
         app.lua_config_dir = info.dir_path;
         app.lua_config_abs = info.abs_path;
@@ -282,10 +283,10 @@ pub fn run(
     var mcp_tools = app.mcp_manager.registeredTools();
 
     for (lua_tools) |tool| {
-        try context_factory.add(arena, tool, .all);
+        try context_factory.add(tool, .all);
     }
     for (mcp_tools) |tool| {
-        try context_factory.add(arena, tool.tool, tool.flags);
+        try context_factory.add(tool.tool, tool.flags);
     }
 
     for (lua_binds) |bind| {
@@ -302,7 +303,7 @@ pub fn run(
     app.reset();
     app.flags.skip_permissions = !flags.strict_mode;
 
-    if (config_lua) |info| app.loadHistory(app.appAlloc(), info.dir_path);
+    if (config_lua) |info| app.loadHistory(info.dir_path);
 
     if (prompt) |p| {
         try app.input_buffer.appendSlice(app.sessionAlloc(), p);
@@ -385,7 +386,7 @@ pub fn run(
                 config_lua_mtime = new_config_mtime;
 
                 app.lua_vm.clearLastError();
-                app.event_bus.listner.clearAndFree(app.appAlloc());
+                app.event_bus.clear(app.gpa);
                 var lua_reload_failed = false;
 
                 app.lua_vm.reset() catch |err| {
@@ -415,7 +416,7 @@ pub fn run(
                 try app.lua_vm.publishAvailableSystems(context_factory);
                 app.dirty = true;
 
-                try context_factory.resetLoadedTools(arena);
+                try context_factory.resetLoadedTools();
                 lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
                     std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
                     if (reload_requested) {
@@ -424,7 +425,7 @@ pub fn run(
                     }
                     break :blk;
                 };
-                for (lua_tools) |tool| try context_factory.add(arena, tool, .all);
+                for (lua_tools) |tool| try context_factory.add(tool, .all);
 
                 const reloaded_mcp_servers = app.lua_vm.getEnabledMcpServers(arena) catch |err| {
                     std.log.scoped(.mcp).err("failed to load MCP server defs {any}", .{err});
@@ -436,7 +437,7 @@ pub fn run(
                 };
                 app.mcp_manager.loadServers(reloaded_mcp_servers);
                 mcp_tools = app.mcp_manager.registeredTools();
-                for (mcp_tools) |tool| try context_factory.add(arena, tool.tool, tool.flags);
+                for (mcp_tools) |tool| try context_factory.add(tool.tool, tool.flags);
 
                 lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
                 app.keymap.custom.clearRetainingCapacity();
@@ -653,14 +654,14 @@ pub fn run(
                             },
                             .text => {
                                 if (app.input_buffer.items.len == 0) break;
-                                const input = std.fmt.allocPrint(gpa, "{f}", .{std.unicode.fmtUtf8(app.inputSlice())}) catch break;
+                                const input = std.fmt.allocPrint(app.sessionAlloc(), "{f}", .{std.unicode.fmtUtf8(app.inputSlice())}) catch break;
 
                                 // -- user commands (processed even while a session is running)
                                 if (input[0] == ':' or input[0] == '/') {
                                     if (app.lua_vm.vm_mu.tryLock()) {
                                         defer app.lua_vm.vm_mu.unlock(io);
                                         if (app.lua_vm.invokeCommand(input)) {
-                                            app.pushHistory(app.appAlloc(), input);
+                                            app.pushHistory(input);
                                             if (config_lua) |info| app.saveHistory(info.dir_path);
                                             app.input_buffer.clearRetainingCapacity();
                                             break;
@@ -691,6 +692,7 @@ pub fn run(
                                                         if (app.exec_pool.ssh_active) {
                                                             if (app.exec_pool.ssh_target) |*tar| {
                                                                 const new_remote = app.exec_pool.alloc.dupe(u8, resolved) catch break;
+                                                                app.exec_pool.alloc.free(tar.cwd);
                                                                 tar.cwd = new_remote;
                                                             }
                                                         }
@@ -704,7 +706,7 @@ pub fn run(
                                             },
                                             .ssh_off => {
                                                 app.exec_pool.clearSsh();
-                                                app.notifications.append(app.arena_app.allocator(), "SSH mode disabled", .{}) catch {};
+                                                app.notifications.append(gpa, "SSH mode disabled", .{}) catch {};
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
                                         }
@@ -714,7 +716,7 @@ pub fn run(
                                 }
 
                                 if (app.running) {
-                                    app.pushHistory(app.appAlloc(), input);
+                                    app.pushHistory(input);
                                     if (config_lua) |info| app.saveHistory(info.dir_path);
                                     try app.event_bus.emit(&app, .{ .user_message_sent = input });
                                     if (app.main_agent_id) |agent_id| {
@@ -745,12 +747,11 @@ pub fn run(
                                     continue;
                                 }
 
-                                app.pushHistory(app.appAlloc(), input);
+                                app.pushHistory(input);
                                 if (config_lua) |info| app.saveHistory(info.dir_path);
                                 try app.event_bus.emit(&app, .{ .user_message_sent = input });
-                                // state.pushChatMessage(.user, input);
 
-                                const alloc = gpa;
+                                const alloc = app.sessionAlloc();
                                 const parts: []const r.sdk.Part = if (app.screenshot_buf) |img_data|
                                     alloc.dupe(r.sdk.Part, &.{
                                         .{ .text = input },
@@ -857,7 +858,7 @@ fn handleSshCommand(
             state.pushSystemMessage("ssh: failed to allocate target", .{});
             return;
         };
-        state.notifications.append(state.arena_app.allocator(), "SSH mode enabled: {s}@{s}", .{ args.user, args.host }) catch {};
+        state.notifications.append(gpa, "SSH mode enabled: {s}@{s}", .{ args.user, args.host }) catch {};
         state.remote_cwd = args.cwd;
     } else {
         state.enterPassphrase(args.user, args.host, args.cwd);
@@ -992,7 +993,7 @@ fn handleSshUnlock(state: *App, cmd_pool: *r.exec.CmdPool, gpa: std.mem.Allocato
         state.pushSystemMessage("ssh: failed to allocate target", .{});
         return;
     };
-    state.notifications.append(state.arena_app.allocator(), "SSH mode enabled: {s}@{s}", .{ user, host }) catch {};
+    state.notifications.append(gpa, "SSH mode enabled: {s}@{s}", .{ user, host }) catch {};
 }
 
 pub const AppCommand = union(enum) {

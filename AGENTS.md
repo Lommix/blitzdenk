@@ -20,6 +20,7 @@ Important modules:
 ## Commands
 
 - `zig build gen` generate the lua meta file `src/blitz_defs.lua`
+- `make test` run the full test suit.
 
 ## RULES
 

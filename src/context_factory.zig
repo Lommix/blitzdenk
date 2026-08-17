@@ -134,6 +134,7 @@ pub const Flags = packed struct(u8) {
 };
 
 // -------------------------------------------------------------------------------
+alloc: std.mem.Allocator,
 loaded_tools: std.ArrayList(ToolEntry) = .empty,
 mode_counter: u32 = 2, // skip first 2 for interal modes
 agent_counter: u32 = 3,
@@ -174,6 +175,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !*Self {
     };
 
     self.* = Self{
+        .alloc = alloc,
         .loaded_tools = try buildDefaultTools(alloc),
         .prompt_arena = std.heap.ArenaAllocator.init(alloc),
         .io = io,
@@ -379,8 +381,8 @@ pub fn resetDefs(self: *Self) void {
     });
 }
 
-pub fn add(self: *Self, alloc: std.mem.Allocator, tool: r.tools.Tool, flags: ToolFlags) !void {
-    try self.loaded_tools.append(alloc, .{ .tool = tool, .flags = flags });
+pub fn add(self: *Self, tool: r.tools.Tool, flags: ToolFlags) !void {
+    try self.loaded_tools.append(self.alloc, .{ .tool = tool, .flags = flags });
 }
 
 pub fn setAvailableSystems(self: *Self, mcp_names: []const []const u8) !void {
@@ -550,8 +552,15 @@ pub fn addAgentTool(self: *Self, agent_type: AgentType, name: []const u8) !void 
     tools.len += 1;
 }
 
-pub fn resetLoadedTools(self: *Self, alloc: std.mem.Allocator) !void {
-    self.loaded_tools = try buildDefaultTools(alloc);
+pub fn resetLoadedTools(self: *Self) !void {
+    self.loaded_tools.deinit(self.alloc);
+    self.loaded_tools = try buildDefaultTools(self.alloc);
+}
+
+pub fn deinit(self: *Self) void {
+    self.loaded_tools.deinit(self.alloc);
+    self.prompt_arena.deinit();
+    self.alloc.destroy(self);
 }
 
 pub fn build_system_prompt(
@@ -803,6 +812,7 @@ test "skill meta parses folded yaml description" {
 
 test "agent defaults can be replaced with an empty tool list" {
     var factory = Self{
+        .alloc = std.testing.allocator,
         .prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .io = undefined,
         .config_dir = null,
@@ -812,7 +822,7 @@ test "agent defaults can be replaced with an empty tool list" {
     defer factory.loaded_tools.deinit(std.testing.allocator);
 
     factory.resetDefs();
-    try factory.add(std.testing.allocator, r.tools.read.ReadTool, .all);
+    try factory.add(r.tools.read.ReadTool, .all);
 
     var tools = ToolSet{};
     try factory.build_toolset(.general, &tools);
@@ -826,6 +836,7 @@ test "agent defaults can be replaced with an empty tool list" {
 
 test "remove deletes the matched loaded tool" {
     var factory = Self{
+        .alloc = std.testing.allocator,
         .prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .io = undefined,
         .config_dir = null,
@@ -835,10 +846,10 @@ test "remove deletes the matched loaded tool" {
     defer factory.loaded_tools.deinit(std.testing.allocator);
 
     factory.resetDefs();
-    try factory.add(std.testing.allocator, r.tools.read.ReadTool, .all);
-    try factory.add(std.testing.allocator, r.tools.write.WriteTool, .all);
-    try factory.add(std.testing.allocator, r.tools.search.GlobTool, .all);
-    try factory.add(std.testing.allocator, r.tools.search.GrepTool, .all);
+    try factory.add(r.tools.read.ReadTool, .all);
+    try factory.add(r.tools.write.WriteTool, .all);
+    try factory.add(r.tools.search.GlobTool, .all);
+    try factory.add(r.tools.search.GrepTool, .all);
 
     factory.remove(r.tools.write.WriteTool.def.name);
 
@@ -850,6 +861,7 @@ test "remove deletes the matched loaded tool" {
 
 fn initTestFactory() Self {
     var factory = Self{
+        .alloc = std.testing.allocator,
         .prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .io = undefined,
         .config_dir = null,

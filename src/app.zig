@@ -5,7 +5,7 @@ const log = std.log.scoped(.app);
 
 pub const FULL_MODE_REMINDER_AFTER_USER_MSG_COUNT = 4;
 pub const PROMPT_HISTORY_FILENAME = "prompt_history.json";
-pub const MAX_HISTORY = 32;
+pub const MAX_HISTORY = 100;
 pub const CONTEXT_LIMIT = 124 * 1024;
 const COMMAND_COMPLETION_ROWS = 8;
 
@@ -159,6 +159,13 @@ pub const Notifications = struct {
         std.mem.copyBackwards(Entry, self.list[1..], self.list[0 .. MAX_ENTRIES - 1]);
         const text = try std.fmt.allocPrint(alloc, fmt, args);
         self.list[0] = .{ .used = .{ .msg = text, .alive = 0 } };
+    }
+
+    pub fn deinit(self: *Notifications, alloc: std.mem.Allocator) void {
+        for (&self.list) |en| switch (en) {
+            .used => |e| alloc.free(e.msg),
+            else => {},
+        };
     }
 
     pub fn tick(self: *Notifications, dt: f32) void {
@@ -344,8 +351,17 @@ pub const App = struct {
         }
 
         self.mcp_manager.deinit();
-        self.arena_streaming_preview.deinit();
         self.lua_vm.deinit();
+        self.cmd_queue.deinit();
+        self.injection_hooks.deinit(self.gpa);
+        self.permission_queue.value.deinit(self.gpa);
+        self.notifications.deinit(self.gpa);
+        self.event_bus.clear(self.gpa);
+        for (self.history.items) |e| self.gpa.free(e.text);
+        self.history.deinit(self.gpa);
+        self.context_factory.deinit();
+        self.arena_streaming_preview.deinit();
+        self.arena_frame.deinit();
         self.arena_session.deinit();
         self.arena_app.deinit();
     }
@@ -489,8 +505,7 @@ pub const App = struct {
         self.input_buffer = .empty;
         self.chat_entries = .empty;
         self.queued = .{};
-        // NOTE: tiny leak per reset,
-        self.context_factory.resetLoadedTools(self.arena_session.allocator()) catch {};
+        self.context_factory.resetLoadedTools() catch {};
         self.lua_vm.disableAllMcp();
         self.event_bus.emit(self, .session_reset) catch {};
         self.reloadMcpTools() catch {};
@@ -563,7 +578,7 @@ pub const App = struct {
         self.mcp_manager.loadServers(servers);
 
         const new_tools = self.mcp_manager.registeredTools();
-        for (new_tools) |entry| try self.context_factory.add(alloc, entry.tool, entry.flags);
+        for (new_tools) |entry| try self.context_factory.add(entry.tool, entry.flags);
 
         try self.refreshLiveAgentTools();
         self.event_bus.emit(self, .mcp_tools_reloaded) catch {};
@@ -576,7 +591,7 @@ pub const App = struct {
         defer self.lua_vm.vm_mu.unlock(self.io);
 
         const tools = try self.lua_vm.getRegisteredTools(alloc);
-        for (tools) |tool| try self.context_factory.add(alloc, tool, .all);
+        for (tools) |tool| try self.context_factory.add(tool, .all);
 
         try self.refreshLiveAgentTools();
         self.dirty = true;
@@ -895,13 +910,13 @@ pub const App = struct {
             if (url) |u| {
                 self.appendBytes(u);
                 self.dirty = true;
-                self.notifications.append(self.arena_app.allocator(), "Image pasted", .{}) catch {};
+                self.notifications.append(self.gpa, "Image pasted", .{}) catch {};
                 return;
             }
-            self.notifications.append(self.arena_app.allocator(), "Failed to save clipboard image", .{}) catch {};
+            self.notifications.append(self.gpa, "Failed to save clipboard image", .{}) catch {};
             return;
         }
-        self.notifications.append(self.arena_app.allocator(), "Clipboard holds no image", .{}) catch {};
+        self.notifications.append(self.gpa, "Clipboard holds no image", .{}) catch {};
     }
 
     /// Terminal paste event handler. Pastes the clipboard image if one is
@@ -923,9 +938,14 @@ pub const App = struct {
         return self.input_buffer.items;
     }
 
-    pub fn pushHistory(self: *App, allocator: std.mem.Allocator, text: []const u8) void {
+    pub fn pushHistory(self: *App, text: []const u8) void {
         if (text.len == 0) return;
+        const allocator = self.gpa;
         const dupe = allocator.dupe(u8, text) catch return;
+        if (self.history.items.len >= MAX_HISTORY) {
+            const old = self.history.orderedRemove(0);
+            allocator.free(old.text);
+        }
         self.history.append(allocator, .{
             .text = dupe,
             .timestamp = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds,
@@ -963,8 +983,9 @@ pub const App = struct {
         timestamp: i128,
     };
 
-    pub fn loadHistory(self: *App, allocator: std.mem.Allocator, config_dir_path: []const u8) void {
+    pub fn loadHistory(self: *App, config_dir_path: []const u8) void {
         const SaveFormat = struct { prompts: []const PromptEntry };
+        const allocator = self.gpa;
 
         const io = self.io;
         const abs_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ config_dir_path, PROMPT_HISTORY_FILENAME }) catch return;
@@ -983,7 +1004,9 @@ pub const App = struct {
         }) catch return;
         defer parsed.deinit();
 
-        for (parsed.value.prompts) |entry| {
+        const src = parsed.value.prompts;
+        const start = if (src.len > MAX_HISTORY) src.len - MAX_HISTORY else 0;
+        for (src[start..]) |entry| {
             const dupe = allocator.dupe(u8, entry.text) catch return;
             self.history.append(allocator, .{
                 .text = dupe,
@@ -1074,6 +1097,7 @@ pub const App = struct {
 
     pub fn dropStreamingPreview(self: *App) void {
         self.streaming_entry = null;
+        self.sdk_preview_parts = .empty;
         _ = self.arena_streaming_preview.reset(.free_all);
     }
 
@@ -1092,29 +1116,30 @@ pub const App = struct {
 
     pub fn applyRunEvent(self: *App, agent_id: r.AgentId, event: r.agent_run.Event) !void {
         const alloc = self.sessionAlloc();
+        const preview_alloc = self.arena_streaming_preview.allocator();
         const is_main = if (self.main_agent_id) |id| id.pack() == agent_id.pack() else true;
         switch (event) {
             .text => |text| {
                 if (!is_main) return;
                 self.sdk_preview_flushed = false;
-                try self.appendSdkPreviewText(alloc, .message, text);
+                try self.appendSdkPreviewText(preview_alloc, .message, text);
                 try self.refreshSdkPreview(agent_id);
             },
             .reasoning => |reasoning| {
                 if (!is_main) return;
                 self.sdk_preview_flushed = false;
-                try self.appendSdkPreviewText(alloc, .thinking, reasoning);
+                try self.appendSdkPreviewText(preview_alloc, .thinking, reasoning);
                 try self.refreshSdkPreview(agent_id);
             },
             .tool => |chunk| {
                 if (!is_main) return;
                 if (chunk.type != .tool_call) return;
                 self.sdk_preview_flushed = false;
-                try self.sdk_preview_parts.append(alloc, .{
+                try self.sdk_preview_parts.append(preview_alloc, .{
                     .kind = .tool_call,
                     .call = .{
-                        .call_id = try alloc.dupe(u8, chunk.tool_call_id),
-                        .tool_name = try alloc.dupe(u8, chunk.tool_name),
+                        .call_id = try preview_alloc.dupe(u8, chunk.tool_call_id),
+                        .tool_name = try preview_alloc.dupe(u8, chunk.tool_name),
                     },
                 });
                 try self.refreshSdkPreview(agent_id);
@@ -1142,7 +1167,6 @@ pub const App = struct {
                 if (provider_error.will_retry) return;
                 if (!is_main) return;
                 self.dropStreamingPreview();
-                self.sdk_preview_parts.clearRetainingCapacity();
                 const body = std.mem.trim(u8, provider_error.response_body, " \t\r\n");
                 const message = if (provider_error.status_code != 0)
                     try std.fmt.allocPrint(alloc, "Provider error (HTTP {d})\n{s}", .{ provider_error.status_code, body })
@@ -1161,7 +1185,6 @@ pub const App = struct {
                     return;
                 }
                 self.dropStreamingPreview();
-                self.sdk_preview_parts.clearRetainingCapacity();
                 if (skip_final) return;
                 var index = result.messages.len;
                 while (index > 0) {
@@ -1177,7 +1200,6 @@ pub const App = struct {
                 try self.event_bus.emit(self, .{ .agent_failed = .{ .id = agent_id, .err = @errorName(err) } });
                 if (!is_main) return;
                 self.dropStreamingPreview();
-                self.sdk_preview_parts.clearRetainingCapacity();
                 const parts = try alloc.alloc(ChatPart, 1);
                 parts[0] = .{ .plain_text = try std.fmt.allocPrint(alloc, "Agent failed: {s}", .{@errorName(err)}) };
                 try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
@@ -1187,24 +1209,23 @@ pub const App = struct {
     }
 
     fn refreshSdkPreview(self: *App, agent_id: r.AgentId) !void {
-        _ = self.arena_streaming_preview.reset(.free_all);
         const alloc = self.arena_streaming_preview.allocator();
         var parts: std.ArrayList(ChatPart) = .empty;
         for (self.sdk_preview_parts.items) |item| switch (item.kind) {
             .thinking => {
                 const trimmed = std.mem.trim(u8, item.text.items, " \t\r\n");
                 if (trimmed.len == 0) continue;
-                try parts.append(alloc, .{ .thinking = try alloc.dupe(u8, trimmed) });
+                try parts.append(alloc, .{ .thinking = trimmed });
             },
             .message => {
                 const trimmed = std.mem.trim(u8, item.text.items, " \t\r\n");
                 if (trimmed.len == 0) continue;
-                try parts.append(alloc, .{ .message = try alloc.dupe(u8, trimmed) });
+                try parts.append(alloc, .{ .message = trimmed });
             },
             .tool_call => try parts.append(alloc, .{ .tool_call = .{
                 .agent_id = agent_id,
-                .call_id = try alloc.dupe(u8, item.call.call_id),
-                .tool_name = try alloc.dupe(u8, item.call.tool_name),
+                .call_id = item.call.call_id,
+                .tool_name = item.call.tool_name,
             } }),
         };
         if (parts.items.len == 0) {
@@ -1222,7 +1243,6 @@ pub const App = struct {
         const entry = self.streaming_entry orelse return;
         const alloc = self.sessionAlloc();
         try self.appendChatEntry(alloc, try r.util.deepClone(ChatEntry, entry, alloc));
-        self.sdk_preview_parts.clearRetainingCapacity();
         self.sdk_preview_flushed = true;
         self.dropStreamingPreview();
     }

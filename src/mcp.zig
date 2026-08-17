@@ -125,7 +125,7 @@ fn toolTrampoline(ctx: r.tools.ToolContext, call: r.sdk.ToolCall) r.sdk.ToolOutp
 
     r.tools.setToolStatusPrint(ctx, call, "MCP {s}", .{binding.remote_name});
     const client = &manager.clients.items[binding.client_index];
-    const content = client.callTool(binding.remote_name, call.input) catch |err| {
+    const content = client.callTool(ctx.alloc, binding.remote_name, call.input) catch |err| {
         const msg = std.fmt.allocPrint(ctx.alloc, "MCP tool call failed: {s}", .{@errorName(err)}) catch "MCP tool call failed";
         return errResult(call, msg);
     };
@@ -233,7 +233,7 @@ const Client = struct {
         return out.toOwnedSlice(self.alloc);
     }
 
-    fn callTool(self: *Client, remote_name: []const u8, arguments_json: []const u8) !ToolCallResult {
+    fn callTool(self: *Client, alloc: std.mem.Allocator, remote_name: []const u8, arguments_json: []const u8) !ToolCallResult {
         const id = self.nextRequestId();
         var req = std.Io.Writer.Allocating.init(self.alloc);
         defer req.deinit();
@@ -255,10 +255,10 @@ const Client = struct {
         const result = try responseResult(&response.value);
         const is_error = if (objectGet(&result, "isError")) |v| v == .bool and v.bool else false;
         const content_val = objectGet(&result, "content") orelse return .{
-            .text = try self.alloc.dupe(u8, ""),
+            .text = try alloc.dupe(u8, ""),
             .is_error = is_error,
         };
-        const text = try flattenContent(self.alloc, &content_val);
+        const text = try flattenContent(alloc, &content_val);
         return .{ .text = text, .is_error = is_error };
     }
 

@@ -76,4 +76,11 @@ pub const EventBus = struct {
         for (res.value_ptr.items) |s| if (s.func_ref == func_ref) return;
         try res.value_ptr.append(alloc, .{ .func_ref = func_ref });
     }
+
+    pub fn clear(self: *EventBus, alloc: std.mem.Allocator) void {
+        var it = self.listner.valueIterator();
+        while (it.next()) |list| list.deinit(alloc);
+        self.listner.deinit(alloc);
+        self.listner = .{};
+    }
 };

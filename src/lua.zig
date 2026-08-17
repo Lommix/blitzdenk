@@ -1066,7 +1066,7 @@ pub const BlitzEventDef = LuaType{
                         fn t(state: *c.lua_State, a: *r.app.App, event: u32, func: LuaFnRef) !void {
                             if (try isToolVm(state)) return;
                             const ev: r.events.AppEventTag = @enumFromInt(event);
-                            a.event_bus.addLuaListener(a.arena_app.allocator(), ev, func.idx) catch {};
+                            a.event_bus.addLuaListener(a.gpa, ev, func.idx) catch {};
                         }
                     }).t, "add_listener"),
                 } },
@@ -1876,6 +1876,28 @@ fn luaArenaAlloc(ud: ?*anyopaque, ptr: ?*anyopaque, osize: usize, nsize: usize) 
     return @ptrCast(new_ptr);
 }
 
+fn luaGpaAlloc(ud: ?*anyopaque, ptr: ?*anyopaque, osize: usize, nsize: usize) callconv(.c) ?*anyopaque {
+    const alloc: *const Allocator = @ptrCast(@alignCast(ud orelse return null));
+    const alignment: std.mem.Alignment = .of(std.c.max_align_t);
+
+    if (nsize == 0) {
+        if (ptr) |p| alloc.rawFree(@as([*]u8, @ptrCast(p))[0..osize], alignment, @returnAddress());
+        return null;
+    }
+
+    if (ptr) |old_ptr| {
+        const old = @as([*]u8, @ptrCast(old_ptr))[0..osize];
+        if (alloc.rawResize(old, alignment, nsize, @returnAddress())) return old_ptr;
+        const new_ptr = alloc.rawAlloc(nsize, alignment, @returnAddress()) orelse return null;
+        const copy_len = @min(osize, nsize);
+        @memcpy(new_ptr[0..copy_len], old[0..copy_len]);
+        alloc.rawFree(old, alignment, @returnAddress());
+        return @ptrCast(new_ptr);
+    }
+
+    return @ptrCast(alloc.rawAlloc(nsize, alignment, @returnAddress()) orelse return null);
+}
+
 const MAX_LUA_TOOLS = 64;
 const MAX_LUA_BINDS = 64;
 const MAX_LUA_COMMANDS = 64;
@@ -1897,6 +1919,7 @@ pub const LuaVm = struct {
     app: ?*app.App = null,
     is_tool_vm: bool = false,
     cancel_token: ?*r.sdk.CancellationToken = null,
+    parent: Allocator,
     arena_state: std.heap.ArenaAllocator,
     tool_entries: std.ArrayList(LuaToolEntry) = .empty,
     bind_entries: std.ArrayList(LuaBindEntry) = .empty,
@@ -1921,6 +1944,7 @@ pub const LuaVm = struct {
         var self: LuaVm = .{
             .L = undefined,
             .is_tool_vm = is_tool_vm,
+            .parent = parent,
             .arena_state = std.heap.ArenaAllocator.init(parent),
         };
         self.prepareArenaLists() catch |err| {
@@ -1949,11 +1973,17 @@ pub const LuaVm = struct {
     }
 
     fn bindLuaAllocator(self: *LuaVm) void {
-        c.lua_setallocf(self.L, &luaArenaAlloc, @ptrCast(&self.arena_state));
+        if (self.is_tool_vm) {
+            c.lua_setallocf(self.L, &luaArenaAlloc, @ptrCast(&self.arena_state));
+        } else {
+            c.lua_setallocf(self.L, &luaGpaAlloc, @ptrCast(&self.parent));
+        }
     }
 
     fn initLuaState(self: *LuaVm) !void {
-        self.L = c.lua_newstate(&luaArenaAlloc, @ptrCast(&self.arena_state)) orelse return error.LuaInitFailed;
+        const allocf = if (self.is_tool_vm) &luaArenaAlloc else &luaGpaAlloc;
+        const ud: *anyopaque = if (self.is_tool_vm) @ptrCast(&self.arena_state) else @ptrCast(&self.parent);
+        self.L = c.lua_newstate(allocf, ud) orelse return error.LuaInitFailed;
         c.luaL_openlibs(self.L);
         c.lua_pushcfunction(self.L, &luaPrintToBuffer);
         c.lua_setglobal(self.L, "print");

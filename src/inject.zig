@@ -31,6 +31,10 @@ pub const InjectionsHooks = struct {
         return self;
     }
 
+    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+        self._hooks.deinit(alloc);
+    }
+
     pub fn build(self: *const Self, app: *r.app.App, agent: *r.agent.Agent) ![]const u8 {
         const alloc = agent.injection_arena.allocator();
 

@@ -5,6 +5,7 @@ const agent_id = @import("agent-id");
 const agent_run = @import("agent_run.zig");
 const models = @import("models");
 const report = @import("report.zig");
+const exec = @import("exec");
 const log = std.log.scoped(.agent_registry);
 
 pub const max_agents = agent_id.max_agents;
@@ -34,6 +35,7 @@ pub const ModelUsage = struct {
 pub const Registry = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
+    exec_pool: ?*exec.CmdPool = null,
     slots: [max_agents]Slot = [_]Slot{.{}} ** max_agents,
     total_usage: sdk.Usage = .{},
     model_usage: std.StringArrayHashMapUnmanaged(sdk.Usage) = .{},
@@ -47,7 +49,10 @@ pub const Registry = struct {
         for (&self.slots) |*slot| {
             self.accountUsage(slot);
             self.writeReport(slot);
-            if (slot.agent) |*agent| agent.deinit();
+            if (slot.agent) |*agent| {
+                self.cancelAgentExec(agent);
+                agent.deinit();
+            }
         }
         var iterator = self.model_usage.iterator();
         while (iterator.next()) |entry| self.alloc.free(entry.key_ptr.*);
@@ -108,6 +113,13 @@ pub const Registry = struct {
         return &slot.agent.?;
     }
 
+    fn cancelAgentExec(self: *Registry, agent: *agent_mod.Agent) void {
+        const pool = self.exec_pool orelse return;
+        const g = agent.bg_tasks.tryLock(self.io) orelse return;
+        defer g.unlock();
+        for (g.ptr.list.items) |e| pool.cancel(e.handle);
+    }
+
     pub fn releaseReservation(self: *Registry, id: AgentId) void {
         const slot = self.slotFor(id) orelse return;
         if (slot.state.cmpxchgStrong(.reserved, .free, .acq_rel, .monotonic) == null) slot.event.set(self.io);
@@ -119,7 +131,10 @@ pub const Registry = struct {
         slot.event.set(self.io);
         self.accountUsage(slot);
         self.writeReport(slot);
-        if (slot.agent) |*agent| agent.deinit();
+        if (slot.agent) |*agent| {
+            self.cancelAgentExec(agent);
+            agent.deinit();
+        }
         const generation = slot.generation;
         slot.* = .{ .generation = generation };
     }

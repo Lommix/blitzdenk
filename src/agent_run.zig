@@ -49,6 +49,10 @@ pub const EventQueue = struct {
         const drained = @min(max, self.events.items.len);
         for (self.events.items[0..drained]) |event| handler(ctx, event);
         if (drained > 0) self.events.replaceRangeAssumeCapacity(0, drained, &.{});
+        if (self.events.items.len == 0) {
+            _ = self.arena.reset(.free_all);
+            self.events = .empty;
+        }
         return drained;
     }
 
@@ -369,7 +373,7 @@ fn cloneOptions(alloc: std.mem.Allocator, value: sdk.GenerateOptions) !sdk.Gener
     var cloned = value;
     cloned.system = try alloc.dupe(u8, value.system);
     cloned.prompt = try alloc.dupe(u8, value.prompt);
-    cloned.messages = try cloneMessages(alloc, value.messages);
+    cloned.messages = value.messages;
     cloned.tools = try cloneTools(alloc, value.tools);
     const stops = try alloc.alloc([]const u8, value.stop_sequences.len);
     for (value.stop_sequences, 0..) |stop, i| stops[i] = try alloc.dupe(u8, stop);

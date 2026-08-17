@@ -44,6 +44,10 @@ pub const CommandQueue = struct {
 
         if (self._data.items.len > 0) try self.apply(io, app);
     }
+
+    pub fn deinit(self: *CommandQueue) void {
+        self.arena.deinit();
+    }
 };
 
 // defered mutation of the app state
@@ -276,7 +280,7 @@ pub const Command = union(enum) {
                 app.running = true;
             },
             .push_notification => |msg| {
-                try app.notifications.append(app.arena_app.allocator(), "{s}", .{msg});
+                try app.notifications.append(app.gpa, "{s}", .{msg});
             },
             .push_chat_entry => |en| {
                 const entry = try r.util.deepClone(ChatEntry, en, alloc);
@@ -355,21 +359,21 @@ fn showProviderOnboarding(app: *App, diagnostic: r.ContextFactory.AgentConfigDia
                 "No default model/provider is configured. Edit {s} and choose a provider URL, model, and API-key environment variable.\n\n{s}",
                 .{ config_path, example },
             );
-            app.notifications.append(app.appAlloc(), "Configure a default provider/model in {s}", .{config_path}) catch {};
+            app.notifications.append(app.gpa, "Configure a default provider/model in {s}", .{config_path}) catch {};
         },
         .invalid_provider => {
             app.pushSystemMessage(
                 "The configured provider is invalid or inactive. Check its handle and model binding in {s}.\n\n{s}",
                 .{ config_path, example },
             );
-            app.notifications.append(app.appAlloc(), "Configured provider is invalid or inactive", .{}) catch {};
+            app.notifications.append(app.gpa, "Configured provider is invalid or inactive", .{}) catch {};
         },
         .missing_api_key => |name| {
             app.pushSystemMessage(
                 "Provider configuration is missing the required environment variable `{s}`. Set it in the environment that launches Blitzdenk. Configuration lives at {s}.\n\n{s}",
                 .{ name, config_path, example },
             );
-            app.notifications.append(app.appAlloc(), "Missing required environment variable: {s}", .{name}) catch {};
+            app.notifications.append(app.gpa, "Missing required environment variable: {s}", .{name}) catch {};
         },
     }
 }
