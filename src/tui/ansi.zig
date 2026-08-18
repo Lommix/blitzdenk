@@ -23,7 +23,7 @@ pub const AnsiWriter = struct {
     pub fn styled(self: *AnsiWriter, style: Style, text: []const u8) void {
         var style_buf: [128]u8 = undefined;
         const style_ansi = formatStyle(&style_buf, style);
-        if (self.len + style_ansi.len + text.len > self.buf.len) return;
+        if (self.len + style_ansi.len > self.buf.len) return;
         self.write(style_ansi);
         self.write(text);
     }
@@ -43,9 +43,13 @@ pub const AnsiWriter = struct {
     }
 
     fn write(self: *AnsiWriter, bytes: []const u8) void {
-        if (self.len + bytes.len > self.buf.len) return;
-        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
-        self.len += bytes.len;
+        if (self.len == self.buf.len) return;
+        var n = @min(self.buf.len - self.len, bytes.len);
+        while (n > 0 and (bytes[n - 1] & 0xC0) == 0x80) : (n -= 1) {}
+        if (n > 0 and (bytes[n - 1] & 0xC0) == 0xC0) n -= 1;
+        if (n == 0) return;
+        @memcpy(self.buf[self.len..][0..n], bytes[0..n]);
+        self.len += n;
     }
 };
 
