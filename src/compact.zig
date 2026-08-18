@@ -453,7 +453,7 @@ fn readSpillTail(io: std.Io, alloc: std.mem.Allocator, output: []const u8) ?[]co
     if (path.len == 0) return null;
     if (std.mem.indexOf(u8, std.fs.path.basename(path), "blitz-spill-") == null) return null;
 
-    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited64(64 * 1024 * 1024)) catch return null;
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited64(64 * 1024 * 1024 + 1)) catch return null;
     defer alloc.free(raw);
     const content = sanitizeUtf8(alloc, raw) catch return null;
     defer alloc.free(content);

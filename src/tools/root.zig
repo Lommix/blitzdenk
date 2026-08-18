@@ -136,8 +136,10 @@ pub fn isOversized(output: []const u8, max_bytes: usize, max_lines: usize) bool 
     return output.len > max_bytes or countLines(output) > max_lines;
 }
 
-/// Write `content` to a best-effort OS-temp spill file. Returns an owned path
-/// on success, or null on any failure. Never propagates errors to the caller.
+const MAX_SPILL_BYTES: usize = 64 * 1024 * 1024;
+
+/// Write `content` to a best-effort OS-temp spill file, capped at MAX_SPILL_BYTES.
+/// Returns an owned path on success, or null on any failure. Never propagates errors to the caller.
 pub fn writeSpillFile(app_ctx: ?*anyopaque, io: std.Io, alloc: std.mem.Allocator, call_id: []const u8, content: []const u8) ?[]const u8 {
     const base = tmpDir(alloc, app_ctx) orelse return null;
     defer alloc.free(base);
@@ -150,9 +152,11 @@ pub fn writeSpillFile(app_ctx: ?*anyopaque, io: std.Io, alloc: std.mem.Allocator
 
     const file = std.Io.Dir.cwd().createFile(io, path, .{}) catch return null;
     defer file.close(io);
+    var cut = content.len -| MAX_SPILL_BYTES;
+    while (cut < content.len and (content[cut] & 0xC0) == 0x80) cut += 1;
     var buf: [8192]u8 = undefined;
     var writer = file.writer(io, &buf);
-    writer.interface.writeAll(content) catch return null;
+    writer.interface.writeAll(content[cut..]) catch return null;
     writer.interface.flush() catch return null;
     return path;
 }
