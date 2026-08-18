@@ -22,6 +22,16 @@ pub const MAX_DISPLAY_BYTES = 32 * 1024;
 pub const MAX_DISPLAY_LINES = 1000;
 pub const STATUS_BUF: usize = 1024;
 
+/// The head/tail split of a truncated, codepoint-safe tool result.
+pub const HeadTail = struct {
+    head: []const u8,
+    tail: []const u8,
+    head_lines: usize,
+    tail_lines: usize,
+    total_lines: usize,
+    truncated: bool,
+};
+
 pub fn setToolStatusPrint(ctx: ToolContext, call: ToolCall, comptime fmt: []const u8, args: anytype) void {
     const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var buf: [STATUS_BUF]u8 = undefined;
@@ -91,54 +101,166 @@ pub fn truncateOutputToOwned(
     max_bytes: usize,
     max_lines: usize,
 ) []const u8 {
-    if (output.len == 0) return output;
+    return truncateOutputToOwnedSpill(alloc, output, max_bytes, max_lines, null);
+}
 
+/// Head+tail truncation with an optional spill locator embedded in the
+/// notice. `spill_locator` points at a file (or null) holding the full output.
+pub fn truncateOutputToOwnedSpill(
+    alloc: std.mem.Allocator,
+    output: []const u8,
+    max_bytes: usize,
+    max_lines: usize,
+    spill_locator: ?[]const u8,
+) []const u8 {
+    const max_head_bytes = max_bytes * 3 / 4;
+    const max_tail_bytes = max_bytes - max_head_bytes;
+    const max_head_lines = max_lines * 3 / 4;
+    const max_tail_lines = max_lines - max_head_lines;
+    const split = splitHeadTail(output, max_head_bytes, max_head_lines, max_tail_bytes, max_tail_lines);
+    if (!split.truncated) return ensureValidUtf8(alloc, output);
+
+    const notice = if (spill_locator) |path|
+        std.fmt.allocPrint(
+            alloc,
+            "[Truncated: kept head {d} + tail {d} of {d} lines ({d}KB cap). Full result saved at: {s} — call read with offset/limit to page through it.]",
+            .{ split.head_lines, split.tail_lines, split.total_lines, @divTrunc(max_bytes, 1024), path },
+        ) catch return output
+    else
+        std.fmt.allocPrint(
+            alloc,
+            "[Truncated: kept head {d} + tail {d} of {d} lines ({d}KB cap)]",
+            .{ split.head_lines, split.tail_lines, split.total_lines, @divTrunc(max_bytes, 1024) },
+        ) catch return output;
+    defer alloc.free(notice);
+
+    const raw = std.fmt.allocPrint(alloc, "{s}\n\n...\n\n{s}\n\n{s}", .{ split.head, split.tail, notice }) catch
+        return output;
+    return ensureValidUtf8(alloc, raw);
+}
+
+/// True when `output` would be truncated by the given caps (matches
+/// splitHeadTail's entry condition). Callers gate spill-file writes on this.
+pub fn isOversized(output: []const u8, max_bytes: usize, max_lines: usize) bool {
+    return output.len > max_bytes or countLines(output) > max_lines;
+}
+
+/// Write `content` to a best-effort OS-temp spill file. Returns an owned path
+/// on success, or null on any failure. Never propagates errors to the caller.
+pub fn writeSpillFile(app_ctx: ?*anyopaque, io: std.Io, alloc: std.mem.Allocator, call_id: []const u8, content: []const u8) ?[]const u8 {
+    const base = tmpDir(alloc, app_ctx) orelse return null;
+    defer alloc.free(base);
+    const safe_id = sanitizeCallId(alloc, call_id) orelse return null;
+    defer alloc.free(safe_id);
+    const basename = std.fmt.allocPrint(alloc, "blitz-spill-{s}.txt", .{safe_id}) catch return null;
+    defer alloc.free(basename);
+    const path = std.fs.path.join(alloc, &.{ base, basename }) catch return null;
+    errdefer alloc.free(path);
+
+    const file = std.Io.Dir.cwd().createFile(io, path, .{}) catch return null;
+    defer file.close(io);
+    var buf: [8192]u8 = undefined;
+    var writer = file.writer(io, &buf);
+    writer.interface.writeAll(content) catch return null;
+    writer.interface.flush() catch return null;
+    return path;
+}
+
+/// Keep only filename-safe characters so a hostile call id cannot escape the
+/// temp dir. Never returns empty.
+fn sanitizeCallId(alloc: std.mem.Allocator, call_id: []const u8) ?[]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    for (call_id) |c| {
+        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '_' or c == '-';
+        out.append(alloc, if (ok) c else '_') catch return null;
+    }
+    if (out.items.len == 0) out.appendSlice(alloc, "id") catch return null;
+    return alloc.dupe(u8, out.items) catch null;
+}
+
+fn tmpDir(alloc: std.mem.Allocator, app_ctx: ?*anyopaque) ?[]const u8 {
+    if (app_ctx) |ptr| {
+        const self: *r.app.App = @ptrCast(@alignCast(ptr));
+        if (self.exec_pool.env.get("TMPDIR")) |dir| return alloc.dupe(u8, dir) catch null;
+    }
+    return alloc.dupe(u8, "/tmp") catch null;
+}
+
+/// Split `output` into head+tail, enforcing both the byte and line caps on
+/// each segment (whichever binds first cuts). Codepoint-safe boundaries.
+pub fn splitHeadTail(
+    output: []const u8,
+    head_bytes: usize,
+    head_lines: usize,
+    tail_bytes: usize,
+    tail_lines: usize,
+) HeadTail {
     const total_lines = countLines(output);
-    var end_byte: usize = 0;
-    var lines_collected: usize = 0;
-    var pos: usize = 0;
+    if (output.len == 0) return .{ .head = output, .tail = "", .head_lines = total_lines, .tail_lines = 0, .total_lines = total_lines, .truncated = false };
+    if (output.len <= head_bytes + tail_bytes and total_lines <= head_lines + tail_lines)
+        return .{ .head = output, .tail = "", .head_lines = total_lines, .tail_lines = 0, .total_lines = total_lines, .truncated = false };
 
-    while (pos < output.len and lines_collected < max_lines and end_byte < max_bytes) {
+    const head_end = collectLines(output, 0, head_bytes, head_lines);
+    const tail_start = collectLinesBack(output, tail_bytes, tail_lines);
+    const truncated = tail_start > head_end;
+
+    if (!truncated) {
+        // Whole output fits the combined budget.
+        return .{ .head = output, .tail = "", .head_lines = total_lines, .tail_lines = 0, .total_lines = total_lines, .truncated = false };
+    }
+
+    const tail = output[tail_start..];
+    return .{
+        .head = output[0..head_end],
+        .tail = tail,
+        .head_lines = countLines(output[0..head_end]),
+        .tail_lines = countLines(tail),
+        .total_lines = total_lines,
+        .truncated = true,
+    };
+}
+
+/// Collect leading lines from `start` until the byte or line cap binds.
+/// Returns a codepoint-floor boundary (never splits a multi-byte sequence).
+fn collectLines(output: []const u8, from: usize, max_bytes: usize, max_lines: usize) usize {
+    var end: usize = from;
+    var lines: usize = 0;
+    var pos: usize = from;
+    while (pos < output.len and lines < max_lines) {
         const next_line_end = if (std.mem.indexOfScalar(u8, output[pos..], '\n')) |nl|
             pos + nl + 1
         else
             output.len;
-        const remaining_bytes = max_bytes - end_byte;
-        if (next_line_end - pos > remaining_bytes) {
-            end_byte += remaining_bytes;
-            if (remaining_bytes > 0) lines_collected += 1;
-            break;
-        }
-        end_byte = next_line_end;
-        lines_collected += 1;
+        if (next_line_end - end > max_bytes - (end - from)) break;
+        end = next_line_end;
+        lines += 1;
         pos = next_line_end;
     }
+    return utf8Floor(output, end);
+}
 
-    // Mid-sequence cut makes valid UTF-8 invalid; floor to codepoint boundary.
-    end_byte = utf8Floor(output, end_byte);
-
-    const raw: []const u8 = if (end_byte >= output.len)
-        output
-    else blk: {
-        const slice = output[0..end_byte];
-        const notice = if (lines_collected >= max_lines)
-            std.fmt.allocPrint(
-                alloc,
-                "[Truncated: showing {d} of {d} lines ({d} line limit)]",
-                .{ lines_collected, total_lines, max_lines },
-            )
-        else
-            std.fmt.allocPrint(
-                alloc,
-                "[Truncated: {d} lines shown ({d}KB limit)]",
-                .{ lines_collected, @divTrunc(max_bytes, 1024) },
-            );
-        const n = notice catch break :blk slice;
-        defer alloc.free(n);
-        break :blk std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ slice, n }) catch slice;
-    };
-
-    return ensureValidUtf8(alloc, raw);
+/// Collect trailing lines from the end of `output`: the last `max_lines`
+/// lines (matching `countLines` semantics), byte-clamped to `max_bytes` from
+/// the end. Returns the codepoint-floor boundary of the tail start.
+fn collectLinesBack(output: []const u8, max_bytes: usize, max_lines: usize) usize {
+    const total = countLines(output);
+    var line_start: usize = 0;
+    if (total > max_lines) {
+        const target_line = total - max_lines; // 0-based index of first kept line
+        var line_idx: usize = 0;
+        var i: usize = 0;
+        while (i < output.len and line_idx < target_line) : (i += 1) {
+            if (output[i] == '\n') {
+                line_idx += 1;
+                line_start = i + 1;
+            }
+        }
+    }
+    if (output.len - line_start > max_bytes)
+        return utf8Floor(output, output.len - max_bytes);
+    return line_start;
 }
 
 /// Walk end back so it never splits a multi-byte UTF-8 sequence.
@@ -156,7 +278,7 @@ fn ensureValidUtf8(alloc: std.mem.Allocator, raw: []const u8) []const u8 {
         "(binary output; failed to sanitize utf-8)";
 }
 
-fn countLines(output: []const u8) usize {
+pub fn countLines(output: []const u8) usize {
     var lines: usize = 0;
     var pos: usize = 0;
     while (pos < output.len) {
@@ -198,6 +320,41 @@ test "truncateOutputToOwned sanitizes invalid utf8" {
     try testing.expect(json[json.len - 1] == '"');
 }
 
+test "truncateOutputToOwned keeps the tail for oversized output" {
+    const testing = std.testing;
+    // 100 lines of "line N\n"; small budgets force a head+tail cut.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    for (0..100) |i| {
+        const line = try std.fmt.allocPrint(testing.allocator, "line{d}\n", .{i});
+        defer testing.allocator.free(line);
+        try buf.appendSlice(testing.allocator, line);
+    }
+    const out = truncateOutputToOwned(testing.allocator, buf.items, MAX_DISPLAY_BYTES, MAX_DISPLAY_LINES);
+    defer if (out.ptr != buf.items.ptr) testing.allocator.free(out);
+    try testing.expect(std.unicode.utf8ValidateSlice(out));
+    // The final line "line99" must survive as the tail.
+    try testing.expect(std.mem.indexOf(u8, out, "line99") != null);
+}
+
+test "splitHeadTail preserves head and tail on byte cap" {
+    const testing = std.testing;
+    const in = "AAAA\nBBBB\nCCCC\nDDDD\nEEEE\n";
+    const split = splitHeadTail(in, 5, 2, 5, 2);
+    try testing.expect(split.truncated);
+    try testing.expectEqualStrings("AAAA\n", split.head);
+    try testing.expectEqualStrings("EEEE\n", split.tail);
+}
+
+test "splitHeadTail is codepoint-safe at the byte boundary" {
+    const testing = std.testing;
+    // "é" is c3 a9; cutting at a byte count that lands mid-sequence must floor.
+    const in = "ab\xc3\xa9cd\nef\xc3\xa9gh\n";
+    const split = splitHeadTail(in, 3, 100, 4, 100);
+    try testing.expect(std.unicode.utf8ValidateSlice(split.head));
+    try testing.expect(std.unicode.utf8ValidateSlice(split.tail));
+}
+
 test "truncateOutputToOwned does not split multi-byte utf8" {
     const testing = std.testing;
     // "é" is c3 a9 — cut max_bytes inside the sequence.
@@ -205,4 +362,22 @@ test "truncateOutputToOwned does not split multi-byte utf8" {
     const out = truncateOutputToOwned(testing.allocator, in, 3, MAX_DISPLAY_LINES);
     defer if (out.ptr != in.ptr) testing.allocator.free(out);
     try testing.expect(std.unicode.utf8ValidateSlice(out));
+}
+
+test "writeSpillFile persists a small payload and sanitizes the call id" {
+    const testing = std.testing;
+    const payload = "hello spill\n";
+    const path = writeSpillFile(null, testing.io, testing.allocator, "b.a/d/1", payload).?;
+    defer testing.allocator.free(path);
+
+    const content = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited64(1024)) catch
+        return error.TestUnexpectedResult;
+    defer testing.allocator.free(content);
+    try testing.expectEqualStrings(payload, content);
+
+    // The hostile call id must not escape into the basename (slashes/dots are
+    // replaced), so the filename only ever lands under the temp dir.
+    const base = std.fs.path.basename(path);
+    try testing.expect(std.mem.indexOf(u8, base, "/") == null);
+    try testing.expect(std.mem.eql(u8, base, "blitz-spill-b_a_d_1.txt"));
 }

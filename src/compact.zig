@@ -55,7 +55,9 @@ pub const SUMMARY_PREFIX =
 ;
 
 pub const KEEP_RECENT_TOKENS: u64 = 20_000;
-pub const TOOL_RESULT_MAX_CHARS: usize = 2000;
+pub const TOOL_RESULT_MAX_CHARS: usize = COMPACT_HEAD_CHARS + COMPACT_TAIL_CHARS;
+pub const COMPACT_HEAD_CHARS: usize = 4096;
+pub const COMPACT_TAIL_CHARS: usize = 1024;
 pub const RESERVE_TOKENS: u64 = 16_384;
 pub const TIMEOUT_MS: u64 = 5 * 60_000;
 
@@ -196,13 +198,13 @@ pub fn computeCutIndex(messages: []const sdk.Message) usize {
     return 0;
 }
 
-pub fn buildCompactPrompt(alloc: std.mem.Allocator, messages: []const sdk.Message, cut_index: usize) ![]const sdk.Message {
+pub fn buildCompactPrompt(alloc: std.mem.Allocator, io: std.Io, messages: []const sdk.Message, cut_index: usize) ![]const sdk.Message {
     var transcript: std.Io.Writer.Allocating = .init(alloc);
     errdefer transcript.deinit();
     try transcript.writer.writeAll("<conversation>\n");
     for (messages[0..cut_index]) |message| {
         if (message.role == .system) continue;
-        try writeMessageForSummary(&transcript.writer, message);
+        try writeMessageForSummary(&transcript.writer, io, alloc, message);
         try transcript.writer.writeAll("\n\n");
     }
     try transcript.writer.writeAll("</conversation>\n\n");
@@ -247,7 +249,7 @@ pub fn compactOrdinary(
     if (cut_index == 0) return error.NothingToCompact;
     var scratch = std.heap.ArenaAllocator.init(alloc);
     defer scratch.deinit();
-    const prompt = try buildCompactPrompt(scratch.allocator(), messages, cut_index);
+    const prompt = try buildCompactPrompt(scratch.allocator(), io, messages, cut_index);
     const result = try sdk.complete(scratch.allocator(), io, model, .{
         .system = SUMMARY_SYSTEM_PROMPT,
         .messages = prompt[1..],
@@ -337,7 +339,7 @@ fn summaryFromMessages(messages: []const sdk.Message) []const u8 {
     return "";
 }
 
-fn writeMessageForSummary(writer: *std.Io.Writer, message: sdk.Message) !void {
+fn writeMessageForSummary(writer: *std.Io.Writer, io: std.Io, alloc: std.mem.Allocator, message: sdk.Message) !void {
     switch (message.role) {
         .system, .developer => {},
         .user => for (message.parts()) |part| switch (part) {
@@ -368,21 +370,93 @@ fn writeMessageForSummary(writer: *std.Io.Writer, message: sdk.Message) !void {
             else => {},
         },
         .tool => for (message.parts()) |part| switch (part) {
-            .tool_result => |result| try writeToolResult(writer, result),
+            .tool_result => |result| try writeToolResult(writer, io, alloc, result),
             else => {},
         },
     }
 }
 
-fn writeToolResult(writer: *std.Io.Writer, result: anytype) !void {
+fn writeToolResult(writer: *std.Io.Writer, io: std.Io, alloc: std.mem.Allocator, result: anytype) !void {
     try writer.print("[Tool result {s}{s}]: ", .{ result.name, if (result.is_error) " error" else "" });
-    if (result.output.len <= TOOL_RESULT_MAX_CHARS) {
-        try writer.writeAll(result.output);
+    const output = result.output;
+    const spill_tail = readSpillTail(io, alloc, output);
+    defer if (spill_tail) |t| alloc.free(t);
+
+    const owned = try sanitizeUtf8(alloc, output);
+    defer alloc.free(owned);
+    const bytes = owned;
+    const total = utf8Count(bytes);
+    if (total <= COMPACT_HEAD_CHARS + COMPACT_TAIL_CHARS and spill_tail == null) {
+        try writer.writeAll(bytes);
     } else {
-        try writer.writeAll(result.output[0..TOOL_RESULT_MAX_CHARS]);
-        try writer.print("\n\n[... {d} more characters truncated]", .{result.output.len - TOOL_RESULT_MAX_CHARS});
+        const head = utf8Offset(bytes, COMPACT_HEAD_CHARS);
+        const tail_start = utf8Offset(bytes, @min(total, @max(COMPACT_HEAD_CHARS, total - COMPACT_TAIL_CHARS)));
+        try writer.writeAll(bytes[0..head]);
+        if (tail_start > head) {
+            try writer.writeAll("\n\n[... middle pruned ...]\n\n");
+            try writer.writeAll(bytes[tail_start..]);
+        }
+        if (spill_tail) |tail| {
+            try writer.writeAll("\n\n[spilled tail]: ");
+            try writer.writeAll(tail);
+        }
     }
     try writer.writeByte('\n');
+}
+
+/// Owned copy of `s`, lossily repaired to valid UTF-8 when needed.
+fn sanitizeUtf8(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
+    if (std.unicode.utf8ValidateSlice(s)) return alloc.dupe(u8, s);
+    return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf8(s)});
+}
+
+/// Count Unicode code points, clamping the walk so it never exceeds the slice.
+fn utf8Count(s: []const u8) usize {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        i = @min(i + utf8SeqLen(s[i]), s.len);
+        count += 1;
+    }
+    return count;
+}
+
+/// Byte offset after the first `count` code points, clamped to the slice end.
+fn utf8Offset(s: []const u8, count: usize) usize {
+    var i: usize = 0;
+    var seen: usize = 0;
+    while (i < s.len and seen < count) {
+        i = @min(i + utf8SeqLen(s[i]), s.len);
+        seen += 1;
+    }
+    return i;
+}
+
+fn utf8SeqLen(b: u8) usize {
+    return if (b < 0x80) 1 else if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
+}
+
+/// Detect a spill locator path embedded in a truncated tool result and return
+/// the tail of the spilled file (owned, sanitized, best-effort).
+fn readSpillTail(io: std.Io, alloc: std.mem.Allocator, output: []const u8) ?[]const u8 {
+    const marker = "Full result saved at: ";
+    const idx = std.mem.indexOf(u8, output, marker) orelse return null;
+    const start = idx + marker.len;
+    if (start >= output.len) return null;
+    const delim = std.mem.indexOf(u8, output[start..], " — ") orelse
+        (std.mem.indexOfScalar(u8, output[start..], ' ') orelse return null);
+    const path = std.mem.trim(u8, output[start .. start + delim], " ");
+    if (path.len == 0) return null;
+    if (std.mem.indexOf(u8, std.fs.path.basename(path), "blitz-spill-") == null) return null;
+
+    const raw = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited64(64 * 1024 * 1024)) catch return null;
+    defer alloc.free(raw);
+    const content = sanitizeUtf8(alloc, raw) catch return null;
+    defer alloc.free(content);
+    const total = utf8Count(content);
+    const tail_chars = @min(COMPACT_TAIL_CHARS, total);
+    const tail_start = utf8Offset(content, total - tail_chars);
+    return alloc.dupe(u8, content[tail_start..]) catch null;
 }
 
 test "SDK compaction estimates messages and tools" {
@@ -418,7 +492,7 @@ test "SDK compaction prompt preserves structured transcript" {
         } },
         sdk.ToolMessage("c1", "read", "output"),
     };
-    const prompt = try buildCompactPrompt(arena.allocator(), &messages, messages.len);
+    const prompt = try buildCompactPrompt(arena.allocator(), std.testing.io, &messages, messages.len);
     try std.testing.expectEqualStrings(SUMMARY_SYSTEM_PROMPT, prompt[0].text());
     const text = prompt[1].text();
     try std.testing.expect(std.mem.indexOf(u8, text, "## Goal") != null);
@@ -426,6 +500,27 @@ test "SDK compaction prompt preserves structured transcript" {
     try std.testing.expect(std.mem.indexOf(u8, text, "[Assistant thinking]: hmm") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "[Assistant tool calls]: read") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "[Tool result read]: output") != null);
+}
+
+test "SDK compaction keeps tool result tail and never emits invalid utf8" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // A large tool result whose truncated body would, at a raw byte cut, split a
+    // multi-byte sequence. The pruner must be codepoint-safe and keep the tail.
+    var tool_out: std.ArrayList(u8) = .empty;
+    for (0..3000) |i| {
+        const line = try std.fmt.allocPrint(arena.allocator(), "ligne ééé {d}\n", .{i});
+        try tool_out.appendSlice(arena.allocator(), line);
+    }
+    const messages = [_]sdk.Message{
+        sdk.SystemMessage("system"),
+        sdk.ToolMessage("c1", "grep", tool_out.items),
+    };
+    const prompt = try buildCompactPrompt(arena.allocator(), std.testing.io, &messages, messages.len);
+    const text = prompt[1].text();
+    try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+    // The tail's final line must survive the pruned middle.
+    try std.testing.expect(std.mem.indexOf(u8, text, "2999") != null);
 }
 
 test "SDK compaction installs summaries and response parts" {

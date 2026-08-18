@@ -257,7 +257,7 @@ fn runSearch(
     else
         std.fmt.allocPrint(ctx.alloc, "{s}{s}", .{ raw.stdout, raw.stderr }) catch
             return r.errResult(call, "failed to format search output");
-    const content = copyTruncated(ctx.alloc, output) catch
+    const content = copyTruncatedSpill(ctx, call.id, output) catch
         return r.errResult(call, "failed to format search output");
 
     return r.okResult(call, content);
@@ -300,9 +300,14 @@ fn lastErrorDetail(stderr: []const u8) ?[]const u8 {
 /// committed. Always make a final agent-owned copy: truncateOutputToOwned may
 /// legally return its input unchanged when no truncation or UTF-8 repair is
 /// needed.
-fn copyTruncated(alloc: std.mem.Allocator, borrowed: []const u8) ![]const u8 {
-    const truncated = r.truncateOutputToOwned(alloc, borrowed, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES);
-    return alloc.dupe(u8, truncated);
+fn copyTruncatedSpill(ctx: r.ToolContext, call_id: []const u8, borrowed: []const u8) ![]const u8 {
+    const spill = if (r.isOversized(borrowed, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES))
+        r.writeSpillFile(ctx.base.app, ctx.io, ctx.alloc, call_id, borrowed)
+    else
+        null;
+    defer if (spill) |s| ctx.alloc.free(s);
+    const truncated = r.truncateOutputToOwnedSpill(ctx.alloc, borrowed, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES, spill);
+    return ctx.alloc.dupe(u8, truncated);
 }
 
 test "search argument validation" {
@@ -313,7 +318,8 @@ test "search argument validation" {
 
 test "search result owns process-backed content" {
     const source = try std.testing.allocator.dupe(u8, "rg: invalid glob\n");
-    const content = try copyTruncated(std.testing.allocator, source);
+    const truncated = r.truncateOutputToOwned(std.testing.allocator, source, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES);
+    const content = try std.testing.allocator.dupe(u8, truncated);
     std.testing.allocator.free(source);
     defer std.testing.allocator.free(content);
 

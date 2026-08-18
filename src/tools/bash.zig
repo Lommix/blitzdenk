@@ -136,7 +136,13 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     const content = formatBashResult(ctx.alloc, res.stdout, res.stderr, res.exit_code) catch
         return r.errResult(call, "oom");
-    return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
+
+    const spill = if (r.isOversized(content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES))
+        r.writeSpillFile(ctx.base.app, ctx.io, ctx.alloc, call.id, content)
+    else
+        null;
+    defer if (spill) |s| ctx.alloc.free(s);
+    return r.okResult(call, r.truncateOutputToOwnedSpill(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES, spill));
 }
 
 fn formatBashResult(
@@ -145,10 +151,24 @@ fn formatBashResult(
     stderr: []const u8,
     exit_code: ?u8,
 ) ![]const u8 {
-    if (exit_code) |code| {
-        return std.fmt.allocPrint(alloc, "<bash exit_code=\"{d}\">\n<stdout>{s}</stdout>\n<stderr>{s}</stderr>\n</bash>", .{ code, stdout, stderr });
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(alloc);
+    try body.appendSlice(alloc, stdout);
+    if (stderr.len > 0) {
+        if (body.items.len > 0 and body.items[body.items.len - 1] != '\n') try body.append(alloc, '\n');
+        try body.appendSlice(alloc, stderr);
     }
-    return std.fmt.allocPrint(alloc, "<bash>\n<stdout>{s}</stdout>\n<stderr>{s}</stderr>\n</bash>", .{ stdout, stderr });
+    if (body.items.len == 0) try body.appendSlice(alloc, "(no output)");
+
+    if (exit_code) |code| {
+        if (code != 0) {
+            if (body.items[body.items.len - 1] != '\n') try body.append(alloc, '\n');
+            const mark = try std.fmt.allocPrint(alloc, "[exit code: {d}]", .{code});
+            defer alloc.free(mark);
+            try body.appendSlice(alloc, mark);
+        }
+    }
+    return alloc.dupe(u8, body.items);
 }
 
 const RunError = error{ Timeout, Canceled, ExecFailed };
