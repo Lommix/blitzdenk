@@ -26,3 +26,4 @@ Important modules:
 
 - Do not write comments!
 - Keep the user space blitzdenk skill up to date! (`src/skills/blitzdenk-lua.md`)
+- run `zig fmt` after editing files.

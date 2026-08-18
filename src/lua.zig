@@ -205,27 +205,27 @@ const TokenUsageDef = LuaType{ .table_def = .{ .name = "BlitzTokenUsage", .field
     .{ .name = "output", .ty = LuaType.integer },
     .{ .name = "cache", .ty = LuaType.integer },
     .{ .name = "cache_creation", .ty = LuaType.integer },
+    .{ .name = "cost", .ty = LuaType.number, .desc = "total lifetime cost in USD" },
 } } };
-const ModelTokenUsageDef = LuaType{ .table_def = .{ .name = "BlitzModelTokenUsage", .fields = &.{
-    .{ .name = "model", .ty = LuaType.string },
-    .{ .name = "input", .ty = LuaType.integer },
-    .{ .name = "output", .ty = LuaType.integer },
-    .{ .name = "cache", .ty = LuaType.integer },
-    .{ .name = "cache_creation", .ty = LuaType.integer },
-} } };
-const ModelTokenUsageListDef = LuaType{ .raw_refs = .{
-    .text = "BlitzModelTokenUsage[]",
-    .refs = &.{ModelTokenUsageDef},
-} };
 const ThinkingDef = LuaType{ .table_def = .{ .name = "BlitzThinking", .fields = &.{
     .{ .name = "type", .ty = LuaType.string },
     .{ .name = "budget_tokens", .ty = LuaType.integer, .optional = true },
+} } };
+const ModelCostDef = LuaType{ .table_def = .{ .name = "BlitzModelCost", .fields = &.{
+    .{ .name = "input", .ty = LuaType.number, .desc = "price per 1M input tokens" },
+    .{ .name = "output", .ty = LuaType.number, .desc = "price per 1M output tokens" },
+    .{ .name = "cache", .ty = LuaType.number, .desc = "price per 1M cache-read tokens" },
+} } };
+const ModelDef = LuaType{ .table_def = .{ .name = "BlitzModelDef", .fields = &.{
+    .{ .name = "name", .ty = LuaType.string, .desc = "the API model id" },
+    .{ .name = "provider", .ty = LuaType.integer, .desc = "provider handle from add_provider" },
+    .{ .name = "vision", .ty = LuaType.boolean, .optional = true, .desc = "model supports images" },
+    .{ .name = "cost", .ty = ModelCostDef, .optional = true, .desc = "price per 1M tokens; absent = free" },
 } } };
 const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields = &.{
     .{ .name = "type", .ty = LuaType.string, .desc = "'openai' | 'response' | 'anthropic' | 'ollama'" },
     .{ .name = "url", .ty = LuaType.string, .desc = "the endpoint url" },
     .{ .name = "key_envar", .ty = LuaType.string, .desc = "the ENVAR holding the api key (not the key itself!)" },
-    .{ .name = "effort", .ty = LuaType.string, .optional = true },
     .{ .name = "temperature", .ty = LuaType.number, .optional = true },
     .{ .name = "max_tokens", .ty = LuaType.integer, .optional = true },
     .{ .name = "max_completion_tokens", .ty = LuaType.integer, .optional = true },
@@ -316,9 +316,8 @@ const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
     .{ .name = "description", .ty = LuaType.string },
     .{ .name = "prompt", .ty = LuaType.string },
     .{ .name = "tools", .ty = StringListDef },
-    .{ .name = "model", .ty = LuaType.string },
-    .{ .name = "effort", .ty = LuaType.string },
-    .{ .name = "provider", .ty = LuaType.integer },
+    .{ .name = "model", .ty = LuaType.integer, .optional = true, .desc = "model handle from add_model" },
+    .{ .name = "effort", .ty = LuaType.string, .optional = true },
     .{ .name = "in_agent_tool", .ty = LuaType.boolean, .optional = true },
 } } };
 const AppFlagsDef = LuaType{ .table_def = .{ .name = "BlitzAppFlags", .fields = &.{
@@ -458,7 +457,6 @@ pub const Blitz = LuaType{
                                 type: []const u8,
                                 url: []const u8,
                                 key_envar: []const u8,
-                                effort: ?[]const u8 = null,
                                 temperature: ?f32 = null,
                                 max_tokens: ?u32 = null,
                                 max_completion_tokens: ?u32 = null,
@@ -474,10 +472,6 @@ pub const Blitz = LuaType{
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, args: Arg) !r.config.ProviderHandle {
                                 if (try isToolVm(state)) return @enumFromInt(0);
                                 const slot = a.config.reserveProvider(args.url, args.key_envar) orelse return error.MaxProviderReached;
-
-                                if (args.effort) |eff| {
-                                    slot.reasoning_effort = r.config.parseReasoningEffort(eff) orelse return error.UnknownEffortValue;
-                                }
 
                                 const ptype: r.models.Kind = blk: {
                                     if (std.mem.eql(u8, args.type, "openai")) break :blk .openai;
@@ -525,6 +519,29 @@ pub const Blitz = LuaType{
                 },
             },
             .{
+                .name = "add_model",
+                .desc = "Register a model with provider, vision capability and cost.",
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{.{ .name = "def", .ty = ModelDef }},
+                        .ret = &LuaInteger,
+                        .fn_ptr = LuaFnBind((struct {
+                            const Arg = struct {
+                                name: []const u8,
+                                provider: u32,
+                                vision: ?bool = null,
+                                cost: ?r.config.ModelCost = null,
+                            };
+
+                            fn lua_fn(state: *c.lua_State, a: *r.app.App, args: Arg) !r.config.ModelHandle {
+                                if (try isToolVm(state)) return @enumFromInt(0);
+                                return a.config.addModel(args.name, @enumFromInt(args.provider), args.vision orelse false, args.cost);
+                            }
+                        }).lua_fn, "add_model"),
+                    },
+                },
+            },
+            .{
                 .name = "add_agent",
                 .desc = "Register a complete agent configuration.",
                 .ty = LuaType{
@@ -537,9 +554,8 @@ pub const Blitz = LuaType{
                                 description: []const u8,
                                 prompt: []const u8,
                                 tools: [][]const u8,
-                                model: []const u8,
+                                model: ?u32 = null,
                                 effort: ?[]const u8,
-                                provider: u32,
                                 in_agent_tool: ?bool,
                             };
 
@@ -550,17 +566,16 @@ pub const Blitz = LuaType{
                                 else
                                     .medium;
 
-                                const agent_type = try a.context_factory.addAgent(.{
+                                const agent_type = try a.context_factory.addAgent(&a.config, .{
                                     .name = def.name,
                                     .description = def.description,
                                     .prompt = def.prompt,
                                     .in_agent_tool = def.in_agent_tool orelse true,
                                     .tools = def.tools,
-                                    .model = .{
-                                        .name = def.model,
+                                    .model = if (def.model) |handle| .{
+                                        .model = @enumFromInt(handle),
                                         .effort = effort,
-                                        .provider = @enumFromInt(def.provider),
-                                    },
+                                    } else null,
                                 });
 
                                 return @intFromEnum(agent_type);
@@ -570,40 +585,25 @@ pub const Blitz = LuaType{
                 },
             },
             .{
-                .name = "set_model",
-                .desc = "Set the default model.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{
-                        .{ .name = "model", .ty = LuaType.string },
-                        .{ .name = "handle", .ty = LuaType.integer },
-                    },
-                    .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(state: *c.lua_State, a: *r.app.App, model: []const u8, handle: u32) !void {
-                            if (try isToolVm(state)) return;
-                            if (!a.config.setModel(model, @enumFromInt(handle))) {
-                                return error.ModelStringTooLong;
-                            }
-                        }
-                    }).lua_fn, "set_model"),
-                } },
-            },
-            .{
                 .name = "set_model_agent",
                 .desc = "Set the model config for a specific agent.",
                 .ty = LuaType{
                     .function = .{
                         .args = &.{
                             .{ .name = "agent_type", .ty = LuaType.integer },
-                            .{ .name = "model", .ty = LuaType.string },
-                            .{ .name = "effort", .ty = LuaType.string },
-                            .{ .name = "handle", .ty = LuaType.integer },
+                            .{ .name = "model", .ty = LuaType.integer, .desc = "model handle from add_model" },
+                            .{ .name = "effort", .ty = LuaType.string, .optional = true },
                         },
                         .fn_ptr = LuaFnBind((struct {
-                            fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, model: []const u8, effort: []const u8, handle: u32) !void {
+                            fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, model: u32, effort: ?[]const u8) !void {
                                 if (try isToolVm(state)) return;
                                 const agent_type: r.ContextFactory.AgentType = @enumFromInt(agent_type_id);
-                                const eff = r.config.parseReasoningEffort(effort) orelse return error.UnknownEffort;
-                                try a.context_factory.setAgentModel(agent_type, model, eff, @enumFromInt(handle));
+                                const eff = if (effort) |eff|
+                                    r.config.parseReasoningEffort(eff) orelse return error.UnknownEffort
+                                else
+                                    .medium;
+                                try a.context_factory.setAgentModel(&a.config, agent_type, @enumFromInt(model), eff);
+                                try a.refreshLiveAgentTools();
                             }
                         }).lua_fn, "set_model_agent"),
                     },
@@ -621,54 +621,25 @@ pub const Blitz = LuaType{
                                 output: u64,
                                 cache: u64,
                                 cache_creation: u64,
+                                cost: f64,
                             };
 
-                            fn lua_fn(a: *r.app.App) !Ret {
+                            fn lua_fn(a: *r.app.App, _: *c.lua_State) !Ret {
+                                var arena = std.heap.ArenaAllocator.init(a.gpa);
+                                defer arena.deinit();
+                                const entries = try a.registry.usageByModel(arena.allocator());
+                                var cost: f64 = 0;
+                                for (entries) |e| cost += a.config.modelCost(e.model, e.usage);
                                 const useage = a.registry.usage();
                                 return .{
                                     .input = useage.input_tokens,
                                     .output = useage.output_tokens,
                                     .cache = useage.cache_read_tokens,
                                     .cache_creation = useage.cache_write_tokens,
+                                    .cost = cost,
                                 };
                             }
                         }).lua_fn, "token_usage"),
-                    },
-                },
-            },
-            .{
-                .name = "token_usage_by_model",
-                .desc = "Return lifetime per-model token usage, insertion ordered: { { model, input, output, cache, cache_creation }, ... }.",
-                .ty = LuaType{
-                    .function = .{
-                        .ret = &ModelTokenUsageListDef,
-                        .fn_ptr = LuaFnBind((struct {
-                            const Entry = struct {
-                                model: []const u8,
-                                input: u64,
-                                output: u64,
-                                cache: u64,
-                                cache_creation: u64,
-                            };
-
-                            fn lua_fn(a: *r.app.App, state: *c.lua_State) ![]Entry {
-                                const vm = fromState(state) orelse return error.NoLuaVm;
-                                const arena = vm.luaArena();
-                                const entries = try a.registry.usageByModel(arena);
-                                const out = try arena.alloc(Entry, entries.len);
-                                for (entries, out) |e, *o| {
-                                    o.* = .{
-                                        .model = e.model,
-                                        .input = e.usage.input_tokens,
-                                        .output = e.usage.output_tokens,
-                                        .cache = e.usage.cache_read_tokens,
-                                        .cache_creation = e.usage.cache_write_tokens,
-                                    };
-                                }
-                                arena.free(entries);
-                                return out;
-                            }
-                        }).lua_fn, "token_usage_by_model"),
                     },
                 },
             },
@@ -734,11 +705,11 @@ pub const Blitz = LuaType{
                 \\Example: blitz.add_command(":help", function(args) end)
                 ,
                 .ty = LuaType{ .function = .{
-                        .args = &.{ .{ .name = "command", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
-                        .fn_ptr = LuaFnBind((struct {
-                            fn lua_fn(a: *r.app.App, state: *c.lua_State, name: []const u8, func: LuaFnRef) !void {
-                                if (try isToolVm(state)) return;
-                                const vm = &a.lua_vm;
+                    .args = &.{ .{ .name = "command", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, state: *c.lua_State, name: []const u8, func: LuaFnRef) !void {
+                            if (try isToolVm(state)) return;
+                            const vm = &a.lua_vm;
                             if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) return error.TooManyCommands;
                             if (name.len == 0 or (name[0] != ':' and name[0] != '/')) return error.InvalidCommandPrefix;
                             if (std.mem.indexOfScalar(u8, name, ' ') != null) return error.InvalidCommandName;
@@ -2215,7 +2186,7 @@ pub const LuaVm = struct {
         self.mcp_entries.clearRetainingCapacity();
         self.stdout_buf.clearRetainingCapacity();
         if (self.app) |a| {
-            a.config.resetProviders();
+            a.config.reset();
             a.default_context_limit = app.CONTEXT_LIMIT;
         }
         try self.initLuaState();
@@ -2652,6 +2623,13 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
         vm.cancel_token = null;
     }
 
+    // Reading shared app config/factory state must be serialized against
+    // hot-reload, which mutates it under lua_vm.vm_mu. Release before the
+    // pcall so the tool body itself still runs in parallel.
+    var app_lock_released = false;
+    app_ptr.lua_vm.vm_mu.lockUncancelable(ctx.io);
+    defer if (!app_lock_released) app_ptr.lua_vm.vm_mu.unlock(ctx.io);
+
     loadToolConfig(&vm, app_ptr) catch {
         const msg = vm.getLastError();
         const owned = ctx.alloc.dupe(u8, if (msg.len > 0) msg else "failed to load lua tool config") catch "failed to load lua tool config";
@@ -2674,6 +2652,9 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
     };
     pushCtxTable(L, &bridge, entry.state_ref);
     pushCallTable(vm.luaArena(), L, call);
+
+    app_lock_released = true;
+    app_ptr.lua_vm.vm_mu.unlock(ctx.io);
 
     vm.vm_mu.lockUncancelable(ctx.io);
     const status = c.lua_pcallk(L, 2, 1, 0, 0, null);
@@ -2766,6 +2747,7 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
     c.lua_newtable(L);
 
     setFieldAny(L, -2, "cwd", bridge.cwd);
+    setFieldAny(L, -2, "vision", ctxVision(bridge));
 
     pushAgentId(L, bridge.tool_ctx.base.self_id);
     setFieldPushed(L, -2, "agent_id");
@@ -2782,6 +2764,13 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
     }) |binding| {
         setClosureField(L, -2, binding[0], @ptrCast(bridge), binding[1]);
     }
+}
+
+fn ctxVision(bridge: *CtxBridge) bool {
+    const base = &bridge.tool_ctx.base;
+    const app_ptr: *r.app.App = @ptrCast(@alignCast(base.app orelse return false));
+    const agent = base.registry.get(base.self_id) orelse return false;
+    return app_ptr.context_factory.agentVision(&app_ptr.config, @enumFromInt(agent.type_idx));
 }
 
 fn pushCallTable(alloc: Allocator, L: *c.lua_State, call: ToolCall) void {

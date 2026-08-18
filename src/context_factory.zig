@@ -98,13 +98,12 @@ pub const AgentTools = struct {
 };
 
 pub const AgentModelConfig = struct {
-    name: []const u8,
+    model: r.config.ModelHandle,
     effort: r.config.ReasoningEffort = .medium,
-    provider: r.config.ProviderHandle,
 };
 
 pub const AgentConfigDiagnostic = union(enum) {
-    no_default_model,
+    no_agent_model: []const u8,
     invalid_provider,
     missing_api_key: []const u8,
 };
@@ -195,11 +194,8 @@ pub fn buildAgentApiConfig(
 ) AgentConfigResult {
     const def = self.getAgent(agent_type) orelse return .{ .diagnostic = .invalid_provider };
     if (def.model) |ag_cfg| {
-        const provider_idx = @intFromEnum(ag_cfg.provider);
-        if (provider_idx >= cfg.provider_count) return .{ .diagnostic = .invalid_provider };
-
-        const provider = &cfg.providers[provider_idx];
-        if (!provider.active) return .{ .diagnostic = .invalid_provider };
+        const model = cfg.getModel(ag_cfg.model) orelse return .{ .diagnostic = .invalid_provider };
+        const provider = cfg.getProvider(model.provider) orelse return .{ .diagnostic = .invalid_provider };
 
         const key = if (provider.key_len > 0)
             env.get(provider.getKeyEnvar()) orelse return .{
@@ -211,35 +207,13 @@ pub fn buildAgentApiConfig(
         return .{ .config = .{
             .api_key = key,
             .base_url = provider.getUrl(),
-            .model = ag_cfg.name,
+            .model = model.getName(),
             .provider = provider.provider_config,
             .reasoning_effort = ag_cfg.effort,
         } };
     }
 
-    const entry = &cfg.default_model;
-    if (!entry.bound) return .{ .diagnostic = .no_default_model };
-
-    const provider_idx = @intFromEnum(entry.provider);
-    if (provider_idx >= cfg.provider_count) return .{ .diagnostic = .invalid_provider };
-
-    const provider = &cfg.providers[provider_idx];
-    if (!provider.active) return .{ .diagnostic = .invalid_provider };
-
-    const key = if (provider.key_len > 0)
-        env.get(provider.getKeyEnvar()) orelse return .{
-            .diagnostic = .{ .missing_api_key = provider.getKeyEnvar() },
-        }
-    else
-        "";
-
-    return .{ .config = .{
-        .api_key = key,
-        .model = entry.getName(),
-        .base_url = provider.getUrl(),
-        .reasoning_effort = provider.reasoning_effort,
-        .provider = provider.provider_config,
-    } };
+    return .{ .diagnostic = .{ .no_agent_model = def.name } };
 }
 
 pub fn setAgentPrompt(self: *Self, agent_type: AgentType, prompt: []const u8) !void {
@@ -248,16 +222,24 @@ pub fn setAgentPrompt(self: *Self, agent_type: AgentType, prompt: []const u8) !v
     def.prompt = dup;
 }
 
-pub fn setAgentModel(self: *Self, agent_type: AgentType, model: []const u8, effort: r.config.ReasoningEffort, provider: r.config.ProviderHandle) !void {
+pub fn setAgentModel(self: *Self, cfg: *const r.config.BlitzdenkCfg, agent_type: AgentType, model: r.config.ModelHandle, effort: r.config.ReasoningEffort) !void {
     const def = self.getAgentMut(agent_type) orelse return error.UnknownAgent;
+    _ = cfg.getModel(model) orelse return error.UnknownModel;
     def.model = .{
-        .name = try self.prompt_arena.allocator().dupe(u8, model),
+        .model = model,
         .effort = effort,
-        .provider = provider,
     };
 }
 
-pub fn addAgent(self: *Self, def: NewAgentDef) !AgentType {
+pub fn collectUnboundAgents(self: *const Self, alloc: std.mem.Allocator, out: *std.ArrayList([]const u8)) !void {
+    for (0..self.agent_counter) |i| {
+        const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));
+        const def = self.getAgent(agent_type) orelse continue;
+        if (def.model == null) try out.append(alloc, def.name);
+    }
+}
+
+pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: NewAgentDef) !AgentType {
     if (self.agent_counter > std.math.maxInt(u6)) return error.TooManyAgents;
     if (self.findAgentType(def.name) != null) return error.DuplicateAgentName;
     if (def.tools.len > MAX_AGENT_TOOLS) return error.TooManyTools;
@@ -270,10 +252,12 @@ pub fn addAgent(self: *Self, def: NewAgentDef) !AgentType {
         .description = try alloc.dupe(u8, def.description),
         .prompt = try alloc.dupe(u8, def.prompt),
         .in_agent_tool = def.in_agent_tool,
-        .model = if (def.model) |model| .{
-            .name = try alloc.dupe(u8, model.name),
-            .effort = model.effort,
-            .provider = model.provider,
+        .model = if (def.model) |model| blk: {
+            _ = cfg.getModel(model.model) orelse return error.UnknownModel;
+            break :blk .{
+                .model = model.model,
+                .effort = model.effort,
+            };
         } else null,
     });
     try self.setAgentTools(idx, def.tools);
@@ -408,29 +392,42 @@ pub fn remove(self: *Self, tool_name: []const u8) void {
 
 pub fn configureAgent(
     self: *const Self,
+    cfg: *const r.config.BlitzdenkCfg,
     agent: *r.agent.Agent,
     base: r.tools.context.BaseContext,
 ) !void {
-    try self.refreshAgentTools(agent, base);
+    try self.refreshAgentTools(cfg, agent, base);
     const alloc = agent.state_arena.allocator();
     const prompt = try self.build_system_prompt(alloc, @enumFromInt(agent.type_idx));
     try agent.setSystemPrompt(prompt);
 }
 
-pub fn refreshAgentTools(self: *const Self, agent: *r.agent.Agent, base: r.tools.context.BaseContext) !void {
-    try self.refreshAgentToolsInternal(agent, base, false);
+pub fn agentVision(self: *const Self, cfg: *const r.config.BlitzdenkCfg, agent_type: AgentType) bool {
+    if (self.getAgent(agent_type)) |def| {
+        if (def.model) |m| {
+            const model = cfg.getModel(m.model) orelse return false;
+            return model.vision;
+        }
+    }
+    return false;
 }
 
-pub fn refreshAgentToolsLive(self: *const Self, agent: *r.agent.Agent, base: r.tools.context.BaseContext) !void {
-    try self.refreshAgentToolsInternal(agent, base, true);
+pub fn refreshAgentTools(self: *const Self, cfg: *const r.config.BlitzdenkCfg, agent: *r.agent.Agent, base: r.tools.context.BaseContext) !void {
+    try self.refreshAgentToolsInternal(cfg, agent, base, false);
 }
 
-fn refreshAgentToolsInternal(self: *const Self, agent: *r.agent.Agent, base: r.tools.context.BaseContext, live: bool) !void {
+pub fn refreshAgentToolsLive(self: *const Self, cfg: *const r.config.BlitzdenkCfg, agent: *r.agent.Agent, base: r.tools.context.BaseContext) !void {
+    try self.refreshAgentToolsInternal(cfg, agent, base, true);
+}
+
+fn refreshAgentToolsInternal(self: *const Self, cfg: *const r.config.BlitzdenkCfg, agent: *r.agent.Agent, base: r.tools.context.BaseContext, live: bool) !void {
     const alloc = agent.state_arena.allocator();
     var definitions: [MAX_AGENT_TOOLS]r.tools.Tool = undefined;
     var count: usize = 0;
+    const vision = self.agentVision(cfg, @enumFromInt(agent.type_idx));
     var it = self.iter(@enumFromInt(agent.type_idx));
     while (it.next()) |tool| {
+        if (std.mem.eql(u8, tool.def.name, r.tools.read.ViewImageTool.def.name) and !vision) continue;
         if (std.mem.eql(u8, tool.def.name, r.tools.agent.AgentTool.def.name)) {
             var buf: [64]AgentMeta = undefined;
             var out = std.ArrayList(AgentMeta).initBuffer(&buf);
@@ -871,7 +868,7 @@ fn initTestFactory() Self {
     return factory;
 }
 
-test "agent config diagnoses an unbound default model" {
+test "agent config diagnoses an unbound agent model" {
     var factory = initTestFactory();
     defer factory.prompt_arena.deinit();
 
@@ -880,7 +877,10 @@ test "agent config diagnoses an unbound default model" {
     defer env.deinit();
 
     switch (factory.buildAgentApiConfig(.general, &cfg, &env)) {
-        .diagnostic => |diagnostic| try std.testing.expect(diagnostic == .no_default_model),
+        .diagnostic => |diagnostic| switch (diagnostic) {
+            .no_agent_model => |name| try std.testing.expectEqualStrings("general", name),
+            else => return error.TestExpectedUnboundAgentModel,
+        },
         .config => return error.TestExpectedConfigDiagnostic,
     }
 }
@@ -890,7 +890,9 @@ test "agent config diagnoses an invalid provider" {
     defer factory.prompt_arena.deinit();
 
     var cfg: r.config.BlitzdenkCfg = .{};
-    cfg.default_model.bound = true;
+    cfg.model_count = 1;
+    cfg.models[0] = .{ .provider = @enumFromInt(0) };
+    try factory.setAgentModel(&cfg, .general, @enumFromInt(0), .medium);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
 
@@ -907,7 +909,8 @@ test "agent config reports the missing API key environment variable" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY").?;
     const provider = cfg.commitProvider();
-    try std.testing.expect(cfg.setModel("example-model", provider));
+    const model = try cfg.addModel("example-model", provider, false, null);
+    try factory.setAgentModel(&cfg, .general, model, .medium);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
 
@@ -927,7 +930,8 @@ test "agent config permits keyless providers" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("http://localhost:8080/v1", "").?;
     const provider = cfg.commitProvider();
-    try std.testing.expect(cfg.setModel("local-model", provider));
+    const model = try cfg.addModel("local-model", provider, false, null);
+    try factory.setAgentModel(&cfg, .general, model, .medium);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
 

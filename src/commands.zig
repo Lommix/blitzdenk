@@ -330,7 +330,7 @@ pub const Command = union(enum) {
                         if (agent.task != null) {
                             agent.markToolsDirty();
                         } else {
-                            try app.context_factory.refreshAgentTools(agent, app.toolBase(id));
+                            try app.context_factory.refreshAgentTools(&app.config, agent, app.toolBase(id));
                         }
                     }
                 }
@@ -347,7 +347,11 @@ fn showProviderOnboarding(app: *App, diagnostic: r.ContextFactory.AgentConfigDia
         \\    url = "https://api.openai.com/v1",
         \\    key_envar = "OPENAI_API_KEY",
         \\})
-        \\blitz.set_model("gpt-5.4-mini", provider)
+        \\local model = blitz.add_model({
+        \\    name = "gpt-5.4-mini",
+        \\    provider = provider,
+        \\})
+        \\blitz.set_model_agent(blitz.AGENT_GENERAL, model, "max")
         \\
         \\Then set the key before launching Blitzdenk:
         \\export OPENAI_API_KEY=...
@@ -355,12 +359,12 @@ fn showProviderOnboarding(app: *App, diagnostic: r.ContextFactory.AgentConfigDia
     ;
 
     switch (diagnostic) {
-        .no_default_model => {
+        .no_agent_model => |name| {
             app.pushSystemMessage(
-                "No default model/provider is configured. Edit {s} and choose a provider URL, model, and API-key environment variable.\n\n{s}",
-                .{ config_path, example },
+                "Agent `{s}` has no model bound. Bind a model per agent with `blitz.set_model_agent(AGENT_TYPE, model, effort?)` or `model =` in `blitz.add_agent`. Edit {s}.\n\n{s}",
+                .{ name, config_path, example },
             );
-            app.notifications.append(app.gpa, "Configure a default provider/model in {s}", .{config_path}) catch {};
+            app.notifications.append(app.gpa, "Agent `{s}` has no model bound", .{name}) catch {};
         },
         .invalid_provider => {
             app.pushSystemMessage(

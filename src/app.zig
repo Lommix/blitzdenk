@@ -278,6 +278,7 @@ pub const App = struct {
     remote_cwd: []const u8 = "/",
     flags: AppFlags = .{},
     default_context_limit: u32 = CONTEXT_LIMIT,
+    last_unbound_warn: ?[]const u8 = null,
     screenshot_buf: ?[]const u8 = null,
     dirty: bool = true,
     history: std.ArrayList(PromptEntry) = .empty,
@@ -355,6 +356,7 @@ pub const App = struct {
         self.permission_queue.value.deinit(self.gpa);
         self.notifications.deinit(self.gpa);
         self.event_bus.clear(self.gpa, self.io);
+        if (self.last_unbound_warn) |s| self.gpa.free(s);
         for (self.history.items) |e| self.gpa.free(e.text);
         self.history.deinit(self.gpa);
         self.context_factory.deinit();
@@ -604,7 +606,7 @@ pub const App = struct {
             if (agent.task != null) {
                 agent.markToolsDirty();
             } else {
-                try self.context_factory.refreshAgentTools(agent, self.toolBase(.{ .index = @intCast(index), .generation = slot.generation }));
+                try self.context_factory.refreshAgentTools(&self.config, agent, self.toolBase(.{ .index = @intCast(index), .generation = slot.generation }));
             }
         }
     }
@@ -626,7 +628,7 @@ pub const App = struct {
         self.lua_vm.vm_mu.lockUncancelable(self.io);
         defer self.lua_vm.vm_mu.unlock(self.io);
         const id = self.registry.idForAgent(agent) orelse return error.AgentNotFound;
-        try self.context_factory.refreshAgentToolsLive(agent, self.toolBase(id));
+        try self.context_factory.refreshAgentToolsLive(&self.config, agent, self.toolBase(id));
     }
 
     pub fn pushSystemMessage(self: *App, comptime fmt: []const u8, args: anytype) void {
@@ -641,13 +643,38 @@ pub const App = struct {
         }) catch return;
     }
 
+    pub fn warnUnboundAgentModels(self: *App) void {
+        var names = std.ArrayList([]const u8).empty;
+        defer names.deinit(self.gpa);
+        self.context_factory.collectUnboundAgents(self.gpa, &names) catch return;
+        if (names.items.len == 0) {
+            if (self.last_unbound_warn) |s| self.gpa.free(s);
+            self.last_unbound_warn = null;
+            return;
+        }
+        const joined = std.mem.join(self.gpa, ", ", names.items) catch return;
+        if (self.last_unbound_warn) |s| {
+            if (std.mem.eql(u8, s, joined)) {
+                self.gpa.free(joined);
+                return;
+            }
+            self.gpa.free(s);
+        }
+        self.last_unbound_warn = joined;
+        self.pushSystemMessage(
+            "Agent(s) without a bound model: {s}. Bind `model` per agent with `blitz.set_model_agent(AGENT_TYPE, model, effort?)` or `model =` in `blitz.add_agent`.",
+            .{joined},
+        );
+        self.notifications.append(self.gpa, "Agent(s) without a bound model: {s}", .{joined}) catch {};
+    }
+
     pub fn mainAgent(self: *const App) ?*r.agent.Agent {
         const id = self.main_agent_id orelse return null;
         return self.registry.get(id);
     }
 
     pub fn configureAgent(self: *const App, id: r.AgentId, agent: *r.agent.Agent) !void {
-        try self.context_factory.configureAgent(agent, self.toolBase(id));
+        try self.context_factory.configureAgent(&self.config, agent, self.toolBase(id));
         agent.context_limit = self.default_context_limit;
         agent.reminder_hook = buildReminderOpaque;
         agent.reminder_hook_ctx = @ptrCast(@constCast(self));
@@ -902,6 +929,10 @@ pub const App = struct {
     /// temp file and embeds its `file://` URL (masked as `[Image]`) instead of
     /// inserting the raw paste text. Reports the outcome with a notification.
     pub fn pasteImage(self: *App) void {
+        if (!self.context_factory.agentVision(&self.config, .general)) {
+            self.notifications.append(self.gpa, "Current model does not support images", .{}) catch {};
+            return;
+        }
         const img = r.clipboard.readImage(self.sessionAlloc(), self.exec_pool) catch null;
         if (img) |image| {
             defer self.sessionAlloc().free(image.data);
@@ -921,6 +952,10 @@ pub const App = struct {
     /// Terminal paste event handler. Pastes the clipboard image if one is
     /// present, otherwise appends the raw paste `text`.
     pub fn pasteImageOrText(self: *App, text: []const u8) void {
+        if (!self.context_factory.agentVision(&self.config, .general)) {
+            self.appendBytes(text);
+            return;
+        }
         const img = r.clipboard.readImage(self.sessionAlloc(), self.exec_pool) catch null;
         if (img) |image| {
             defer self.sessionAlloc().free(image.data);

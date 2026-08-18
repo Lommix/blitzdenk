@@ -76,11 +76,14 @@ local openai = blitz.add_provider({
 })
 ```
 
-Then set a default model to use, or specify which agent should use which model
+Then bind a model to each agent
 
 ```lua
-blitz.set_model("gpt-5.4-mini", openai)
-blitz.set_model_agent(blitz.AGENT_GENERAL, "deepseek/deepseek-v4-pro", "max", novita)
+local deepseek = blitz.add_model({
+    name = "deepseek/deepseek-v4-pro",
+    provider = novita,
+})
+blitz.set_model_agent(blitz.AGENT_GENERAL, deepseek, "max")
 ```
 
 ## Documentation

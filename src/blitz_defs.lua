@@ -160,7 +160,6 @@
 ---@field url string
 ---the ENVAR holding the api key (not the key itself!)
 ---@field key_envar string
----@field effort? string
 ---@field temperature? number
 ---@field max_tokens? integer
 ---@field max_completion_tokens? integer
@@ -172,14 +171,32 @@
 ---@field enable_thinking? boolean
 ---@field thinking? BlitzThinking
 
+---@class BlitzModelCost
+---price per 1M input tokens
+---@field input number
+---price per 1M output tokens
+---@field output number
+---price per 1M cache-read tokens
+---@field cache number
+
+---@class BlitzModelDef
+---the API model id
+---@field name string
+---provider handle from add_provider
+---@field provider integer
+---model supports images
+---@field vision? boolean
+---price per 1M tokens; absent = free
+---@field cost? BlitzModelCost
+
 ---@class BlitzAgentDef
 ---@field name string
 ---@field description string
 ---@field prompt string
 ---@field tools string[]
----@field model string
----@field effort string
----@field provider integer
+---model handle from add_model
+---@field model? integer
+---@field effort? string
 ---@field in_agent_tool? boolean
 
 ---@class BlitzTokenUsage
@@ -187,13 +204,8 @@
 ---@field output integer
 ---@field cache integer
 ---@field cache_creation integer
-
----@class BlitzModelTokenUsage
----@field model string
----@field input integer
----@field output integer
----@field cache integer
----@field cache_creation integer
+---total lifetime cost in USD
+---@field cost number
 
 ---@class BlitzAppFlags
 ---@field show_thinking? boolean
@@ -254,16 +266,14 @@
 ---@field exit_loop fun(content?: string): BlitzToolResult
 ---Register a provider.
 ---@field add_provider fun(def: BlitzProviderDef): integer
+---Register a model with provider, vision capability and cost.
+---@field add_model fun(def: BlitzModelDef): integer
 ---Register a complete agent configuration.
 ---@field add_agent fun(def: BlitzAgentDef): integer
----Set the default model.
----@field set_model fun(model: string, handle: integer)
 ---Set the model config for a specific agent.
----@field set_model_agent fun(agent_type: integer, model: string, effort: string, handle: integer)
+---@field set_model_agent fun(agent_type: integer, model: integer, effort?: string)
 ---Return token usage currently shown by the statusbar.
 ---@field token_usage fun(): BlitzTokenUsage
----Return lifetime per-model token usage, insertion ordered: { { model, input, output, cache, cache_creation }, ... }.
----@field token_usage_by_model fun(): BlitzModelTokenUsage[]
 ---Return main-agent context fill percentage currently shown by the statusbar.
 ---@field context_percent fun(): number
 ---Set the default context edge, in tokens, used for statusbar percentage and auto-compaction.

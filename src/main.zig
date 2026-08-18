@@ -259,6 +259,7 @@ pub fn run(
 
     app.reset();
     app.flags.skip_permissions = !flags.strict_mode;
+    app.warnUnboundAgentModels();
 
     if (config_lua) |info| app.loadHistory(info.dir_path);
 
@@ -352,6 +353,7 @@ pub fn run(
                     std.log.scoped(.lua).err("hot-reload: failed to reset lua vm ({any})", .{err});
                 };
                 context_factory.resetDefs();
+                try context_factory.resetLoadedTools();
                 if (config_lua) |info| {
                     const inject = std.fmt.allocPrint(arena, "package.path = \"{s}?.lua;\" .. package.path", .{info.dir_path}) catch null;
                     if (inject) |code| app.lua_vm.exec(code) catch |err| {
@@ -371,10 +373,10 @@ pub fn run(
                 }
                 if (!lua_reload_failed) app.lua_vm.clearLastError();
                 app.lua_vm.readConfigFields();
+                app.warnUnboundAgentModels();
                 try app.lua_vm.publishAvailableSystems(context_factory);
                 app.dirty = true;
 
-                try context_factory.resetLoadedTools();
                 lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
                     std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
                     if (reload_requested) {

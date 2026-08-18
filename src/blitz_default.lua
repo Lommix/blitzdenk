@@ -20,16 +20,14 @@ local opencode = blitz.add_provider({
 ---------------------------------------------------------------------------------------------------
 --- Model configuration
 ---------------------------------------------------------------------------------------------------
-local default_model = "deepseek/deepseek-v4-flash-0731"
-
---- Price per 1M tokens
-local model_costs = {
-	["deepseek/deepseek-v4-flash-0731"] = { input = 0.14, output = 0.28, cache = 0.028 },
-}
+local deepseek = blitz.add_model({
+	name = "deepseek/deepseek-v4-flash-0731",
+	provider = novita,
+	cost = { input = 0.14, output = 0.28, cache = 0.028 },
+})
 
 blitz.set_compact_edge(250000)
-blitz.set_model(default_model, novita)
-blitz.set_model_agent(blitz.AGENT_GENERAL, default_model, "max", novita)
+blitz.set_model_agent(blitz.AGENT_GENERAL, deepseek, "max")
 
 ---------------------------------------------------------------------------------------------------
 --- Default Agent tool set overwrites
@@ -177,18 +175,6 @@ local function fmt(n)
 end
 
 blitz.status_bar_render = function()
-	local total_cost = 0.0
-
-	for _, en in ipairs(blitz.token_usage_by_model()) do
-		local c = model_costs[en.model]
-		if c then
-			total_cost = total_cost
-				+ (en.cache / 1000000) * c.cache
-				+ (en.output / 1000000) * c.output
-				+ (en.input / 1000000) * c.input
-		end
-	end
-
 	local use = blitz.token_usage()
 	return "Cache:"
 		.. fmt(use.cache)
@@ -200,7 +186,7 @@ blitz.status_bar_render = function()
 		.. math.floor(blitz.context_percent())
 		.. "%"
 		.. " | Cost:"
-		.. string.format("%.2f", total_cost)
+		.. string.format("%.2f", use.cost)
 		.. "$"
 end
 
@@ -246,10 +232,9 @@ You are a fast read-only research agent. Answer the question. Stop.
 Direct answer first, one sentence if possible. Then file:line references as proof. No headers, no sections, no template. If the answer is "no" or "not found", say so and list the 1-2 places you checked.
 
 Keep it under 10 lines unless the question genuinely needs more.
-]],
+	]],
 	effort = "low",
-	model = default_model,
-	provider = novita,
+	model = deepseek,
 	tools = {
 		blitz.tools.GLOB,
 		blitz.tools.GREP,
@@ -309,10 +294,9 @@ diff) and report actionable, verified findings. Respect the task's scope: if it 
 Numbered findings, each: severity (critical/major/minor) | file:line | why it's a bug
 (one paragraph) | concrete fix. Then a short "Verified OK" list for checked-but-clean
 items. Do not overstate severity. Tone: matter-of-fact, no flattery, no filler.
-]],
+	]],
 	effort = "max",
-	model = default_model,
-	provider = novita,
+	model = deepseek,
 	tools = {
 		blitz.tools.GLOB,
 		blitz.tools.GREP,

@@ -1,8 +1,11 @@
 const std = @import("std");
 const models = @import("models");
+const sdk = @import("blitz-sdk");
 
 pub const MAX_PROVIDERS = 16;
+pub const MAX_MODELS = 16;
 pub const ProviderHandle = enum(u32) { _ };
+pub const ModelHandle = enum(u32) { _ };
 pub const ReasoningEffort = models.ReasoningEffort;
 
 pub const parseReasoningEffort = models.parseReasoningEffort;
@@ -15,7 +18,6 @@ pub const Provider = struct {
     provider_config: models.ProviderOptions = .{ .openai = .{} },
     thinking_type_buf: [16]u8 = undefined,
     thinking_type_len: usize = 0,
-    reasoning_effort: ?ReasoningEffort = null,
     active: bool = false,
 
     pub fn getUrl(self: *const Provider) []const u8 {
@@ -38,11 +40,18 @@ pub const Provider = struct {
     }
 };
 
+pub const ModelCost = struct {
+    input: f64 = 0,
+    output: f64 = 0,
+    cache: f64 = 0,
+};
+
 pub const ModelEntry = struct {
     name: [256]u8 = undefined,
     name_len: usize = 0,
     provider: ProviderHandle = @enumFromInt(0),
-    bound: bool = false,
+    vision: bool = false,
+    cost: ?ModelCost = null,
 
     pub fn getName(self: *const ModelEntry) []const u8 {
         return self.name[0..self.name_len];
@@ -52,7 +61,8 @@ pub const ModelEntry = struct {
 pub const BlitzdenkCfg = struct {
     providers: [MAX_PROVIDERS]Provider = @splat(.{}),
     provider_count: u32 = 0,
-    default_model: ModelEntry = .{},
+    models: [MAX_MODELS]ModelEntry = @splat(.{}),
+    model_count: u32 = 0,
 
     pub fn reserveProvider(self: *BlitzdenkCfg, url: []const u8, key_envar: []const u8) ?*Provider {
         if (self.provider_count >= MAX_PROVIDERS) return null;
@@ -73,39 +83,53 @@ pub const BlitzdenkCfg = struct {
         return handle;
     }
 
-    pub fn setModel(self: *BlitzdenkCfg, name: []const u8, handle: ProviderHandle) bool {
+    pub fn getProvider(self: *const BlitzdenkCfg, handle: ProviderHandle) ?*const Provider {
         const index = @intFromEnum(handle);
-        if (index >= self.provider_count or !self.providers[index].active) return false;
-        if (name.len > 256) return false;
-        const entry = &self.default_model;
-        @memcpy(entry.name[0..name.len], name);
-        entry.name_len = name.len;
-        entry.provider = handle;
-        entry.bound = true;
-        return true;
+        if (index >= self.provider_count or !self.providers[index].active) return null;
+        return &self.providers[index];
     }
 
-    pub fn buildConfig(self: *const BlitzdenkCfg, env: *const std.process.Environ.Map) ?models.Config {
-        const entry = &self.default_model;
-        if (!entry.bound) return null;
-        const index = @intFromEnum(entry.provider);
-        if (index >= self.provider_count) return null;
-        const provider = &self.providers[index];
-        if (!provider.active) return null;
-        const key = if (provider.key_len > 0) env.get(provider.getKeyEnvar()) orelse return null else "";
-        return .{
-            .api_key = key,
-            .model = entry.getName(),
-            .base_url = provider.getUrl(),
-            .reasoning_effort = provider.reasoning_effort,
-            .provider = provider.provider_config,
-        };
+    pub fn addModel(self: *BlitzdenkCfg, name: []const u8, provider: ProviderHandle, vision: bool, cost: ?ModelCost) !ModelHandle {
+        if (self.model_count >= MAX_MODELS) return error.MaxModelsReached;
+        const provider_idx = @intFromEnum(provider);
+        if (provider_idx >= self.provider_count or !self.providers[provider_idx].active) return error.UnknownProvider;
+        if (name.len > 256) return error.NameTooLong;
+        for (self.models[0..self.model_count]) |*m| {
+            if (std.mem.eql(u8, m.getName(), name)) return error.DuplicateModel;
+        }
+        const slot = &self.models[self.model_count];
+        slot.* = .{};
+        @memcpy(slot.name[0..name.len], name);
+        slot.name_len = name.len;
+        slot.provider = provider;
+        slot.vision = vision;
+        slot.cost = cost;
+        self.model_count += 1;
+        return @enumFromInt(self.model_count - 1);
     }
 
-    pub fn resetProviders(self: *BlitzdenkCfg) void {
+    pub fn getModel(self: *const BlitzdenkCfg, handle: ModelHandle) ?*const ModelEntry {
+        const index = @intFromEnum(handle);
+        if (index >= self.model_count) return null;
+        return &self.models[index];
+    }
+
+    pub fn modelCost(self: *const BlitzdenkCfg, name: []const u8, usage: sdk.Usage) f64 {
+        for (self.models[0..self.model_count]) |*model| {
+            const cost = model.cost orelse continue;
+            if (!std.mem.eql(u8, model.getName(), name)) continue;
+            return (@as(f64, @floatFromInt(usage.input_tokens)) / 1e6) * cost.input +
+                (@as(f64, @floatFromInt(usage.output_tokens)) / 1e6) * cost.output +
+                (@as(f64, @floatFromInt(usage.cache_read_tokens)) / 1e6) * cost.cache;
+        }
+        return 0;
+    }
+
+    pub fn reset(self: *BlitzdenkCfg) void {
         self.providers = @splat(.{});
         self.provider_count = 0;
-        self.default_model = .{};
+        self.models = @splat(.{});
+        self.model_count = 0;
     }
 };
 
