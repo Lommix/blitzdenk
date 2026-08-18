@@ -236,6 +236,7 @@ const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields
     .{ .name = "presence_penalty", .ty = LuaType.number, .optional = true },
     .{ .name = "enable_thinking", .ty = LuaType.boolean, .optional = true },
     .{ .name = "thinking", .ty = ThinkingDef, .optional = true },
+    .{ .name = "rate_limit", .ty = LuaType.integer, .optional = true, .desc = "requests per minute; 0 = unlimited" },
 } } };
 
 const ThemeDef = LuaType{ .table_def = .{ .name = "BlitzTheme", .fields = &.{
@@ -467,11 +468,13 @@ pub const Blitz = LuaType{
                                 presence_penalty: ?f32 = null,
                                 enable_thinking: ?bool = true,
                                 thinking: ?r.models.Thinking = null,
+                                rate_limit: ?u32 = null,
                             };
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, args: Arg) !r.config.ProviderHandle {
                                 if (try isToolVm(state)) return @enumFromInt(0);
                                 const slot = a.config.reserveProvider(args.url, args.key_envar) orelse return error.MaxProviderReached;
+                                slot.rate_limit = args.rate_limit orelse 0;
 
                                 const ptype: r.models.Kind = blk: {
                                     if (std.mem.eql(u8, args.type, "openai")) break :blk .openai;

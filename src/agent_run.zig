@@ -101,7 +101,11 @@ pub const RunTask = struct {
         self.provider_error_seen.store(false, .release);
         self.finished.store(false, .release);
         self.failure = null;
-        self.future = std.Io.async(self.io, run, .{self});
+        self.future = std.Io.concurrent(self.io, run, .{self}) catch {
+            self.failure = error.ConcurrencyUnavailable;
+            self.finished.store(true, .release);
+            return;
+        };
     }
 
     pub fn isFinished(self: *const RunTask) bool {

@@ -166,6 +166,8 @@
 ---@field presence_penalty? number
 ---@field enable_thinking? boolean
 ---@field thinking? BlitzThinking
+---requests per minute; 0 = unlimited
+---@field rate_limit? integer
 
 ---@class BlitzModelCost
 ---price per 1M input tokens

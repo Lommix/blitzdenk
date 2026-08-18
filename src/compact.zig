@@ -123,7 +123,11 @@ pub const Task = struct {
 
     pub fn start(self: *Task) void {
         self.finished.store(false, .release);
-        self.future = std.Io.async(self.io, run, .{self});
+        self.future = std.Io.concurrent(self.io, run, .{self}) catch {
+            self.failure = error.ConcurrencyUnavailable;
+            self.finished.store(true, .release);
+            return;
+        };
     }
 
     pub fn isFinished(self: *const Task) bool {

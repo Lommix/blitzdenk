@@ -59,7 +59,8 @@ blitz.set_model_agent(blitz.AGENT_GENERAL, deepseek, "max")
 
 `add_provider` returns an integer handle. Other optional provider fields:
 `max_completion_tokens`, `max_output_tokens`, `top_p`, `top_k`,
-`frequency_penalty`, `presence_penalty`, `enable_thinking`, `thinking = { type = ..., budget_tokens = ... }`.
+`frequency_penalty`, `presence_penalty`, `enable_thinking`, `thinking = { type = ..., budget_tokens = ... }`,
+`rate_limit` (requests per minute, shared per provider URL, `0` = unlimited).
 
 `add_model` returns an integer handle. `vision` (default false) gates the
 `view_image` tool and image pasting for agents using the model. `cost` is

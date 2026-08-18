@@ -7,6 +7,7 @@ pub const errors = @import("errors.zig");
 pub const auth = @import("auth.zig");
 pub const schema = @import("schema.zig");
 pub const provider = @import("provider/root.zig");
+pub const rate_limit = @import("rate_limit.zig");
 
 pub const Role = types.Role;
 pub const Part = types.Part;
@@ -81,4 +82,5 @@ test {
     _ = generate;
     _ = embed;
     _ = provider;
+    _ = @import("rate_limit_stress_test.zig");
 }

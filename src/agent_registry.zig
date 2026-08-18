@@ -229,9 +229,8 @@ pub const Registry = struct {
     }
 
     pub fn cancelAll(self: *Registry) void {
-        self.cancelDepth(0);
-        var depth: u16 = 1;
-        while (depth < max_agents) : (depth += 1) self.cancelDepth(depth);
+        var depth: i32 = max_agents;
+        while (depth >= 0) : (depth -= 1) self.cancelDepth(@intCast(depth));
     }
 
     pub fn wait(self: *Registry, id: AgentId) !SlotState {

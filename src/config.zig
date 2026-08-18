@@ -18,6 +18,7 @@ pub const Provider = struct {
     provider_config: models.ProviderOptions = .{ .openai = .{} },
     thinking_type_buf: [16]u8 = undefined,
     thinking_type_len: usize = 0,
+    rate_limit: u32 = 0,
     active: bool = false,
 
     pub fn getUrl(self: *const Provider) []const u8 {

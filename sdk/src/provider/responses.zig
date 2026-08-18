@@ -14,6 +14,7 @@ pub const Options = struct {
     base_url: []const u8 = default_base_url,
     headers: []const std.http.Header = &.{},
     env: auth.Env = .{},
+    rate_limit: u32 = 0,
 };
 
 pub const CompactResult = struct {
@@ -32,6 +33,7 @@ pub const Chat = struct {
     api_key: []const u8,
     base_url: []const u8,
     extra_headers: []const std.http.Header,
+    rate_limit: u32,
 
     pub fn init(alloc: std.mem.Allocator, model_id: []const u8, opts: Options) !Chat {
         const key = opts.api_key orelse auth.resolveKey(opts.env, api_key_env) orelse "";
@@ -40,6 +42,7 @@ pub const Chat = struct {
             .api_key = try alloc.dupe(u8, key),
             .base_url = try alloc.dupe(u8, opts.base_url),
             .extra_headers = try auth.cloneHeaders(alloc, opts.headers),
+            .rate_limit = opts.rate_limit,
         };
     }
 
@@ -68,7 +71,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/responses/compact", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, requestOptions(params));
+        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, requestOptions(self, params));
         defer alloc.free(response);
         const generated = try parseResponse(alloc, response);
         defer {
@@ -118,7 +121,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/responses", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, requestOptions(params));
+        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, requestOptions(self, params));
         defer alloc.free(response);
         return parseResponse(alloc, response);
     }
@@ -136,7 +139,7 @@ pub const Chat = struct {
         const body = try buildRequest(alloc, self, params, true, false);
         const headers = try self.authHeaders(alloc, params.headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/responses", .{self.base_url});
-        const request_options = requestOptions(params);
+        const request_options = requestOptions(self, params);
         var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
         const sse_text = try jsonx.postSseWithRetry(alloc, io, client, url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
@@ -144,12 +147,14 @@ pub const Chat = struct {
     }
 };
 
-fn requestOptions(params: model.GenerateParams) jsonx.RequestOptions {
+fn requestOptions(self: *const Chat, params: model.GenerateParams) jsonx.RequestOptions {
     return .{
         .timeout_ms = params.timeout_ms,
         .cancellation = params.cancellation,
         .on_provider_error = params.on_provider_error,
         .on_provider_error_ctx = params.on_provider_error_ctx,
+        .rate_limit = self.rate_limit,
+        .rate_limit_url = self.base_url,
     };
 }
 
@@ -663,6 +668,7 @@ test "function continuation and structured output request" {
         .api_key = "",
         .base_url = "",
         .extra_headers = &.{},
+        .rate_limit = 0,
     };
     const messages = [_]types.Message{
         .{ .role = .assistant, .content = &.{types.Part.toolCallPart("call_1", "weather", "{\"city\":\"Paris\"}")} },
@@ -682,7 +688,7 @@ test "function continuation and structured output request" {
 }
 
 test "compact requests omit response streaming fields" {
-    var chat = Chat{ .model_id = "gpt-test", .api_key = "", .base_url = "", .extra_headers = &.{} };
+    var chat = Chat{ .model_id = "gpt-test", .api_key = "", .base_url = "", .extra_headers = &.{}, .rate_limit = 0 };
     const body = try buildRequest(std.testing.allocator, &chat, .{}, false, true);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\"") == null);
@@ -709,6 +715,7 @@ test "canonical output items roundtrip" {
         .api_key = "",
         .base_url = "",
         .extra_headers = &.{},
+        .rate_limit = 0,
     };
     const messages = [_]types.Message{.{ .role = .assistant, .content = result.provider_parts }};
     const request = try buildRequest(std.testing.allocator, &chat, .{ .messages = &messages }, false, false);
@@ -749,7 +756,7 @@ test "request and stream filter invalid function calls" {
             types.Part.toolResultPart("call_ok", "read", "ok"),
         } },
     };
-    var chat = Chat{ .model_id = "gpt-test", .api_key = "", .base_url = "", .extra_headers = &.{} };
+    var chat = Chat{ .model_id = "gpt-test", .api_key = "", .base_url = "", .extra_headers = &.{}, .rate_limit = 0 };
     const request = try buildRequest(std.testing.allocator, &chat, .{ .messages = &messages }, false, false);
     defer std.testing.allocator.free(request);
     try std.testing.expect(std.mem.indexOf(u8, request, "call_ok") != null);

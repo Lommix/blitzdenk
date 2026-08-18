@@ -12,6 +12,7 @@ pub const Options = struct {
     api_key: ?[]const u8 = null,
     headers: []const std.http.Header = &.{},
     env: auth.Env = .{},
+    rate_limit: u32 = 0,
 };
 
 pub const Chat = struct {
@@ -19,6 +20,7 @@ pub const Chat = struct {
     api_key: []const u8,
     base_url: []const u8,
     extra_headers: []const std.http.Header,
+    rate_limit: u32,
 
     pub fn init(alloc: std.mem.Allocator, model_id: []const u8, opts: Options) !Chat {
         const base = opts.base_url orelse auth.resolveKey(opts.env, base_url_env) orelse "";
@@ -28,6 +30,7 @@ pub const Chat = struct {
             .api_key = try alloc.dupe(u8, key),
             .base_url = try alloc.dupe(u8, base),
             .extra_headers = try auth.cloneHeaders(alloc, opts.headers),
+            .rate_limit = opts.rate_limit,
         };
     }
 
@@ -81,7 +84,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, requestOptions(params));
+        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, requestOptions(self, params));
         defer alloc.free(response);
         return openai.parseChatResponse(alloc, response);
     }
@@ -99,7 +102,7 @@ pub const Chat = struct {
         const body = try jsonx.buildChatRequest(alloc, self.model_id, params, true);
         const headers = try self.authHeaders(alloc, params.headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{self.base_url});
-        const request_options = requestOptions(params);
+        const request_options = requestOptions(self, params);
         var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
         const sse_text = try jsonx.postSseWithRetry(alloc, io, client, url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
@@ -131,17 +134,19 @@ pub const Chat = struct {
 
         const headers = try self.authHeaders(alloc, params.headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/embeddings", .{self.base_url});
-        const response = try jsonx.postWithRetry(alloc, io, client, url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation });
+        const response = try jsonx.postWithRetry(alloc, io, client, url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation, .rate_limit = self.rate_limit, .rate_limit_url = self.base_url });
         return openai.parseEmbedResponse(alloc, response);
     }
 };
 
-fn requestOptions(params: model.GenerateParams) jsonx.RequestOptions {
+fn requestOptions(self: *const Chat, params: model.GenerateParams) jsonx.RequestOptions {
     return .{
         .timeout_ms = params.timeout_ms,
         .cancellation = params.cancellation,
         .on_provider_error = params.on_provider_error,
         .on_provider_error_ctx = params.on_provider_error_ctx,
+        .rate_limit = self.rate_limit,
+        .rate_limit_url = self.base_url,
     };
 }
 

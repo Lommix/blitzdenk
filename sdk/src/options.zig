@@ -25,6 +25,26 @@ pub const CancellationToken = struct {
     }
 };
 
+pub fn sleepCancellable(io: std.Io, duration_ms: u64, cancellation: ?*CancellationToken) !void {
+    const token = cancellation orelse {
+        std.Io.sleep(io, .fromMilliseconds(@intCast(duration_ms)), .awake) catch {};
+        return;
+    };
+    if (token.isCancelled()) return error.Canceled;
+    var remaining: u64 = duration_ms;
+    while (remaining > 0) {
+        const chunk: u64 = @min(remaining, 100);
+        const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(@intCast(chunk)), .clock = .awake } };
+        if (token.event.waitTimeout(io, timeout)) {
+            return error.Canceled;
+        } else |err| switch (err) {
+            error.Timeout => {},
+            error.Canceled => return error.Canceled,
+        }
+        remaining -= chunk;
+    }
+}
+
 pub const ToolChoice = union(enum) {
     auto,
     none,

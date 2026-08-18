@@ -152,7 +152,7 @@ fn awaitChildResult(
     while (true) {
         const state = ctx.base.registry.state(child_id) orelse return childGone(call);
         if (state != .active and state != .reserved) break;
-        _ = ctx.base.registry.wait(child_id) catch return bail(ctx, call, child_id, "canceled");
+        if (waitForChild(ctx, child_id)) break;
         if (ctx.isCanceled()) return bail(ctx, call, child_id, "canceled");
     }
 
@@ -164,6 +164,20 @@ fn awaitChildResult(
     if (despawn) releaseChild(ctx, child_id);
 
     return .{ .content = owned, .is_error = is_err };
+}
+
+fn waitForChild(ctx: r.ToolContext, child_id: r.r.AgentId) bool {
+    const registry = ctx.base.registry;
+    const token = ctx.cancellation() orelse {
+        _ = registry.wait(child_id) catch return true;
+        return false;
+    };
+    while (true) {
+        const state = registry.state(child_id) orelse return true;
+        if (state != .active and state != .reserved) return true;
+        if (token.isCancelled()) return false;
+        std.Io.sleep(ctx.io, .fromMilliseconds(100), .awake) catch return false;
+    }
 }
 
 fn extractChildResult(registry: *r.r.agent_registry.Registry, child_id: r.r.AgentId) []const u8 {

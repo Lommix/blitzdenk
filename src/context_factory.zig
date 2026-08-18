@@ -206,6 +206,7 @@ pub fn buildAgentApiConfig(
             .model = model.getName(),
             .provider = provider.provider_config,
             .reasoning_effort = ag_cfg.effort,
+            .rate_limit = provider.rate_limit,
         } };
     }
 

@@ -3,6 +3,7 @@ const model = @import("../model.zig");
 const types = @import("../types.zig");
 const errors = @import("../errors.zig");
 const opts_mod = @import("../options.zig");
+const rate_limiter = @import("../rate_limit.zig");
 
 pub fn logDroppedToolCall(comptime scope: type, id: []const u8, name: []const u8, input: []const u8) void {
     const reason = if (id.len == 0) "missing id" else if (name.len == 0) "missing name" else "arguments are not a JSON object";
@@ -309,6 +310,8 @@ pub const RequestOptions = struct {
     cancellation: ?*opts_mod.CancellationToken = null,
     on_provider_error: ?*const fn (ctx: ?*anyopaque, info: opts_mod.ProviderErrorInfo) void = null,
     on_provider_error_ctx: ?*anyopaque = null,
+    rate_limit: u32 = 0,
+    rate_limit_url: []const u8 = "",
 };
 
 pub fn postWithRetry(
@@ -321,6 +324,7 @@ pub fn postWithRetry(
     max_retries: u32,
     options: RequestOptions,
 ) ![]u8 {
+    try rate_limiter.acquire(io, options.rate_limit_url, options.rate_limit, options.cancellation);
     var attempt: u32 = 0;
     while (true) {
         if (options.cancellation) |token| try token.check();
@@ -350,6 +354,7 @@ pub fn postSseWithRetry(
     event_ctx: ?*anyopaque,
     on_event: *const fn (?*anyopaque, []const u8) anyerror!void,
 ) ![]u8 {
+    try rate_limiter.acquire(io, options.rate_limit_url, options.rate_limit, options.cancellation);
     var attempt: u32 = 0;
     while (true) {
         if (options.cancellation) |token| try token.check();
@@ -370,28 +375,7 @@ pub fn postSseWithRetry(
 fn sleepBackoff(io: std.Io, attempt: u32, retry_after_ms: ?u64, cancellation: ?*opts_mod.CancellationToken) !void {
     const base_ms: u64 = 2000 * (@as(u64, 1) << @intCast(@min(attempt, 5)));
     const capped = @min(retry_after_ms orelse base_ms, 60_000);
-    const token = cancellation orelse {
-        std.Io.sleep(io, .fromMilliseconds(@intCast(capped)), .awake) catch {};
-        return;
-    };
-    const Selection = union(enum) { elapsed: void, canceled: void };
-    var buffer: [2]Selection = undefined;
-    var select = std.Io.Select(Selection).init(io, &buffer);
-    var done = std.atomic.Value(bool).init(false);
-    select.async(.elapsed, backoffTask, .{ io, capped, &done });
-    select.async(.canceled, opts_mod.CancellationToken.waitUntilDone, .{ token, &done, io });
-    switch (try select.await()) {
-        .elapsed => select.cancelDiscard(),
-        .canceled => {
-            select.cancelDiscard();
-            return error.Canceled;
-        },
-    }
-}
-
-fn backoffTask(io: std.Io, duration_ms: u64, done: *std.atomic.Value(bool)) void {
-    defer done.store(true, .release);
-    std.Io.sleep(io, .fromMilliseconds(@intCast(duration_ms)), .awake) catch {};
+    try opts_mod.sleepCancellable(io, capped, cancellation);
 }
 
 fn isRetryableStatus(status: std.http.Status) bool {

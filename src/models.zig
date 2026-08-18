@@ -73,6 +73,7 @@ pub const Config = struct {
     model: []const u8,
     base_url: []const u8,
     reasoning_effort: ?ReasoningEffort = null,
+    rate_limit: u32 = 0,
     provider: ProviderOptions,
 };
 
@@ -87,18 +88,22 @@ pub const Model = union(Kind) {
             .ollama => .{ .ollama = try sdk.compat.Chat.init(alloc, config.model, .{
                 .api_key = config.api_key,
                 .base_url = config.base_url,
+                .rate_limit = config.rate_limit,
             }) },
             .openai => .{ .openai = try sdk.openai.Chat.init(alloc, config.model, .{
                 .api_key = config.api_key,
                 .base_url = config.base_url,
+                .rate_limit = config.rate_limit,
             }) },
             .response => .{ .response = try sdk.responses.Chat.init(alloc, config.model, .{
                 .api_key = config.api_key,
                 .base_url = config.base_url,
+                .rate_limit = config.rate_limit,
             }) },
             .anthropic => .{ .anthropic = try sdk.anthropic.Chat.init(alloc, config.model, .{
                 .api_key = config.api_key,
                 .base_url = config.base_url,
+                .rate_limit = config.rate_limit,
             }) },
         };
     }
@@ -115,21 +120,25 @@ pub const Model = union(Kind) {
                 .api_key = chat.api_key,
                 .base_url = chat.base_url,
                 .headers = chat.extra_headers,
+                .rate_limit = chat.rate_limit,
             }) },
             .openai => |chat| .{ .openai = try sdk.openai.Chat.init(alloc, chat.model_id, .{
                 .api_key = chat.api_key,
                 .base_url = chat.base_url,
                 .headers = chat.extra_headers,
+                .rate_limit = chat.rate_limit,
             }) },
             .response => |chat| .{ .response = try sdk.responses.Chat.init(alloc, chat.model_id, .{
                 .api_key = chat.api_key,
                 .base_url = chat.base_url,
                 .headers = chat.extra_headers,
+                .rate_limit = chat.rate_limit,
             }) },
             .anthropic => |chat| .{ .anthropic = try sdk.anthropic.Chat.init(alloc, chat.model_id, .{
                 .api_key = chat.api_key,
                 .base_url = chat.base_url,
                 .headers = chat.extra_headers,
+                .rate_limit = chat.rate_limit,
             }) },
         };
     }
