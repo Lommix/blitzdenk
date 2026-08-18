@@ -20,6 +20,7 @@ pub const CmdSlot = struct {
     stderr: std.ArrayList(u8) = .empty,
     result_ty: CmdResult.ResType = .failed,
     exit_code: ?u8 = null,
+    signal: ?u32 = null,
 };
 
 pub const CmdResult = struct {
@@ -31,6 +32,7 @@ pub const CmdResult = struct {
     /// Callers that assign meaning to a specific exit code must inspect this
     /// instead of relying on the coarser `ty` field.
     exit_code: ?u8 = null,
+    signal: ?u32 = null,
 
     pub fn toOwned(self: *const CmdResult, alloc: std.mem.Allocator) ![]const u8 {
         var response = try alloc.alloc(u8, self.stderr.len + self.stdout.len);
@@ -208,6 +210,7 @@ pub const CmdPool = struct {
         slot.done.store(false, .release);
         slot.result_ty = .failed;
         slot.exit_code = null;
+        slot.signal = null;
 
         const final_argv = try self.maybeWrapSsh(opts.argv, opts.force_local);
         errdefer self.freeArgv(final_argv);
@@ -328,6 +331,25 @@ pub const CmdPool = struct {
         }
     }
 
+    /// Cancels a running worker and returns its partial output. Buffers are
+    /// stable before reading: the worker is joined (cancelled first when
+    /// still running) before duping.
+    pub fn killAndCollect(self: *Self, handle: Handle) !CmdResult {
+        const slot = &self.slots[@intFromEnum(handle)];
+        const timed_out = !slot.done.load(.acquire);
+        errdefer self.release(handle);
+        if (timed_out) slot.future.cancel(self.io) catch {};
+        slot.future.await(self.io) catch {};
+        const out = try self.alloc.dupe(u8, slot.stdout.items);
+        errdefer self.alloc.free(out);
+        const err = try self.alloc.dupe(u8, slot.stderr.items);
+        const ty = if (timed_out) CmdResult.ResType.timeout else slot.result_ty;
+        const exit_code = slot.exit_code;
+        const signal = slot.signal;
+        self.release(handle);
+        return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code, .signal = signal };
+    }
+
     // -----------------
 
     fn workerFn(
@@ -361,6 +383,7 @@ pub const CmdPool = struct {
         }) catch {
             slot.result_ty = .failed;
             slot.exit_code = null;
+            slot.signal = null;
             return;
         };
         defer if (child.id != null) {
@@ -392,6 +415,7 @@ pub const CmdPool = struct {
             else => {
                 slot.result_ty = .failed;
                 slot.exit_code = null;
+                slot.signal = null;
                 return;
             },
         };
@@ -403,6 +427,11 @@ pub const CmdPool = struct {
             .exited => |code| {
                 slot.exit_code = code;
                 slot.result_ty = if (code == 0) .success else .failed;
+            },
+            .signal => |sig| {
+                slot.signal = @intFromEnum(sig);
+                slot.exit_code = null;
+                slot.result_ty = .failed;
             },
             else => {
                 slot.exit_code = null;
@@ -527,20 +556,12 @@ pub const CmdPool = struct {
     pub fn runAndWait(self: *Self, opts: RunOpts) !CmdResult {
         const handle = try self.runWithOpts(opts);
         const slot = &self.slots[@intFromEnum(handle)];
-        // Wait for worker completion.
         slot.future.await(self.io) catch {};
-        const out = try self.alloc.dupe(u8, slot.stdout.items);
-        errdefer self.alloc.free(out);
-        const err = try self.alloc.dupe(u8, slot.stderr.items);
-        const ty = slot.result_ty;
-        const exit_code = slot.exit_code;
-        self.release(handle);
-        return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code };
+        return self.killAndCollect(handle);
     }
 
     /// Run synchronously with a wall-clock deadline. On timeout, cancels the
-    /// worker, kills the child via worker cleanup, and returns `.timeout`.
-    /// Caller frees stdout/stderr.
+    /// worker and returns its partial output with `.timeout`.
     pub fn runAndWaitTimeout(self: *Self, opts: RunOpts, timeout_ms: i64) !CmdResult {
         const handle = try self.runWithOpts(opts);
         const slot = &self.slots[@intFromEnum(handle)];
@@ -548,22 +569,11 @@ pub const CmdPool = struct {
 
         while (true) {
             if (slot.done.load(.acquire)) {
-                slot.future.await(self.io) catch {};
-                const out = try self.alloc.dupe(u8, slot.stdout.items);
-                errdefer self.alloc.free(out);
-                const err = try self.alloc.dupe(u8, slot.stderr.items);
-                const ty = slot.result_ty;
-                const exit_code = slot.exit_code;
-                self.release(handle);
-                return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code };
+                return self.killAndCollect(handle);
             }
 
             if (nowMs(self.io) - start_ms > timeout_ms) {
-                const out = try self.alloc.dupe(u8, "");
-                errdefer self.alloc.free(out);
-                const err = try self.alloc.dupe(u8, "");
-                self.cancel(handle);
-                return .{ .stdout = out, .stderr = err, .ty = .timeout };
+                return self.killAndCollect(handle);
             }
 
             std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(25), .real) catch {
@@ -587,7 +597,7 @@ test "runAndWaitTimeout cancels long-running command and releases slot" {
     defer pool.deinit();
 
     const res = try pool.runAndWaitTimeout(.{
-        .argv = &.{ "/bin/sh", "-c", "sleep 1" },
+        .argv = &.{ "/bin/sh", "-c", "printf 'partial-output'; sleep 1" },
         .force_local = true,
     }, 50);
     defer pool.alloc.free(res.stdout);
@@ -595,9 +605,29 @@ test "runAndWaitTimeout cancels long-running command and releases slot" {
 
     try testing.expectEqual(CmdResult.ResType.timeout, res.ty);
     try testing.expectEqual(@as(?u8, null), res.exit_code);
-    try testing.expectEqual(@as(usize, 0), res.stdout.len);
+    try testing.expect(res.stdout.len > 0);
     try testing.expectEqual(@as(usize, 0), res.stderr.len);
     try testing.expectEqual(false, pool.slots[0].in_use.load(.acquire));
+}
+
+test "runAndWait captures signal kill" {
+    const testing = std.testing;
+
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
+    var pool = CmdPool.init(testing.allocator, testing.io, &env);
+    defer pool.deinit();
+
+    const res = try pool.runAndWait(.{
+        .argv = &.{ "/bin/sh", "-c", "kill -KILL $$" },
+        .force_local = true,
+    });
+    defer pool.alloc.free(res.stdout);
+    defer pool.alloc.free(res.stderr);
+
+    try testing.expectEqual(CmdResult.ResType.failed, res.ty);
+    try testing.expectEqual(@as(?u8, null), res.exit_code);
+    try testing.expectEqual(@as(?u32, @intFromEnum(std.posix.SIG.KILL)), res.signal);
 }
 
 test "runAndWait drains output while writing large stdin" {
