@@ -14,7 +14,7 @@ pub const BashTool = r.Tool{
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Bash command to execute"},
         \\  "description": {"type": "string", "description": "Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples: \"ls\" → \"List files in current directory\"; \"git status\" → \"Show working tree status\"; \"npm install\" → \"Install package dependencies\""},
-        \\  "timeout": {"type": "number", "description": "Timeout in seconds (optional, no default timeout)"}
+        \\  "timeout": {"type": "number", "description": "Timeout in seconds (default 60s)"}
         \\}, "required": ["command", "description"]}
         ,
     },
@@ -45,7 +45,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         args.command;
 
     const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    var sgr_buf: [255]u8 = undefined;
+    var sgr_buf: [128]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&sgr_buf);
 
     w.styled(.{ .modifier = .{ .bold = true } }, "bash ");
@@ -77,7 +77,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     // Foreground with deadline race.
     const timeout_ms: i64 = blk: {
-        const t = args.timeout orelse break :blk std.math.maxInt(i64);
+        const t = args.timeout orelse break :blk 60;
         if (!std.math.isFinite(t) or t <= 0)
             return r.errResult(call, "timeout must be a positive number of seconds");
         break :blk timeoutToMs(t);
