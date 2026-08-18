@@ -120,6 +120,7 @@
 ---@field cwd string
 ---@field agent_id BlitzAgentId
 ---@field state table
+---Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines.
 ---@field set_status fun(msg: string)
 ---@field set_child_id fun(agent_id: BlitzAgentId)
 ---@field approve fun(tool_name: string, tool_arguments: string): integer, string|nil

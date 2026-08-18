@@ -20,71 +20,19 @@ pub const start = @import("start.zig");
 
 pub const MAX_DISPLAY_BYTES = 32 * 1024;
 pub const MAX_DISPLAY_LINES = 1000;
-
-pub fn fmtSpan(ctx: *ToolContext, comptime fmt: []const u8, args: anytype, style: tui.Style) r.tui.Span {
-    const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    return .{
-        .content = std.fmt.allocPrint(app.sessionAlloc(), fmt, args) catch "",
-        .style = style,
-    };
-}
+pub const STATUS_BUF: usize = 1024;
 
 pub fn setToolStatusPrint(ctx: ToolContext, call: ToolCall, comptime fmt: []const u8, args: anytype) void {
     const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    const alloc = app.sessionAlloc();
-
-    const txt = std.fmt.allocPrint(alloc, fmt, args) catch return;
-    const count = std.mem.count(u8, txt, "\n") + 1;
-
-    // TODO: this does not need to be allocated
-    const spans = alloc.alloc(r.tui.Span, count) catch return;
-    const lines = alloc.alloc(r.app.ToolStatusLineInput, count) catch return;
-
-    var it = std.mem.splitScalar(u8, txt, '\n');
-    var i: usize = 0;
-    while (it.next()) |text| : (i += 1) {
-        spans[i] = .{ .content = text };
-        lines[i] = .{ .spans = spans[i .. i + 1] };
-    }
-    app.setToolStatus(ctx.base.self_id, call.id, lines) catch return;
+    var buf: [STATUS_BUF]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    w.print(fmt, args) catch {};
+    app.setToolStatus(ctx.base.self_id, call.id, w.buffered()) catch return;
 }
 
-pub fn setToolStatusSpan(
-    ctx: ToolContext,
-    call: ToolCall,
-    span: r.tui.Span,
-) !void {
-    try setToolStatusParagraph(ctx, call, &.{&.{span}});
-}
-
-pub fn setToolStatusSpans(
-    ctx: ToolContext,
-    call: ToolCall,
-    spans: []const r.tui.Span,
-) !void {
-    try setToolStatusParagraph(ctx, call, &.{spans});
-}
-
-pub fn setToolStatusLine(ctx: ToolContext, call: ToolCall, line: r.tui.Line) !void {
-    try setToolStatusLines(ctx, call, &.{line});
-}
-
-pub fn setToolStatusLines(ctx: ToolContext, call: ToolCall, lines: []const r.tui.Line) !void {
-    const inputs = try ctx.alloc.alloc(r.app.ToolStatusLineInput, lines.len);
-    for (lines, 0..) |line, i| inputs[i] = .{ .spans = line.spans.items, .style = line.style };
+pub fn setToolStatus(ctx: ToolContext, call: ToolCall, text: []const u8) !void {
     const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    try app.setToolStatus(ctx.base.self_id, call.id, inputs);
-}
-
-pub fn setToolStatusParagraph(
-    ctx: ToolContext,
-    call: ToolCall,
-    lines: []const []const r.tui.Span,
-) !void {
-    const inputs = try ctx.alloc.alloc(r.app.ToolStatusLineInput, lines.len);
-    for (lines, 0..) |spans, i| inputs[i] = .{ .spans = spans };
-    const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    try app.setToolStatus(ctx.base.self_id, call.id, inputs);
+    try app.setToolStatus(ctx.base.self_id, call.id, text);
 }
 
 pub fn setToolChild(ctx: ToolContext, call: ToolCall, child_id: r.AgentId) void {

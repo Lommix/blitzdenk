@@ -270,10 +270,12 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     }, timeout_ms) catch |err| switch (err) {
         error.Timeout => {
             const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-            r.setToolStatusParagraph(ctx, call, &.{
-                &.{.{ .content = cleaned_command_str[0..@min(cleaned_command_str.len, 248)] }},
-                &.{.{ .content = "Timeout reached!", .style = .{ .fg = app.theme.err } }},
-            }) catch {};
+            var status_buf: [r.STATUS_BUF]u8 = undefined;
+            var w = r.tui.AnsiWriter.init(&status_buf);
+            w.writeAll(cleaned_command_str[0..@min(cleaned_command_str.len, 248)]);
+            w.writeAll("\n");
+            w.styled(.{ .fg = app.theme.err }, "Timeout reached!");
+            r.setToolStatus(ctx, call, w.finish()) catch {};
             return r.errResult(call,
                 \\!Command Timeout reached! Process killed.
             );

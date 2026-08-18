@@ -77,22 +77,20 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, "failed to resolve path");
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    var read_info: []const u8 = rel_path;
-
+    var status_buf: [r.STATUS_BUF]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&status_buf);
+    w.styled(.{ .modifier = .{ .bold = true } }, "read ");
     if (args.limit) |l| {
-        if (args.offset) |o| {
-            read_info = std.fmt.allocPrint(app.sessionAlloc(), "{s} offset: {d} limit: {d}", .{ rel_path, o, l }) catch "";
-        } else {
-            read_info = std.fmt.allocPrint(app.sessionAlloc(), "{s} limit: {d}", .{ rel_path, l }) catch "";
-        }
+        if (args.offset) |o|
+            w.styledPrint(.{ .fg = app.theme.muted }, "{s} offset: {d} limit: {d}", .{ rel_path, o, l })
+        else
+            w.styledPrint(.{ .fg = app.theme.muted }, "{s} limit: {d}", .{ rel_path, l });
     } else if (args.offset) |o| {
-        read_info = std.fmt.allocPrint(app.sessionAlloc(), "{s} offset: {d}", .{ rel_path, o }) catch "";
+        w.styledPrint(.{ .fg = app.theme.muted }, "{s} offset: {d}", .{ rel_path, o });
+    } else {
+        w.styled(.{ .fg = app.theme.muted }, rel_path);
     }
-
-    r.setToolStatusSpans(ctx, call, &.{
-        .{ .content = "read ", .style = .{ .modifier = .{ .bold = true } } },
-        .{ .content = read_info, .style = .{ .fg = app.theme.muted } },
-    }) catch {};
+    r.setToolStatus(ctx, call, w.finish()) catch {};
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
@@ -130,10 +128,11 @@ fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         args.path;
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    r.setToolStatusSpans(ctx, call, &.{
-        .{ .content = "view image ", .style = .{ .modifier = .{ .bold = true } } },
-        .{ .content = display_path, .style = .{ .fg = app.theme.muted } },
-    }) catch {};
+    var status_buf: [r.STATUS_BUF]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&status_buf);
+    w.styled(.{ .modifier = .{ .bold = true } }, "view image ");
+    w.styled(.{ .fg = app.theme.muted }, display_path);
+    r.setToolStatus(ctx, call, w.finish()) catch {};
 
     const raw = if (is_url)
         loadRemoteImage(ctx, args.path) catch |err| return r.errResult(call, imageLoadError(err, true))

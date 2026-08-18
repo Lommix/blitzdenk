@@ -216,11 +216,6 @@ const ToolStatusEntry = struct {
     is_error: ?bool = null,
 };
 
-pub const ToolStatusLineInput = struct {
-    spans: []const r.tui.Span,
-    style: r.tui.Style = .{},
-};
-
 const ToolStatusAgent = struct {
     generation: u16 = 0,
     entries: std.array_hash_map.String(ToolStatusEntry) = .empty,
@@ -416,12 +411,11 @@ pub const App = struct {
         return self.arena_session.allocator();
     }
 
-    // TODO: refactor
     pub fn setToolStatus(
         self: *App,
         agent_id: r.AgentId,
         call_id: []const u8,
-        lines: []const ToolStatusLineInput,
+        text: []const u8,
     ) !void {
         if (agent_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
         const g = self.tool_status_entries.lock(self.io);
@@ -442,10 +436,11 @@ pub const App = struct {
             res.value_ptr.lines.clearRetainingCapacity();
         }
 
-        for (lines) |input| {
-            var line = r.tui.Line{ .style = input.style };
-            for (input.spans) |span| try line.pushSpan(alloc, span);
-            try res.value_ptr.lines.append(alloc, line);
+        var parsed = try r.tui.Text.fromAnsi(alloc, text);
+        defer parsed.deinit(alloc);
+        for (parsed.lines.items) |*line| {
+            try res.value_ptr.lines.append(alloc, line.*);
+            line.* = .{};
         }
     }
 

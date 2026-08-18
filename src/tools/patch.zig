@@ -139,14 +139,19 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     defer abs_paths.deinit(alloc);
 
     var applied: usize = 0;
+
+    var status_buf: [r.STATUS_BUF]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&status_buf);
+
+    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    w.styled(.{ .modifier = .{ .bold = true } }, "patch ");
+
     for (patch.commands, 0..) |cmd, ci| {
         if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
         const cmd_path = commandPath(cmd);
         const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, cmd_path }) catch
             return r.errResult(call, "failed to resolve path");
-
-        r.setToolStatusPrint(ctx, call, "patch {s}", .{cmd_path});
 
         if (cmd == .file_add) {
             const exists = fileExistsViaExec(ctx, resolved) catch false;
@@ -202,7 +207,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         const abs_cmd = withResolvedPath(alloc, ctx.base.cwd, cmd, resolved) catch
             return r.errResult(call, "failed to resolve path");
 
-        r.setToolStatusPrint(ctx, call, "patch {s}", .{commandPath(cmd)});
+        w.styled(.{ .fg = app.theme.muted }, commandPath(cmd));
 
         var diag: ApplyDiagnostics = .{};
         executeCommand(ctx, abs_cmd, &diag) catch |err| {
@@ -218,6 +223,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         r.markConfigTouched(ctx, resolved);
         applied += 1;
     }
+
+    r.setToolStatus(ctx, call, w.finish()) catch {};
 
     const msg = std.fmt.allocPrint(alloc, "patch applied: {d} command(s)", .{applied}) catch
         "patch applied";

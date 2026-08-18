@@ -286,10 +286,139 @@ pub const Line = struct {
     }
 };
 
+fn basicColor(n: u8) cell.Color {
+    return switch (n) {
+        0 => .black,
+        1 => .red,
+        2 => .green,
+        3 => .yellow,
+        4 => .blue,
+        5 => .magenta,
+        6 => .cyan,
+        7 => .white,
+        8 => .bright_black,
+        9 => .bright_red,
+        10 => .bright_green,
+        11 => .bright_yellow,
+        12 => .bright_blue,
+        13 => .bright_magenta,
+        14 => .bright_cyan,
+        15 => .bright_white,
+        else => .reset,
+    };
+}
+
+fn applySgr(style: *Style, params: []const u8) void {
+    var it = std.mem.splitScalar(u8, params, ';');
+    while (it.next()) |p| {
+        if (p.len == 0) {
+            style.* = .{};
+            continue;
+        }
+        const code = std.fmt.parseInt(u16, p, 10) catch continue;
+        switch (code) {
+            0 => style.* = .{},
+            1 => style.modifier.bold = true,
+            2 => style.modifier.dim = true,
+            3 => style.modifier.italic = true,
+            4 => style.modifier.underline = true,
+            7 => style.modifier.reverse = true,
+            9 => style.modifier.strikethrough = true,
+            22 => {
+                style.modifier.bold = false;
+                style.modifier.dim = false;
+            },
+            23 => style.modifier.italic = false,
+            24 => style.modifier.underline = false,
+            27 => style.modifier.reverse = false,
+            29 => style.modifier.strikethrough = false,
+            39 => style.fg = .reset,
+            49 => style.bg = .reset,
+            30...37 => style.fg = basicColor(@intCast(code - 30)),
+            40...47 => style.bg = basicColor(@intCast(code - 40)),
+            90...97 => style.fg = basicColor(@intCast(code - 90 + 8)),
+            100...107 => style.bg = basicColor(@intCast(code - 100 + 8)),
+            38, 48 => {
+                const is_fg = code == 38;
+                const mode = std.fmt.parseInt(u8, it.next() orelse continue, 10) catch continue;
+                if (mode == 5) {
+                    const n = std.fmt.parseInt(u8, it.next() orelse continue, 10) catch continue;
+                    if (is_fg) style.fg = .{ .indexed = n } else style.bg = .{ .indexed = n };
+                } else if (mode == 2) {
+                    const r = std.fmt.parseInt(u8, it.next() orelse continue, 10) catch continue;
+                    const g = std.fmt.parseInt(u8, it.next() orelse continue, 10) catch continue;
+                    const b = std.fmt.parseInt(u8, it.next() orelse continue, 10) catch continue;
+                    const rgb = cell.Color{ .rgb = .{ .r = r, .g = g, .b = b } };
+                    if (is_fg) style.fg = rgb else style.bg = rgb;
+                }
+            },
+            else => {},
+        }
+    }
+}
+
 /// A block of styled lines. Mutable builder.
 pub const Text = struct {
     lines: std.ArrayList(Line) = .empty,
     style: Style = .{},
+
+    /// Parse ANSI SGR escapes and newlines into styled lines. Style carries across newlines. Content is copied.
+    pub fn fromAnsi(alloc: std.mem.Allocator, text: []const u8) !Text {
+        var out = Text{};
+        var line = Line{};
+        errdefer {
+            line.deinit(alloc);
+            out.deinit(alloc);
+        }
+
+        var style: Style = .{};
+        var i: usize = 0;
+        while (i < text.len) {
+            const c = text[i];
+            if (c == '\n') {
+                if (line.spans.items.len > 0) {
+                    try out.lines.append(alloc, line);
+                    line = .{};
+                }
+                i += 1;
+                continue;
+            }
+            if (c == 0x1b) {
+                if (i + 1 < text.len and text[i + 1] == '[') {
+                    const line_end = std.mem.indexOfAnyPos(u8, text, i + 2, "\x1b\n") orelse text.len;
+                    const end = std.mem.indexOfScalarPos(u8, text, i + 2, 'm') orelse line_end;
+                    if (end < line_end) {
+                        applySgr(&style, text[i + 2 .. end]);
+                        i = end + 1;
+                        continue;
+                    }
+                    var j = i + 2;
+                    while (j < line_end and text[j] >= 0x30 and text[j] <= 0x3f) : (j += 1) {}
+                    if (j < line_end) j += 1;
+                    i = j;
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            const esc = std.mem.indexOfScalarPos(u8, text, i, 0x1b) orelse text.len;
+            const nl = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+            const stop = @min(esc, nl);
+            if (stop > i) {
+                const content = try alloc.dupe(u8, text[i..stop]);
+                errdefer alloc.free(content);
+                try line.spans.append(alloc, .{ .content = content, .style = style, .owned = true });
+            }
+            i = stop;
+        }
+
+        if (line.spans.items.len > 0) {
+            try out.lines.append(alloc, line);
+        } else {
+            line.deinit(alloc);
+        }
+        return out;
+    }
 
     pub fn deinit(self: *Text, alloc: std.mem.Allocator) void {
         for (self.lines.items) |*line| line.deinit(alloc);
@@ -298,12 +427,6 @@ pub const Text = struct {
 
     pub fn pushLine(self: *Text, alloc: std.mem.Allocator, line: Line) !void {
         try self.lines.append(alloc, line);
-    }
-
-    /// Append a span to the last line. Creates a new line if empty.
-    pub fn pushSpan(self: *Text, alloc: std.mem.Allocator, span: Span) !void {
-        if (self.lines.items.len == 0) try self.lines.append(alloc, .{});
-        try self.lines.items[self.lines.items.len - 1].pushSpan(alloc, span);
     }
 
     pub fn render(self: *const Text, area: Rect, buf: *Buffer) void {
@@ -463,6 +586,76 @@ test "wrapLine basic word wrap" {
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
     // "hello world" — 11 cols exactly
     // "foo bar baz"
+}
+
+test "Text.fromAnsi parses SGR escapes" {
+    const alloc = std.testing.allocator;
+    var text = try Text.fromAnsi(alloc, "\x1b[1mread \x1b[0m\x1b[2mpath\x1b[0m");
+    defer text.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), text.lines.items.len);
+    const spans = text.lines.items[0].spans.items;
+    try std.testing.expectEqual(@as(usize, 2), spans.len);
+    try std.testing.expectEqualStrings("read ", spans[0].content);
+    try std.testing.expect(spans[0].style.modifier.bold);
+    try std.testing.expectEqualStrings("path", spans[1].content);
+    try std.testing.expect(spans[1].style.modifier.dim);
+}
+
+test "Text.fromAnsi parses truecolor and drops unknown codes" {
+    const alloc = std.testing.allocator;
+    var text = try Text.fromAnsi(alloc, "\x1b[38;2;255;0;128mhi\x1b[99m\x1b[1m!");
+    defer text.deinit(alloc);
+    const spans = text.lines.items[0].spans.items;
+    try std.testing.expectEqual(@as(usize, 2), spans.len);
+    try std.testing.expectEqualStrings("hi", spans[0].content);
+    try std.testing.expectEqualDeep(cell.Color{ .rgb = .{ .r = 255, .g = 0, .b = 128 } }, spans[0].style.fg);
+    try std.testing.expectEqualStrings("!", spans[1].content);
+    try std.testing.expect(spans[1].style.modifier.bold);
+    try std.testing.expect(!spans[1].style.modifier.dim);
+}
+
+test "Text.fromAnsi carries style across newlines" {
+    const alloc = std.testing.allocator;
+    var text = try Text.fromAnsi(alloc, "\x1b[31mred\nstill red");
+    defer text.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 2), text.lines.items.len);
+    try std.testing.expectEqualStrings("red", text.lines.items[0].spans.items[0].content);
+    try std.testing.expectEqualDeep(cell.Color.red, text.lines.items[0].spans.items[0].style.fg);
+    try std.testing.expectEqualStrings("still red", text.lines.items[1].spans.items[0].content);
+    try std.testing.expectEqualDeep(cell.Color.red, text.lines.items[1].spans.items[0].style.fg);
+}
+
+test "Text.fromAnsi resets on bare ESC[m and skips lone ESC" {
+    const alloc = std.testing.allocator;
+    var text = try Text.fromAnsi(alloc, "\x1b[1mbold\x1b[mplain\x1b");
+    defer text.deinit(alloc);
+    const spans = text.lines.items[0].spans.items;
+    try std.testing.expectEqual(@as(usize, 2), spans.len);
+    try std.testing.expectEqualStrings("bold", spans[0].content);
+    try std.testing.expect(spans[0].style.modifier.bold);
+    try std.testing.expectEqualStrings("plain", spans[1].content);
+    try std.testing.expect(!spans[1].style.modifier.bold);
+}
+
+test "Text.fromAnsi skips truncated escape and does not consume the next escape" {
+    const alloc = std.testing.allocator;
+    var text = try Text.fromAnsi(alloc, "\x1b[3\n\x1b[31mTimeout reached!");
+    defer text.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), text.lines.items.len);
+    const spans = text.lines.items[0].spans.items;
+    try std.testing.expectEqual(@as(usize, 1), spans.len);
+    try std.testing.expectEqualStrings("Timeout reached!", spans[0].content);
+    try std.testing.expectEqualDeep(cell.Color.red, spans[0].style.fg);
+}
+
+test "Text.fromAnsi drops truncated escape at end of text" {
+    const alloc = std.testing.allocator;
+    var text = try Text.fromAnsi(alloc, "abc\x1b[31");
+    defer text.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), text.lines.items.len);
+    const spans = text.lines.items[0].spans.items;
+    try std.testing.expectEqual(@as(usize, 1), spans.len);
+    try std.testing.expectEqualStrings("abc", spans[0].content);
 }
 
 test "wrapLine preserves per-span styles" {

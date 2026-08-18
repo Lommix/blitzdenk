@@ -184,7 +184,7 @@ const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "cwd", .ty = LuaType.string },
     .{ .name = "agent_id", .ty = AgentIdDef },
     .{ .name = "state", .ty = LuaType.table },
-    .{ .name = "set_status", .ty = LuaType{ .raw = "fun(msg: string)" } },
+    .{ .name = "set_status", .ty = LuaType{ .raw = "fun(msg: string)" }, .desc = "Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines." },
     .{ .name = "set_child_id", .ty = LuaType{ .raw = "fun(agent_id: BlitzAgentId)" } },
     .{ .name = "approve", .ty = LuaType{ .raw = "fun(tool_name: string, tool_arguments: string): integer, string|nil" } },
     .{ .name = "plan", .ty = LuaType{ .raw = "fun(path: string, plan_text: string): integer, string|nil" } },

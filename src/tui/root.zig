@@ -7,6 +7,7 @@ pub const text_utils = @import("text_utils.zig");
 pub const icon = @import("icon.zig");
 pub const markdown = @import("markdown.zig");
 pub const mermaid = @import("mermaid.zig");
+pub const AnsiWriter = @import("ansi.zig").AnsiWriter;
 pub const MarkdownStreamRenderer = markdown.MarkdownStreamRenderer;
 pub const HighlightTheme = markdown.HighlightTheme;
 pub const wrapLine = widgets.wrapLine;
