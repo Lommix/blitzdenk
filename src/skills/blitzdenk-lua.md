@@ -195,10 +195,24 @@ Event tags on `blitz.events.*`: `SESSION_RESET`, `MODE_CHANGED`, `AGENT_CREATED`
 `AGENT_STARTED`, `AGENT_COMPLETE`, `AGENT_FAILED`, `AGENT_CANCELLED`,
 `COMPACTION_STARTED`, `COMPACTION_COMPLETE`, `TOOL_CALL_STARTED`,
 `TOOL_CALL_COMPLETE`, `AGENT_BROADCAST`, `PERMISSION_REQUESTED`,
-`PERMISSION_RESOLVED`, `USER_MESSAGE_SENT`, `MCP_TOOLS_RELOADED`.
+`PERMISSION_RESOLVED`, `USER_MESSAGE_SENT`, `MCP_TOOLS_RELOADED`, `ON_INJECT`.
 
 Payloads vary: agent events receive an agent id table, `MODE_CHANGED` receives an
 integer, `USER_MESSAGE_SENT` receives a string. Check `meta.lua` for descriptions.
+
+`ON_INJECT` fires for every agent on each step, right before the system reminder
+is built. Return a string to append it to that agent's `<system-reminder>` block:
+
+```lua
+blitz.events.add_listener(blitz.events.ON_INJECT, function(agent_id)
+    if agent_id.index == blitz.get_main_agent().index then
+        return "[CUSTOM] main agent reminder\n"
+    end
+end)
+```
+
+It runs in the main Lua VM with a brief lock, like `status_bar_render`. A nil or
+non-string return is skipped; errors are logged and the step continues.
 
 ## Shared state
 

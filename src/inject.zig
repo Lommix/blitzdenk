@@ -65,6 +65,20 @@ pub const InjectionsHooks = struct {
             try w.flush();
         }
 
+        if (app.lua_inject_hooks_enabled.load(.acquire)) {
+            if (app.registry.idForAgent(agent)) |agent_id| {
+                var hook_w = std.Io.Writer.Allocating.init(alloc);
+                app.lua_vm.emitInjectHooks(&hook_w.writer, agent_id, if (agent.task) |*t| &t.cancellation else null);
+                const hook_res = try hook_w.toOwnedSlice();
+                defer alloc.free(hook_res);
+                if (hook_res.len > 0) {
+                    try w.writeAll(hook_res);
+                    if (hook_res[hook_res.len - 1] != '\n') try w.writeAll("\n");
+                }
+                try w.flush();
+            }
+        }
+
         try w.print("</system-reminder>\n", .{});
         try w.flush();
 

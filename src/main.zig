@@ -343,7 +343,8 @@ pub fn run(
                 config_lua_mtime = new_config_mtime;
 
                 app.lua_vm.clearLastError();
-                app.event_bus.clear(app.gpa);
+                app.event_bus.clear(app.gpa, app.io);
+                app.lua_inject_hooks_enabled.store(false, .release);
                 var lua_reload_failed = false;
 
                 app.lua_vm.reset() catch |err| {

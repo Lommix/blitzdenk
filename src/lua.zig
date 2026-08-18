@@ -1056,6 +1056,7 @@ pub const BlitzEventDef = LuaType{
             .{ .name = "PERMISSION_RESOLVED", .desc = "Emitted when a permission request is resolved.", .ty = LuaType.integer, .value = .{ .integer = 13 } },
             .{ .name = "USER_MESSAGE_SENT", .desc = "Emitted after the user sends a message.", .ty = LuaType.integer, .value = .{ .integer = 14 } },
             .{ .name = "MCP_TOOLS_RELOADED", .desc = "Emitted after MCP tools are reloaded.", .ty = LuaType.integer, .value = .{ .integer = 15 } },
+            .{ .name = "ON_INJECT", .desc = "Emitted when an agent's system reminder is built. Return a string to append it to the injection.", .ty = LuaType.integer, .value = .{ .integer = 16 } },
             .{
                 .name = "add_listener",
                 .desc =
@@ -1068,7 +1069,8 @@ pub const BlitzEventDef = LuaType{
                         fn t(state: *c.lua_State, a: *r.app.App, event: u32, func: LuaFnRef) !void {
                             if (try isToolVm(state)) return;
                             const ev: r.events.AppEventTag = @enumFromInt(event);
-                            a.event_bus.addLuaListener(a.gpa, ev, func.idx) catch {};
+                            a.event_bus.addLuaListener(a.gpa, a.io, ev, func.idx) catch {};
+                            if (ev == .on_inject) a.lua_inject_hooks_enabled.store(true, .release);
                         }
                     }).t, "add_listener"),
                 } },
@@ -1518,6 +1520,10 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                         .reserved, .active => {},
                     }
 
+                    if (vm.main_thread_id != 0 and std.Thread.getCurrentId() != vm.main_thread_id) {
+                        _ = c.luaL_error(state, "cmd.await_agent: cannot be called from the agent thread");
+                        return 0;
+                    }
                     vm.vm_mu.unlock(io);
                     slot.event.wait(io) catch {
                         vm.vm_mu.lockUncancelable(io);
@@ -1708,11 +1714,15 @@ fn pushAny(L: *c.lua_State, value: anytype) void {
                 @compileError("pushAny: unsupported pointer type " ++ @typeName(T));
             }
         },
-        .array => {
-            c.lua_createtable(L, @intCast(value.len), 0);
-            for (value, 0..) |item, i| {
-                pushAny(L, item);
-                c.lua_rawseti(L, -2, @intCast(i + 1));
+        .array => |arr| {
+            if (arr.child == u8) {
+                _ = c.lua_pushlstring(L, &value, value.len);
+            } else {
+                c.lua_createtable(L, @intCast(value.len), 0);
+                for (value, 0..) |item, i| {
+                    pushAny(L, item);
+                    c.lua_rawseti(L, -2, @intCast(i + 1));
+                }
             }
         },
         .@"struct" => |str| {
@@ -2056,6 +2066,7 @@ pub const LuaVm = struct {
     L: *c.lua_State,
     app: ?*app.App = null,
     is_tool_vm: bool = false,
+    main_thread_id: std.Thread.Id = 0,
     cancel_token: ?*r.sdk.CancellationToken = null,
     parent: Allocator,
     arena_state: std.heap.ArenaAllocator,
@@ -2082,6 +2093,7 @@ pub const LuaVm = struct {
         var self: LuaVm = .{
             .L = undefined,
             .is_tool_vm = is_tool_vm,
+            .main_thread_id = if (is_tool_vm) 0 else std.Thread.getCurrentId(),
             .parent = parent,
             .arena_state = std.heap.ArenaAllocator.init(parent),
         };
@@ -2482,6 +2494,51 @@ pub const LuaVm = struct {
         const capped = @min(len, dest.len);
         @memcpy(dest[0..capped], ptr[0..capped]);
         return dest[0..capped];
+    }
+
+    pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, cancel_token: ?*r.sdk.CancellationToken) void {
+        const a = self.app orelse return;
+        self.vm_mu.lockUncancelable(a.io);
+        defer self.vm_mu.unlock(a.io);
+
+        a.event_bus.listner_mu.lockUncancelable(a.io);
+        const listeners = a.event_bus.listner.get(.on_inject) orelse {
+            a.event_bus.listner_mu.unlock(a.io);
+            return;
+        };
+        const snapshot = a.gpa.dupe(r.events.Listner, listeners.items) catch {
+            a.event_bus.listner_mu.unlock(a.io);
+            return;
+        };
+        a.event_bus.listner_mu.unlock(a.io);
+        defer a.gpa.free(snapshot);
+
+        if (cancel_token) |token| {
+            self.cancel_token = token;
+            c.lua_sethook(self.L, &luaCancellationHook, c.LUA_MASKCOUNT, CANCELLATION_HOOK_INTERVAL);
+            defer {
+                c.lua_sethook(self.L, null, 0, 0);
+                self.cancel_token = null;
+            }
+        }
+
+        const L = self.L;
+        for (snapshot) |en| blk: {
+            const top = c.lua_gettop(L);
+            defer c.lua_settop(L, top);
+
+            _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, en.func_ref);
+            pushAgentId(L, agent_id);
+            const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
+            if (status != 0) {
+                self.popError();
+                break :blk;
+            }
+            if (c.lua_type(L, -1) != c.LUA_TSTRING) break :blk;
+            var len: usize = 0;
+            const ptr = c.lua_tolstring(L, -1, &len) orelse break :blk;
+            w.writeAll(ptr[0..len]) catch break :blk;
+        }
     }
 };
 

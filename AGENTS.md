@@ -25,3 +25,4 @@ Important modules:
 ## RULES
 
 - Do not write comments!
+- Keep the user space blitzdenk skill up to date! (`src/skills/blitzdenk-lua.md`)

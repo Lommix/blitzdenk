@@ -26,6 +26,7 @@ pub const AppEvent = union(enum) {
     permission_resolved: struct { call_id: ?[]const u8, state: r.permissions.State },
     user_message_sent: []const u8,
     mcp_tools_reloaded,
+    on_inject: AgentId,
 };
 
 pub const AppEventTag = @typeInfo(AppEvent).@"union".tag_type.?;
@@ -36,6 +37,7 @@ pub const Listner = struct {
 
 pub const EventBus = struct {
     listner: std.AutoHashMapUnmanaged(AppEventTag, std.ArrayList(Listner)) = .{},
+    listner_mu: std.Io.Mutex = .init,
     pub fn emit(self: *const EventBus, app: *r.app.App, event: AppEvent) !void {
         const listners = self.listner.get(event) orelse return;
         for (listners.items) |en| {
@@ -65,7 +67,9 @@ pub const EventBus = struct {
         }
     }
 
-    pub fn addLuaListener(self: *EventBus, alloc: std.mem.Allocator, event_type: AppEventTag, func_ref: c_int) !void {
+    pub fn addLuaListener(self: *EventBus, alloc: std.mem.Allocator, io: std.Io, event_type: AppEventTag, func_ref: c_int) !void {
+        self.listner_mu.lockUncancelable(io);
+        defer self.listner_mu.unlock(io);
         const res = try self.listner.getOrPut(alloc, event_type);
         if (!res.found_existing) {
             res.value_ptr.* = .empty;
@@ -77,7 +81,9 @@ pub const EventBus = struct {
         try res.value_ptr.append(alloc, .{ .func_ref = func_ref });
     }
 
-    pub fn clear(self: *EventBus, alloc: std.mem.Allocator) void {
+    pub fn clear(self: *EventBus, alloc: std.mem.Allocator, io: std.Io) void {
+        self.listner_mu.lockUncancelable(io);
+        defer self.listner_mu.unlock(io);
         var it = self.listner.valueIterator();
         while (it.next()) |list| list.deinit(alloc);
         self.listner.deinit(alloc);

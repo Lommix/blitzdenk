@@ -300,6 +300,7 @@ pub const App = struct {
     lua_status_bar_enabled: bool = false,
     lua_status_bar_cache: [512]u8 = undefined,
     lua_status_bar_cache_len: usize = 0,
+    lua_inject_hooks_enabled: std.atomic.Value(bool) = .init(false),
     mcp_manager: r.mcp.Manager,
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
@@ -353,7 +354,7 @@ pub const App = struct {
         self.injection_hooks.deinit(self.gpa);
         self.permission_queue.value.deinit(self.gpa);
         self.notifications.deinit(self.gpa);
-        self.event_bus.clear(self.gpa);
+        self.event_bus.clear(self.gpa, self.io);
         for (self.history.items) |e| self.gpa.free(e.text);
         self.history.deinit(self.gpa);
         self.context_factory.deinit();

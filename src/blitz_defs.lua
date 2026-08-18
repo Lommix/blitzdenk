@@ -107,6 +107,8 @@
 ---@field USER_MESSAGE_SENT integer
 ---Emitted after MCP tools are reloaded.
 ---@field MCP_TOOLS_RELOADED integer
+---Emitted when an agent's system reminder is built. Return a string to append it to the injection.
+---@field ON_INJECT integer
 ---Bind an event listener.
 ---Example: blitz.events.add_listener(blitz.events.MODE_CHANGED, function(new_mode_id) end)
 ---@field add_listener fun(event: integer, func: function)
