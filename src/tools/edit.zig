@@ -4,6 +4,8 @@ const std = @import("std");
 // 4MB file edit limit
 pub const MAX_EDIT_SIZE: u32 = 1024 * 1024 * 4;
 
+var edit_mutex: std.Io.Mutex = .init;
+
 pub const EditTool = r.Tool{
     .def = .{
         .name = "edit",
@@ -60,6 +62,10 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     if (std.mem.eql(u8, args.old_string, args.new_string)) {
         return r.errResult(call, "No changes to make: old_string and new_string are exactly the same.");
     }
+
+    const lock = &edit_mutex;
+    lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
+    defer lock.unlock(ctx.io);
 
     // Read current content.
     const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } }) catch
