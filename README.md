@@ -16,6 +16,15 @@ Extend in Lua with hot reload. Let the harness code itself.
 - Mermaid diagram render in tui.
 - Lua hot reload. Agents can code tools and debug them at the same time.
 
+## Defaults
+
+The default config comes with some useful commands for quick testing
+
+- `/plan <prompt>`: Plan with the agent - based on grill-me skill
+- `/review <?prompt>`: Launch multiple challenger agents to review what was done.
+- `/team <?prompt>`: Multiagent orchestrator mode
+- `/show <?prompt>`: explain something with mermaid diagrams
+
 ## Install
 
 You can download the pre compiled binaries from [the release page](https://github.com/Lommix/blitzdenk/releases) or build it yourself:
@@ -81,11 +90,12 @@ local openai = blitz.add_provider({
 Then bind a model to each agent
 
 ```lua
-local deepseek = blitz.add_model({
-    name = "deepseek/deepseek-v4-pro",
-    provider = novita,
+local ds_flash = blitz.add_model({
+	name = "deepseek/deepseek-v4-flash-0731",
+	provider = novita,
+	cost = { input = 0.14, output = 0.28, cache = 0.028 },
 })
-blitz.set_model_agent(blitz.AGENT_GENERAL, deepseek, "max")
+blitz.set_model_agent(blitz.AGENT_GENERAL, ds_flash, "max")
 ```
 
 ## Documentation

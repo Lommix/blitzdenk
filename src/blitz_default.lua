@@ -116,7 +116,7 @@ blitz.add_command("/team", function(rem)
 
         explore -> plan -> build -> review -> update -> review -> finalize
 
-        Each review step must be aware of the original intent of the task.
+        Each review step must be aware of the original intent of the task and be performed by 2 challenger agents (regression + edge cases and correctness)
 
         This is the task:
 

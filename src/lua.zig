@@ -1115,7 +1115,9 @@ const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
                     const vm = fromState(state) orelse return pushNilBool(state, false);
-                    const json = luaToJsonAlloc(vm.luaArena(), state, 1) catch return pushNilBool(state, false);
+                    var arena = std.heap.ArenaAllocator.init(vm.parent);
+                    defer arena.deinit();
+                    const json = luaToJsonAlloc(arena.allocator(), state, 1) catch return pushNilBool(state, false);
                     _ = c.lua_pushlstring(state, json.ptr, json.len);
                     c.lua_pushboolean(state, 1);
                     return 2;
@@ -1137,7 +1139,9 @@ const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
                 if (c.lua_type(state, 1) != c.LUA_TSTRING) return pushNilBool(state, false);
                 var len: usize = 0;
                 const ptr = c.lua_tolstring(state, 1, &len) orelse return pushNilBool(state, false);
-                pushJsonValue(vm.luaArena(), state, ptr[0..len]) catch return pushNilBool(state, false);
+                var arena = std.heap.ArenaAllocator.init(vm.parent);
+                defer arena.deinit();
+                pushJsonValue(arena.allocator(), state, ptr[0..len]) catch return pushNilBool(state, false);
                 c.lua_pushboolean(state, 1);
                 return 2;
             }
