@@ -581,14 +581,21 @@ pub const Agent = struct {
         const now: i128 = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
         if (self.stream_started_ns == 0) self.stream_started_ns = now;
         const elapsed = now - self.stream_started_ns;
-        if (elapsed <= 0) return;
+        const min_ns: i128 = std.time.ns_per_s / 50;
+        if (elapsed < min_ns) return;
         const tokens = self.stream_output_bytes / 3;
-        self.tokens_per_second = @floatCast(@as(f64, @floatFromInt(tokens)) * @as(f64, std.time.ns_per_s) / @as(f64, @floatFromInt(elapsed)));
+        const rate: f64 = @as(f64, @floatFromInt(tokens)) * @as(f64, std.time.ns_per_s) / @as(f64, @floatFromInt(elapsed));
+        if (self.tokens_per_second == 0) {
+            self.tokens_per_second = @floatCast(rate);
+        } else {
+            self.tokens_per_second = @floatCast(rate + (self.tokens_per_second - rate) * 0.5);
+        }
     }
 
     fn endStream(self: *Agent) void {
         self.stream_output_bytes = 0;
         self.stream_started_ns = 0;
+        self.tokens_per_second = 0;
     }
 };
 
