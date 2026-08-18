@@ -177,10 +177,28 @@ pub const Registry = struct {
     }
 
     pub fn retry(self: *Registry, id: AgentId, options: sdk.GenerateOptions) !void {
-        if (self.state(id) == .active) return error.RunInProgress;
+        const slot = self.slotFor(id) orelse return error.AgentNotFound;
+        const agent = if (slot.agent) |*value| value else return error.AgentNotFound;
+        if (slot.state.load(.acquire) == .active and (agent.status != .retrying or agent.task != null)) return error.RunInProgress;
         var retry_options = options;
         retry_options.prompt = "";
         try self.run(id, retry_options);
+    }
+
+    pub fn retryDue(self: *Registry) void {
+        for (&self.slots, 0..) |*slot, index| {
+            if (slot.state.load(.acquire) != .active) continue;
+            const agent = if (slot.agent) |*value| value else continue;
+            if (!agent.retryDue()) continue;
+            agent.retryNow() catch |err| {
+                log.warn("auto retry for agent {d} failed: {s}", .{ index, @errorName(err) });
+                agent.last_error = err;
+                agent.status = .failed;
+                slot.state.store(.failed, .release);
+                self.accountUsage(slot);
+                slot.event.set(self.io);
+            };
+        }
     }
 
     pub fn wake(self: *Registry, id: AgentId, options: sdk.GenerateOptions) !void {
@@ -461,4 +479,50 @@ test "registry accepts explicit idle compaction without runnable history" {
     try std.testing.expect(!try registry.compact(id, false));
     try std.testing.expect(!agent.compaction.requested);
     try std.testing.expectEqual(agent_mod.Status.idle, agent.status);
+}
+
+test "registry retry is allowed while an agent is retrying" {
+    const Fixture = struct {
+        fn discard(_: ?*anyopaque, _: agent_run.Event) void {}
+    };
+
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    var registry = Registry.init(std.testing.allocator, io);
+    defer registry.deinit();
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    agent.status = agent_mod.Status.retrying;
+    try registry.retry(id, .{ .max_steps = 0 });
+    while (registry.state(id) == .active) {
+        _ = registry.drain(id, 64, null, Fixture.discard);
+        _ = registry.reap(id);
+        if (registry.state(id) == .active) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(SlotState.complete, registry.state(id).?);
+    registry.release(id);
+}
+
+test "registry completes a canceled retry-waiting agent" {
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    var registry = Registry.init(std.testing.allocator, io);
+    defer registry.deinit();
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    agent.status = agent_mod.Status.retrying;
+    agent.cancel();
+    try std.testing.expect(registry.reap(id));
+    try std.testing.expectEqual(SlotState.complete, registry.state(id).?);
+    registry.release(id);
 }

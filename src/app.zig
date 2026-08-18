@@ -492,6 +492,7 @@ pub const App = struct {
             _ = self.registry.drain(id, 64, &drain_context, applyRegistryEvent);
             _ = self.registry.reap(id);
         }
+        self.registry.retryDue();
         self.running = self.registry.countActive() > 0;
 
         // --------------------------------------------------
@@ -1166,6 +1167,14 @@ pub const App = struct {
             .provider_error => |provider_error| {
                 if (provider_error.will_retry) return;
                 if (!is_main) return;
+                if (provider_error.is_retryable) {
+                    if (self.registry.get(agent_id)) |agent| {
+                        if (agent.retry_count < agent.max_retries) {
+                            self.dropStreamingPreview();
+                            return;
+                        }
+                    }
+                }
                 self.dropStreamingPreview();
                 const body = std.mem.trim(u8, provider_error.response_body, " \t\r\n");
                 const message = if (provider_error.status_code != 0)
