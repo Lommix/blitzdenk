@@ -22,7 +22,7 @@ pub const AppEvent = union(enum) {
     // TODO: emit from agent.zig — needs event bus accessible from Agent
     tool_call_complete: struct { agent_id: AgentId, call_id: []const u8, name: []const u8, is_error: bool },
     agent_broadcast: struct { id: AgentId, role: Role },
-    permission_requested: struct { call_id: ?[]const u8, level: r.permissions.Level },
+    permission_requested: struct { call_id: ?[]const u8 },
     permission_resolved: struct { call_id: ?[]const u8, state: r.permissions.State },
     user_message_sent: []const u8,
     mcp_tools_reloaded,

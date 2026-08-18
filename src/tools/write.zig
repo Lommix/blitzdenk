@@ -39,7 +39,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.path }) catch
         return r.errResult(call, "failed to resolve path");
 
-    const decision = ctx.requestPermission(call.id, .always_check, .{ .diff = .{
+    const decision = ctx.requestPermission(call.id, .{ .diff = .{
         .before = null,
         .after = args.content,
         .path = args.path,

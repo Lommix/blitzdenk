@@ -18,12 +18,6 @@ const builtin_command_completions: []const []const u8 = &.{
     ":cd /path/to/new/cwd",
 };
 
-pub const PermisionLevel = enum {
-    read_only,
-    write_safe,
-    write_deadly,
-};
-
 pub const UiState = union(enum) {
     chat,
     cmd_palette,

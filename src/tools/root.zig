@@ -22,16 +22,6 @@ pub const MAX_DISPLAY_BYTES = 32 * 1024;
 pub const MAX_DISPLAY_LINES = 1000;
 pub const STATUS_BUF: usize = 1024;
 
-/// The head/tail split of a truncated, codepoint-safe tool result.
-pub const HeadTail = struct {
-    head: []const u8,
-    tail: []const u8,
-    head_lines: usize,
-    tail_lines: usize,
-    total_lines: usize,
-    truncated: bool,
-};
-
 pub fn setToolStatusPrint(ctx: ToolContext, call: ToolCall, comptime fmt: []const u8, args: anytype) void {
     const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var buf: [STATUS_BUF]u8 = undefined;
@@ -104,8 +94,9 @@ pub fn truncateOutputToOwned(
     return truncateOutputToOwnedSpill(alloc, output, max_bytes, max_lines, null);
 }
 
-/// Head+tail truncation with an optional spill locator embedded in the
-/// notice. `spill_locator` points at a file (or null) holding the full output.
+/// Truncate `output` to its tail (last `max_lines` lines, last `max_bytes`
+/// bytes — whichever binds first), with an optional spill locator embedded in
+/// the notice. `spill_locator` points at a file (or null) holding the full output.
 pub fn truncateOutputToOwnedSpill(
     alloc: std.mem.Allocator,
     output: []const u8,
@@ -113,34 +104,34 @@ pub fn truncateOutputToOwnedSpill(
     max_lines: usize,
     spill_locator: ?[]const u8,
 ) []const u8 {
-    const max_head_bytes = max_bytes * 3 / 4;
-    const max_tail_bytes = max_bytes - max_head_bytes;
-    const max_head_lines = max_lines * 3 / 4;
-    const max_tail_lines = max_lines - max_head_lines;
-    const split = splitHeadTail(output, max_head_bytes, max_head_lines, max_tail_bytes, max_tail_lines);
-    if (!split.truncated) return ensureValidUtf8(alloc, output);
+    const total_lines = countLines(output);
+    if (output.len <= max_bytes and total_lines <= max_lines) return ensureValidUtf8(alloc, output);
+
+    const tail = output[collectLinesBack(output, max_bytes, max_lines)..];
+    const kept = countLines(tail);
 
     const notice = if (spill_locator) |path|
         std.fmt.allocPrint(
             alloc,
-            "[Truncated: kept head {d} + tail {d} of {d} lines ({d}KB cap). Full result saved at: {s} — call read with offset/limit to page through it.]",
-            .{ split.head_lines, split.tail_lines, split.total_lines, @divTrunc(max_bytes, 1024), path },
+            "[Truncated: kept tail {d} of {d} lines ({d}KB cap). Full result saved at: {s} — call read with offset/limit to page through it.]",
+            .{ kept, total_lines, @divTrunc(max_bytes, 1024), path },
         ) catch return output
     else
         std.fmt.allocPrint(
             alloc,
-            "[Truncated: kept head {d} + tail {d} of {d} lines ({d}KB cap)]",
-            .{ split.head_lines, split.tail_lines, split.total_lines, @divTrunc(max_bytes, 1024) },
+            "[Truncated: kept tail {d} of {d} lines ({d}KB cap)]",
+            .{ kept, total_lines, @divTrunc(max_bytes, 1024) },
         ) catch return output;
     defer alloc.free(notice);
 
-    const raw = std.fmt.allocPrint(alloc, "{s}\n\n...\n\n{s}\n\n{s}", .{ split.head, split.tail, notice }) catch
+    const raw = std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ tail, notice }) catch
         return output;
     return ensureValidUtf8(alloc, raw);
 }
 
 /// True when `output` would be truncated by the given caps (matches
-/// splitHeadTail's entry condition). Callers gate spill-file writes on this.
+/// truncateOutputToOwnedSpill's entry condition). Callers gate spill-file
+/// writes on this.
 pub fn isOversized(output: []const u8, max_bytes: usize, max_lines: usize) bool {
     return output.len > max_bytes or countLines(output) > max_lines;
 }
@@ -186,59 +177,6 @@ fn tmpDir(alloc: std.mem.Allocator, app_ctx: ?*anyopaque) ?[]const u8 {
         if (self.exec_pool.env.get("TMPDIR")) |dir| return alloc.dupe(u8, dir) catch null;
     }
     return alloc.dupe(u8, "/tmp") catch null;
-}
-
-/// Split `output` into head+tail, enforcing both the byte and line caps on
-/// each segment (whichever binds first cuts). Codepoint-safe boundaries.
-pub fn splitHeadTail(
-    output: []const u8,
-    head_bytes: usize,
-    head_lines: usize,
-    tail_bytes: usize,
-    tail_lines: usize,
-) HeadTail {
-    const total_lines = countLines(output);
-    if (output.len == 0) return .{ .head = output, .tail = "", .head_lines = total_lines, .tail_lines = 0, .total_lines = total_lines, .truncated = false };
-    if (output.len <= head_bytes + tail_bytes and total_lines <= head_lines + tail_lines)
-        return .{ .head = output, .tail = "", .head_lines = total_lines, .tail_lines = 0, .total_lines = total_lines, .truncated = false };
-
-    const head_end = collectLines(output, 0, head_bytes, head_lines);
-    const tail_start = collectLinesBack(output, tail_bytes, tail_lines);
-    const truncated = tail_start > head_end;
-
-    if (!truncated) {
-        // Whole output fits the combined budget.
-        return .{ .head = output, .tail = "", .head_lines = total_lines, .tail_lines = 0, .total_lines = total_lines, .truncated = false };
-    }
-
-    const tail = output[tail_start..];
-    return .{
-        .head = output[0..head_end],
-        .tail = tail,
-        .head_lines = countLines(output[0..head_end]),
-        .tail_lines = countLines(tail),
-        .total_lines = total_lines,
-        .truncated = true,
-    };
-}
-
-/// Collect leading lines from `start` until the byte or line cap binds.
-/// Returns a codepoint-floor boundary (never splits a multi-byte sequence).
-fn collectLines(output: []const u8, from: usize, max_bytes: usize, max_lines: usize) usize {
-    var end: usize = from;
-    var lines: usize = 0;
-    var pos: usize = from;
-    while (pos < output.len and lines < max_lines) {
-        const next_line_end = if (std.mem.indexOfScalar(u8, output[pos..], '\n')) |nl|
-            pos + nl + 1
-        else
-            output.len;
-        if (next_line_end - end > max_bytes - (end - from)) break;
-        end = next_line_end;
-        lines += 1;
-        pos = next_line_end;
-    }
-    return utf8Floor(output, end);
 }
 
 /// Collect trailing lines from the end of `output`: the last `max_lines`
@@ -322,7 +260,7 @@ test "truncateOutputToOwned sanitizes invalid utf8" {
 
 test "truncateOutputToOwned keeps the tail for oversized output" {
     const testing = std.testing;
-    // 100 lines of "line N\n"; small budgets force a head+tail cut.
+    // 100 lines of "line N\n"; a small budget forces a tail-only cut.
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     for (0..100) |i| {
@@ -337,22 +275,21 @@ test "truncateOutputToOwned keeps the tail for oversized output" {
     try testing.expect(std.mem.indexOf(u8, out, "line99") != null);
 }
 
-test "splitHeadTail preserves head and tail on byte cap" {
+test "truncateOutputToOwned drops the head and keeps the tail on line cap" {
     const testing = std.testing;
     const in = "AAAA\nBBBB\nCCCC\nDDDD\nEEEE\n";
-    const split = splitHeadTail(in, 5, 2, 5, 2);
-    try testing.expect(split.truncated);
-    try testing.expectEqualStrings("AAAA\n", split.head);
-    try testing.expectEqualStrings("EEEE\n", split.tail);
+    const out = truncateOutputToOwned(testing.allocator, in, MAX_DISPLAY_BYTES, 2);
+    defer if (out.ptr != in.ptr) testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "EEEE\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "AAAA") == null);
 }
 
-test "splitHeadTail is codepoint-safe at the byte boundary" {
+test "collectLinesBack is codepoint-safe at the byte boundary" {
     const testing = std.testing;
     // "é" is c3 a9; cutting at a byte count that lands mid-sequence must floor.
     const in = "ab\xc3\xa9cd\nef\xc3\xa9gh\n";
-    const split = splitHeadTail(in, 3, 100, 4, 100);
-    try testing.expect(std.unicode.utf8ValidateSlice(split.head));
-    try testing.expect(std.unicode.utf8ValidateSlice(split.tail));
+    const tail_start = collectLinesBack(in, 4, 100);
+    try testing.expect(std.unicode.utf8ValidateSlice(in[tail_start..]));
 }
 
 test "truncateOutputToOwned does not split multi-byte utf8" {

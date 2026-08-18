@@ -43,7 +43,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     r.setToolStatusPrint(ctx, call, "question {s}", .{args.question});
 
-    const decision = ctx.requestPermission(call.id, .minor, .{ .ask = .{
+    const decision = ctx.requestPermission(call.id, .{ .ask = .{
         .header = args.header,
         .options = args.options,
         .question = args.question,

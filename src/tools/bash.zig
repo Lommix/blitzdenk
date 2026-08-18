@@ -6,7 +6,7 @@ pub const BashTool = r.Tool{
     .def = .{
         .name = "bash",
         .description =
-        \\Execute a bash command in the current working directory. Returns stdout and stderr. Non-zero exits are reported as `[exit code: N]`, signal kills as `[killed by signal: N]`, timeouts as `[timed out after Nms]`. Output is truncated to first 1000 lines or 32KB (whichever is hit first); the full output is saved to a file whose path is reported when available. Optionally provide a timeout in seconds. Any `ssh` command requires approval.
+        \\Execute a bash command in the current working directory. Returns stdout and stderr. Non-zero exits are reported as `[exit code: N]`, signal kills as `[killed by signal: N]`, timeouts as `[timed out after Nms]`. Output is truncated to the last 1000 lines or 32KB (whichever is hit first); the full output is saved to a file whose path is reported when available. Optionally provide a timeout in seconds. Bash commands require approval.
         ,
         .prompt_snippet = "Execute a bash command",
         .prompt_guidelines = "Prefer specialist tools over bash whenever available",
@@ -48,24 +48,22 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     r.setToolStatusPrint(ctx, call, "{s}{s}", .{ trunc, dots });
 
-    if (ctx.base.exec_pool.ssh_active) {
-        const decision = ctx.requestPermission(call.id, .always_check, .{ .call = .{
-            .tool_name = call.name,
-            .tool_arguments = call.input,
-        } });
-        switch (decision) {
-            .approved => {},
-            .denied => return r.errResult(call, "User declined bash"),
-            .message => |txt| {
-                const wrapped = std.fmt.allocPrint(
-                    ctx.alloc,
-                    "User declined bash command and left feedback: {s}",
-                    .{txt},
-                ) catch txt;
-                return r.errResult(call, wrapped);
-            },
-            else => return r.errResult(call, "permission unresolved"),
-        }
+    const decision = ctx.requestPermission(call.id, .{ .call = .{
+        .tool_name = call.name,
+        .tool_arguments = call.input,
+    } });
+    switch (decision) {
+        .approved => {},
+        .denied => return r.errResult(call, "User declined bash"),
+        .message => |txt| {
+            const wrapped = std.fmt.allocPrint(
+                ctx.alloc,
+                "User declined bash command and left feedback: {s}",
+                .{txt},
+            ) catch txt;
+            return r.errResult(call, wrapped);
+        },
+        else => return r.errResult(call, "permission unresolved"),
     }
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");

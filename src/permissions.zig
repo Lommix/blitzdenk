@@ -1,12 +1,6 @@
 const std = @import("std");
 const AgentId = @import("agent-id").AgentId;
 
-pub const Level = enum {
-    minor,
-    always_check,
-    dangerous,
-};
-
 pub const ToolDiff = struct {
     path: []const u8,
     before: ?[]const u8,
@@ -48,7 +42,6 @@ pub const Request = struct {
     agent_id: AgentId,
     call_id: ?[]const u8 = null,
     state: State = .pending,
-    level: Level = .minor,
     payload: Payload,
     event: std.Io.Event = .unset,
 };

@@ -107,7 +107,9 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     defer ctx.base.exec_pool.alloc.free(read_res.stderr);
 
     const out = read_res.toOwned(ctx.alloc) catch return r.errResult(call, "oom");
-    return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
+    const truncated = r.truncateOutputToOwned(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES);
+    if (truncated.ptr != out.ptr) ctx.alloc.free(out);
+    return r.okResult(call, truncated);
 }
 
 fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
