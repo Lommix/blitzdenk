@@ -2656,7 +2656,8 @@ fn renderMainProgress(app: *App, id: ?r.AgentId, area: r.tui.Rect, buf: *r.tui.B
     const alloc = app.sessionAlloc();
     const agent = if (slot.agent) |*value| value else return;
     const now: i128 = @intCast(std.Io.Timestamp.now(app.io, .real).nanoseconds);
-    const elapsed = if (agent.run_started_ns == 0) 0 else @max(0, now - agent.run_started_ns);
+    const end = if (agent.run_ended_ns != 0) agent.run_ended_ns else now;
+    const elapsed = if (agent.run_started_ns == 0) 0 else @max(0, end - agent.run_started_ns);
     const secs: u32 = @intCast(@divTrunc(elapsed, std.time.ns_per_s));
 
     var para = r.tui.Paragraph{

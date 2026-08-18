@@ -295,6 +295,8 @@ pub const Registry = struct {
 
     fn accountUsage(self: *Registry, slot: *Slot) void {
         const agent = if (slot.agent) |*value| value else return;
+        if (agent.run_ended_ns == 0)
+            agent.run_ended_ns = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
         const added = usageDifference(agent.usage, slot.accounted_usage);
         if (added.total_tokens == 0 and added.input_tokens == 0 and added.output_tokens == 0 and added.reasoning_tokens == 0 and added.cache_read_tokens == 0 and added.cache_write_tokens == 0) return;
         self.total_usage.add(added);

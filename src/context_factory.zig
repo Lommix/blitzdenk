@@ -9,6 +9,17 @@ const CONTEXT_FILES = .{"AGENTS.md"};
 pub const MAX_AGENT_TOOLS = 64;
 const MAX_AVAILABLE_SYSTEMS = 32;
 
+const CliCapability = struct {
+    binary: []const u8,
+    guideline: []const u8,
+};
+
+const cli_capabilities = [_]CliCapability{
+    .{ .binary = "rg", .guideline = "Use rg for fast recursive grep searches. Prefer rg over grep." },
+    .{ .binary = "fd", .guideline = "Use fd for fast file discovery. Prefer fd over find." },
+    .{ .binary = "jq", .guideline = "Use jq to parse and filter JSON data." },
+};
+
 pub const general_default_tool_set = .{
     r.tools.write.WriteTool,
     r.tools.edit.EditTool,
@@ -138,6 +149,8 @@ modes: std.EnumArray(Mode, ?ModeDef) = .initFill(null),
 // ---
 available_mcp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
 available_mcp_count: usize = 0,
+cli_checked: bool = false,
+cli_installed: [cli_capabilities.len]bool = .{false} ** cli_capabilities.len,
 // Arena holds definitions set from Lua. Reset on hot-reload so the
 // factory keeps using the embedded defaults until lua re-installs them.
 prompt_arena: std.heap.ArenaAllocator,
@@ -179,7 +192,19 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !*Self {
     };
 
     self.resetDefs();
+    self.checkCliCapabilities();
     return self;
+}
+
+/// Startup check for useful cli tools. Runs once, then caches the result
+/// until the factory is relaunched.
+pub fn checkCliCapabilities(self: *Self) void {
+    if (self.cli_checked) return;
+    self.cli_checked = true;
+
+    for (0..cli_capabilities.len) |i| {
+        self.cli_installed[i] = binaryExists(self.io, cli_capabilities[i].binary);
+    }
 }
 
 pub fn buildAgentApiConfig(
@@ -679,6 +704,22 @@ pub fn build_system_prompt(
         }
     }
 
+    if (self.agentHasTool(agent_type, r.tools.bash.BashTool.def.name)) {
+        var wrote_cli_header = false;
+        for (0..cli_capabilities.len) |i| {
+            if (!self.cli_installed[i]) continue;
+            if (!wrote_cli_header) {
+                _ = try w.write(
+                    \\
+                    \\# Envirement:
+                    \\
+                );
+                wrote_cli_header = true;
+            }
+            try w.print("- {s}: {s}\n", .{ cli_capabilities[i].binary, cli_capabilities[i].guideline });
+        }
+    }
+
     return allocating.written();
 }
 
@@ -781,6 +822,23 @@ fn parseYamlBlock(block: []u8, literal: bool) []const u8 {
     }
 
     return std.mem.trim(u8, block[0..out], " \t\r\n");
+}
+
+/// Checks whether `binary` can be resolved on the PATH. Uses `sh -c "command -v"`.
+fn binaryExists(io: std.Io, binary: []const u8) bool {
+    var buf: [256]u8 = undefined;
+    const cmd = std.fmt.bufPrint(&buf, "command -v {s} >/dev/null 2>&1", .{binary}) catch return false;
+    const argv = [_][]const u8{ "sh", "-c", cmd };
+
+    var child = std.process.spawn(io, .{
+        .argv = &argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return false;
+    defer if (child.id != null) child.kill(io);
+    const term = child.wait(io) catch return false;
+    return term == .exited and term.exited == 0;
 }
 
 test "skill meta parses folded yaml description" {

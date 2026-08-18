@@ -71,6 +71,7 @@ pub const Agent = struct {
     retry_delay_ms: u64 = 10_000,
     retry_at_ns: i128 = 0,
     run_started_ns: i128 = 0,
+    run_ended_ns: i128 = 0,
     stream_started_ns: i128 = 0,
     stream_output_bytes: u64 = 0,
     tokens_per_second: f32 = 0,
@@ -269,6 +270,7 @@ pub const Agent = struct {
         self.retry_after_ms = null;
         self.retry_at_ns = 0;
         self.run_started_ns = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
+        self.run_ended_ns = 0;
         self.endStream();
         var run_options = options;
         if (run_options.system.len == 0) run_options.system = self.system_prompt;
