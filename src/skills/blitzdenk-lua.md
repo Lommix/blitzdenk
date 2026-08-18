@@ -74,10 +74,8 @@ Effort values: `"none"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`.
 
 `blitz.tools.*` are string constants for the built-in tool names.
 
-Built-in names: `BASH`, `CANCEL_PROCESS`, `READ_PROCESS`, `READ`, `VIEW_IMAGE`,
-`WRITE`, `EDIT`, `PATCH`, `AGENT`, `ASK`, `AWAIT_AGENT`, `CANCEL_AGENT`, `GLOB`,
-`GREP`, `START_MCP`. There is no LOADSKILL or TODO constant; skills load
-automatically (see Skills).
+Built-in names: `BASH`, `READ`, `VIEW_IMAGE`,
+`WRITE`, `EDIT`, `PATCH`, `AGENT`, `ASK`, `GLOB`, `GREP`, `START_MCP`.
 
 - `blitz.set_agent_tools(agent_type, {names})` replaces the whole tool set.
 - `blitz.add_tool(agent_type, tool_name)` adds one tool to the current set.

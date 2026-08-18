@@ -22,8 +22,6 @@ pub const InjectionsHooks = struct {
             &inject_cwd_information,
             &inject_mode_information,
             &inject_budget_information,
-            &inject_processes_information,
-            &inject_bg_agents_information,
         }) |cb| {
             try self._hooks.append(alloc, .{ .zig = cb });
         }
@@ -114,54 +112,6 @@ fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.A
         "unknown";
 
     try w.print("[TIME] {s} os={s}\n", .{ datetime, os_name });
-}
-
-fn inject_processes_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
-    if (agent.bg_tasks.tryLock(app.io)) |g| blk: {
-        defer g.unlock();
-        var i = g.ptr.list.items.len;
-
-        if (i == 0) break :blk;
-
-        // Background tasks stay alive for the agent lifetime. Completed ones are
-        // NOT released here: the agent reads their output via read_process, so
-        // they must remain readable. Only cancel/teardown frees them.
-        while (i > 0) {
-            i -|= 1;
-            const en = &g.ptr.list.items[i];
-            if (app.exec_pool.isDone(en.handle)) {
-                try w.print("[BACKGROUND PROCESS] id: {d} cmd: {s} status: complete. Read the output with read_process\n", .{ @intFromEnum(en.handle), en.command });
-            } else {
-                try w.print("[BACKGROUND PROCESS] id: {d} cmd: {s} status: working\n", .{ @intFromEnum(en.handle), en.command });
-            }
-        }
-    }
-}
-
-fn inject_bg_agents_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
-    if (agent.bg_agents.tryLock(app.io)) |g| blk: {
-        defer g.unlock();
-        var i = g.ptr.list.items.len;
-        if (i == 0) break :blk;
-        while (i > 0) {
-            i -= 1;
-            const bg = &g.ptr.list.items[i];
-            const state = if (app.registry.state(bg.agent_id)) |s| s else .failed;
-            bg.status = switch (state) {
-                .complete => .complete,
-                .failed => .failed,
-                else => .running,
-            };
-
-            if (bg.status == .complete) {
-                try w.print("[BACKGROUND AGENT COMPLETE] agent_id={d} description: {s}. Read the result with await_agent\n", .{ bg.agent_id.pack(), bg.description });
-            } else if (bg.status == .failed) {
-                try w.print("[BACKGROUND AGENT FAILED] agent_id={d} description: {s}. Read the result with await_agent\n", .{ bg.agent_id.pack(), bg.description });
-            } else {
-                try w.print("[BACKGROUND AGENT RUNNING] agent_id={d} description: {s}\n", .{ bg.agent_id.pack(), bg.description });
-            }
-        }
-    }
 }
 
 fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.agent.Agent) !void {

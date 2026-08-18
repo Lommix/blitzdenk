@@ -46,8 +46,6 @@ pub const Agent = struct {
     state_arena: std.heap.ArenaAllocator,
     injection_mutex: std.Io.Mutex = .init,
     queued_messages: std.ArrayList(sdk.Message) = .empty,
-    bg_tasks: state.Locked(state.BackgroundTaskList) = .{},
-    bg_agents: state.Locked(state.BackgroundAgentList) = .{},
     tool_display: state.Locked(std.StringHashMapUnmanaged(state.ToolDisplay)) = .{},
     compaction: compact.State = .{},
     messages: ?agent_run.OwnedMessages = null,
@@ -652,11 +650,6 @@ test "agent adopts compacted SDK history and preserves durable tool state" {
     defer agent.deinit();
     const big = "x" ** 70_000;
     try agent.setMessages(&.{ sdk.SystemMessage("system"), sdk.UserMessage(big), sdk.UserMessage("recent") });
-    {
-        const bg = agent.bg_agents.lock(agent.io);
-        bg.ptr.list.append(agent.alloc, .{ .agent_id = .{ .index = 1, .generation = 1 }, .description = "subject", .status = .running }) catch unreachable;
-        bg.unlock();
-    }
     var outcome = compact.Outcome{
         .messages = try compact.installSummary(std.testing.allocator, agent.history(), "summary"),
         .usage = .{ .input_tokens = 10, .output_tokens = 2, .total_tokens = 12 },
@@ -672,10 +665,4 @@ test "agent adopts compacted SDK history and preserves durable tool state" {
     try std.testing.expectEqual(@as(u64, 12), agent.usage.total_tokens);
     try std.testing.expectEqual(false, agent.compaction.completed_continue_after.?);
     try std.testing.expect(std.mem.endsWith(u8, agent.history()[agent.history().len - 1].text(), "summary"));
-    {
-        const bg = agent.bg_agents.lock(agent.io);
-        try std.testing.expectEqual(@as(usize, 1), bg.ptr.list.items.len);
-        bg.ptr.list.deinit(agent.alloc);
-        bg.unlock();
-    }
 }

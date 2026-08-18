@@ -3,6 +3,8 @@
 Universal Coding harness for posix. No deps, no chain, vendored Lua.
 Extend in Lua with hot reload. Let the harness code itself.
 
+**_[WIP]: The harness is fine tuned on deepseek-v4-flash, Lua-Api may change/still unfinished _**
+
 ![screenshot](docs/assets/screen.jpg)
 
 ## Core features and patterns

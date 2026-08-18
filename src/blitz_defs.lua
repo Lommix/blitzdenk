@@ -59,8 +59,6 @@
 
 ---@class BlitzToolDef
 ---@field BASH string
----@field CANCEL_PROCESS string
----@field READ_PROCESS string
 ---@field READ string
 ---@field VIEW_IMAGE string
 ---@field WRITE string
@@ -68,8 +66,6 @@
 ---@field PATCH string
 ---@field AGENT string
 ---@field ASK string
----@field AWAIT_AGENT string
----@field CANCEL_AGENT string
 ---@field GLOB string
 ---@field GREP string
 ---@field START_MCP string

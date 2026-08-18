@@ -35,14 +35,10 @@ blitz.set_model_agent(blitz.AGENT_GENERAL, deepseek, "max")
 
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.BASH,
-	blitz.tools.CANCEL_PROCESS,
-	blitz.tools.READ_PROCESS,
 	blitz.tools.READ,
 	blitz.tools.PATCH, -- switch to EDIT + WRITE for older models
 	blitz.tools.ASK,
 	blitz.tools.AGENT,
-	blitz.tools.AWAIT_AGENT,
-	blitz.tools.CANCEL_AGENT,
 	-- blitz.tools.EDIT,
 	-- blitz.tools.WRITE,
 	-- blitz.tools.START_MCP,

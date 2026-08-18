@@ -338,16 +338,6 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        // cleanup hanging processes
-        if (self.main_agent_id) |id| blk: {
-            const a = self.registry.get(id) orelse break :blk;
-            // Agent is being torn down — no tools should be in flight, but
-            // go through the lock anyway for consistency.
-            const g = a.bg_tasks.tryLock(self.io) orelse break :blk;
-            defer g.unlock();
-            for (g.ptr.list.items) |e| self.exec_pool.cancel(e.handle);
-        }
-
         self.mcp_manager.deinit();
         self.lua_vm.deinit();
         self.lua_state.deinit(self.gpa);
@@ -383,30 +373,6 @@ pub const App = struct {
         g.ptr.clearRetainingCapacity();
 
         self.returnToText();
-    }
-
-    pub fn cancelAgentPermissions(self: *App, id: r.AgentId) void {
-        if (self.active_permission) |req| {
-            if (req.agent_id.pack() == id.pack()) {
-                req.state = .denied;
-                req.event.set(self.io);
-                self.active_permission = null;
-            }
-        }
-
-        const g = self.permission_queue.lock(self.io);
-        defer g.unlock();
-        var index: usize = 0;
-        while (index < g.ptr.items.len) {
-            const req = g.ptr.items[index];
-            if (req.agent_id.pack() != id.pack()) {
-                index += 1;
-                continue;
-            }
-            req.state = .denied;
-            req.event.set(self.io);
-            _ = g.ptr.swapRemove(index);
-        }
     }
 
     /// Session-scoped allocator. Wiped on reset.

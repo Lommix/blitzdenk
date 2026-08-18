@@ -1,27 +1,5 @@
 const std = @import("std");
-const exec = @import("exec");
 const AgentId = @import("agent-id").AgentId;
-
-pub const BackgroundTask = struct {
-    handle: exec.CmdPool.Handle,
-    command: []const u8,
-};
-
-pub const BackgroundTaskList = struct {
-    list: std.ArrayList(BackgroundTask) = .empty,
-};
-
-pub const BackgroundAgentStatus = enum { running, complete, failed };
-
-pub const BackgroundAgent = struct {
-    agent_id: AgentId,
-    description: []const u8,
-    status: BackgroundAgentStatus,
-};
-
-pub const BackgroundAgentList = struct {
-    list: std.ArrayList(BackgroundAgent) = .empty,
-};
 
 pub fn Guard(comptime T: type) type {
     return struct {

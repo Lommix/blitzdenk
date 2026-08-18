@@ -1,13 +1,11 @@
 //! Process execution pool. Spawns each command as a `std.Io.async` worker.
 //!
-//! Two API surfaces:
+//! API surface:
 //! - `runAndWait` blocks the caller until the command exits. Used by foreground
 //!   tools that trust the child to exit.
 //! - `runAndWaitTimeout` is the same synchronous surface with a wall-clock
 //!   deadline. Used by foreground tools that spawn potentially hanging children.
-//! - `run` + `poll`/`isDone`/`release`/`cancel` expose the worker future
-//!   without blocking. Used only for bash background commands and the read
-//!   tool's bg-task inspection path.
+//! - `release`/`cancel`/`cancelAll` release or cancel a worker future.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -18,9 +16,6 @@ pub const CmdSlot = struct {
     in_use: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
     future: std.Io.Future(std.Io.Cancelable!void) = .{ .any_future = null, .result = {} },
-    /// Guards `stdout`/`stderr` so readers can snapshot partial output while the
-    /// worker streams into them.
-    output_lock: std.Io.Mutex = .init,
     stdout: std.ArrayList(u8) = .empty,
     stderr: std.ArrayList(u8) = .empty,
     result_ty: CmdResult.ResType = .failed,
@@ -181,19 +176,6 @@ pub const CmdPool = struct {
         return fallback;
     }
 
-    pub fn run(self: *Self, cwd: ?[]const u8, argv: []const []const u8) !Handle {
-        return self.runWithOpts(.{ .cwd = cwd, .argv = argv });
-    }
-
-    pub fn runWithStdin(
-        self: *Self,
-        cwd: ?[]const u8,
-        argv: []const []const u8,
-        stdin_data: ?[]const u8,
-    ) !Handle {
-        return self.runWithOpts(.{ .cwd = cwd, .argv = argv, .stdin_data = stdin_data });
-    }
-
     pub const RunOpts = struct {
         cwd: ?[]const u8 = null,
         argv: []const []const u8,
@@ -318,50 +300,21 @@ pub const CmdPool = struct {
         return out;
     }
 
-    /// Non-blocking poll. Returns null while running, result when exited.
-    /// stdout/stderr are caller-owned (free with self.alloc).
-    pub fn poll(self: *Self, handle: Handle) std.mem.Allocator.Error!?CmdResult {
-        const slot = &self.slots[@intFromEnum(handle)];
-        if (!slot.done.load(.acquire)) return null;
-
-        slot.output_lock.lockUncancelable(self.io);
-        const out = try self.alloc.dupe(u8, slot.stdout.items);
-        errdefer self.alloc.free(out);
-        const err = try self.alloc.dupe(u8, slot.stderr.items);
-        slot.output_lock.unlock(self.io);
-
-        return .{
-            .stdout = out,
-            .stderr = err,
-            .ty = slot.result_ty,
-            .exit_code = slot.exit_code,
-        };
-    }
-
-    pub fn isDone(self: *Self, handle: Handle) bool {
-        const slot = &self.slots[@intFromEnum(handle)];
-        return slot.done.load(.acquire);
-    }
-
     pub fn release(self: *Self, handle: Handle) void {
         const slot = &self.slots[@intFromEnum(handle)];
         if (!slot.in_use.load(.acquire)) return;
 
-        // Wait for worker completion and mutate buffers under the lock so a
-        // concurrent read_process neither reads freed memory nor a torn append.
         if (slot.done.load(.acquire)) {
             slot.future.await(self.io) catch {};
         } else {
             slot.future.cancel(self.io) catch {};
         }
 
-        slot.output_lock.lockUncancelable(self.io);
         slot.stdout.deinit(self.alloc);
         slot.stderr.deinit(self.alloc);
         slot.stdout = .empty;
         slot.stderr = .empty;
         slot.in_use.store(false, .release);
-        slot.output_lock.unlock(self.io);
     }
 
     pub fn cancel(self: *Self, handle: Handle) void {
@@ -485,9 +438,7 @@ pub const CmdPool = struct {
         const stdout_reader = mr.reader(0);
         const stderr_reader = mr.reader(1);
 
-        // Stream each drained chunk into the slot so read_process can observe
-        // partial output while the command is still running. The slot lock keeps
-        // readers from seeing a torn append.
+        // Stream each drained chunk into the slot.
         while (mr.fill(64, .none)) |_| {
             try self.appendBuffered(slot, stdout_reader, stderr_reader);
         } else |err| switch (err) {
@@ -514,9 +465,6 @@ pub const CmdPool = struct {
         const err = stderr_reader.buffered();
         stdout_reader.toss(out.len);
         stderr_reader.toss(err.len);
-
-        slot.output_lock.lockUncancelable(self.io);
-        defer slot.output_lock.unlock(self.io);
 
         try slot.stdout.appendSlice(self.alloc, out);
         try slot.stderr.appendSlice(self.alloc, err);
@@ -715,41 +663,4 @@ test "output over cap is reported as truncated success, not failure" {
     try testing.expectEqual(CmdResult.ResType.success, res.ty);
     try testing.expect(res.stdout.len >= MAX_OUTPUT);
     try testing.expectEqual(@as(?u8, null), res.exit_code);
-}
-
-test "background slots stream partial output and keep it until release" {
-    const testing = std.testing;
-
-    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
-    defer env.deinit();
-    var pool = CmdPool.init(testing.allocator, testing.io, &env);
-    defer pool.deinit();
-
-    const handle = try pool.run(null, &.{
-        "/bin/sh", "-c",
-        \\printf 'early'
-        \\sleep 0.3
-        \\printf 'done'
-    });
-
-    // Partial output must be observable while the process is still running.
-    var seen_early = false;
-    while (!pool.isDone(handle)) {
-        std.Io.sleep(testing.io, std.Io.Duration.fromMilliseconds(20), .real) catch break;
-        const slot = &pool.slots[@intFromEnum(handle)];
-        slot.output_lock.lockUncancelable(pool.io);
-        if (std.mem.indexOf(u8, slot.stdout.items, "early") != null) seen_early = true;
-        slot.output_lock.unlock(pool.io);
-    }
-
-    try testing.expect(seen_early);
-
-    // Full output must still be readable after completion, before release.
-    const res = (try pool.poll(handle)).?;
-    defer pool.alloc.free(res.stdout);
-    defer pool.alloc.free(res.stderr);
-    try testing.expect(std.mem.endsWith(u8, res.stdout, "done"));
-
-    pool.release(handle);
-    try testing.expectEqual(false, pool.slots[0].in_use.load(.acquire));
 }

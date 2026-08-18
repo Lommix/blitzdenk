@@ -193,7 +193,6 @@ pub fn run(
     var exec_pool = r.exec.CmdPool.init(gpa, io, env);
     app.registry = &registry;
     app.exec_pool = &exec_pool;
-    registry.exec_pool = &exec_pool;
     if (config_lua) |info| {
         app.lua_config_dir = info.dir_path;
         app.lua_config_abs = info.abs_path;

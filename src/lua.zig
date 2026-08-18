@@ -989,8 +989,6 @@ pub const BlitzToolDef = LuaType{
         .name = "BlitzToolDef",
         .fields = &.{
             .{ .name = "BASH", .ty = LuaType.string, .value = .{ .string = tl.bash.BashTool.def.name } },
-            .{ .name = "CANCEL_PROCESS", .ty = LuaType.string, .value = .{ .string = tl.bash.CancelBackgroundCommand.def.name } },
-            .{ .name = "READ_PROCESS", .ty = LuaType.string, .value = .{ .string = tl.bash.ReadProcessTool.def.name } },
             .{ .name = "READ", .ty = LuaType.string, .value = .{ .string = tl.read.ReadTool.def.name } },
             .{ .name = "VIEW_IMAGE", .ty = LuaType.string, .value = .{ .string = tl.read.ViewImageTool.def.name } },
             .{ .name = "WRITE", .ty = LuaType.string, .value = .{ .string = tl.write.WriteTool.def.name } },
@@ -998,8 +996,6 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "PATCH", .ty = LuaType.string, .value = .{ .string = tl.patch.PatchTool.def.name } },
             .{ .name = "AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AgentTool.def.name } },
             .{ .name = "ASK", .ty = LuaType.string, .value = .{ .string = tl.ask.AskTool.def.name } },
-            .{ .name = "AWAIT_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.AwaitAgent.def.name } },
-            .{ .name = "CANCEL_AGENT", .ty = LuaType.string, .value = .{ .string = tl.agent.CancelAgent.def.name } },
             .{ .name = "GLOB", .ty = LuaType.string, .value = .{ .string = tl.search.GlobTool.def.name } },
             .{ .name = "GREP", .ty = LuaType.string, .value = .{ .string = tl.search.GrepTool.def.name } },
             .{ .name = "START_MCP", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },

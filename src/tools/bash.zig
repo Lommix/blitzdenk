@@ -35,149 +35,24 @@ pub const BashTool = r.Tool{
     .def = .{
         .name = "bash",
         .description =
-        \\Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to first 1000 lines or 32KB (whichever is hit first). Optionally provide a timeout in seconds. Set "run_in_background" to true to run the command in the background and poll it with read_process / stop it with cancel_process.
+        \\Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to first 1000 lines or 32KB (whichever is hit first). Optionally provide a timeout in seconds.
         ,
         .prompt_snippet = "Execute a bash command",
         .prompt_guidelines = "Use bash for operations without a dedicated tool (e.g. ls, rg, find, builds, tests).",
         .parameters_schema =
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Bash command to execute"},
-        \\  "timeout": {"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
-        \\  "run_in_background": {"type": "boolean", "default": false, "description": "If true, spawn the command in the background and return immediately with a process id; poll with read_process, stop with cancel_process"}
+        \\  "timeout": {"type": "number", "description": "Timeout in seconds (optional, no default timeout)"}
         \\}, "required": ["command"]}
         ,
     },
     .func = &run,
 };
 
-pub const CancelBackgroundCommand = r.Tool{
-    .def = .{
-        .name = "cancel_process",
-        .description = "cancel a background process which was spawned with the bash 'run_in_background' mode",
-        .prompt_snippet = "Cancel a background process",
-        .parameters_schema =
-        \\{"type": "object", "properties": {
-        \\  "id": {"type": "number", "description": "the background process id"}
-        \\}, "required": ["id"]}
-        ,
-    },
-    .func = &run_cancel,
-};
-
-pub const ReadProcessTool = r.Tool{
-    .def = .{
-        .name = "read_process",
-        .description =
-        \\Reads the current stdout/stderr of a background command spawned with the bash 'run_in_background' mode.
-        \\Returns the output so far, even while the process is still running.
-        ,
-        .prompt_snippet = "Read a background process' output",
-        .parameters_schema =
-        \\{"type": "object", "properties": {
-        \\  "id": {"type": "number", "description": "the background process id"}
-        \\}, "required": ["id"]}
-        ,
-    },
-    .func = &run_read_process,
-};
-
-/// Reverse-scan for the newest background task with this id, returning its
-/// handle. The returned handle stays valid until the task is removed.
-fn findHandle(ctx: r.ToolContext, id: u8) ?Handle {
-    const g = ctx.agent().bg_tasks.lock(ctx.io);
-    defer g.unlock();
-    const items = g.ptr.list.items;
-    for (0..items.len) |i| {
-        const rev = items.len - i - 1;
-        if (@as(u8, @intFromEnum(items[rev].handle)) == id)
-            return items[rev].handle;
-    }
-    return null;
-}
-
-fn run_cancel(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
-    r.setToolStatusPrint(ctx, call, "(Stopping Process)", .{});
-
-    const Args = struct {
-        id: u8,
-    };
-
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch {
-        return r.errResult(call, "invalid JSON arguments: expected {\"id\" : <process id>}");
-    };
-
-    r.setToolStatusPrint(ctx, call, "(Stopping Process) {d}", .{args.id});
-
-    const handle = findHandle(ctx, args.id) orelse
-        return r.errResult(call, "No background command for this id found");
-
-    // Drop the task entry under lock, then cancel (which may block) outside.
-    {
-        const g = ctx.agent().bg_tasks.lock(ctx.io);
-        defer g.unlock();
-        const items = g.ptr.list.items;
-        for (0..items.len) |i| {
-            if (items[i].handle == handle) {
-                _ = g.ptr.list.swapRemove(i);
-                break;
-            }
-        }
-    }
-
-    ctx.base.exec_pool.cancel(handle);
-    return r.okResult(call, "Command cancel successfull");
-}
-
-fn run_read_process(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
-    const Args = struct {
-        id: u8,
-    };
-
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch {
-        return r.errResult(call, "invalid JSON arguments: expected {\"id\": <process id>}");
-    };
-
-    const handle = findHandle(ctx, args.id) orelse
-        return r.errResult(call, "No background command for this id found");
-
-    r.setToolStatusPrint(ctx, call, "(Reading Process) {d}", .{args.id});
-
-    if (ctx.base.exec_pool.poll(handle)) |maybe_res| {
-        if (maybe_res) |res| {
-            defer ctx.base.exec_pool.alloc.free(res.stdout);
-            defer ctx.base.exec_pool.alloc.free(res.stderr);
-            const content = formatBashResult(ctx.alloc, res.stdout, res.stderr, res.exit_code) catch "failed to read command pipe";
-            return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
-        }
-    } else |_| {
-        return r.errResult(call, "failed to read command output");
-    }
-
-    const slot = &ctx.base.exec_pool.slots[@intFromEnum(handle)];
-    slot.output_lock.lockUncancelable(ctx.base.exec_pool.io);
-    defer slot.output_lock.unlock(ctx.base.exec_pool.io);
-    const content = std.fmt.allocPrint(
-        ctx.alloc,
-        "<bash status=\"running\">\n<stdout>{s}</stdout>\n<stderr>{s}</stderr>\n</bash>",
-        .{ slot.stdout.items, slot.stderr.items },
-    ) catch "failed to read command pipe";
-    return r.okResult(call, r.truncateOutputToOwned(ctx.alloc, content, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES));
-}
-
-pub const BackgroundTask = r.r.agent_state.BackgroundTask;
-pub const BackgroundTaskList = r.r.agent_state.BackgroundTaskList;
-
-const Handle = exec.CmdPool.Handle;
-
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         command: []const u8,
         timeout: ?f64 = null,
-        run_in_background: bool = false,
     };
 
     const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
@@ -229,33 +104,6 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     }
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
-
-    if (args.run_in_background) {
-        const handle = ctx.base.exec_pool.run(ctx.base.cwd, &.{ "/bin/sh", "-c", args.command }) catch
-            return r.errResult(call, "failed to spawn command process");
-
-        const id: u8 = @intFromEnum(handle);
-        {
-            const agent = ctx.agent();
-            const g = agent.bg_tasks.lock(ctx.io);
-            defer g.unlock();
-            const alloc = agent.state_arena.allocator();
-            const command = alloc.dupe(u8, args.command) catch {
-                ctx.base.exec_pool.cancel(handle);
-                return r.errResult(call, "oom");
-            };
-            g.ptr.list.append(alloc, .{
-                .handle = handle,
-                .command = command,
-            }) catch {
-                ctx.base.exec_pool.cancel(handle);
-                return r.errResult(call, "oom");
-            };
-        }
-
-        const text = std.fmt.allocPrint(ctx.alloc, "Command running in background. Process ID: {d}", .{id}) catch return r.errResult(call, "oom");
-        return r.okResult(call, text);
-    }
 
     // Foreground with deadline race.
     const timeout_ms: i64 = blk: {
