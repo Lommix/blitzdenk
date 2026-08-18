@@ -700,7 +700,7 @@ test "thinking signatures survive blocking and streaming responses" {
 
 test "stream seeds tool input from content block start" {
     const body =
-        \\data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read","input":{"path":"src/main.zig"}}}
+        \\data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read","input":{"file_path":"src/main.zig"}}}
     ;
     var stream = model.StreamContext{ .emit = discardChunk };
     const result = try parseStream(std.testing.allocator, body, &stream);
@@ -709,7 +709,7 @@ test "stream seeds tool input from content block start" {
         std.testing.allocator.destroy(result);
     }
     try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
-    try std.testing.expectEqualStrings("{\"path\":\"src/main.zig\"}", result.tool_calls[0].input);
+    try std.testing.expectEqualStrings("{\"file_path\":\"src/main.zig\"}", result.tool_calls[0].input);
 }
 
 fn discardChunk(_: ?*anyopaque, _: types.StreamChunk) void {}

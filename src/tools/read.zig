@@ -17,11 +17,11 @@ pub const ReadTool = r.Tool{
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\      "path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
+        \\      "file_path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
         \\      "offset": {"type": "number", "description": "Line number to start reading from (1-indexed)"},
         \\      "limit": {"type": "number", "description": "Maximum number of lines to read"}
         \\  },
-        \\  "required": ["path"]
+        \\  "required": ["file_path"]
         \\}
         ,
     },
@@ -37,9 +37,9 @@ pub const ViewImageTool = r.Tool{
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\      "path": {"type": "string", "description": "Local image path (relative to cwd or absolute) or HTTP(S) URL"}
+        \\      "file_path": {"type": "string", "description": "Local image path (relative to cwd or absolute) or HTTP(S) URL"}
         \\  },
-        \\  "required": ["path"]
+        \\  "required": ["file_path"]
         \\}
         ,
     },
@@ -48,14 +48,14 @@ pub const ViewImageTool = r.Tool{
 
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
-        path: []const u8,
+        file_path: []const u8,
         offset: ?u64 = null,
         limit: ?u64 = null,
     };
 
     var args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\"}");
+    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"file_path\": \"...\"}");
 
     if (args.offset) |off| {
         args.offset = off -| READ_PADDING;
@@ -65,15 +65,15 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         args.limit = off + READ_PADDING;
     }
 
-    if (args.path.len == 0) return r.errResult(call, "path is empty");
+    if (args.file_path.len == 0) return r.errResult(call, "path is empty");
 
     var buf: [512]u8 = undefined;
     const rel_path = if (ctx.base.cwd.len > 0)
-        r.replaceAll(args.path, ctx.base.cwd, ".", &buf)
+        r.replaceAll(args.file_path, ctx.base.cwd, ".", &buf)
     else
-        args.path;
+        args.file_path;
 
-    const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, args.path }) catch
+    const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
@@ -113,21 +113,21 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 }
 
 fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
-    const Args = struct { path: []const u8 };
+    const Args = struct { file_path: []const u8 };
     const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\"}");
+    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"file_path\": \"...\"}");
 
-    if (args.path.len == 0) return r.errResult(call, "path is empty");
+    if (args.file_path.len == 0) return r.errResult(call, "path is empty");
 
-    const is_url = std.mem.startsWith(u8, args.path, "http://") or
-        std.mem.startsWith(u8, args.path, "https://");
+    const is_url = std.mem.startsWith(u8, args.file_path, "http://") or
+        std.mem.startsWith(u8, args.file_path, "https://");
 
     var display_buf: [512]u8 = undefined;
     const display_path = if (!is_url and ctx.base.cwd.len > 0)
-        r.replaceAll(args.path, ctx.base.cwd, ".", &display_buf)
+        r.replaceAll(args.file_path, ctx.base.cwd, ".", &display_buf)
     else
-        args.path;
+        args.file_path;
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var status_buf: [r.STATUS_BUF]u8 = undefined;
@@ -137,9 +137,9 @@ fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     r.setToolStatus(ctx, call, w.finish()) catch {};
 
     const raw = if (is_url)
-        loadRemoteImage(ctx, args.path) catch |err| return r.errResult(call, imageLoadError(err, true))
+        loadRemoteImage(ctx, args.file_path) catch |err| return r.errResult(call, imageLoadError(err, true))
     else blk: {
-        const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, args.path }) catch
+        const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, args.file_path }) catch
             return r.errResult(call, "failed to resolve image path");
         break :blk loadLocalImage(ctx, resolved) catch |err| return r.errResult(call, imageLoadError(err, false));
     };

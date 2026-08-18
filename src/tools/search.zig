@@ -10,7 +10,7 @@ pub const GlobTool = r.Tool{
         .description =
         \\Find files by path glob. Use this whenever you need to discover files by name, extension, or path shape; use grep when you need to search file contents.
         \\
-        \\`pattern` is a gitignore-style glob matched against paths, e.g. `**/*.zig` or `src/**/*.zig`. `path` narrows the directory being searched. Results respect ignore files, are sorted by path, and are truncated to 1000 lines or 32 KB.
+        \\`pattern` is a gitignore-style glob matched against paths, e.g. `**/*.zig` or `src/**/*.zig`. `file_path` narrows the directory being searched. Results respect ignore files, are sorted by path, and are truncated to 1000 lines or 32 KB.
         \\
         \\Every field is data, not a shell fragment. Do not add `rg`, `find`, shell syntax, or pipes to any argument.
         ,
@@ -21,7 +21,7 @@ pub const GlobTool = r.Tool{
         \\  "type": "object",
         \\  "properties": {
         \\    "pattern": {"type": "string", "description": "Glob pattern to match files, e.g. `**/*.zig` or `src/**/*.zig`"},
-        \\    "path": {"type": "string", "default": ".", "description": "Directory to search in, relative to the current working directory or absolute"}
+        \\    "file_path": {"type": "string", "default": ".", "description": "Directory to search in, relative to the current working directory or absolute"}
         \\  },
         \\  "required": ["pattern"]
         \\}
@@ -36,7 +36,7 @@ pub const GrepTool = r.Tool{
         .description =
         \\Search file contents for patterns. Use this for definitions, references, error messages, configuration keys, and any other content search; use glob when you only need filenames.
         \\
-        \\`pattern` is a regular expression by default; set `literal` when punctuation must be matched literally. `path` narrows the search, `glob` filters files, and `context` includes surrounding lines. Results respect .gitignore, include file paths and line numbers, and are truncated to 1000 lines or 32 KB.
+        \\`pattern` is a regular expression by default; set `literal` when punctuation must be matched literally. `file_path` narrows the search, `glob` filters files, and `context` includes surrounding lines. Results respect .gitignore, include file paths and line numbers, and are truncated to 1000 lines or 32 KB.
         \\
         \\Every field is data, not a shell fragment. Do not add `rg`, shell quoting, or pipes to any argument.
         ,
@@ -47,7 +47,7 @@ pub const GrepTool = r.Tool{
         \\  "type": "object",
         \\  "properties": {
         \\    "pattern": {"type": "string", "description": "Search pattern (regex or literal string)"},
-        \\    "path": {"type": "string", "default": ".", "description": "File or directory to search, relative to the current working directory or absolute"},
+        \\    "file_path": {"type": "string", "default": ".", "description": "File or directory to search, relative to the current working directory or absolute"},
         \\    "glob": {"type": "string", "description": "Filter files by glob pattern, e.g. `*.zig` or `src/**/*.zig`"},
         \\    "ignoreCase": {"type": "boolean", "default": false, "description": "Case-insensitive search (default: false)"},
         \\    "literal": {"type": "boolean", "default": false, "description": "Treat pattern as literal string instead of regex (default: false)"},
@@ -62,12 +62,12 @@ pub const GrepTool = r.Tool{
 
 const GlobArgs = struct {
     pattern: []const u8,
-    path: []const u8 = ".",
+    file_path: []const u8 = ".",
 };
 
 const GrepArgs = struct {
     pattern: []const u8,
-    path: []const u8 = ".",
+    file_path: []const u8 = ".",
     glob: ?[]const u8 = null,
     ignoreCase: bool = false,
     literal: bool = false,
@@ -79,24 +79,24 @@ fn runGlob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments for glob");
 
-    if (validateCommon(args.pattern, args.path)) |msg| return r.errResult(call, msg);
+    if (validateCommon(args.pattern, args.file_path)) |msg| return r.errResult(call, msg);
 
-    r.setToolStatusPrint(ctx, call, "glob  {s}  {s}", .{ args.pattern, args.path });
+    r.setToolStatusPrint(ctx, call, "glob  {s}  {s}", .{ args.pattern, args.file_path });
 
     var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(ctx.alloc, &.{ "rg", "--files", "--sort=path" }) catch
         return r.errResult(call, "failed to build glob command");
     argv.append(ctx.alloc, "--hidden") catch
         return r.errResult(call, "failed to build glob command");
-    appendIncludeGlob(ctx.alloc, &argv, ctx.base.cwd, args.path, args.pattern) catch
+    appendIncludeGlob(ctx.alloc, &argv, ctx.base.cwd, args.file_path, args.pattern) catch
         return r.errResult(call, "failed to build glob command");
-    appendSearchPath(ctx.alloc, &argv, args.path) catch
+    appendSearchPath(ctx.alloc, &argv, args.file_path) catch
         return r.errResult(call, "failed to build glob command");
 
     return runSearch(ctx, call, argv.items, .{
         .kind = "glob",
         .pattern = args.pattern,
-        .path = args.path,
+        .file_path = args.file_path,
         .empty_message = "No files matched.",
     });
 }
@@ -106,12 +106,12 @@ fn runGrep(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments for grep");
 
-    if (validateCommon(args.pattern, args.path)) |msg| return r.errResult(call, msg);
+    if (validateCommon(args.pattern, args.file_path)) |msg| return r.errResult(call, msg);
     if (args.context > MAX_CONTEXT_LINES) {
         return r.errResult(call, "context must be between 0 and 100");
     }
 
-    r.setToolStatusPrint(ctx, call, "grep  {s}  {s}", .{ args.pattern, args.path });
+    r.setToolStatusPrint(ctx, call, "grep  {s}  {s}", .{ args.pattern, args.file_path });
 
     var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(ctx.alloc, &.{ "rg", "--color=never", "--no-heading", "--line-number", "--with-filename" }) catch
@@ -124,7 +124,7 @@ fn runGrep(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (args.glob) |glob| {
         if (glob.len == 0) return r.errResult(call, "glob must not be empty");
-        appendIncludeGlob(ctx.alloc, &argv, ctx.base.cwd, args.path, glob) catch
+        appendIncludeGlob(ctx.alloc, &argv, ctx.base.cwd, args.file_path, glob) catch
             return r.errResult(call, "failed to build grep command");
     }
     argv.append(ctx.alloc, "--hidden") catch
@@ -139,21 +139,21 @@ fn runGrep(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     argv.appendSlice(ctx.alloc, &.{ "--regexp", args.pattern }) catch
         return r.errResult(call, "failed to build grep command");
-    appendSearchPath(ctx.alloc, &argv, args.path) catch
+    appendSearchPath(ctx.alloc, &argv, args.file_path) catch
         return r.errResult(call, "failed to build grep command");
 
     return runSearch(ctx, call, argv.items, .{
         .kind = "grep",
         .pattern = args.pattern,
-        .path = args.path,
+        .file_path = args.file_path,
         .regex = !args.literal,
         .empty_message = "No matches found.",
     });
 }
 
-fn validateCommon(pattern: []const u8, path: []const u8) ?[]const u8 {
+fn validateCommon(pattern: []const u8, file_path: []const u8) ?[]const u8 {
     if (pattern.len == 0) return "pattern is empty";
-    if (path.len == 0) return "path is empty";
+    if (file_path.len == 0) return "path is empty";
     return null;
 }
 
@@ -161,10 +161,10 @@ fn appendIncludeGlob(
     alloc: std.mem.Allocator,
     argv: *std.ArrayList([]const u8),
     cwd: []const u8,
-    path: []const u8,
+    file_path: []const u8,
     pattern: []const u8,
 ) !void {
-    const resolved = try resolveGlobForSearchPath(alloc, cwd, path, pattern);
+    const resolved = try resolveGlobForSearchPath(alloc, cwd, file_path, pattern);
     try argv.appendSlice(alloc, &.{ "--glob", resolved });
 }
 
@@ -210,15 +210,15 @@ fn stripDotSlash(value: []const u8) []const u8 {
 
 /// Omitting the default `.` operand keeps ripgrep's paths relative without a
 /// leading `./`, consistently across glob and grep output.
-fn appendSearchPath(alloc: std.mem.Allocator, argv: *std.ArrayList([]const u8), path: []const u8) !void {
+fn appendSearchPath(alloc: std.mem.Allocator, argv: *std.ArrayList([]const u8), file_path: []const u8) !void {
     try argv.append(alloc, "--");
-    if (!std.mem.eql(u8, path, ".")) try argv.append(alloc, path);
+    if (!std.mem.eql(u8, file_path, ".")) try argv.append(alloc, file_path);
 }
 
 const SearchFailureContext = struct {
     kind: []const u8,
     pattern: []const u8,
-    path: []const u8,
+    file_path: []const u8,
     regex: bool = false,
     empty_message: []const u8,
 };
@@ -234,7 +234,7 @@ fn runSearch(
         .argv = search_argv,
     }, SEARCH_TIMEOUT_MS) catch {
         const message = std.fmt.allocPrint(ctx.alloc, "{s} failed for pattern `{s}` in `{s}`: could not spawn search process", .{
-            failure.kind, failure.pattern, failure.path,
+            failure.kind, failure.pattern, failure.file_path,
         }) catch return r.errResult(call, "failed to spawn search process");
         return r.errResult(call, message);
     };
@@ -272,18 +272,18 @@ fn formatSearchError(
     if (failure.regex and std.mem.indexOf(u8, stderr, "regex parse error") != null) {
         const detail = lastErrorDetail(stderr) orelse "invalid regular expression";
         return std.fmt.allocPrint(alloc, "invalid regular expression `{s}` for path `{s}`: {s}", .{
-            failure.pattern, failure.path, detail,
+            failure.pattern, failure.file_path, detail,
         });
     }
 
     const detail = if (stderr.len == 0) "search process produced no error output" else std.mem.trimEnd(u8, stderr, "\r\n");
     if (exit_code) |code| {
         return std.fmt.allocPrint(alloc, "{s} failed for pattern `{s}` in `{s}` (exit code {d}): {s}", .{
-            failure.kind, failure.pattern, failure.path, code, detail,
+            failure.kind, failure.pattern, failure.file_path, code, detail,
         });
     }
     return std.fmt.allocPrint(alloc, "{s} failed for pattern `{s}` in `{s}`: {s}", .{
-        failure.kind, failure.pattern, failure.path, detail,
+        failure.kind, failure.pattern, failure.file_path, detail,
     });
 }
 
@@ -367,7 +367,7 @@ test "search errors add context and simplify regex parse failures" {
     const regex_error = try formatSearchError(std.testing.allocator, .{
         .kind = "grep",
         .pattern = "fn render(self:",
-        .path = "src",
+        .file_path = "src",
         .regex = true,
         .empty_message = "unused",
     }, 2, "rg: regex parse error:\n    fn render(self:\n             ^\nerror: unclosed group\n");
@@ -380,7 +380,7 @@ test "search errors add context and simplify regex parse failures" {
     const io_error = try formatSearchError(std.testing.allocator, .{
         .kind = "glob",
         .pattern = "**/*.zig",
-        .path = "missing",
+        .file_path = "missing",
         .empty_message = "unused",
     }, 2, "rg: missing: No such file or directory\n");
     defer std.testing.allocator.free(io_error);

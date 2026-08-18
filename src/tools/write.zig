@@ -12,10 +12,10 @@ pub const WriteTool = r.Tool{
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\      "path": {"type": "string", "description": "Path to the file to write (relative or absolute)"},
+        \\      "file_path": {"type": "string", "description": "Path to the file to write (relative or absolute)"},
         \\      "content": {"type": "string", "description": "Content to write to the file"}
         \\  },
-        \\  "required": ["path", "content"]
+        \\  "required": ["file_path", "content"]
         \\}
         ,
     },
@@ -23,7 +23,7 @@ pub const WriteTool = r.Tool{
 };
 
 const Args = struct {
-    path: []const u8,
+    file_path: []const u8,
     content: []const u8,
 };
 
@@ -31,18 +31,18 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const alloc = ctx.alloc;
     const args = std.json.parseFromSliceLeaky(Args, alloc, call.input, .{
         .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"path\": \"...\", \"content\": \"...\"}");
+    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"file_path\": \"...\", \"content\": \"...\"}");
 
-    r.setToolStatusPrint(ctx, call, "write {s}", .{args.path});
-    if (args.path.len == 0) return r.errResult(call, "path is empty");
+    r.setToolStatusPrint(ctx, call, "write {s}", .{args.file_path});
+    if (args.file_path.len == 0) return r.errResult(call, "path is empty");
 
-    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.path }) catch
+    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
 
     const decision = ctx.requestPermission(call.id, .{ .diff = .{
         .before = null,
         .after = args.content,
-        .path = args.path,
+        .path = args.file_path,
     } });
     switch (decision) {
         .approved => {},
@@ -73,7 +73,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, msg);
     }
 
-    const msg = std.fmt.allocPrint(ctx.alloc, "Successfully wrote {d} bytes to {s}", .{ args.content.len, args.path }) catch
+    const msg = std.fmt.allocPrint(ctx.alloc, "Successfully wrote {d} bytes to {s}", .{ args.content.len, args.file_path }) catch
         "write failed";
     return r.okResult(call, msg);
 }

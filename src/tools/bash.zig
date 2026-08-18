@@ -13,8 +13,9 @@ pub const BashTool = r.Tool{
         .parameters_schema =
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Bash command to execute"},
+        \\  "description": {"type": "string", "description": "Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples: \"ls\" → \"List files in current directory\"; \"git status\" → \"Show working tree status\"; \"npm install\" → \"Install package dependencies\""},
         \\  "timeout": {"type": "number", "description": "Timeout in seconds (optional, no default timeout)"}
-        \\}, "required": ["command"]}
+        \\}, "required": ["command", "description"]}
         ,
     },
     .func = &run,
@@ -23,6 +24,7 @@ pub const BashTool = r.Tool{
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         command: []const u8,
+        description: ?[]const u8 = null,
         timeout: ?f64 = null,
     };
 
@@ -42,11 +44,16 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     else
         args.command;
 
-    const LIMIT = 100;
-    const trunc = cleaned_command_str[0..@min(cleaned_command_str.len, LIMIT)];
-    const dots = if (cleaned_command_str.len > LIMIT) ".." else "";
+    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    var sgr_buf: [255]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&sgr_buf);
 
-    r.setToolStatusPrint(ctx, call, "{s}{s}", .{ trunc, dots });
+    w.styled(.{ .modifier = .{ .bold = true } }, "bash ");
+    w.styled(.{ .fg = app.theme.info }, args.description orelse "");
+    w.writeAll(" ");
+    w.styled(.{ .fg = app.theme.muted }, cleaned_command_str);
+
+    r.setToolStatus(ctx, call, w.finish()) catch {};
 
     const decision = ctx.requestPermission(call.id, .{ .call = .{
         .tool_name = call.name,

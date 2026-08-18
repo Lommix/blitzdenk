@@ -21,12 +21,12 @@ pub const EditTool = r.Tool{
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\      "path": {"type": "string", "description": "The absolute path to the file to modify"},
+        \\      "file_path": {"type": "string", "description": "The absolute path to the file to modify"},
         \\      "old_string": {"type": "string", "description": "The text to replace"},
         \\      "new_string": {"type": "string", "description": "The text to replace it with (must be different from old_string)"},
         \\      "replace_all": {"type": "boolean", "default": false, "description": "Replace all occurrences of old_string (default false)"}
         \\  },
-        \\  "required": ["path", "old_string", "new_string"]
+        \\  "required": ["file_path", "old_string", "new_string"]
         \\}
         ,
     },
@@ -36,7 +36,7 @@ pub const EditTool = r.Tool{
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const alloc = ctx.alloc;
     const Args = struct {
-        path: []const u8,
+        file_path: []const u8,
         old_string: []const u8,
         new_string: []const u8,
         replace_all: bool = false,
@@ -47,16 +47,16 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const args = (std.json.parseFromSlice(Args, alloc, call.input, .{ .ignore_unknown_fields = true }) catch {
         std.log.err("ARGs ERROR: {s}", .{call.input});
         return r.errResult(call,
-            \\invalid JSON arguments, expected `{"path": "...", "old_string": "...", "new_string": "...", "replace_all": ...}`
+            \\invalid JSON arguments, expected `{"file_path": "...", "old_string": "...", "new_string": "...", "replace_all": ...}`
         );
     }).value;
 
-    r.setToolStatusPrint(ctx, call, "edit {s}", .{args.path});
+    r.setToolStatusPrint(ctx, call, "edit {s}", .{args.file_path});
 
-    if (args.path.len == 0) return r.errResult(call, "path is empty");
+    if (args.file_path.len == 0) return r.errResult(call, "path is empty");
     if (args.old_string.len == 0) return r.errResult(call, "oldText is empty");
 
-    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.path }) catch
+    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
 
     if (std.mem.eql(u8, args.old_string, args.new_string)) {
@@ -99,7 +99,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const decision = ctx.requestPermission(call.id, .{ .diff = .{
         .before = file_content,
         .after = new_content,
-        .path = args.path,
+        .path = args.file_path,
     } });
     switch (decision) {
         .approved => {},
@@ -134,7 +134,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     r.markConfigTouched(ctx, resolved);
 
-    return r.okResult(call, std.fmt.allocPrint(alloc, "edit applied to {s}", .{args.path}) catch "edit applied successfully");
+    return r.okResult(call, std.fmt.allocPrint(alloc, "edit applied to {s}", .{args.file_path}) catch "edit applied successfully");
 }
 
 fn buildReplacement(

@@ -64,6 +64,11 @@ pub fn dynamic_def(alloc: std.mem.Allocator, agent_defs: []const ctxf.AgentMeta)
 }
 
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+    const self = ctx.base.registry.get(ctx.base.self_id) orelse
+        return r.errResult(call, "agent not found");
+    if (self.depth > 0)
+        return r.errResult(call, "subagents cannot spawn subagents");
+
     const Args = struct {
         description: []const u8,
         prompt: []const u8,
