@@ -71,6 +71,8 @@ have a bound model; unbound agents fail to spawn.
 
 Effort values: `"none"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`.
 
+Read the current model name bound to an agent with `blitz.get_model_name(agent_type)`.
+
 ## Tool sets
 
 `blitz.tools.*` are string constants for the built-in tool names.

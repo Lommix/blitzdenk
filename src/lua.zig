@@ -613,6 +613,23 @@ pub const Blitz = LuaType{
                 },
             },
             .{
+                .name = "get_model_name",
+                .desc = "Return the model name bound to an agent type.",
+                .ty = LuaType{ .function = .{
+                    .args = &.{.{ .name = "agent_type", .ty = LuaType.integer }},
+                    .ret = &LuaString,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, agent_type_id: u32) ![]const u8 {
+                            const agent_type: r.ContextFactory.AgentType = @enumFromInt(agent_type_id);
+                            const def = a.context_factory.agents.getPtrConst(agent_type).* orelse return error.UnknownAgent;
+                            const model = def.model orelse return error.NoModel;
+                            const entry = a.config.getModel(model.model) orelse return error.UnknownModel;
+                            return entry.getName();
+                        }
+                    }).lua_fn, "get_model_name"),
+                } },
+            },
+            .{
                 .name = "token_usage",
                 .desc = "Return token usage currently shown by the statusbar.",
                 .ty = LuaType{

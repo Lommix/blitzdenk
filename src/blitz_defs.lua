@@ -270,6 +270,8 @@
 ---@field add_agent fun(def: BlitzAgentDef): integer
 ---Set the model config for a specific agent.
 ---@field set_model_agent fun(agent_type: integer, model: integer, effort?: string)
+---Return the model name bound to an agent type.
+---@field get_model_name fun(agent_type: integer): string
 ---Return token usage currently shown by the statusbar.
 ---@field token_usage fun(): BlitzTokenUsage
 ---Return main-agent context fill percentage currently shown by the statusbar.
