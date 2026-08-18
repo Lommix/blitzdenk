@@ -38,7 +38,7 @@ pub const BashTool = r.Tool{
         \\Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to first 1000 lines or 32KB (whichever is hit first). Optionally provide a timeout in seconds.
         ,
         .prompt_snippet = "Execute a bash command",
-        .prompt_guidelines = "Use bash for operations without a dedicated tool (e.g. ls, rg, find, builds, tests).",
+        .prompt_guidelines = "Prefer specialist tools over bash whenever available",
         .parameters_schema =
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Bash command to execute"},
