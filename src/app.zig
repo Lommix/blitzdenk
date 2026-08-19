@@ -840,7 +840,6 @@ pub const App = struct {
 
         if (is_welcome) {
             var wp = r.tui.Paragraph{
-                .border = .single,
                 .padding = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
             };
             r.dash.build_info(app, &wp.lines) catch {};
