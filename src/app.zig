@@ -11,8 +11,7 @@ const COMMAND_COMPLETION_ROWS = 8;
 pub const ChatRole = enum { system, user, agent };
 
 const builtin_command_completions: []const []const u8 = &.{
-    "/ssh user@host:/path/to/cwd",
-    "/cd /path/to/new/cwd",
+    "/ssh",
 };
 
 pub const UiState = union(enum) {
@@ -792,29 +791,33 @@ pub const App = struct {
         defer app.mu.unlock(app.io);
         _ = app.arena_frame.reset(.free_all);
         const frame_alloc = app.arena_frame.allocator();
-        buf.fill(area, .{ .style = .{ .bg = app.theme.overlay } });
 
         const input_height: u16 = blk: {
             switch (app.input_mode) {
-                .text, .perm_message, .passphrase => break :blk 5,
+                .text, .passphrase => {
+                    const inner_w = area.width -| 5; // 2 left + 2 right padding + ❯ prompt
+                    const rows = inputWrappedRows(app, frame_alloc, inner_w);
+                    break :blk @min(rows +| 3, 9); // input rows + status + 2 padding
+                },
+                .perm_message => break :blk 8, // 5-row input box + status + 2 padding
                 .perm_select => {
-                    const entry = app.active_permission orelse break :blk 5;
+                    const entry = app.active_permission orelse break :blk 9;
                     if (entry.payload == .ask) {
-                        break :blk askPermissionInputHeight(entry.payload.ask.options, entry.payload.ask.header, entry.payload.ask.question, area.width, area.height);
+                        break :blk askPermissionInputHeight(entry.payload.ask.options, entry.payload.ask.header, entry.payload.ask.question, area.width, area.height) +| 3;
                     }
-                    break :blk 6; // .call, .diff, .plan all have header + options
+                    break :blk 9; // header + options + status + 2 padding
                 },
             }
         };
 
-        const main_status_height: u16 = 3; //renderMainProgressRequiredLines(app);
-
-        // Combined chat + main-agent-status region; status floats right after chat.
-        const _combined_area, const _input_area, const _status_area =
+        // Chat fills the screen; input + status stick right after the chat
+        // content (or to the viewport bottom once it overflows). Each status
+        // line lives inside the input footer: the main-agent status on the top
+        // row, the statusbar on the row above the bottom padding.
+        const _combined_area, _ =
             r.tui.Col(area, .{
                 r.tui.Constr.fill, // chat + status
-                r.tui.Constr{ .fixed = input_height }, // input
-                r.tui.Constr{ .fixed = 1 }, // statusbar (pinned bottom)
+                r.tui.Constr{ .fixed = input_height }, // input + status footer
             });
 
         const lua_error_height = luaErrorHeight(app, frame_alloc, _combined_area.width, _combined_area.height) catch 0;
@@ -824,58 +827,90 @@ pub const App = struct {
                 r.tui.Constr.fill,
             });
 
+        // Build the content first so the viewport only renders as much as needed.
+        const is_welcome = app.chat_entries.items.len == 0 and !app.isMainAgentCompacting();
+        var welcome_p: ?r.tui.Paragraph = null;
+        var chat_stack: ?ChatStack = null;
+        var content_end_h: usize = 0;
+
+        // The main-agent status line lives inside the input footer, so the
+        // chat keeps all of its rows.
+        const progress_line: ?r.tui.Line = mainProgressLine(app, frame_alloc);
+        const progress_h: u16 = if (progress_line != null) 1 else 0;
+        const chat_h: u16 = _chat_status_area.height;
+
+        if (is_welcome) {
+            var wp = r.tui.Paragraph{
+                .border = .single,
+                .padding = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
+            };
+            r.dash.build_info(app, &wp.lines) catch {};
+            content_end_h = wp.totalHeightLong(_chat_status_area.width);
+            welcome_p = wp;
+        } else {
+            chat_stack = buildChatStack(app, frame_alloc, _chat_status_area.width, chat_h) catch |err| blk: {
+                log.err("chat build failed with {any}", .{err});
+                break :blk null;
+            };
+            if (chat_stack) |cs| content_end_h = cs.total -| cs.scroll_offset;
+        }
+
+        // Input sits right after the chat content; once content fills the
+        // viewport it pins to the bottom and stays sticky. The footer includes
+        // the main-agent status row on top of the input widget.
+        const footer_h: u16 = input_height +| progress_h;
+        const max_footer_y: u16 = (area.y +| area.height) -| footer_h;
+        const content_cap: u16 = @intCast(@min(content_end_h, @as(usize, chat_h)));
+        const footer_y: u16 = @min(
+            _chat_status_area.y +| content_cap,
+            max_footer_y,
+        );
+        const _input_area: r.tui.Rect = .{
+            .x = area.x,
+            .y = footer_y,
+            .width = area.width,
+            .height = footer_h,
+        };
+
+        // Paint the background only over the used region; the rest stays
+        // terminal default so unused viewport space is not rendered.
+        const used_bottom: u16 = @min(footer_y +| footer_h, area.y +| area.height);
+        buf.fill(.{
+            .x = area.x,
+            .y = area.y,
+            .width = area.width,
+            .height = used_bottom -| area.y,
+        }, .{ .style = .{ .bg = app.theme.overlay } });
+
         renderLuaError(app, frame_alloc, _lua_error_area, buf) catch |err| {
             log.err("lua error render failed with {any}", .{err});
         };
 
-        var used_chat_lines: usize = 0;
-        if (app.chat_entries.items.len == 0 and !app.isMainAgentCompacting()) {
-            var welcome_p = r.tui.Paragraph{};
-            r.dash.build_info(app, &welcome_p.lines) catch {};
-            welcome_p.renderSimple(frame_alloc, _chat_status_area.center(70, 25), buf);
-        } else {
-            const chat_cap: u16 = _chat_status_area.height -| main_status_height;
-            const _chat_area: r.tui.Rect = .{
-                .x = _chat_status_area.x,
-                .y = _chat_status_area.y,
-                .width = _chat_status_area.width,
-                .height = chat_cap,
-            };
-            used_chat_lines = renderChatArea(app, _chat_area, buf) catch |err| blk: {
-                log.err("chat render failed with {any}", .{err});
-                break :blk 0;
-            };
-        }
-
-        const status_y: u16 = _chat_status_area.y +| @as(u16, @intCast(used_chat_lines));
-        const status_remaining: u16 = (_chat_status_area.y +| _chat_status_area.height) -| status_y;
-
-        const main_agent_id = app.main_agent_id;
-
-        renderMainProgress(app, main_agent_id, .{
+        const _chat_area: r.tui.Rect = .{
             .x = _chat_status_area.x,
-            .y = status_y,
+            .y = _chat_status_area.y,
             .width = _chat_status_area.width,
-            .height = @min(main_status_height, status_remaining),
-        }, buf);
+            .height = chat_h,
+        };
 
-        // Input/Permission
-        switch (app.input_mode) {
-            .perm_select => renderPermissionWidget(app, _input_area, buf),
-            .perm_message => renderPermMessage(app, _input_area, buf),
-            .text => renderInput(app, frame_alloc, _input_area, buf) catch {},
-            .passphrase => {
-                // Render the normal input bar dimmed underneath, then a centered modal on top.
-                renderInput(app, frame_alloc, _input_area, buf) catch {};
-                renderPassphraseModal(app, area, buf);
-            },
+        if (welcome_p) |wp| {
+            const welcome_area: r.tui.Rect = .{
+                .x = _chat_area.x,
+                .y = _chat_area.y,
+                .width = _chat_area.width,
+                .height = content_cap,
+            };
+            wp.renderSimple(frame_alloc, welcome_area, buf);
+        } else if (chat_stack) |cs| {
+            _ = renderChatStack(app, cs, _chat_area, buf);
         }
+
+        // Input/Permission: a single overlay_dark block hosting the main-agent
+        // progress, the input content, and the statusbar.
+        renderInputWidget(app, frame_alloc, _input_area, progress_line, buf);
 
         // Notifications
         renderNotifications(app, frame_alloc, area, buf);
-
-        // Statusbar
-        renderStatusBar(app, _status_area, buf);
 
         if (app.input_mode == .text and app.input_mode.text.completion_open) {
             const completions = commandCompletions(app, frame_alloc, app.input_buffer.items, app.input_cursor);
@@ -1886,13 +1921,54 @@ fn insertCompletionToken(self: *App, entry: []const u8) void {
     self.input_cursor = @intCast(entry.len);
 }
 
-fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
+fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, progress_line: ?r.tui.Line, buf: *r.tui.Buffer) void {
+    const progress_h: u16 = if (progress_line != null) 1 else 0;
+
+    buf.fill(area, .{ .style = .{ .bg = app.theme.overlay_dark } });
+
+    // 1-row top/bottom padding, 2-column left/right padding.
+    const content: r.tui.Rect = .{
+        .x = area.x +| 2,
+        .y = area.y +| 1,
+        .width = area.width -| 4,
+        .height = area.height -| 2,
+    };
+    if (content.width == 0 or content.height == 0) return;
+
+    if (progress_line) |l| {
+        l.render(content.x, content.y, content.width, buf);
+    }
+
+    const input_area: r.tui.Rect = .{
+        .x = content.x,
+        .y = content.y +| progress_h,
+        .width = content.width,
+        .height = content.height -| progress_h -| 1,
+    };
+    const status_area: r.tui.Rect = .{
+        .x = content.x,
+        .y = content.y +| content.height -| 1,
+        .width = content.width,
+        .height = 1,
+    };
+
+    switch (app.input_mode) {
+        .text => renderInputContent(app, arena, input_area, buf) catch {},
+        .passphrase => renderPassphraseInput(app, input_area, buf),
+        .perm_message => renderPermMessageContent(app, input_area, buf),
+        .perm_select => renderPermissionContent(app, input_area, buf),
+    }
+
+    renderStatusBar(app, status_area, buf);
+}
+
+fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
     const border_color = app.theme.muted;
 
     var para = r.tui.Paragraph{
         .border = .none,
         .style = .{ .fg = border_color },
-        .padding = .{ .bottom = 1, .left = 2, .right = 2, .top = 1 },
+        .padding = .{ .left = 1 }, // ❯ prompt column
     };
     const inner = para.inner(area);
 
@@ -1908,9 +1984,11 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
     while (it.next()) |raw_line| {
         const line_start = consumed;
         const line_end = line_start + raw_line.len;
-        var line = r.tui.Line{};
 
+        var wrapped: std.ArrayList(r.tui.Line) = .empty;
+        defer wrapped.deinit(arena);
         if (cursor >= line_start and cursor <= line_end) {
+            var line = r.tui.Line{};
             const off = cursor - line_start;
             const before = raw_line[0..off];
             try line.pushText(arena, before, .{});
@@ -1922,16 +2000,11 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
             } else {
                 try line.pushText(arena, " ", cursor_style);
             }
+            try r.tui.wrapLine(arena, &line, inner.width, &wrapped);
         } else {
-            try line.pushText(arena, raw_line, .{});
+            try pushPlainWrappedLine(arena, raw_line, inner.width, &wrapped);
         }
 
-        // Wrap to temp buffer to detect cursor position
-        var wrapped: std.ArrayList(r.tui.Line) = .empty;
-        defer wrapped.deinit(arena);
-        try r.tui.wrapLine(arena, &line, inner.width, &wrapped);
-
-        // Find which wrapped row has cursor
         if (cursor >= line_start and cursor <= line_end) {
             for (wrapped.items, 0..) |*row, i| {
                 for (row.spans.items) |span| {
@@ -1943,13 +2016,11 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
             }
         }
 
-        // Append wrapped rows to para.lines
         try para.lines.appendSlice(arena, wrapped.items);
         accumulated_rows += wrapped.items.len;
         consumed = line_end + 1;
     }
 
-    // Auto-scroll to keep cursor visible
     const visible_height = inner.height;
     if (cursor_visual_row >= visible_height) {
         app.input_scroll_offset = @intCast(cursor_visual_row - visible_height + 1);
@@ -1958,21 +2029,34 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
     }
     para.scroll_offset = app.input_scroll_offset;
 
-    const block = r.tui.Block{
-        .style = .{ .fg = border_color, .bg = app.theme.overlay_dark },
-        .borders = .{ .top = true, .bottom = false, .left = false, .right = false },
-    };
-
-    block.render(area, buf);
     para.render(arena, area, area, buf);
-    buf.set(area.x + 1, area.y + 1, .{ .char = '❯' });
+    buf.set(area.x, area.y, .{ .char = '❯' });
     if (app.screenshot_buf != null) {
-        buf.set(area.x + 1, area.y, .{});
         buf.setString(area.x, area.y, r.tui.icon.eye, .{ .fg = app.theme.ok });
     }
 }
 
-fn renderPermMessage(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn pushPlainWrappedLine(arena: std.mem.Allocator, raw_line: []const u8, inner_w: u16, out: *std.ArrayList(r.tui.Line)) !void {
+    var line = r.tui.Line{};
+    try line.pushText(arena, raw_line, .{});
+    try r.tui.wrapLine(arena, &line, inner_w, out);
+}
+
+/// Number of visual rows the input text wraps to at `inner_w` columns.
+fn inputWrappedRows(app: *App, arena: std.mem.Allocator, inner_w: u16) u16 {
+    const display = app.displayInput(arena);
+    var rows: u16 = 0;
+    var it = std.mem.splitAny(u8, display.text, "\n");
+    while (it.next()) |raw_line| {
+        var wrapped: std.ArrayList(r.tui.Line) = .empty;
+        defer wrapped.deinit(arena);
+        pushPlainWrappedLine(arena, raw_line, inner_w, &wrapped) catch break;
+        rows +|= @intCast(wrapped.items.len);
+    }
+    return @max(rows, 1);
+}
+
+fn renderPermMessageContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const pm = &app.input_mode.perm_message;
     const input_widget: r.tui.Input = .{
         .text = pm.buf[0..pm.len],
@@ -1983,33 +2067,27 @@ fn renderPermMessage(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     input_widget.render(area, buf);
 }
 
-/// ╭──────── PASSWORD ───────────╮
-/// │         ********            │
-/// ╰─────────────────────────────╯
-fn renderPassphraseModal(app: *App, full_area: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn renderPassphraseInput(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const pp = &app.input_mode.passphrase;
-    const modal = full_area.center(32, 3);
+    const style: r.tui.Style = .{ .fg = app.theme.warn };
+    const label = "❯ Passphrase: ";
+    const label_width: u16 = 14;
+    if (area.width <= label_width) {
+        buf.setStringMax(area.x, area.y, label, style, area.width);
+        return;
+    }
+    buf.setString(area.x, area.y, label, style);
 
-    const block: r.tui.Block = .{
-        .title = " Password or Passphrase ",
-        .title_style = .{ .fg = app.theme.warn, .modifier = .{ .bold = true } },
-        .style = .{ .fg = app.theme.warn },
-        .borders = .all,
-    };
-    const inner = block.innerArea(modal);
-    block.render(modal, buf);
-
-    // Mask the entered characters as '*'.
-    var x: u16 = inner.x + 2;
-    const y: u16 = inner.y;
-    const max_chars = inner.width -| 3;
+    var x: u16 = area.x +| label_width;
+    const y: u16 = area.y;
+    const max_chars = area.width -| label_width -| 1;
     const shown: usize = @min(pp.len, max_chars);
     var i: usize = 0;
     while (i < shown) : (i += 1) {
-        buf.set(x, y, .{ .char = '*' });
+        buf.set(x, y, .{ .char = '*', .style = style });
         x += 1;
     }
-    buf.set(x, y, .{ .char = '_', .style = .{ .fg = app.theme.warn } });
+    buf.set(x, y, .{ .char = '_', .style = style });
 }
 
 fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rect, buf: *r.tui.Buffer) void {
@@ -2054,39 +2132,40 @@ fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rec
 }
 
 fn renderStatusBar(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    for (area.x..area.x +| area.width) |x| {
-        buf.set(@intCast(x), area.y, .{ .char = ' ', .style = .{ .fg = app.theme.text, .bg = app.theme.overlay_dark } });
-    }
+    const alloc = app.arena_frame.allocator();
+    var line = statusBarLine(app, alloc) catch return;
+    line.render(area.x, area.y, area.width, buf);
+}
 
-    if (app.lua_status_bar_enabled) {
-        if (app.lua_status_bar_cache_len > 0) {
-            renderCenteredStatusText(app, area, buf, app.lua_status_bar_cache[0..app.lua_status_bar_cache_len]);
-            return;
+fn statusBarLine(app: *App, alloc: std.mem.Allocator) !r.tui.Line {
+    if (app.lua_status_bar_enabled and app.lua_status_bar_cache_len > 0) {
+        const parsed = try r.tui.Text.fromAnsi(alloc, app.lua_status_bar_cache[0..app.lua_status_bar_cache_len]);
+        if (parsed.lines.items.len > 0) {
+            var line = parsed.lines.items[0];
+            line.style = .{ .fg = app.theme.muted };
+            return line;
         }
+        return .{};
     }
 
     const ctx_pct: u8 = @intFromFloat(@min(app.contextPercent(), 100));
-
     var status_buf: [256]u8 = undefined;
     var in_buf: [16]u8 = undefined;
     var out_buf: [16]u8 = undefined;
     var cache_buf: [16]u8 = undefined;
-    var ctx_buf: [8]u8 = undefined;
-
     const usage = app.registry.usage();
-    const in_str = formatTokenCount(&in_buf, usage.input_tokens);
-    const out_str = formatTokenCount(&out_buf, usage.output_tokens);
-    const cache_str = formatTokenCount(&cache_buf, usage.cache_read_tokens + usage.cache_write_tokens);
-    const ctx_str = std.fmt.bufPrint(&ctx_buf, "{d}%", .{ctx_pct}) catch "0%";
-    const skip_str = if (app.flags.skip_permissions) "| AUTO APPROVAL" else "";
-
     const status = std.fmt.bufPrint(
         &status_buf,
-        "IN:{s} OUT:{s} CACHE:{s} | CTX:{s} {s}",
-        .{ in_str, out_str, cache_str, ctx_str, skip_str },
+        "IN:{s} OUT:{s} CACHE:{s} | CTX:{d}% {s}",
+        .{
+            formatTokenCount(&in_buf, usage.input_tokens),
+            formatTokenCount(&out_buf, usage.output_tokens),
+            formatTokenCount(&cache_buf, usage.cache_read_tokens + usage.cache_write_tokens),
+            ctx_pct,
+            if (app.flags.skip_permissions) "| AUTO APPROVAL" else "",
+        },
     ) catch " ?? ";
-
-    renderCenteredStatusText(app, area, buf, status);
+    return r.tui.Line.new(alloc, "{s}", .{status}, .{ .fg = app.theme.muted });
 }
 
 fn refreshLuaStatusBar(app: *App) void {
@@ -2097,28 +2176,6 @@ fn refreshLuaStatusBar(app: *App) void {
             app.lua_status_bar_cache_len = status.len;
         }
     }
-}
-
-fn statusTextWidth(text: []const u8) u16 {
-    var cols: u16 = 0;
-    var i: usize = 0;
-    while (i < text.len) {
-        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch break;
-        if (i + len > text.len) break;
-        const cp = std.unicode.utf8Decode(text[i..][0..len]) catch break;
-        i += len;
-        if (cp < 0x20 or cp == 0x7F) continue;
-        cols +|= 1;
-    }
-    return cols;
-}
-
-fn renderCenteredStatusText(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer, status: []const u8) void {
-    const width = @min(statusTextWidth(status), area.width);
-    const offset = @divTrunc(area.width -| width, 2);
-    buf.setStringMax(area.x + offset, area.y, status, .{
-        .fg = app.theme.muted,
-    }, area.width -| offset);
 }
 
 fn luaErrorParagraph(app: *App, arena: std.mem.Allocator, msg: []const u8) !r.tui.Paragraph {
@@ -2633,26 +2690,24 @@ fn appendMarkdownText(p: *r.tui.Paragraph, gpa: std.mem.Allocator, arena: std.me
     }
 }
 
-fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
-    if (area.width == 0 or area.height == 0) return 0;
+const ChatStack = struct {
+    items: std.ArrayList(RenderParagraphItem) = .empty,
+    total: usize = 0,
+    scroll_offset: usize = 0,
+};
 
-    const alloc = app.arena_frame.allocator();
+fn buildChatStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u16) !ChatStack {
+    var s = ChatStack{};
     const maybe_agent: ?*r.agent.Agent = if (app.main_agent_id) |id| app.registry.get(id) else null;
-
-    const inner_w: u16 = area.width;
-    const inner_h: u16 = area.height;
 
     var scroll_offset_usize: usize = if (app.auto_scroll) 0 else app.scroll_offset;
     const target: usize = @as(usize, inner_h) +| scroll_offset_usize;
 
-    var stack: std.ArrayList(RenderParagraphItem) = .empty;
-    var total: usize = 0;
-
     if (app.isMainAgentCompacting()) {
         var p = buildCompactionIndicatorParagraph(alloc, app);
         const h = p.totalHeightLong(inner_w);
-        stack.append(alloc, .{ .p = p, .h = h }) catch {};
-        total += h;
+        s.items.append(alloc, .{ .p = p, .h = h }) catch {};
+        s.total += h;
     }
 
     // Failed agent path
@@ -2671,8 +2726,8 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
                 try para.appendText(alloc, txt, .{ .fg = app.theme.warn, .modifier = .{ .italic = true } });
             }
             const h = para.totalHeightLong(inner_w);
-            try stack.append(alloc, .{ .p = para, .h = h });
-            total += h;
+            try s.items.append(alloc, .{ .p = para, .h = h });
+            s.total += h;
         }
     }
 
@@ -2692,7 +2747,7 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
                 .diff_lines = lines.items,
             } };
 
-            try buildChatEntryParagraph(alloc, &stack, &total, app, .{
+            try buildChatEntryParagraph(alloc, &s.items, &s.total, app, .{
                 .role = .agent,
                 .parts = parts,
             }, inner_w);
@@ -2700,20 +2755,20 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
     }
 
     if (app.streaming_entry) |entry| {
-        try buildChatEntryParagraph(alloc, &stack, &total, app, entry, inner_w);
+        try buildChatEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w);
     }
 
-    while (i > 0 and total < target) {
+    while (i > 0 and s.total < target) {
         i -= 1;
         const entry = app.chat_entries.items[i];
 
         if (maybe_agent == null and entry.role != .system) continue;
 
-        try buildChatEntryParagraph(alloc, &stack, &total, app, entry, inner_w);
+        try buildChatEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w);
     }
 
     if (i == 0) {
-        const max_scroll: usize = if (total > inner_h) @intCast(total - inner_h) else 0;
+        const max_scroll: usize = if (s.total > inner_h) @intCast(s.total - inner_h) else 0;
         if (scroll_offset_usize > max_scroll) {
             scroll_offset_usize = max_scroll;
             app.scroll_offset = max_scroll;
@@ -2721,16 +2776,28 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
         }
     }
 
+    s.scroll_offset = scroll_offset_usize;
+    return s;
+}
+
+fn renderChatStack(app: *App, s: ChatStack, area: r.tui.Rect, buf: *r.tui.Buffer) usize {
+    if (area.width == 0 or area.height == 0) return 0;
+
+    const alloc = app.arena_frame.allocator();
+    const inner_w: u16 = area.width;
+    const inner_h: u16 = area.height;
+    const scroll_offset_usize: usize = s.scroll_offset;
+
     // Render bottom-up. anchor_y is the row JUST BELOW the next paragraph's
     // bottom border. When the stack does not fill the area, anchor below the
     // last visible row instead of the area bottom — keeps short chats top-aligned
     // and lets paragraphs grow downward until they hit the input.
     const viewport_top: i128 = area.y;
     const viewport_bottom: i128 = @as(i128, area.y) + @as(i128, inner_h);
-    const fill_bottom: usize = @min(total, @as(usize, inner_h));
+    const fill_bottom: usize = @min(s.total, @as(usize, inner_h));
     var anchor_y: i128 = @as(i128, area.y) + @as(i128, @intCast(fill_bottom)) + @as(i128, @intCast(scroll_offset_usize));
 
-    for (stack.items) |e| {
+    for (s.items.items) |e| {
         const item_bottom = anchor_y;
         const item_top = item_bottom - @as(i128, @intCast(e.h));
         defer anchor_y = item_top;
@@ -2758,28 +2825,21 @@ fn renderChatArea(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) !usize {
         p.render(alloc, sub, area, buf);
     }
 
-    const consumed: usize = if (total > scroll_offset_usize) total - scroll_offset_usize else 0;
-    return @min(@as(usize, inner_h), consumed);
+    const consumed: usize = if (s.total > scroll_offset_usize) s.total - scroll_offset_usize else 0;
+    return consumed;
 }
 
-fn renderMainProgress(app: *App, id: ?r.AgentId, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    if (area.width == 0 or area.height == 0) return;
-
-    const aid = id orelse return;
+fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
+    const aid = app.main_agent_id orelse return null;
     const slot = &app.registry.slots[aid.index];
     const state = slot.state.load(.acquire);
-    if (state != .active and state != .complete and state != .failed) return;
+    if (state != .active and state != .complete and state != .failed) return null;
 
-    const alloc = app.sessionAlloc();
-    const agent = if (slot.agent) |*value| value else return;
+    const agent = if (slot.agent) |*value| value else return null;
     const now: i128 = @intCast(std.Io.Timestamp.now(app.io, .real).nanoseconds);
     const end = if (agent.run_ended_ns != 0) agent.run_ended_ns else now;
     const elapsed = if (agent.run_started_ns == 0) 0 else @max(0, end - agent.run_started_ns);
     const secs: u32 = @intCast(@divTrunc(elapsed, std.time.ns_per_s));
-
-    var para = r.tui.Paragraph{
-        .padding = .all(1),
-    };
 
     const hl: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .bold = true } };
     const info: r.tui.Style = .{ .fg = app.theme.info };
@@ -2828,9 +2888,7 @@ fn renderMainProgress(app: *App, id: ?r.AgentId, area: r.tui.Rect, buf: *r.tui.B
         else
             l.pushSpanPrint(alloc, "{s} ({d}s)", .{ label, secs }, info) catch {};
     }
-
-    para.lines.append(alloc, l) catch {};
-    para.render(alloc, area, area, buf);
+    return l;
 }
 
 fn formatDuration(buf: []u8, secs: u32) []const u8 {
@@ -2846,7 +2904,7 @@ fn str_replace(buf: []u8, from: []const u8, to: []const u8, input: []const u8) [
     return buf[0..len];
 }
 
-fn renderPermissionWidget(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const block: r.tui.Block = .{
         .style = .{ .fg = app.theme.warn },
         .borders = .{ .bottom = true, .left = true, .right = true },
