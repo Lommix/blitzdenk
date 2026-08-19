@@ -862,7 +862,7 @@ pub const Blitz = LuaType{
             },
             .{
                 .name = "set_theme",
-                .desc = "Set the theme from a table of hex color strings. Missing fields keep their current value.",
+                .desc = "Set the theme from a table of hex color strings or \"transparent\". Missing fields keep their current value.",
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "theme", .ty = ThemeDef }},
                     .fn_ptr = LuaFnBind((struct {

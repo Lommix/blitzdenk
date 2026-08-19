@@ -296,7 +296,7 @@
 ---@field set_flags fun(flags: BlitzAppFlags)
 ---Return the current theme as a table of hex color strings.
 ---@field get_theme fun(): BlitzTheme
----Set the theme from a table of hex color strings. Missing fields keep their current value.
+---Set the theme from a table of hex color strings or "transparent". Missing fields keep their current value.
 ---@field set_theme fun(theme: BlitzTheme)
 ---Write a debug log line.
 ---@field log fun(msg: string)

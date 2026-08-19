@@ -46,7 +46,7 @@ pub const Theme = struct {
     pub const default: Theme = .{
         .bg = .{ .rgb = .{ .r = 26, .g = 27, .b = 38 } },
         .overlay_dark = .{ .rgb = .{ .r = 22, .g = 22, .b = 30 } },
-        .overlay = .{ .rgb = .{ .r = 47, .g = 51, .b = 77 } },
+        .overlay = .reset,
         .muted = .{ .rgb = .{ .r = 86, .g = 95, .b = 137 } },
         .text = .{ .rgb = .{ .r = 192, .g = 202, .b = 245 } },
         .ok = .{ .rgb = .{ .r = 158, .g = 206, .b = 106 } },

@@ -21,8 +21,9 @@ pub const Color = union(enum) {
     rgb: struct { r: u8, g: u8, b: u8 },
     indexed: u8,
 
-    /// '#232323' ...
+    /// '#232323' ... or 'transparent'
     pub fn parseStrHex(str: []const u8) !Color {
+        if (std.mem.eql(u8, str, "transparent")) return .reset;
         const hex = if (str.len > 0 and str[0] == '#') str[1..] else str;
         if (hex.len != 6) return error.InvalidHexLength;
         const n = try std.fmt.parseInt(u24, hex, 16);

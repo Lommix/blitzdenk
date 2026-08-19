@@ -273,7 +273,8 @@ end
 ```
 
 Also: `blitz.get_flags()` / `blitz.set_flags(t)` for `show_thinking`, `debug_log`,
-`skip_permissions`; `blitz.get_theme()` / `blitz.set_theme(t)` for hex colors;
+`skip_permissions`; `blitz.get_theme()` / `blitz.set_theme(t)` for hex colors
+(`"transparent"` clears a field);
 `blitz.push_notification(msg)`; `blitz.log(msg)`; `blitz.set_compact_edge(tokens)`.
 `blitz.token_usage()` also returns `cost` (total USD, computed from the model
 registry).
