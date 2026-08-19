@@ -34,6 +34,8 @@
 ---@class BlitzCmd
 ---Reset the active session.
 ---@field reset_session fun()
+---Change the working directory.
+---@field cd fun(path: string)
 ---Cancel all in-flight agent work and drop streaming preview.
 ---@field cancel fun()
 ---Retry the main agent's last turn.
@@ -280,8 +282,8 @@
 ---Bind a vim-style key combo to a Lua callback.
 ---Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
 ---@field bind fun(key: string, func: function)
----Bind a slash command to a Lua callback.
----Example: blitz.add_command("/help", function(args) end)
+---Bind a slash command to a Lua callback. The leading "/" is added automatically.
+---Example: blitz.add_command("help", function(args) end)
 ---@field add_command fun(command: string, func: function)
 ---Override the tool set for a given agent type. Replaces defaults entirely.
 ---Names must match built-in tool names or names of tools registered via blitz.register_tool.

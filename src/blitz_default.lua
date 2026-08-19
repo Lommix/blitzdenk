@@ -47,19 +47,23 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 ---------------------------------------------------------------------------------------------------
 --- Commands
 ---------------------------------------------------------------------------------------------------
-blitz.add_command("/compact", function()
+blitz.add_command("cd", function(rem)
+	blitz.cmd.cd(rem)
+end)
+
+blitz.add_command("compact", function()
 	blitz.cmd.compact()
 end)
 
-blitz.add_command("/clear", function()
+blitz.add_command("clear", function()
 	blitz.cmd.reset_session()
 end)
 
-blitz.add_command("/help", function(rem)
+blitz.add_command("help", function(rem)
 	blitz.cmd.prompt("Load the blitzdenk skill and help the user: \n" .. rem)
 end)
 
-blitz.add_command("/plan", function(rem)
+blitz.add_command("plan", function(rem)
 	local prompt = [[
 You are in collaborative explore-plan mode. Do NOT make any edits and do NOT present a final plan yet.
 Interview the user relentlessly about every aspect of the task until you reach a shared understanding,
@@ -80,7 +84,7 @@ This is the request to explore:
 	blitz.cmd.prompt(prompt)
 end)
 
-blitz.add_command("/show", function(rem)
+blitz.add_command("show", function(rem)
 	local prompt = [[
 Explain the answer in a visual way using short and precise mermaid diagrams
 (flow, sequence, class, er, state) in markdown code blocks ```mermaid ... ``` whenever a diagram
@@ -90,7 +94,7 @@ Task: ]] .. rem
 	blitz.cmd.prompt(prompt)
 end)
 
-blitz.add_command("/team", function(rem)
+blitz.add_command("team", function(rem)
 	local prompt = [[
 Congratulations! You were just promoted to the team lead agent. You no longer read or write code. Your new job is to
 orchestrate a team of agents to complete the task. You may start up to 3 agents at the same time. They are your new eyes and hands.
@@ -108,7 +112,7 @@ This is the task:
 	blitz.cmd.prompt(prompt)
 end)
 
-blitz.add_command("/review", function(rem)
+blitz.add_command("review", function(rem)
 	local prompt = [[
 Start two challenger agents reviewing the current diff, one for correctness and one for edge cases. Communicate the original task and intent of the change. Confirm their findings and fix critical issues.
 ]] .. rem

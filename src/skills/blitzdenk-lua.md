@@ -156,7 +156,7 @@ general agent's sub-agent tool.
 ## Commands and cmd
 
 ```lua
-blitz.add_command("/plan", function(rem)
+blitz.add_command("plan", function(rem)
     blitz.cmd.reset_session()
     blitz.cmd.spawn_agent({
         agent_type = blitz.AGENT_GENERAL,
@@ -166,7 +166,8 @@ blitz.add_command("/plan", function(rem)
 end)
 ```
 
-Queue API: `reset_session`, `cancel`, `retry`, `compact`, `prompt(text)`,
+Queue API: `reset_session`, `cancel`, `retry`, `compact`, `cd(path)`,
+`prompt(text)`,
 `push_chat_entry(role, text)`, `queue_agent_message(agent_id, text)`, `spawn_agent(args)`, `await_agent(agent_id)`,
 `await_agent_result(agent_id)` (returns an `AWAIT_*` status), `save_session(path)`, `load_session(path)`,
 `attach_screenshot(data, media_type)`. `spawn_agent` args: `parent_id`,

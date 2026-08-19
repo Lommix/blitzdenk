@@ -655,25 +655,6 @@ pub fn run(
                                                 handleSshCommand(&app, app.exec_pool, gpa, args);
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
-                                            .cd => |path| {
-                                                if (path.len > 0) {
-                                                    const base = app.exec_pool.effectiveCwd(app.cwd);
-                                                    if (std.fs.path.resolve(app.appAlloc(), &.{ base, path })) |resolved| {
-                                                        if (app.exec_pool.ssh_active) {
-                                                            if (app.exec_pool.ssh_target) |*tar| {
-                                                                const new_remote = app.exec_pool.alloc.dupe(u8, resolved) catch break;
-                                                                app.exec_pool.alloc.free(tar.cwd);
-                                                                tar.cwd = new_remote;
-                                                            }
-                                                        }
-                                                        app.cwd = resolved;
-                                                        if (app.main_agent_id) |id| {
-                                                            if (app.registry.get(id)) |ag| ag.setCwd(resolved) catch {};
-                                                        }
-                                                    } else |_| {}
-                                                }
-                                                app.input_buffer.clearRetainingCapacity();
-                                            },
                                             .ssh_off => {
                                                 app.exec_pool.clearSsh();
                                                 app.notifications.append(gpa, "SSH mode disabled", .{}) catch {};
@@ -997,8 +978,6 @@ pub const AppCommand = union(enum) {
     ssh: SshArgs,
     /// /ssh off  (or bare /ssh)
     ssh_off,
-    /// change CWD
-    cd: []const u8,
 
     pub const SshArgs = struct { user: []const u8, host: []const u8, cwd: []const u8 };
 
@@ -1007,10 +986,6 @@ pub const AppCommand = union(enum) {
         var it = std.mem.splitScalar(u8, input, ' ');
         const verb = it.first();
         const rest = it.rest();
-
-        if (std.mem.eql(u8, verb, "cd")) {
-            return .{ .cd = rest };
-        }
 
         if (std.mem.eql(u8, verb, "ssh")) {
             if (rest.len == 0 or std.mem.eql(u8, rest, "off")) return .ssh_off;

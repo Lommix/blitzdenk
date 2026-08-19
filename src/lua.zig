@@ -720,8 +720,8 @@ pub const Blitz = LuaType{
             .{
                 .name = "add_command",
                 .desc =
-                \\Bind a slash command to a Lua callback.
-                \\Example: blitz.add_command("/help", function(args) end)
+                \\Bind a slash command to a Lua callback. The leading "/" is added automatically.
+                \\Example: blitz.add_command("help", function(args) end)
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{ .{ .name = "command", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
@@ -730,16 +730,23 @@ pub const Blitz = LuaType{
                             if (try isToolVm(state)) return;
                             const vm = &a.lua_vm;
                             if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) return error.TooManyCommands;
-                            if (name.len == 0 or name[0] != '/') return error.InvalidCommandPrefix;
-                            if (std.mem.indexOfScalar(u8, name, ' ') != null) return error.InvalidCommandName;
-                            if (name.len > 128) return error.CommandNameTooLong;
+                            if (name.len == 0) return error.InvalidCommandName;
+                            const stripped = if (name[0] == '/') name[1..] else name;
+                            if (stripped.len == 0) return error.InvalidCommandName;
+                            if (std.mem.indexOfScalar(u8, stripped, ' ') != null) return error.InvalidCommandName;
+                            if (stripped.len + 1 > 128) return error.CommandNameTooLong;
+
+                            var buf: [128]u8 = undefined;
+                            buf[0] = '/';
+                            @memcpy(buf[1 .. stripped.len + 1], stripped);
+                            const cmd_name = buf[0 .. stripped.len + 1];
 
                             var entry = LuaCommandEntry{
-                                .name_len = name.len,
+                                .name_len = cmd_name.len,
                                 .func_ref = func.idx,
                                 .L = state,
                             };
-                            @memcpy(entry.name[0..name.len], name);
+                            @memcpy(entry.name[0..cmd_name.len], cmd_name);
                             vm.command_entries.appendAssumeCapacity(entry);
                         }
                     }).lua_fn, "add_command"),
@@ -1244,6 +1251,19 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                 }).lua_fn, "cmd.reset_session"),
             },
         },
+    },
+    .{
+        .name = "cd",
+        .desc = "Change the working directory.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "path", .ty = LuaType.string }},
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(state: *c.lua_State, a: *r.app.App, path: []const u8) !void {
+                    if (try isToolVm(state)) return;
+                    try a.cmd_queue.append(a.io, .{ .cd = path });
+                }
+            }).lua_fn, "cmd.cd"),
+        } },
     },
     .{
         .name = "cancel",
@@ -2531,7 +2551,7 @@ pub fn getAppFromRegistry(L: *c.lua_State) ?*app.App {
 }
 
 /// blitz.bind(vim_key_combo_string, lua func)
-/// blitz.add_command("/command", lua func)
+/// blitz.add_command("command", lua func)
 fn readAnyArg(
     comptime T: type,
     state: *c.lua_State,

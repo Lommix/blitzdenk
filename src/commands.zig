@@ -65,6 +65,7 @@ pub const Command = union(enum) {
     scroll_to: usize,
     scroll_up: usize,
     scroll_down: usize,
+    cd: []const u8,
     compact,
     reload_mcp,
     start_mcp: StartArgs,
@@ -172,6 +173,23 @@ pub const Command = union(enum) {
                 if (state != .active) {
                     try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
                 }
+            },
+            .cd => |path| {
+                if (path.len == 0) return;
+                const base = app.exec_pool.effectiveCwd(app.cwd);
+                if (std.fs.path.resolve(app.appAlloc(), &.{ base, path })) |resolved| {
+                    if (app.exec_pool.ssh_active) {
+                        if (app.exec_pool.ssh_target) |*tar| {
+                            const new_remote = app.exec_pool.alloc.dupe(u8, resolved) catch return;
+                            app.exec_pool.alloc.free(tar.cwd);
+                            tar.cwd = new_remote;
+                        }
+                    }
+                    app.cwd = resolved;
+                    if (app.main_agent_id) |id| {
+                        if (app.registry.get(id)) |ag| ag.setCwd(resolved) catch {};
+                    }
+                } else |_| {}
             },
             .compact => {
                 if (app.main_agent_id) |id| {
