@@ -2290,7 +2290,7 @@ fn buildToolGroupParagraph(
     calls: []const ChatPart.ToolCallEntry,
     inner_w: u16,
 ) !RenderParagraphItem {
-    var p = r.tui.Paragraph{};
+    var p = r.tui.Paragraph{ .wrap = false };
 
     p.style.bg = app.theme.bg;
     p.padding = .all(1);

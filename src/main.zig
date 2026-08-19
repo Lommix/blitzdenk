@@ -459,9 +459,6 @@ pub fn run(
                                 }
                                 continue;
                             },
-                            .open_cmd => {
-                                continue;
-                            },
                             .cursor_left => app.input_cursor -|= 1,
                             .cursor_right => {
                                 app.input_cursor = @min(app.input_cursor + 1, app.input_buffer.items.len);
@@ -477,13 +474,6 @@ pub fn run(
                                     app.handleCompletion(.next);
                                     continue;
                                 }
-                            },
-                            .toggle_skip => {
-                                app.mu.lockUncancelable(app.io);
-                                app.flags.skip_permissions = !app.flags.skip_permissions;
-                                app.mu.unlock(app.io);
-                                app.dirty = true;
-                                continue;
                             },
                             .noop => {},
                             .completion_next => {

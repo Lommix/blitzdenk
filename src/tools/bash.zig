@@ -47,7 +47,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         args.command;
 
     const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    var sgr_buf: [128]u8 = undefined;
+    var sgr_buf: [255]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&sgr_buf);
 
     w.styled(.{ .modifier = .{ .bold = true } }, "bash ");

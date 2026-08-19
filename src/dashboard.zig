@@ -12,13 +12,10 @@ const HEADER_ART =
 
 // TODO: load keybindings
 const keybinds = .{
-    .{ "c+g", "toggle permission" },
     .{ "esc", "cancel" },
-    .{ "c+n", "clear" },
     .{ "c+c", "quit" },
     .{ "c+u", "scroll up" },
     .{ "c+d", "scroll down" },
-    .{ "c+t", "show thinking" },
 };
 
 pub fn build_header(frame: usize, alloc: std.mem.Allocator, out: *std.ArrayList(r.tui.Line)) !void {
@@ -156,5 +153,4 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
         try l.pushSpanPrint(alloc, "@{s} ", .{@tagName(model.effort)}, .{ .fg = app.theme.text });
         try out.append(alloc, l);
     }
-
 }

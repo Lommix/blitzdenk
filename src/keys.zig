@@ -9,12 +9,10 @@ pub const Action = union(enum) {
     clear_session,
     retry,
     cancel,
-    open_cmd,
     cursor_left,
     cursor_right,
     cursor_up,
     cursor_down,
-    toggle_skip,
     completion_next,
     completion_prev,
     completion_accept,
@@ -40,9 +38,7 @@ pub const KeyMap = struct {
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'p' } }, .action = .completion_prev },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'y' } }, .action = .completion_accept },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'x' } }, .action = .clear_session },
-        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'z' } }, .action = .open_cmd },
         KeyBind{ .key = .{ .code = .esc }, .action = .cancel },
-        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'g' } }, .action = .toggle_skip },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'v' } }, .action = .paste_image },
     };
 
