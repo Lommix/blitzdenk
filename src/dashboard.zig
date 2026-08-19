@@ -134,6 +134,14 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
 
     var header_shown = false;
 
+    var last_idx: ?usize = null;
+    for (0..app.context_factory.agent_counter) |agent_idx| {
+        const ag_type: r.ContextFactory.AgentType = @enumFromInt(agent_idx);
+        const def = app.context_factory.agents.get(ag_type) orelse continue;
+        if (def.model == null) continue;
+        last_idx = agent_idx;
+    }
+
     for (0..app.context_factory.agent_counter) |agent_idx| {
         const ag_type: r.ContextFactory.AgentType = @enumFromInt(agent_idx);
         const def = app.context_factory.agents.get(ag_type) orelse continue;
@@ -146,7 +154,7 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
         }
 
         var l = r.tui.Line{};
-        try l.pushSpan(alloc, .{ .content = "├[", .style = .{ .fg = app.theme.muted } });
+        try l.pushSpan(alloc, .{ .content = if (last_idx == agent_idx) "└[" else "├[", .style = .{ .fg = app.theme.muted } });
         try l.pushSpanPrint(alloc, "{s: <12} ", .{def.name}, .{ .fg = app.theme.muted, .modifier = .{ .bold = true } });
         const model_name = if (app.config.getModel(model.model)) |m| m.getName() else "unknown";
         try l.pushSpanPrint(alloc, "{s: <28} ", .{model_name}, .{ .fg = app.theme.info });
