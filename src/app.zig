@@ -24,7 +24,7 @@ pub const UiState = union(enum) {
 };
 
 pub const AppFlags = packed struct {
-    show_thinking: bool = true,
+    show_thinking: bool = false,
     debug_log: bool = true,
     skip_permissions: bool = true,
 };
