@@ -1277,6 +1277,12 @@ pub const App = struct {
                 }
             },
             .failed => |err| {
+                if (self.registry.get(agent_id)) |agent| {
+                    if (agent.shouldAutoRetry(err)) {
+                        if (is_main) self.dropStreamingPreview();
+                        return;
+                    }
+                }
                 try self.event_bus.emit(self, .{ .agent_failed = .{ .id = agent_id, .err = @errorName(err) } });
                 if (!is_main) return;
                 self.dropStreamingPreview();

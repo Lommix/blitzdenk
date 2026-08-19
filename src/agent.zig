@@ -76,6 +76,7 @@ pub const Agent = struct {
     max_tool_calls: u32 = 64,
     tool_call_count: std.atomic.Value(u32) = .init(0),
     stop_requested: std.atomic.Value(bool) = .init(false),
+    cancel_requested: bool = false,
     reminder_hook: ?*const fn (?*anyopaque, *Agent) anyerror!?[]const u8 = null,
     reminder_hook_ctx: ?*anyopaque = null,
     prepare_hook: ?PrepareHook = null,
@@ -262,6 +263,7 @@ pub const Agent = struct {
         self.last_error = null;
         self.last_provider_error = null;
         self.stop_requested.store(false, .release);
+        self.cancel_requested = false;
         self.retry_after_ms = null;
         self.retry_at_ns = 0;
         self.run_started_ns = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
@@ -395,19 +397,22 @@ pub const Agent = struct {
             }
         } else if (failure) |err| {
             self.last_error = err;
-            if (self.status != .canceled) {
-                if (err != error.ContextOverflow and self.willAutoRetry(err)) {
-                    self.scheduleRetry();
-                    return true;
-                }
-                self.status = .failed;
+            if (self.shouldAutoRetry(err)) {
+                self.scheduleRetry();
+                return true;
             }
+            if (self.status != .canceled or !self.cancel_requested) self.status = .failed;
         }
         return true;
     }
 
+    pub fn shouldAutoRetry(self: *const Agent, failure: anyerror) bool {
+        return !self.cancel_requested and self.willAutoRetry(failure);
+    }
+
     pub fn willAutoRetry(self: *const Agent, failure: anyerror) bool {
         if (self.retry_count >= self.max_retries) return false;
+        if (failure == error.Canceled or failure == error.NetworkError) return true;
         if (failure != error.RateLimited and failure != error.ApiError) return false;
         const provider_error = self.last_provider_error orelse return false;
         return provider_error.is_retryable;
@@ -436,6 +441,7 @@ pub const Agent = struct {
     }
 
     pub fn cancel(self: *Agent) void {
+        self.cancel_requested = true;
         if (self.compact_task) |*task| task.cancel();
         if (self.task) |*task| task.cancel();
         self.status = .canceled;
@@ -895,7 +901,7 @@ test "non-provider failures do not auto retry after a retryable provider error" 
                 .is_retryable = true,
                 .retry_after_ms = 1000,
             });
-            return error.NetworkError;
+            return error.InvalidResponse;
         }
 
         fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
@@ -923,6 +929,93 @@ test "non-provider failures do not auto retry after a retryable provider error" 
     while (agent.drain(2, &agent, Fixture.collect) != 0) {}
     try std.testing.expect(agent.reap());
     try std.testing.expectEqual(Status.failed, agent.status);
-    try std.testing.expectEqual(error.NetworkError, agent.last_error.?);
+    try std.testing.expectEqual(error.InvalidResponse, agent.last_error.?);
+    try std.testing.expectEqual(@as(u32, 0), agent.retry_count);
+}
+
+test "stream connection failures schedule auto retry" {
+    const Fixture = struct {
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generate(_: *anyopaque, _: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            return error.Canceled;
+        }
+
+        fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            return generate(ctx, alloc, io, params, client, retries);
+        }
+
+        fn collect(ctx: ?*anyopaque, event: agent_run.Event) void {
+            const agent: *Agent = @ptrCast(@alignCast(ctx.?));
+            agent.observe(event) catch unreachable;
+        }
+    };
+
+    var fixture: u8 = 0;
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    agent.max_retries = 1;
+    try std.testing.expect(agent.willAutoRetry(error.NetworkError));
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = "hi" });
+    agent.task.?.wait();
+    while (agent.drain(2, &agent, Fixture.collect) != 0) {}
+    try std.testing.expect(agent.reap());
+    try std.testing.expectEqual(Status.retrying, agent.status);
+    try std.testing.expectEqual(@as(u32, 1), agent.retry_count);
+    try std.testing.expect(agent.retry_at_ns > 0);
+
+    try agent.retryNow();
+    agent.task.?.wait();
+    while (agent.drain(2, &agent, Fixture.collect) != 0) {}
+    try std.testing.expect(agent.reap());
+    try std.testing.expectEqual(Status.failed, agent.status);
+    try std.testing.expectEqual(error.Canceled, agent.last_error.?);
+}
+
+test "explicit cancel does not auto retry on stream failure" {
+    const Fixture = struct {
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generate(_: *anyopaque, _: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            return error.Canceled;
+        }
+
+        fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            return generate(ctx, alloc, io, params, client, retries);
+        }
+
+        fn collect(ctx: ?*anyopaque, event: agent_run.Event) void {
+            const agent: *Agent = @ptrCast(@alignCast(ctx.?));
+            agent.observe(event) catch unreachable;
+        }
+    };
+
+    var fixture: u8 = 0;
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = "hi" });
+    agent.task.?.wait();
+    agent.cancel();
+    while (agent.drain(2, &agent, Fixture.collect) != 0) {}
+    try std.testing.expect(agent.reap());
+    try std.testing.expectEqual(Status.canceled, agent.status);
     try std.testing.expectEqual(@as(u32, 0), agent.retry_count);
 }
