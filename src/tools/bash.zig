@@ -79,7 +79,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     // Foreground with deadline race.
     const timeout_ms: i64 = blk: {
-        const t = args.timeout orelse break :blk 60;
+        const t = args.timeout orelse break :blk 60_000;
         if (!std.math.isFinite(t) or t <= 0)
             return r.errResult(call, "timeout must be a positive number of seconds");
         break :blk timeoutToMs(t);
