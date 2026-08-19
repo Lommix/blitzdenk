@@ -1010,7 +1010,6 @@ pub const Input = struct {
     border_style: Style = .{},
     text_style: Style = .{},
     screenshot_style: Style = .{},
-    focused: bool = true,
     has_screenshot: bool = false,
 
     pub fn render(self: *const Input, area: Rect, buf: *Buffer) void {

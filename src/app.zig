@@ -803,7 +803,7 @@ pub const App = struct {
                 .perm_select => {
                     const entry = app.active_permission orelse break :blk 9;
                     if (entry.payload == .ask) {
-                        break :blk askPermissionInputHeight(entry.payload.ask.options, entry.payload.ask.header, entry.payload.ask.question, area.width, area.height) +| 3;
+                        break :blk askPermissionInputHeight(entry.payload.ask.options, entry.payload.ask.header, entry.payload.ask.question, area.width, area.height);
                     }
                     break :blk 9; // header + options + status + 2 padding
                 },
@@ -899,12 +899,12 @@ pub const App = struct {
             };
             wp.renderSimple(frame_alloc, welcome_area, buf);
         } else if (chat_stack) |cs| {
-            _ = renderChatStack(app, cs, _chat_area, buf);
+            renderChatStack(app, cs, _chat_area, buf);
         }
 
         // Input/Permission: a single overlay_dark block hosting the main-agent
         // progress, the input content, and the statusbar.
-        renderInputWidget(app, frame_alloc, _input_area, progress_line, buf);
+        renderInputWidget(app, frame_alloc, _input_area, progress_h, progress_line, buf);
 
         // Notifications
         renderNotifications(app, frame_alloc, area, buf);
@@ -1159,46 +1159,6 @@ pub const App = struct {
         return self.popQueuedMessage(agent_id, alloc);
     }
 
-    /// Convert an agent message's content parts into renderable ChatEntry
-    /// message parts (trim + dupe text/thinking, drop everything else).
-    /// Returns null if no renderable parts remain.
-    fn renderableParts(
-        alloc: std.mem.Allocator,
-        agent_id: r.AgentId,
-        parts: []const r.sdk.Part,
-        plain_text: bool,
-    ) ?[]ChatPart {
-        var out: std.ArrayList(ChatPart) = .empty;
-        for (parts) |part| {
-            switch (part) {
-                .text => |txt| {
-                    const trimmed = std.mem.trim(u8, txt, " \t\r\n");
-                    if (trimmed.len == 0) continue;
-                    const dup = alloc.dupe(u8, trimmed) catch continue;
-                    out.append(alloc, if (plain_text) .{ .plain_text = dup } else .{ .message = dup }) catch continue;
-                },
-                .reasoning => |th| {
-                    const trimmed = std.mem.trim(u8, th.text, " \t\r\n");
-                    if (trimmed.len == 0) continue;
-                    const dup = alloc.dupe(u8, trimmed) catch continue;
-                    out.append(alloc, .{ .thinking = dup }) catch continue;
-                },
-                .tool_call => |call| {
-                    const call_id = alloc.dupe(u8, call.id) catch continue;
-                    const tool_name = alloc.dupe(u8, call.name) catch continue;
-                    out.append(alloc, .{ .tool_call = .{
-                        .agent_id = agent_id,
-                        .call_id = call_id,
-                        .tool_name = tool_name,
-                    } }) catch continue;
-                },
-                else => {},
-            }
-        }
-        if (out.items.len == 0) return null;
-        return out.toOwnedSlice(alloc) catch null;
-    }
-
     pub fn dropStreamingPreview(self: *App) void {
         self.streaming_entry = null;
         self.sdk_preview_parts = .empty;
@@ -1303,7 +1263,7 @@ pub const App = struct {
                     index -= 1;
                     const message = result.messages[index];
                     if (message.role != .assistant) continue;
-                    const parts = renderSdkParts(alloc, agent_id, message.parts(), false) orelse return;
+                    const parts = renderSdkParts(alloc, agent_id, message.parts()) orelse return;
                     try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
                     return;
                 }
@@ -1365,34 +1325,6 @@ pub const App = struct {
         self.dropStreamingPreview();
     }
 
-    pub fn render_permission_preview(
-        self: *App,
-        arena: std.mem.Allocator,
-        stack: *std.ArrayList(RenderParagraphItem),
-        inner_w: u16,
-    ) !?RenderParagraphItem {
-        const perm = self.active_permission orelse return;
-
-        if (perm.payload == .diff) {
-            var lines = std.ArrayList(r.tui.DiffLine).empty;
-            emitDiffLines(&lines, perm.payload.diff, arena);
-
-            var parts = try arena.alloc(ChatPart, 1);
-            parts[0] = .{ .diff = .{
-                .path = perm.payload.diff.path,
-                .diff_lines = lines.items,
-            } };
-
-            var total: usize = 0;
-            try buildChatEntryParagraph(arena, &stack, &total, self, .{
-                .role = .agent,
-                .parts = parts,
-            }, inner_w);
-        }
-
-        return null;
-    }
-
     pub fn persist_permission_to_history(
         self: *App,
         perm: *const r.permissions.Request,
@@ -1402,15 +1334,7 @@ pub const App = struct {
                 try self.flushSdkPreview();
                 const alloc = self.sessionAlloc();
                 var parts = try alloc.alloc(r.app.ChatPart, 1);
-
-                var lines = std.ArrayList(r.tui.DiffLine).empty;
-                r.app.emitDiffLines(&lines, diff, alloc);
-
-                parts[0] = .{ .diff = .{
-                    .path = try alloc.dupe(u8, diff.path),
-                    .diff_lines = try lines.toOwnedSlice(alloc),
-                } };
-
+                parts[0] = try diffChatPart(alloc, diff);
                 try self.appendChatEntry(alloc, .{
                     .role = .agent,
                     .parts = parts,
@@ -1434,7 +1358,7 @@ pub fn emitDiffLines(out: *std.ArrayList(r.tui.DiffLine), snap: r.permissions.To
     if (snap.before) |before| {
         const old_lines = splitLinesAlloc(before, alloc) orelse return;
         const new_lines = splitLinesAlloc(snap.after, alloc) orelse return;
-        emitMyersDiff(out, old_lines, new_lines, 1, alloc);
+        emitMyersDiff(out, old_lines, new_lines, alloc);
     } else {
         var new_iter = std.mem.splitScalar(u8, snap.after, '\n');
         var ln: u32 = 1;
@@ -1445,18 +1369,26 @@ pub fn emitDiffLines(out: *std.ArrayList(r.tui.DiffLine), snap: r.permissions.To
     }
 }
 
-/// Myers' O(ND) shortest edit script with context collapsing. `base_line` is
-/// the 1-based line number in the original where `old_lines` begins.
+fn diffChatPart(alloc: std.mem.Allocator, diff: r.permissions.ToolDiff) !ChatPart {
+    var lines = std.ArrayList(r.tui.DiffLine).empty;
+    emitDiffLines(&lines, diff, alloc);
+    return .{ .diff = .{
+        .path = try alloc.dupe(u8, diff.path),
+        .diff_lines = try lines.toOwnedSlice(alloc),
+    } };
+}
+
+/// Myers' O(ND) shortest edit script with context collapsing. Old-file line
+/// numbers are 1-based.
 fn emitMyersDiff(
     out: *std.ArrayList(r.tui.DiffLine),
     old_lines: []const []const u8,
     new_lines: []const []const u8,
-    base_line: u32,
     alloc: std.mem.Allocator,
 ) void {
     const ops = myersDiff(old_lines, new_lines, alloc) orelse {
         for (old_lines, 0..) |line, i| {
-            pushDiffLine(out, alloc, .{ .kind = .deletion, .line_number = base_line + @as(u32, @intCast(i)), .content = line });
+            pushDiffLine(out, alloc, .{ .kind = .deletion, .line_number = @as(u32, @intCast(i)) + 1, .content = line });
         }
         for (new_lines) |line| {
             pushDiffLine(out, alloc, .{ .kind = .addition, .content = line });
@@ -1469,7 +1401,7 @@ fn emitMyersDiff(
     const ctx_radius = 3;
 
     const visible = alloc.alloc(bool, ops.len) catch {
-        emitAllOps(out, ops, base_line, alloc);
+        emitAllOps(out, ops, alloc);
         return;
     };
     @memset(visible, false);
@@ -1500,11 +1432,11 @@ fn emitMyersDiff(
 
         switch (op) {
             .keep => |content| {
-                pushDiffLine(out, alloc, .{ .kind = .context, .line_number = base_line + old_ln, .content = content });
+                pushDiffLine(out, alloc, .{ .kind = .context, .line_number = old_ln + 1, .content = content });
                 old_ln += 1;
             },
             .delete => |content| {
-                pushDiffLine(out, alloc, .{ .kind = .deletion, .line_number = base_line + old_ln, .content = content });
+                pushDiffLine(out, alloc, .{ .kind = .deletion, .line_number = old_ln + 1, .content = content });
                 old_ln += 1;
             },
             .insert => |content| {
@@ -1514,16 +1446,16 @@ fn emitMyersDiff(
     }
 }
 
-fn emitAllOps(out: *std.ArrayList(r.tui.DiffLine), ops: []const DiffOp, base_line: u32, alloc: std.mem.Allocator) void {
+fn emitAllOps(out: *std.ArrayList(r.tui.DiffLine), ops: []const DiffOp, alloc: std.mem.Allocator) void {
     var old_ln: u32 = 0;
     for (ops) |op| {
         switch (op) {
             .keep => |content| {
-                pushDiffLine(out, alloc, .{ .kind = .context, .line_number = base_line + old_ln, .content = content });
+                pushDiffLine(out, alloc, .{ .kind = .context, .line_number = old_ln + 1, .content = content });
                 old_ln += 1;
             },
             .delete => |content| {
-                pushDiffLine(out, alloc, .{ .kind = .deletion, .line_number = base_line + old_ln, .content = content });
+                pushDiffLine(out, alloc, .{ .kind = .deletion, .line_number = old_ln + 1, .content = content });
                 old_ln += 1;
             },
             .insert => |content| {
@@ -1558,9 +1490,6 @@ pub const ChatEntry = struct {
                 .message => |slice| alloc.free(slice),
                 .plain_text => |slice| alloc.free(slice),
                 .thinking => |slice| alloc.free(slice),
-                .plan => |plan| {
-                    alloc.free(plan.lines);
-                },
                 .tool_call => |call| {
                     alloc.free(call.call_id);
                     alloc.free(call.tool_name);
@@ -1588,12 +1517,7 @@ pub const ChatPart = union(enum) {
     message: []const u8,
     plain_text: []const u8,
     diff: DiffEntry,
-    plan: PlanEntry, // rename to proposal
     tool_call: ToolCallEntry,
-
-    pub const PlanEntry = struct {
-        lines: []const r.tui.Line,
-    };
 
     pub const ToolCallEntry = struct {
         agent_id: r.AgentId,
@@ -1623,15 +1547,13 @@ fn renderSdkParts(
     alloc: std.mem.Allocator,
     agent_id: r.AgentId,
     parts: []const r.sdk.Part,
-    plain_text: bool,
 ) ?[]ChatPart {
     var out: std.ArrayList(ChatPart) = .empty;
     for (parts) |part| switch (part) {
         .text => |text| {
             const trimmed = std.mem.trim(u8, text, " \t\r\n");
             if (trimmed.len == 0) continue;
-            const owned = alloc.dupe(u8, trimmed) catch continue;
-            out.append(alloc, if (plain_text) .{ .plain_text = owned } else .{ .message = owned }) catch continue;
+            out.append(alloc, .{ .message = alloc.dupe(u8, trimmed) catch continue }) catch continue;
         },
         .reasoning => |reasoning| {
             const trimmed = std.mem.trim(u8, reasoning.text, " \t\r\n");
@@ -1918,9 +1840,7 @@ fn insertCompletionToken(self: *App, entry: []const u8) void {
     self.input_cursor = @intCast(entry.len);
 }
 
-fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, progress_line: ?r.tui.Line, buf: *r.tui.Buffer) void {
-    const progress_h: u16 = if (progress_line != null) 1 else 0;
-
+fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, progress_h: u16, progress_line: ?r.tui.Line, buf: *r.tui.Buffer) void {
     buf.fill(area, .{ .style = .{ .bg = app.theme.overlay_dark } });
 
     // 1-row top/bottom padding, 2-column left/right padding.
@@ -2003,11 +1923,11 @@ fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf
         }
 
         if (cursor >= line_start and cursor <= line_end) {
-            for (wrapped.items, 0..) |*row, i| {
+            outer: for (wrapped.items, 0..) |*row, i| {
                 for (row.spans.items) |span| {
-                    if (span.style.fg.eql(cursor_style.fg)) {
+                    if (span.style.fg.eql(cursor_style.fg) and span.style.bg.eql(cursor_style.bg)) {
                         cursor_visual_row = accumulated_rows + i;
-                        break;
+                        break :outer;
                     }
                 }
             }
@@ -2300,9 +2220,6 @@ fn buildChatEntryParagraph(
                         try out.append(arena, .{ .p = p, .h = h });
                         total.* += h;
                     },
-                    .plan => |p| {
-                        _ = p;
-                    },
                     .diff => |diff| {
                         const p = buildDiffParagraph(arena, app, diff);
                         const h = p.totalHeightLong(inner_w);
@@ -2455,57 +2372,6 @@ fn buildToolGroupParagraph(
     };
 }
 
-fn buildMessageParagraph(
-    arena: std.mem.Allocator,
-    app: *App,
-    m: ChatEntry.MessageEntry,
-    show_thinking: bool,
-    is_thinking: bool,
-    spinner: []const u8,
-) r.tui.Paragraph {
-    var p: r.tui.Paragraph = .{
-        .border = .none,
-        .sides = .left_only,
-        .padding = .{ .left = 1, .right = 1 },
-        .dynamic_border = true,
-        .reverse = true,
-    };
-
-    const role_text: []const u8 = if (m.role == .user) "❯ you:" else "❯ blitz:";
-    const role_style: r.tui.Style = if (m.role == .user)
-        .{ .fg = app.theme.info, .modifier = .{ .bold = true } }
-    else
-        .{ .fg = app.theme.ok, .modifier = .{ .bold = true } };
-
-    {
-        var role_line = r.tui.Line{ .style = role_style };
-        role_line.pushText(arena, role_text, role_style) catch {};
-        if (m.role == .agent and is_thinking and !show_thinking) {
-            role_line.pushText(arena, " thinking ", .{ .fg = app.theme.muted }) catch {};
-            role_line.pushText(arena, spinner, .{ .fg = app.theme.muted }) catch {};
-        }
-        p.lines.append(arena, role_line) catch {};
-    }
-
-    const muted: r.tui.Style = .{ .fg = app.theme.muted };
-
-    for (m.parts) |part| switch (part) {
-        .text => |txt| {
-            if (m.role == .user) {
-                appendPlainText(&p, arena, txt, .{});
-            } else {
-                appendMarkdownText(&p, app.gpa, arena, txt, 0, app.theme) catch {};
-            }
-        },
-        .thinking => |txt| {
-            if (!show_thinking) continue;
-            appendThinkingText(&p, arena, txt, muted);
-        },
-    };
-
-    return p;
-}
-
 /// Scan chat history for a tool_result with the given call_id. Source of
 /// truth for "did this tool finish": `tool_call_done` is cleared right
 /// after commit, but the result lives on in the chat as a tool_result part.
@@ -2526,20 +2392,6 @@ fn findToolResult(agent: *r.agent.Agent, call_id: []const u8) ?r.sdk.ToolResult 
         };
     }
     return null;
-}
-
-fn buildPlanParagraph(arena: std.mem.Allocator, app: *App, plan: ChatEntry.PlanEntry) r.tui.Paragraph {
-    var p: r.tui.Paragraph = .{
-        .border = .double,
-        .padding = .all(1),
-        .style = .{ .bg = app.theme.diff_surface },
-        .dynamic_border = false,
-        .reverse = true,
-    };
-    for (plan.lines) |ln| {
-        p.lines.append(arena, ln) catch return p;
-    }
-    return p;
 }
 
 fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: ChatPart.DiffEntry) r.tui.Paragraph {
@@ -2577,57 +2429,6 @@ fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: ChatPart.DiffEntry
         p.lines.append(arena, src) catch break;
     }
     return p;
-}
-
-/// Append one logical Line to the paragraph, single span, given style.
-fn appendPlainLine(p: *r.tui.Paragraph, arena: std.mem.Allocator, text: []const u8, style: r.tui.Style) void {
-    var ln: r.tui.Line = .{ .style = style };
-    ln.pushText(arena, text, style) catch {};
-    p.lines.append(arena, ln) catch {};
-}
-
-/// Split `txt` on `\n` and append each segment as a logical Line. Paragraph
-/// wraps internally, so do not pre-wrap here.
-fn appendPlainText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8, style: r.tui.Style) void {
-    const txt = if (raw.len > 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
-    if (txt.len == 0) return;
-    var pos: usize = 0;
-    while (true) {
-        const nl = std.mem.indexOfScalarPos(u8, txt, pos, '\n');
-        const end = nl orelse txt.len;
-        const seg = txt[pos..end];
-        var ln: r.tui.Line = .{ .style = style };
-        if (seg.len > 0) ln.pushText(arena, seg, style) catch {};
-        p.lines.append(arena, ln) catch return;
-        if (nl == null) break;
-        pos = end + 1;
-    }
-}
-
-/// Prepend `thinking: ` to the first line of `raw`, append rest as plain.
-/// All content uses `style` (typically muted).
-fn appendThinkingText(p: *r.tui.Paragraph, arena: std.mem.Allocator, raw: []const u8, style: r.tui.Style) void {
-    const txt = if (raw.len > 0 and raw[raw.len - 1] == '\n') raw[0 .. raw.len - 1] else raw;
-    if (txt.len == 0) {
-        appendPlainLine(p, arena, "thinking:", style);
-        return;
-    }
-    var pos: usize = 0;
-    var first = true;
-    while (true) {
-        const nl = std.mem.indexOfScalarPos(u8, txt, pos, '\n');
-        const end = nl orelse txt.len;
-        const seg = txt[pos..end];
-        var ln: r.tui.Line = .{ .style = style };
-        if (first) {
-            ln.pushText(arena, "thinking: ", style) catch {};
-        }
-        if (seg.len > 0) ln.pushText(arena, seg, style) catch {};
-        p.lines.append(arena, ln) catch return;
-        first = false;
-        if (nl == null) break;
-        pos = end + 1;
-    }
 }
 
 fn markdownTheme(theme: Theme) r.tui.HighlightTheme {
@@ -2711,15 +2512,8 @@ fn buildChatStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u1
     // preview diff
     if (app.active_permission) |perm| {
         if (perm.payload == .diff) {
-            var lines = std.ArrayList(r.tui.DiffLine).empty;
-            emitDiffLines(&lines, perm.payload.diff, alloc);
-
             var parts = try alloc.alloc(ChatPart, 1);
-            parts[0] = .{ .diff = .{
-                .path = perm.payload.diff.path,
-                .diff_lines = lines.items,
-            } };
-
+            parts[0] = try diffChatPart(alloc, perm.payload.diff);
             try buildChatEntryParagraph(alloc, &s.items, &s.total, app, .{
                 .role = .agent,
                 .parts = parts,
@@ -2753,8 +2547,8 @@ fn buildChatStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u1
     return s;
 }
 
-fn renderChatStack(app: *App, s: ChatStack, area: r.tui.Rect, buf: *r.tui.Buffer) usize {
-    if (area.width == 0 or area.height == 0) return 0;
+fn renderChatStack(app: *App, s: ChatStack, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+    if (area.width == 0 or area.height == 0) return;
 
     const alloc = app.arena_frame.allocator();
     const inner_w: u16 = area.width;
@@ -2797,9 +2591,6 @@ fn renderChatStack(app: *App, s: ChatStack, area: r.tui.Rect, buf: *r.tui.Buffer
         };
         p.render(alloc, sub, area, buf);
     }
-
-    const consumed: usize = if (s.total > scroll_offset_usize) s.total - scroll_offset_usize else 0;
-    return consumed;
 }
 
 fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
@@ -2816,6 +2607,9 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
 
     const hl: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .bold = true } };
     const info: r.tui.Style = .{ .fg = app.theme.info };
+
+    var dur_buf: [32]u8 = undefined;
+    const dur = formatDuration(&dur_buf, secs);
 
     var l = r.tui.Line{};
     if (state == .active) {
@@ -2845,10 +2639,7 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
         };
 
         l.pushSpanPrint(alloc, "{s} (", .{spinner_str}, info) catch {};
-        if (secs >= 60)
-            l.pushSpanPrint(alloc, "{d}m {d}s", .{ secs / 60, secs % 60 }, hl) catch {}
-        else
-            l.pushSpanPrint(alloc, "{d}s", .{secs}, hl) catch {};
+        l.pushSpanPrint(alloc, "{s}", .{dur}, hl) catch {};
         l.pushSpanPrint(alloc, ") Consuming Tokens at ", .{}, info) catch {};
         l.pushSpanPrint(alloc, "{d} T/s", .{@as(u32, @intFromFloat(agent.tokens_per_second))}, hl) catch {};
 
@@ -2860,10 +2651,7 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
         l.pushSpanPrint(alloc, "{s} {s}", .{ ssh_suffix, queued_suffix }, info) catch {};
     } else {
         const label = if (state == .complete) "Done" else "Failed";
-        if (secs >= 60)
-            l.pushSpanPrint(alloc, "{s} ({d}m {d}s)", .{ label, secs / 60, secs % 60 }, info) catch {}
-        else
-            l.pushSpanPrint(alloc, "{s} ({d}s)", .{ label, secs }, info) catch {};
+        l.pushSpanPrint(alloc, "{s} ({s})", .{ label, dur }, info) catch {};
     }
     return l;
 }
@@ -2874,11 +2662,11 @@ fn formatDuration(buf: []u8, secs: u32) []const u8 {
     return std.fmt.bufPrint(buf, "{d}s", .{secs}) catch "…";
 }
 
-fn str_replace(buf: []u8, from: []const u8, to: []const u8, input: []const u8) []u8 {
-    const len = std.mem.replacementSize(u8, input, from, to);
-    if (len > buf.len) return buf;
-    _ = std.mem.replace(u8, input, from, to, buf[0..len]);
-    return buf[0..len];
+fn currentSelection(app: *App) u8 {
+    return switch (app.input_mode) {
+        .perm_select => |ps| ps.selected,
+        else => 0,
+    };
 }
 
 fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
@@ -2928,10 +2716,7 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
     const is_plan = entry.payload == .plan;
     const count: usize = if (is_plan) 4 else 3;
 
-    const cur_sel: u8 = switch (app.input_mode) {
-        .perm_select => |ps| ps.selected,
-        else => 0,
-    };
+    const cur_sel = currentSelection(app);
     for (0..count) |i| {
         const y = inner.y + 1 + @as(u16, @intCast(i));
         if (y >= inner.y +| inner.height) break;
@@ -2955,10 +2740,7 @@ fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, bu
         const ps = &app.input_mode.perm_select;
         if (ps.selected >= total_rows) ps.selected = @intCast(total_rows - 1);
     }
-    const cur_sel: u8 = switch (app.input_mode) {
-        .perm_select => |ps| ps.selected,
-        else => 0,
-    };
+    const cur_sel = currentSelection(app);
 
     // Line 0+: "[header] question" (wrapped)
     var header_buf: [256]u8 = undefined;
@@ -3186,7 +2968,7 @@ test "persisted diff owns path" {
     try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
 }
 
-test "renderableParts keeps streamed final parts together" {
+test "renderSdkParts keeps streamed final parts together" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -3198,7 +2980,7 @@ test "renderableParts keeps streamed final parts together" {
     };
 
     const agent_id: r.AgentId = .{ .index = 3, .generation = 7 };
-    const rendered = App.renderableParts(alloc, agent_id, &parts, false) orelse return error.TestUnexpectedResult;
+    const rendered = renderSdkParts(alloc, agent_id, &parts) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 3), rendered.len);
     try std.testing.expectEqualStrings("think", rendered[0].thinking);
     try std.testing.expectEqualStrings("answer", rendered[1].message);
@@ -3370,17 +3152,6 @@ test "appendChatEntry preserves parts order" {
     try std.testing.expectEqualStrings("answer", entry.parts[1].message);
     try std.testing.expectEqualStrings("think", entry.parts[2].thinking);
     try std.testing.expectEqualStrings("call_2", entry.parts[3].tool_call.call_id);
-}
-
-test "renderableParts preserves provider errors as plain text" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    const parts = [_]r.sdk.Part{.{ .text = " {\"error\":\"model unavailable\"} " }};
-    const rendered = App.renderableParts(arena.allocator(), .{ .index = 0, .generation = 0 }, &parts, true) orelse return error.TestUnexpectedResult;
-
-    try std.testing.expectEqual(@as(usize, 1), rendered.len);
-    try std.testing.expectEqualStrings("{\"error\":\"model unavailable\"}", rendered[0].plain_text);
 }
 
 test "ToolStatusStore retains terminal tool result" {

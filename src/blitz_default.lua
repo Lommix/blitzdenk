@@ -138,19 +138,19 @@ end
 
 blitz.status_bar_render = function()
 	local use = blitz.token_usage()
-	return blitz.get_model_name(blitz.AGENT_GENERAL)
-		.. " | Cache:"
-		.. fmt(use.cache)
-		.. " | In:"
-		.. fmt(use.input)
-		.. " | Out:"
-		.. fmt(use.output)
+	local white = "\27[1;37m"
+	local green = "\27[32m"
+	local orange = "\27[38;5;208m"
+	local red = "\27[31m"
+	local reset = "\27[0m"
+	return white .. blitz.get_model_name(blitz.AGENT_GENERAL) .. reset
+		.. " | Cache:" .. green .. fmt(use.cache) .. reset
+		.. " | In:" .. orange .. fmt(use.input) .. reset
+		.. " | Out:" .. orange .. fmt(use.output) .. reset
 		.. " | Ctx:"
 		.. math.floor(blitz.context_percent())
 		.. "%"
-		.. " | Cost:"
-		.. string.format("%.2f", use.cost)
-		.. "$"
+		.. " | Cost:" .. red .. string.format("%.2f", use.cost) .. reset .. "$"
 end
 
 ---------------------------------------------------------------------------------------------------
