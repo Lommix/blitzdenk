@@ -20,7 +20,6 @@ const builtin_command_completions: []const []const u8 = &.{
 
 pub const UiState = union(enum) {
     chat,
-    cmd_palette,
     password,
 };
 
@@ -69,11 +68,16 @@ pub const Theme = struct {
 };
 
 pub const InputMode = union(enum) {
-    text,
+    text: Text,
     perm_select: PermSelect,
     perm_message: PermMessage,
     passphrase: Passphrase,
 
+    pub const Text = struct {
+        completion_open: bool = false,
+        completion_selected: usize = 0,
+        completion_query_len: usize = 0,
+    };
     pub const PermSelect = struct { selected: u8 = 0 };
     pub const PermMessage = struct {
         buf: [512]u8 = undefined,
@@ -260,7 +264,7 @@ pub const App = struct {
     frame_count: usize = 0,
     scroll_offset: usize = 0,
     auto_scroll: bool = true,
-    input_mode: InputMode = .text,
+    input_mode: InputMode = .{ .text = .{} },
     mode: r.ContextFactory.Mode = @enumFromInt(0),
     context_factory: *r.ContextFactory,
     theme: Theme = .default,
@@ -300,7 +304,6 @@ pub const App = struct {
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
     injection_hooks: r.inject.InjectionsHooks = .{},
-    completion_suggestion: ?[]const u8 = null,
 
     // TODO: cleanup io
     pub fn init(
@@ -448,7 +451,7 @@ pub const App = struct {
         self.running = false;
         self.frame_count = 0;
         self.scroll_offset = 0;
-        self.input_mode = .text;
+        self.input_mode = .{ .text = .{} };
         self.input_cursor = 0;
         self.streaming_entry = null;
         self.sdk_preview_parts = .empty;
@@ -524,7 +527,81 @@ pub const App = struct {
             const pp = &self.input_mode.passphrase;
             @memset(pp.buf[0..pp.len], 0);
         }
-        self.input_mode = .text;
+        self.input_mode = .{ .text = .{} };
+    }
+
+    fn textState(self: *App) ?*InputMode.Text {
+        return switch (self.input_mode) {
+            .text => |*t| t,
+            else => null,
+        };
+    }
+
+    pub fn completionIsOpen(self: *const App) bool {
+        return switch (self.input_mode) {
+            .text => |t| t.completion_open,
+            else => false,
+        };
+    }
+
+    pub fn syncCompletion(self: *App) void {
+        const t = self.textState() orelse return;
+        t.completion_selected = 0;
+        t.completion_query_len = commandCompletionPrefix(self.input_buffer.items, self.input_cursor).len;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const rows = commandCompletions(self, arena.allocator(), self.input_buffer.items, self.input_cursor);
+        t.completion_open = completionVisible(self.input_buffer.items, self.input_cursor, rows.len);
+    }
+
+    pub fn closeCompletion(self: *App) bool {
+        const t = self.textState() orelse return false;
+        if (!t.completion_open) return false;
+        t.completion_open = false;
+        t.completion_selected = 0;
+        t.completion_query_len = 0;
+        return true;
+    }
+
+    pub const CompletionMove = enum { next, prev, accept };
+
+    pub fn handleCompletion(self: *App, move: CompletionMove) void {
+        const t = self.textState() orelse return;
+        if (!t.completion_open) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        const rows = commandCompletions(self, alloc, self.input_buffer.items, self.input_cursor);
+        if (rows.len == 0) {
+            t.completion_open = false;
+            t.completion_selected = 0;
+            t.completion_query_len = 0;
+            return;
+        }
+        if (t.completion_selected >= rows.len) t.completion_selected = 0;
+
+        const cur_end = @min(@as(usize, self.input_cursor), self.input_buffer.items.len);
+        const already = std.ascii.eqlIgnoreCase(self.input_buffer.items[0..cur_end], rows.items[t.completion_selected]);
+
+        switch (move) {
+            .accept => {},
+            .next => {
+                if (already) t.completion_selected = (t.completion_selected + 1) % rows.len;
+            },
+            .prev => {
+                if (already) t.completion_selected = (t.completion_selected + rows.len - 1) % rows.len;
+            },
+        }
+
+        insertCompletionToken(self, rows.items[t.completion_selected]);
+
+        if (move == .accept) {
+            t.completion_open = false;
+            t.completion_selected = 0;
+            t.completion_query_len = 0;
+        }
     }
 
     pub fn reloadMcpTools(self: *App) !void {
@@ -804,33 +881,32 @@ pub const App = struct {
         // Statusbar
         renderStatusBar(app, _status_area, buf);
 
-        // command completion
-        if (app.input_buffer.items.len > 0) {
+        if (app.input_mode == .text and app.input_mode.text.completion_open) {
             const completions = commandCompletions(app, frame_alloc, app.input_buffer.items, app.input_cursor);
-            var p = r.tui.Paragraph{};
-            p.border = .single;
-            p.style.bg = app.theme.overlay_dark;
+            if (completions.len > 0) {
+                var p = r.tui.Paragraph{};
+                p.border = .single;
+                p.style.bg = app.theme.overlay_dark;
 
-            for (completions) |cmp| {
-                if (cmp.len > 0) {
-                    p.appendText(frame_alloc, cmp, .{ .modifier = .{ .bold = true } }) catch {};
-                    app.completion_suggestion = cmp;
+                const selected = @min(app.input_mode.text.completion_selected, completions.len - 1);
+                for (completions.items[0..completions.len], 0..) |cmp, i| {
+                    const style: r.tui.Style = if (i == selected)
+                        .{ .modifier = .{ .bold = true, .reverse = true } }
+                    else
+                        .{ .modifier = .{ .bold = true } };
+                    p.appendText(frame_alloc, cmp, style) catch {};
                 }
-            }
 
-            const height: u16 = @intCast(p.lines.items.len + 2);
-
-            if (p.lines.items.len > 0) {
-                const completion_area = r.tui.Rect{
-                    .x = _input_area.x + 1,
-                    .y = _input_area.y -| height + 1,
-                    .width = 32,
-                    .height = height,
-                };
-
-                p.renderSimple(frame_alloc, completion_area, buf);
-            } else {
-                app.completion_suggestion = null;
+                if (p.lines.items.len > 0) {
+                    const height: u16 = @intCast(p.lines.items.len + 2);
+                    const completion_area = r.tui.Rect{
+                        .x = _input_area.x + 1,
+                        .y = _input_area.y -| height + 1,
+                        .width = 32,
+                        .height = height,
+                    };
+                    p.renderSimple(frame_alloc, completion_area, buf);
+                }
             }
         }
     }
@@ -852,6 +928,7 @@ pub const App = struct {
         const idx = self.input_cursor;
         self.input_buffer.replaceRange(self.sessionAlloc(), idx, 0, bytes) catch return;
         self.input_cursor += @intCast(bytes.len);
+        self.syncCompletion();
     }
 
     pub fn deleteChar(self: *App) void {
@@ -865,6 +942,7 @@ pub const App = struct {
         if (r.clipboard.findPasteAt(self.input_buffer.items, self.input_cursor)) |rg| {
             self.input_buffer.replaceRange(self.sessionAlloc(), rg.start, rg.end - rg.start, &.{}) catch return;
             self.input_cursor = @intCast(rg.start);
+            self.syncCompletion();
             return;
         }
 
@@ -876,6 +954,7 @@ pub const App = struct {
         const len = self.input_cursor - start;
         self.input_buffer.replaceRange(self.sessionAlloc(), start, len, &.{}) catch return;
         self.input_cursor = @intCast(start);
+        self.syncCompletion();
     }
 
     /// The input as rendered: pasted-image URLs are masked with `[Image]` and
@@ -959,6 +1038,7 @@ pub const App = struct {
         self.input_buffer.clearRetainingCapacity();
         self.input_buffer.appendSlice(self.sessionAlloc(), text) catch {};
         self.input_cursor = @intCast(self.input_buffer.items.len);
+        self.syncCompletion();
     }
 
     pub fn historyDown(self: *App) void {
@@ -971,6 +1051,7 @@ pub const App = struct {
             self.input_buffer.appendSlice(self.sessionAlloc(), text) catch {};
         }
         self.input_cursor = @intCast(self.input_buffer.items.len);
+        self.syncCompletion();
     }
 
     pub const PromptEntry = struct {
@@ -1679,16 +1760,16 @@ fn myersDiff(old: []const []const u8, new: []const []const u8, alloc: std.mem.Al
     return ops;
 }
 
-fn commandPaletteActive(app: *const App) bool {
-    const input = app.inputSlice();
-    return input.len > 0 and input[0] == ':';
-}
-
 fn commandCompletionPrefix(input: []const u8, cursor: u32) []const u8 {
     if (input.len == 0) return "";
     const end = @min(@as(usize, cursor), input.len);
     const command_end = std.mem.indexOfScalar(u8, input[0..end], ' ') orelse end;
     return input[0..command_end];
+}
+
+fn filterPrefix(input: []const u8, cursor: u32, query_len: usize, open: bool) []const u8 {
+    if (open and query_len > 0 and query_len <= input.len) return input[0..query_len];
+    return commandCompletionPrefix(input, cursor);
 }
 
 fn containsCommandCompletion(items: []?[]const u8, needle: []const u8) bool {
@@ -1707,10 +1788,26 @@ fn startsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
     return true;
 }
 
+fn completionMatches(completion: []const u8, prefix: []const u8) bool {
+    return startsWithIgnoreCase(completion, prefix) and !std.ascii.eqlIgnoreCase(completion, prefix);
+}
+
+fn commandTokenActive(input: []const u8, cursor: u32) bool {
+    if (input.len == 0) return false;
+    const end = @min(@as(usize, cursor), input.len);
+    if (end == 0) return false;
+    if (input[0] != ':' and input[0] != '/') return false;
+    return std.mem.indexOfScalar(u8, input[0..end], ' ') == null;
+}
+
+fn completionVisible(input: []const u8, cursor: u32, match_count: usize) bool {
+    return match_count > 0 and commandTokenActive(input, cursor);
+}
+
 fn appendBuiltinCommandCompletions(prefix: []const u8, out: []?[]const u8, count: *usize) void {
     for (builtin_command_completions) |completion| {
         if (count.* >= out.len) return;
-        if (!startsWithIgnoreCase(completion, prefix)) continue;
+        if (!completionMatches(completion, prefix)) continue;
         if (containsCommandCompletion(out[0..count.*], completion)) continue;
 
         out[count.*] = completion;
@@ -1732,7 +1829,7 @@ fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []
     for (app.context_factory.skill_names.items) |name| {
         if (count.* >= out.len) return;
         const formatted = std.fmt.allocPrint(alloc, "{c}skill-{s}", .{ typed, name }) catch return;
-        if (!startsWithIgnoreCase(formatted, prefix)) continue;
+        if (!completionMatches(formatted, prefix)) continue;
         if (containsCommandCompletion(out[0..count.*], formatted)) continue;
 
         out[count.*] = formatted;
@@ -1740,40 +1837,37 @@ fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []
     }
 }
 
-fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: u32) [COMMAND_COMPLETION_ROWS][]const u8 {
+const CompletionRows = struct {
+    items: [COMMAND_COMPLETION_ROWS][]const u8 = [_][]const u8{""} ** COMMAND_COMPLETION_ROWS,
+    len: usize = 0,
+};
+
+fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: u32) CompletionRows {
     var matches: [COMMAND_COMPLETION_ROWS]?[]const u8 = [_]?[]const u8{null} ** COMMAND_COMPLETION_ROWS;
     var count: usize = 0;
 
-    const prefix = commandCompletionPrefix(input, cursor);
+    const prefix = switch (app.input_mode) {
+        .text => |t| filterPrefix(input, cursor, t.completion_query_len, t.completion_open),
+        else => commandCompletionPrefix(input, cursor),
+    };
     appendBuiltinCommandCompletions(prefix, &matches, &count);
     appendLuaCommandCompletions(app, prefix, &matches, &count);
     appendSkillCommandCompletions(app, alloc, prefix, &matches, &count);
 
-    var rows: [COMMAND_COMPLETION_ROWS][]const u8 = [_][]const u8{""} ** COMMAND_COMPLETION_ROWS;
-    for (&rows, 0..) |*row, i| row.* = matches[i] orelse "";
+    var rows = CompletionRows{};
+    for (matches[0..count]) |item| {
+        const value = item orelse continue;
+        if (!completionMatches(value, prefix)) continue;
+        rows.items[rows.len] = value;
+        rows.len += 1;
+    }
     return rows;
 }
 
-// TODO: move to input popup instead
-fn renderCommandPalette(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
-    const input = app.inputSlice();
-    const rows = commandCompletions(app, arena, input, app.input_cursor);
-    const border_color = app.context_factory.getMode(app.mode).color;
-    _ = border_color; // autofix
-
-    const palette_w: u16 = @min(@as(u16, 72), area.width -| 4);
-    const palette_h: u16 = @min(@as(u16, COMMAND_COMPLETION_ROWS + 4), area.height -| 2);
-    if (palette_w == 0 or palette_h == 0) return;
-
-    const palette_area = area.center(palette_w, palette_h);
-    const palette = r.tui.widgets.CommandPallet{
-        .input_value = input,
-        .preview = rows[0..],
-        .border = .single,
-        .style = .{ .fg = app.theme.text, .bg = app.theme.overlay_dark },
-        .padding = .{ .left = 2, .right = 2 },
-    };
-    palette.render(palette_area, buf);
+fn insertCompletionToken(self: *App, entry: []const u8) void {
+    const token_end = std.mem.indexOfScalar(u8, self.input_buffer.items, ' ') orelse self.input_buffer.items.len;
+    self.input_buffer.replaceRange(self.sessionAlloc(), 0, token_end, entry) catch return;
+    self.input_cursor = @intCast(entry.len);
 }
 
 fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
@@ -3279,4 +3373,26 @@ test "appendMarkdownText fills headline to width" {
     try std.testing.expectEqualStrings("Low", h3.spans.items[0].content);
     try std.testing.expect(!h3.spans.items[0].style.modifier.bold);
     try std.testing.expect(h3.spans.items[0].style.fg != .reset);
+}
+
+test "completion matcher excludes exact prefix" {
+    const skills = [_][]const u8{ "/skill-ponytail", "/skill-ponytail-audit" };
+    try std.testing.expect(!completionMatches(skills[0], "/skill-ponytail"));
+    try std.testing.expect(completionMatches(skills[1], "/skill-ponytail"));
+    try std.testing.expect(completionMatches(skills[0], "/skill"));
+    try std.testing.expect(completionMatches(skills[1], "/skill"));
+}
+
+test "completion visibility rule" {
+    try std.testing.expect(completionVisible("/ski", 4, 2));
+    try std.testing.expect(!completionVisible("/skill-x ", 9, 2));
+    try std.testing.expect(!completionVisible("hello", 5, 2));
+    try std.testing.expect(!completionVisible(":cd /tm", 7, 2));
+    try std.testing.expect(!completionVisible("/ski", 4, 0));
+}
+
+test "completion filter keeps original query after insert" {
+    try std.testing.expectEqualStrings("/sk", filterPrefix("/skill-ponytail", 15, 3, true));
+    try std.testing.expectEqualStrings("/skill-ponytail", filterPrefix("/skill-ponytail", 15, 3, false));
+    try std.testing.expectEqualStrings("/ski", filterPrefix("/ski", 4, 0, true));
 }

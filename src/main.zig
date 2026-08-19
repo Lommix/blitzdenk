@@ -429,6 +429,7 @@ pub fn run(
                                 continue;
                             },
                             .cancel => {
+                                if (app.closeCompletion()) continue;
                                 if (app.running) {
                                     try app.cmd_queue.append(io, .cancel);
                                 } else {
@@ -465,8 +466,18 @@ pub fn run(
                             .cursor_right => {
                                 app.input_cursor = @min(app.input_cursor + 1, app.input_buffer.items.len);
                             },
-                            .cursor_up => {},
-                            .cursor_down => {},
+                            .cursor_up => {
+                                if (app.completionIsOpen()) {
+                                    app.handleCompletion(.prev);
+                                    continue;
+                                }
+                            },
+                            .cursor_down => {
+                                if (app.completionIsOpen()) {
+                                    app.handleCompletion(.next);
+                                    continue;
+                                }
+                            },
                             .toggle_skip => {
                                 app.mu.lockUncancelable(app.io);
                                 app.flags.skip_permissions = !app.flags.skip_permissions;
@@ -475,12 +486,17 @@ pub fn run(
                                 continue;
                             },
                             .noop => {},
-                            .complete => {
-                                if (app.completion_suggestion) |sug| {
-                                    app.input_buffer.clearRetainingCapacity();
-                                    try app.input_buffer.appendSlice(app.sessionAlloc(), sug);
-                                    app.input_cursor = @intCast(sug.len);
-                                }
+                            .completion_next => {
+                                app.handleCompletion(.next);
+                                continue;
+                            },
+                            .completion_prev => {
+                                app.handleCompletion(.prev);
+                                continue;
+                            },
+                            .completion_accept => {
+                                app.handleCompletion(.accept);
+                                continue;
                             },
                             .paste_image => {
                                 if (app.input_mode == .text) app.pasteImage();

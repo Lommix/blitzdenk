@@ -15,7 +15,9 @@ pub const Action = union(enum) {
     cursor_up,
     cursor_down,
     toggle_skip,
-    complete,
+    completion_next,
+    completion_prev,
+    completion_accept,
     paste_image,
     lua: c_int,
 };
@@ -25,7 +27,7 @@ pub const KeyMap = struct {
     custom: std.ArrayList(KeyBind) = .empty,
 
     pub const defaults: []const KeyBind = &.{
-        KeyBind{ .key = .{ .code = .tab }, .action = .complete },
+        KeyBind{ .key = .{ .code = .tab }, .action = .completion_next },
         KeyBind{ .key = .{ .code = .arrow_left }, .action = .cursor_left },
         KeyBind{ .key = .{ .code = .arrow_right }, .action = .cursor_right },
         KeyBind{ .key = .{ .code = .arrow_up }, .action = .cursor_up },
@@ -34,7 +36,10 @@ pub const KeyMap = struct {
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'd' } }, .action = .scroll_down },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'c' } }, .action = .exit },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'r' } }, .action = .retry },
-        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'n' } }, .action = .clear_session },
+        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'n' } }, .action = .completion_next },
+        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'p' } }, .action = .completion_prev },
+        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'y' } }, .action = .completion_accept },
+        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'x' } }, .action = .clear_session },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'z' } }, .action = .open_cmd },
         KeyBind{ .key = .{ .code = .esc }, .action = .cancel },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'g' } }, .action = .toggle_skip },
@@ -270,4 +275,12 @@ test "parseKeyString round-trip with KeyMap defaults" {
     const k = parseKeyString("<C-c>").?;
     var map = KeyMap{};
     try std.testing.expectEqual(Action.exit, map.parse(k).?);
+}
+
+test "KeyMap defaults bind completion actions" {
+    var map = KeyMap{};
+    try std.testing.expectEqual(Action.completion_next, map.parse(.{ .code = .tab }).?);
+    try std.testing.expectEqual(Action.completion_next, map.parse(.{ .mods = .{ .ctrl = true }, .code = .{ .char = 'n' } }).?);
+    try std.testing.expectEqual(Action.completion_prev, map.parse(.{ .mods = .{ .ctrl = true }, .code = .{ .char = 'p' } }).?);
+    try std.testing.expectEqual(Action.completion_accept, map.parse(.{ .mods = .{ .ctrl = true }, .code = .{ .char = 'y' } }).?);
 }

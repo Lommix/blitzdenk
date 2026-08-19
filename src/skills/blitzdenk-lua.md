@@ -186,6 +186,14 @@ end)
 
 Vim-style combos: `<C-c>`, `<M-S-a>`, `<Esc>`, `<Up>`, `<F1>`, `a`.
 
+Command completion actions (custom `blitz.bind` on a key wins over these defaults):
+
+- `completion_next` — `<Tab>`, `<C-n>`. Cycle forward and insert. Wraps.
+- `completion_prev` — `<C-p>`. Cycle backward and insert. Wraps.
+- `completion_accept` — `<C-y>`. Insert the selected entry without cycling.
+
+Arrow `<Up>` / `<Down>` traverse the menu while it is open (wrap, same as `<Tab>`).
+
 ## Modes
 
 ```lua
