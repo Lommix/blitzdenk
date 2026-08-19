@@ -806,7 +806,7 @@ pub const App = struct {
 
         // command completion
         if (app.input_buffer.items.len > 0) {
-            const completions = commandCompletions(app, app.input_buffer.items, app.input_cursor);
+            const completions = commandCompletions(app, frame_alloc, app.input_buffer.items, app.input_cursor);
             var p = r.tui.Paragraph{};
             p.border = .single;
             p.style.bg = app.theme.overlay_dark;
@@ -1725,13 +1725,29 @@ fn appendLuaCommandCompletions(app: *App, prefix: []const u8, out: []?[]const u8
     app.lua_vm.appendCommandCompletions(prefix, out, count);
 }
 
-fn commandCompletions(app: *App, input: []const u8, cursor: u32) [COMMAND_COMPLETION_ROWS][]const u8 {
+fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?[]const u8, count: *usize) void {
+    if (count.* >= out.len) return;
+    const typed: u8 = if (prefix.len > 0 and (prefix[0] == '/' or prefix[0] == ':')) prefix[0] else '/';
+
+    for (app.context_factory.skill_names.items) |name| {
+        if (count.* >= out.len) return;
+        const formatted = std.fmt.allocPrint(alloc, "{c}skill-{s}", .{ typed, name }) catch return;
+        if (!startsWithIgnoreCase(formatted, prefix)) continue;
+        if (containsCommandCompletion(out[0..count.*], formatted)) continue;
+
+        out[count.*] = formatted;
+        count.* += 1;
+    }
+}
+
+fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: u32) [COMMAND_COMPLETION_ROWS][]const u8 {
     var matches: [COMMAND_COMPLETION_ROWS]?[]const u8 = [_]?[]const u8{null} ** COMMAND_COMPLETION_ROWS;
     var count: usize = 0;
 
     const prefix = commandCompletionPrefix(input, cursor);
     appendBuiltinCommandCompletions(prefix, &matches, &count);
     appendLuaCommandCompletions(app, prefix, &matches, &count);
+    appendSkillCommandCompletions(app, alloc, prefix, &matches, &count);
 
     var rows: [COMMAND_COMPLETION_ROWS][]const u8 = [_][]const u8{""} ** COMMAND_COMPLETION_ROWS;
     for (&rows, 0..) |*row, i| row.* = matches[i] orelse "";
@@ -1740,10 +1756,8 @@ fn commandCompletions(app: *App, input: []const u8, cursor: u32) [COMMAND_COMPLE
 
 // TODO: move to input popup instead
 fn renderCommandPalette(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
-    _ = arena;
-
     const input = app.inputSlice();
-    const rows = commandCompletions(app, input, app.input_cursor);
+    const rows = commandCompletions(app, arena, input, app.input_cursor);
     const border_color = app.context_factory.getMode(app.mode).color;
     _ = border_color; // autofix
 

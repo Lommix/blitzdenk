@@ -614,6 +614,8 @@ pub fn run(
                             .text => {
                                 if (app.input_buffer.items.len == 0) break;
                                 const input = std.fmt.allocPrint(app.sessionAlloc(), "{f}", .{std.unicode.fmtUtf8(app.inputSlice())}) catch break;
+                                var send_text: []const u8 = input;
+                                var chat_text: []const u8 = input;
 
                                 // -- user commands (processed even while a session is running)
                                 if (input[0] == ':' or input[0] == '/') {
@@ -669,21 +671,33 @@ pub fn run(
                                                 app.input_buffer.clearRetainingCapacity();
                                             },
                                         }
+                                        break;
                                     }
 
-                                    break;
+                                    if (reg.parseSkillCommand(input)) |sc| {
+                                        if (reg.findSkill(app.context_factory.skill_dir, app.io, app.sessionAlloc(), sc.name)) |skill| {
+                                            send_text = reg.skillSendText(app.sessionAlloc(), skill.body, sc.prompt) catch break;
+                                            chat_text = reg.skillChatText(app.sessionAlloc(), skill.name, sc.prompt) catch break;
+                                        } else {
+                                            app.pushSystemMessage("unknown skill: {s}", .{sc.name});
+                                            app.input_buffer.clearRetainingCapacity();
+                                            break;
+                                        }
+                                    } else {
+                                        break;
+                                    }
                                 }
 
                                 if (app.running) {
                                     app.pushHistory(input);
                                     if (config_lua) |info| app.saveHistory(info.dir_path);
-                                    try app.event_bus.emit(&app, .{ .user_message_sent = input });
+                                    try app.event_bus.emit(&app, .{ .user_message_sent = chat_text });
                                     if (app.main_agent_id) |agent_id| {
                                         const alloc = app.sessionAlloc();
                                         const len: usize = if (app.screenshot_buf != null) 2 else 1;
 
                                         const parts = try alloc.alloc(r.sdk.Part, len);
-                                        parts[0] = .{ .text = input };
+                                        parts[0] = .{ .text = send_text };
 
                                         if (app.screenshot_buf) |buf| {
                                             parts[1] = .{ .image = .{
@@ -692,7 +706,7 @@ pub fn run(
                                             } };
                                         }
 
-                                        const chat_msg = try ChatEntry.userMessageSimple(alloc, .user, input);
+                                        const chat_msg = try ChatEntry.userMessageSimple(alloc, .user, chat_text);
                                         try app.cmd_queue.append(io, .{ .queue_agent_message = .{
                                             .agent_id = agent_id,
                                             .parts = parts,
@@ -708,22 +722,22 @@ pub fn run(
 
                                 app.pushHistory(input);
                                 if (config_lua) |info| app.saveHistory(info.dir_path);
-                                try app.event_bus.emit(&app, .{ .user_message_sent = input });
+                                try app.event_bus.emit(&app, .{ .user_message_sent = chat_text });
 
                                 const alloc = app.sessionAlloc();
                                 const parts: []const r.sdk.Part = if (app.screenshot_buf) |img_data|
                                     alloc.dupe(r.sdk.Part, &.{
-                                        .{ .text = input },
+                                        .{ .text = send_text },
                                         .{ .image = .{ .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{img_data}), .media_type = "image/png" } },
                                     }) catch break
                                 else
                                     alloc.dupe(r.sdk.Part, &.{
-                                        .{ .text = input },
+                                        .{ .text = send_text },
                                     }) catch break;
 
                                 app.screenshot_buf = null;
 
-                                const chat_entry = try ChatEntry.userMessageSimple(app.sessionAlloc(), .user, input);
+                                const chat_entry = try ChatEntry.userMessageSimple(app.sessionAlloc(), .user, chat_text);
 
                                 if (app.main_agent_id) |id| {
                                     try app.appendChatEntry(app.sessionAlloc(), chat_entry);

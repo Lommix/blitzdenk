@@ -9,6 +9,28 @@ const CONTEXT_FILES = .{"AGENTS.md"};
 pub const MAX_AGENT_TOOLS = 64;
 const MAX_AVAILABLE_SYSTEMS = 32;
 
+// -------------------------------------------------------------------------------
+alloc: std.mem.Allocator,
+loaded_tools: std.ArrayList(ToolEntry) = .empty,
+mode_counter: u32 = 2, // skip first 2 for interal modes
+agent_counter: u32 = 3,
+agents: std.EnumArray(AgentType, ?AgentDef) = .initFill(null),
+modes: std.EnumArray(Mode, ?ModeDef) = .initFill(null),
+// ---
+available_mcp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
+available_mcp_count: usize = 0,
+cli_checked: bool = false,
+cli_installed: [cli_capabilities.len]bool = .{false} ** cli_capabilities.len,
+// Arena holds definitions set from Lua. Reset on hot-reload so the
+// factory keeps using the embedded defaults until lua re-installs them.
+prompt_arena: std.heap.ArenaAllocator,
+io: std.Io,
+config_dir: ?std.Io.Dir,
+skill_dir: ?std.Io.Dir,
+skill_names: std.ArrayList([]const u8) = .empty,
+flags: Flags = .{},
+// -------------------------------------------------------------------------------
+
 const CliCapability = struct {
     binary: []const u8,
     guideline: []const u8,
@@ -138,27 +160,6 @@ pub const Flags = packed struct(u8) {
     skip_local_context_file: bool = false,
     _pad: u7 = 0,
 };
-
-// -------------------------------------------------------------------------------
-alloc: std.mem.Allocator,
-loaded_tools: std.ArrayList(ToolEntry) = .empty,
-mode_counter: u32 = 2, // skip first 2 for interal modes
-agent_counter: u32 = 3,
-agents: std.EnumArray(AgentType, ?AgentDef) = .initFill(null),
-modes: std.EnumArray(Mode, ?ModeDef) = .initFill(null),
-// ---
-available_mcp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
-available_mcp_count: usize = 0,
-cli_checked: bool = false,
-cli_installed: [cli_capabilities.len]bool = .{false} ** cli_capabilities.len,
-// Arena holds definitions set from Lua. Reset on hot-reload so the
-// factory keeps using the embedded defaults until lua re-installs them.
-prompt_arena: std.heap.ArenaAllocator,
-io: std.Io,
-config_dir: ?std.Io.Dir,
-skill_dir: ?std.Io.Dir,
-flags: Flags = .{},
-// -------------------------------------------------------------------------------
 
 fn buildDefaultTools(alloc: std.mem.Allocator) !std.ArrayList(ToolEntry) {
     var list = std.ArrayList(ToolEntry).empty;
@@ -347,6 +348,29 @@ fn getAgentMut(self: *Self, agent_type: AgentType) ?*AgentDef {
     return if (self.agents.getPtr(agent_type).*) |*def| def else null;
 }
 
+/// Load the names of all skills into a gpa-backed buffer, replacing any
+/// previous contents. Called on startup and on hot-reload.
+fn loadSkillNames(self: *Self) void {
+    for (self.skill_names.items) |name| self.alloc.free(name);
+    self.skill_names.clearRetainingCapacity();
+    const dir = self.skill_dir orelse return;
+    var it = dir.iterate();
+    var header_buf: [4096]u8 = undefined;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    while (it.next(self.io) catch return) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
+        const len = dir.realPathFile(self.io, entry.name, &path_buf) catch continue;
+        const skill = loadSkillMeta(self.io, path_buf[0..len], &header_buf) orelse continue;
+        const dup = self.alloc.dupe(u8, skill.name) catch continue;
+        self.skill_names.append(self.alloc, dup) catch {
+            self.alloc.free(dup);
+            return;
+        };
+    }
+}
+
 /// Restore embedded defaults and free any Lua-installed definitions.
 pub fn resetDefs(self: *Self) void {
     _ = self.prompt_arena.reset(.retain_capacity);
@@ -381,6 +405,8 @@ pub fn resetDefs(self: *Self) void {
         .sparse = "",
         .color = .red,
     });
+
+    self.loadSkillNames();
 }
 
 pub fn add(self: *Self, tool: r.tools.Tool, flags: ToolFlags) !void {
@@ -574,6 +600,8 @@ pub fn resetLoadedTools(self: *Self) !void {
 
 pub fn deinit(self: *Self) void {
     self.loaded_tools.deinit(self.alloc);
+    for (self.skill_names.items) |name| self.alloc.free(name);
+    self.skill_names.deinit(self.alloc);
     self.prompt_arena.deinit();
     self.alloc.destroy(self);
 }
@@ -785,6 +813,83 @@ fn parseSkillMeta(raw: []u8) ?SkillMeta {
     return meta;
 }
 
+pub fn parseSkillBody(raw: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, raw, "---\n")) return null;
+    const header_end = std.mem.indexOf(u8, raw[4..], "\n---") orelse return null;
+    var i = 4 + header_end + 4;
+    if (i < raw.len and raw[i] == '\r') i += 1;
+    if (i < raw.len and raw[i] == '\n') i += 1;
+    return raw[i..];
+}
+
+pub const SkillCommand = struct {
+    name: []const u8,
+    prompt: []const u8,
+};
+
+pub fn parseSkillCommand(raw: []const u8) ?SkillCommand {
+    if (raw.len < 2) return null;
+    if (raw[0] != '/' and raw[0] != ':') return null;
+    const rest = raw[1..];
+    if (!std.mem.startsWith(u8, rest, "skill-")) return null;
+    const after = rest["skill-".len..];
+    if (after.len == 0) return null;
+    const space = std.mem.indexOfScalar(u8, after, ' ');
+    const name = if (space) |idx| after[0..idx] else after;
+    if (name.len == 0) return null;
+    const prompt = if (space) |idx| std.mem.trim(u8, after[idx + 1 ..], " \t\r\n") else "";
+    return .{ .name = name, .prompt = prompt };
+}
+
+pub const LoadedSkill = struct {
+    raw: []u8,
+    name: []const u8,
+    body: []const u8,
+};
+
+pub fn findSkill(
+    skill_dir: ?std.Io.Dir,
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    name: []const u8,
+) ?LoadedSkill {
+    const dir = skill_dir orelse return null;
+    var it = dir.iterate();
+    var header_buf: [4096]u8 = undefined;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    while (it.next(io) catch return null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
+
+        const len = dir.realPathFile(io, entry.name, &path_buf) catch continue;
+        const meta = loadSkillMeta(io, path_buf[0..len], &header_buf) orelse continue;
+        if (!std.ascii.eqlIgnoreCase(meta.name, name)) continue;
+
+        const raw = dir.readFileAlloc(io, entry.name, alloc, .limited64(1024 * 1024)) catch continue;
+        const raw_meta = parseSkillMeta(raw) orelse {
+            alloc.free(raw);
+            continue;
+        };
+        const body = parseSkillBody(raw) orelse {
+            alloc.free(raw);
+            continue;
+        };
+        return .{ .raw = raw, .name = raw_meta.name, .body = body };
+    }
+    return null;
+}
+
+pub fn skillSendText(alloc: std.mem.Allocator, body: []const u8, prompt: []const u8) ![]const u8 {
+    if (prompt.len == 0) return body;
+    return std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ body, prompt });
+}
+
+pub fn skillChatText(alloc: std.mem.Allocator, name: []const u8, prompt: []const u8) ![]const u8 {
+    if (prompt.len == 0) return std.fmt.allocPrint(alloc, "[skill-{s}]", .{name});
+    return std.fmt.allocPrint(alloc, "[skill-{s}] {s}", .{ name, prompt });
+}
+
 fn lineEnd(buf: []const u8, start: usize) usize {
     return start + (std.mem.indexOfScalar(u8, buf[start..], '\n') orelse buf.len - start);
 }
@@ -856,6 +961,88 @@ test "skill meta parses folded yaml description" {
         "Whole-repo audit for over-engineering. Like ponytail-review, but scans the entire codebase instead of a diff.",
         meta.description,
     );
+    try std.testing.expectEqualStrings("body\n", parseSkillBody(raw[0..]).?);
+}
+
+test "skill body extract empty body" {
+    var raw = ("---\nname: x\ndescription: y\n---\n").*;
+    try std.testing.expectEqualStrings("", parseSkillBody(raw[0..]).?);
+}
+
+test "skill body extract missing header returns none" {
+    try std.testing.expect(parseSkillBody("no header\n") == null);
+    try std.testing.expect(parseSkillBody("---\nname: x\n") == null);
+}
+
+test "skill command parse" {
+    const Case = struct { in: []const u8, name: ?[]const u8, prompt: []const u8 };
+    const cases = [_]Case{
+        .{ .in = "/skill-zig", .name = "zig", .prompt = "" },
+        .{ .in = ":skill-zig", .name = "zig", .prompt = "" },
+        .{ .in = "/skill-zig fix the allocator", .name = "zig", .prompt = "fix the allocator" },
+        .{ .in = "/skill-ponytail-review", .name = "ponytail-review", .prompt = "" },
+        .{ .in = "/skill-ponytail-review do it", .name = "ponytail-review", .prompt = "do it" },
+        .{ .in = "/skill-PonyTail", .name = "PonyTail", .prompt = "" },
+        .{ .in = "/skill-zig   spaced", .name = "zig", .prompt = "spaced" },
+        .{ .in = "/skill", .name = null, .prompt = "" },
+        .{ .in = ":skill", .name = null, .prompt = "" },
+        .{ .in = "/skill-", .name = null, .prompt = "" },
+        .{ .in = "/foo", .name = null, .prompt = "" },
+        .{ .in = ":clear", .name = null, .prompt = "" },
+        .{ .in = "/plan", .name = null, .prompt = "" },
+        .{ .in = "skill-zig", .name = null, .prompt = "" },
+    };
+    for (cases) |c| {
+        const got = parseSkillCommand(c.in);
+        if (c.name) |n| {
+            try std.testing.expectEqualStrings(n, got.?.name);
+            try std.testing.expectEqualStrings(c.prompt, got.?.prompt);
+        } else {
+            try std.testing.expect(got == null);
+        }
+    }
+}
+
+test "skill send and chat text" {
+    const body = "BODY";
+    try std.testing.expectEqualStrings(body, try skillSendText(std.testing.allocator, body, ""));
+    const joined = try skillSendText(std.testing.allocator, body, "do it");
+    defer std.testing.allocator.free(joined);
+    try std.testing.expectEqualStrings("BODY\n\ndo it", joined);
+
+    const tag = try skillChatText(std.testing.allocator, "zig", "");
+    defer std.testing.allocator.free(tag);
+    try std.testing.expectEqualStrings("[skill-zig]", tag);
+
+    const tagp = try skillChatText(std.testing.allocator, "zig", "fix");
+    defer std.testing.allocator.free(tagp);
+    try std.testing.expectEqualStrings("[skill-zig] fix", tagp);
+}
+
+test "findSkill matches name case-insensitively" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    const contents =
+        \\---
+        \\name: ponytail
+        \\description: lazy
+        \\---
+        \\do less
+    ;
+    {
+        const file = try tmp.dir.createFile(std.testing.io, "x.md", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, contents);
+    }
+
+    const found = findSkill(tmp.dir, std.testing.io, std.testing.allocator, "PonyTail").?;
+    defer std.testing.allocator.free(found.raw);
+    try std.testing.expectEqualStrings("ponytail", found.name);
+    try std.testing.expectEqualStrings("do less", found.body);
+
+    try std.testing.expect(findSkill(tmp.dir, std.testing.io, std.testing.allocator, "nope") == null);
+    try std.testing.expect(findSkill(null, std.testing.io, std.testing.allocator, "ponytail") == null);
 }
 
 test "agent defaults can be replaced with an empty tool list" {
