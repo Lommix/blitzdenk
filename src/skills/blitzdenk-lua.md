@@ -166,11 +166,18 @@ blitz.add_command("/plan", function(rem)
 end)
 ```
 
-Queue API: `reset_session`, `cancel`, `retry`, `compact`, `push_chat_entry(role, text)`,
-`queue_agent_message(agent_id, text)`, `spawn_agent(args)`, `await_agent(agent_id)`,
+Queue API: `reset_session`, `cancel`, `retry`, `compact`, `prompt(text)`,
+`push_chat_entry(role, text)`, `queue_agent_message(agent_id, text)`, `spawn_agent(args)`, `await_agent(agent_id)`,
 `await_agent_result(agent_id)` (returns an `AWAIT_*` status), `save_session(path)`, `load_session(path)`,
 `attach_screenshot(data, media_type)`. `spawn_agent` args: `parent_id`,
 `prompt`, `agent_type`, `fork`.
+
+`blitz.cmd.prompt(text)` is the "say something" command: it echoes the text into
+the chat log and sends it to the main agent (queued while it runs, restarted when
+idle), or starts a fresh general agent if none exists. Use it instead of
+`push_chat_entry("user", ...)` (display-only) or hand-rolling
+`get_main_agent()` + `queue_agent_message` (which queues silently, no chat echo).
+Note `spawn_agent` without `parent_id` replaces the running main session.
 
 `blitz.get_main_agent()` returns the main agent id table (`{ index, generation }`) or nil.
 

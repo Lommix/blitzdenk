@@ -44,6 +44,8 @@
 ---@field push_chat_entry fun(role: string, text: string)
 ---Queue a user message for the given agent.
 ---@field queue_agent_message fun(agent_id: BlitzAgentId, text: string)
+---Send a user message to the main agent (queued if running, restarted if idle), or start a general agent if none exists.
+---@field prompt fun(text: string)
 ---Reserve a free slot and enqueue a spawn or fork into it.
 ---@field spawn_agent fun(args: BlitzSpawnArgs): BlitzAgentId|nil
 ---Block until the referenced agent reaches a terminal state.

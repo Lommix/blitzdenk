@@ -36,11 +36,11 @@ blitz.set_model_agent(blitz.AGENT_GENERAL, deepseek, "max")
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.BASH,
 	blitz.tools.READ,
-	blitz.tools.PATCH, -- switch to EDIT + WRITE for older models
+	blitz.tools.EDIT,
+	blitz.tools.WRITE,
 	blitz.tools.ASK,
 	blitz.tools.AGENT,
-	-- blitz.tools.EDIT,
-	-- blitz.tools.WRITE,
+	-- blitz.tools.PATCH, -- EDIT/WRITE alternative
 	-- blitz.tools.START_MCP,
 })
 
@@ -51,111 +51,74 @@ blitz.add_command("/compact", function()
 	blitz.cmd.compact()
 end)
 
+blitz.add_command("/clear", function()
+	blitz.cmd.reset_session()
+end)
+
+blitz.add_command("/help", function(rem)
+	blitz.cmd.prompt("Load the blitzdenk skill and help the user: \n" .. rem)
+end)
+
 blitz.add_command("/plan", function(rem)
-	local main_id = blitz.get_main_agent()
 	local prompt = [[
-        You are in collaborative explore-plan mode. Do NOT make any edits and do NOT present a final plan yet.
-        Interview the user relentlessly about every aspect of the task until you reach a shared understanding,
-        walking down each branch of the design tree and resolving dependencies between decisions one by one.
+You are in collaborative explore-plan mode. Do NOT make any edits and do NOT present a final plan yet.
+Interview the user relentlessly about every aspect of the task until you reach a shared understanding,
+walking down each branch of the design tree and resolving dependencies between decisions one by one.
 
-        Rules:
-        - Ask ONE question at a time (step by step), using your ask tool with a recommendation for each question.
-        - If a question can be answered by exploring the codebase, explore the codebase instead of asking.
-        - Keep questions concrete and decision-oriented; always offer a recommended answer.
-        - When the user answers, follow up on the next unresolved decision — never skip ahead to a plan.
-        - Only after all material unknowns are resolved, summarize the shared understanding and present the
-          implementation plan, then await the user's explicit go-ahead before any edit.
+Rules:
+- Ask ONE question at a time (step by step), using your ask tool with a recommendation for each question.
+- If a question can be answered by exploring the codebase, explore the codebase instead of asking.
+- Keep questions concrete and decision-oriented; always offer a recommended answer.
+- When the user answers, follow up on the next unresolved decision — never skip ahead to a plan.
+- Only after all material unknowns are resolved, summarize the shared understanding and present the
+implementation plan, then await the user's explicit go-ahead before any edit.
 
-        This is the request to explore:
+This is the request to explore:
 
-        ]] .. rem
+]] .. rem
 
-	if main_id == nil then
-		blitz.cmd.reset_session()
-		blitz.cmd.spawn_agent({
-			agent_type = blitz.AGENT_GENERAL,
-			prompt = prompt,
-		})
-	else
-		blitz.cmd.queue_agent_message(main_id, prompt)
-	end
-	blitz.cmd.push_chat_entry("user", "[PLAN]: " .. rem)
+	blitz.cmd.prompt(prompt)
 end)
 
 blitz.add_command("/show", function(rem)
-	local main_id = blitz.get_main_agent()
 	local prompt = [[
-        Explain the answer in a visual way using short and precise mermaid diagrams
-        (flow, sequence, class, er, state) in markdown code blocks ```mermaid ... ``` whenever a diagram
-        clarifies the explanation better than text alone.
+Explain the answer in a visual way using short and precise mermaid diagrams
+(flow, sequence, class, er, state) in markdown code blocks ```mermaid ... ``` whenever a diagram
+clarifies the explanation better than text alone.
 
-
-        Task:
-
-        ]] .. rem
-
-	if main_id == nil then
-		blitz.cmd.reset_session()
-		blitz.cmd.spawn_agent({
-			agent_type = blitz.AGENT_GENERAL,
-			prompt = prompt,
-		})
-	else
-		blitz.cmd.queue_agent_message(main_id, prompt)
-	end
-	blitz.cmd.push_chat_entry("user", "[DEBUG]: " .. rem)
+Task: ]] .. rem
+	blitz.cmd.prompt(prompt)
 end)
 
 blitz.add_command("/team", function(rem)
-	local main_id = blitz.get_main_agent()
 	local prompt = [[
-        Congratulations! You were just promoted to the team lead agent. You no longer read or write code. Your new job is to
-        orchestrate a team of agents to complete the task. You may start up to 3 agents at the same time. They are your new eyes and hands.
+Congratulations! You were just promoted to the team lead agent. You no longer read or write code. Your new job is to
+orchestrate a team of agents to complete the task. You may start up to 3 agents at the same time. They are your new eyes and hands.
 
-        You follow this pattern:
+You follow this pattern:
+- only one builder at the time
+- 3 challengers for code reviews: regression, edge case and correctness
+- 2 reserach agent from different perspectives
+- 2 challengers for each claim.
+- Each review step must be aware of the original intent of the task.
 
-        explore -> plan -> build -> review -> update -> review -> finalize
+This is the task:
+]] .. rem
 
-        Each review step must be aware of the original intent of the task and be performed by 2 challenger agents (regression + edge cases and correctness)
-
-        This is the task:
-
-        ]] .. rem
-
-	if main_id == nil then
-		blitz.cmd.reset_session()
-		blitz.cmd.spawn_agent({
-			agent_type = blitz.AGENT_GENERAL,
-			prompt = prompt,
-		})
-	else
-		blitz.cmd.queue_agent_message(main_id, prompt)
-	end
-	blitz.cmd.push_chat_entry("user", "[TEAM]: " .. rem)
+	blitz.cmd.prompt(prompt)
 end)
 
-blitz.add_command("/review", function()
-	local main_id = blitz.get_main_agent()
+blitz.add_command("/review", function(rem)
+	local prompt = [[
+Start two challenger agents reviewing the current diff, one for correctness and one for edge cases. Communicate the original task and intent of the change. Confirm their findings and fix critical issues.
+]] .. rem
 
-	local prompt =
-		"Start two challenger agents reviewing the current diff, one for correctness and one for edge cases. Communicate the original task and intent of the change. Confirm their findings and fix critical issues."
-
-	if main_id == nil then
-		blitz.cmd.reset_session()
-		blitz.cmd.spawn_agent({
-			agent_type = blitz.AGENT_GENERAL,
-			prompt = prompt,
-		})
-	else
-		blitz.cmd.queue_agent_message(main_id, prompt)
-	end
-	blitz.cmd.push_chat_entry("user", "[starting review]")
+	blitz.cmd.prompt(prompt)
 end)
 
 ---------------------------------------------------------------------------------------------------
 --- Custom status bar render
 ---------------------------------------------------------------------------------------------------
-
 local function fmt(n)
 	local units = { "k", "M", "G" }
 	local u = 0
@@ -171,7 +134,8 @@ end
 
 blitz.status_bar_render = function()
 	local use = blitz.token_usage()
-	return "Cache:"
+	return blitz.get_model_name(blitz.AGENT_GENERAL)
+		.. " | Cache:"
 		.. fmt(use.cache)
 		.. " | In:"
 		.. fmt(use.input)
@@ -231,9 +195,8 @@ Keep it under 10 lines unless the question genuinely needs more.
 	effort = "low",
 	model = deepseek,
 	tools = {
-		blitz.tools.GLOB,
-		blitz.tools.GREP,
 		blitz.tools.READ,
+		blitz.tools.BASH,
 	},
 })
 
@@ -293,8 +256,6 @@ items. Do not overstate severity. Tone: matter-of-fact, no flattery, no filler.
 	effort = "max",
 	model = deepseek,
 	tools = {
-		blitz.tools.GLOB,
-		blitz.tools.GREP,
 		blitz.tools.READ,
 		blitz.tools.BASH,
 	},

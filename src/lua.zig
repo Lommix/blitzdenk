@@ -1326,6 +1326,39 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
+        .name = "prompt",
+        .desc = "Send a user message to the main agent (queued if running, restarted if idle), or start a general agent if none exists.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "text", .ty = LuaType.string }},
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(state: *c.lua_State, a: *r.app.App, text: []const u8) !void {
+                    if (try isToolVm(state)) return;
+                    const parts = [_]r.sdk.Part{.{ .text = text }};
+                    const entry = try r.app.ChatEntry.userMessageSimple(a.sessionAlloc(), .user, text);
+                    if (a.main_agent_id) |id| {
+                        try a.cmd_queue.append(a.io, .{ .queue_agent_message = .{
+                            .agent_id = id,
+                            .parts = &parts,
+                            .chat_entry = entry,
+                        } });
+                    } else {
+                        const id = a.registry.reserve() orelse return;
+                        a.cmd_queue.append(a.io, .{ .spawn_agent = .{
+                            .agent_id = id,
+                            .agent_type = @intFromEnum(r.ContextFactory.AgentType.general),
+                            .prompt = &parts,
+                            .chat_entry = entry,
+                            .cwd = a.cwd,
+                        } }) catch {
+                            a.registry.releaseReservation(id);
+                            return;
+                        };
+                    }
+                }
+            }).lua_fn, "cmd.prompt"),
+        } },
+    },
+    .{
         .name = "spawn_agent",
         .desc = "Reserve a free slot and enqueue a spawn or fork into it.",
         .ty = LuaType{ .function = .{

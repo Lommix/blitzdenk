@@ -11,8 +11,6 @@ const COMMAND_COMPLETION_ROWS = 8;
 pub const ChatRole = enum { system, user, agent };
 
 const builtin_command_completions: []const []const u8 = &.{
-    "/clear",
-    "/help",
     "/ssh user@host:/path/to/cwd",
     "/cd /path/to/new/cwd",
 };
