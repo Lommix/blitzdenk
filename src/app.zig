@@ -1837,6 +1837,21 @@ fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []
     }
 }
 
+fn appendSshAliasCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?[]const u8, count: *usize) void {
+    if (count.* >= out.len) return;
+    const typed: u8 = if (prefix.len > 0 and (prefix[0] == '/' or prefix[0] == ':')) prefix[0] else '/';
+
+    for (app.context_factory.ssh_aliases.items) |alias| {
+        if (count.* >= out.len) return;
+        const formatted = std.fmt.allocPrint(alloc, "{c}ssh-{s}", .{ typed, alias.name }) catch return;
+        if (!completionMatches(formatted, prefix)) continue;
+        if (containsCommandCompletion(out[0..count.*], formatted)) continue;
+
+        out[count.*] = formatted;
+        count.* += 1;
+    }
+}
+
 const CompletionRows = struct {
     items: [COMMAND_COMPLETION_ROWS][]const u8 = [_][]const u8{""} ** COMMAND_COMPLETION_ROWS,
     len: usize = 0,
@@ -1853,6 +1868,7 @@ fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cu
     appendBuiltinCommandCompletions(prefix, &matches, &count);
     appendLuaCommandCompletions(app, prefix, &matches, &count);
     appendSkillCommandCompletions(app, alloc, prefix, &matches, &count);
+    appendSshAliasCompletions(app, alloc, prefix, &matches, &count);
 
     var rows = CompletionRows{};
     for (matches[0..count]) |item| {

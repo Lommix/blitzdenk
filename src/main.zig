@@ -690,6 +690,20 @@ pub fn run(
                                         break;
                                     }
 
+                                    if (reg.parseSshAliasCommand(input)) |alias| {
+                                        if (app.context_factory.findSshAlias(alias)) |target| {
+                                            handleSshCommand(&app, app.exec_pool, gpa, .{
+                                                .user = target.user,
+                                                .host = target.host,
+                                                .cwd = target.cwd,
+                                            });
+                                        } else {
+                                            app.pushSystemMessage("unknown ssh alias: {s}", .{alias});
+                                        }
+                                        app.input_buffer.clearRetainingCapacity();
+                                        break;
+                                    }
+
                                     if (reg.parseSkillCommand(input)) |sc| {
                                         if (reg.findSkill(app.context_factory.skill_dir, app.io, app.sessionAlloc(), sc.name)) |skill| {
                                             send_text = reg.skillSendText(app.sessionAlloc(), skill.body, sc.prompt) catch break;

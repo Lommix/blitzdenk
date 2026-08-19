@@ -28,6 +28,8 @@ io: std.Io,
 config_dir: ?std.Io.Dir,
 skill_dir: ?std.Io.Dir,
 skill_names: std.ArrayList([]const u8) = .empty,
+ssh_dir: ?std.Io.Dir = null,
+ssh_aliases: std.ArrayList(SshAlias) = .empty,
 flags: Flags = .{},
 // -------------------------------------------------------------------------------
 
@@ -183,6 +185,11 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !*Self {
         else => return err,
     };
 
+    const ssh_dir: ?std.Io.Dir = home_dir.openDir(io, ".ssh/", .{}) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+
     self.* = Self{
         .alloc = alloc,
         .loaded_tools = try buildDefaultTools(alloc),
@@ -190,6 +197,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8) !*Self {
         .io = io,
         .skill_dir = skill_dir,
         .config_dir = config_dir,
+        .ssh_dir = ssh_dir,
     };
 
     self.resetDefs();
@@ -348,6 +356,166 @@ fn getAgentMut(self: *Self, agent_type: AgentType) ?*AgentDef {
     return if (self.agents.getPtr(agent_type).*) |*def| def else null;
 }
 
+/// A connectable alias resolved from ~/.ssh/config.
+pub const SshAlias = struct {
+    name: []const u8,
+    user: []const u8,
+    host: []const u8,
+    cwd: []const u8,
+};
+
+const SshKeys = struct {
+    user: ?[]const u8 = null,
+    host_name: ?[]const u8 = null,
+    directory: ?[]const u8 = null,
+};
+
+fn mergeSshKeys(dst: *SshKeys, src: SshKeys) void {
+    if (src.user) |v| dst.user = v;
+    if (src.host_name) |v| dst.host_name = v;
+    if (src.directory) |v| dst.directory = v;
+}
+
+fn freeSshAliases(alloc: std.mem.Allocator, aliases: []SshAlias) void {
+    for (aliases) |a| {
+        alloc.free(a.name);
+        alloc.free(a.user);
+        alloc.free(a.host);
+        alloc.free(a.cwd);
+    }
+}
+
+const SshBlock = struct {
+    name: []const u8,
+    keys: SshKeys,
+};
+
+const SshBlockState = enum { none, default, named, skipped };
+
+/// Parse the contents of ~/.ssh/config into connectable aliases.
+/// Global keys and `Host *` blocks provide defaults, later blocks win.
+/// Named hosts need a resolvable user; wildcard or multi-name hosts are skipped.
+fn parseSshAliases(alloc: std.mem.Allocator, content: []const u8) !std.ArrayList(SshAlias) {
+    var list = std.ArrayList(SshAlias).empty;
+    errdefer {
+        freeSshAliases(alloc, list.items);
+        list.deinit(alloc);
+    }
+
+    var defaults = SshKeys{};
+    var named = std.ArrayList(SshBlock).empty;
+    defer named.deinit(alloc);
+
+    const flush = struct {
+        fn call(
+            blocks: *std.ArrayList(SshBlock),
+            a: std.mem.Allocator,
+            dflts: *SshKeys,
+            state: SshBlockState,
+            name: []const u8,
+            keys: SshKeys,
+        ) !void {
+            switch (state) {
+                .default => mergeSshKeys(dflts, keys),
+                .named => try blocks.append(a, .{ .name = name, .keys = keys }),
+                else => {},
+            }
+        }
+    }.call;
+
+    var state: SshBlockState = .none;
+    var cur_name: []const u8 = undefined;
+    var cur_keys = SshKeys{};
+
+    var it = std.mem.splitScalar(u8, content, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        const hash = std.mem.indexOfScalar(u8, line, '#') orelse line.len;
+        const body = std.mem.trim(u8, line[0..hash], " \t");
+        if (body.len == 0) continue;
+
+        const sep = std.mem.indexOfAny(u8, body, " \t=") orelse continue;
+        const key = body[0..sep];
+        const value = std.mem.trim(u8, body[sep..], " \t=");
+
+        if (std.ascii.eqlIgnoreCase(key, "host")) {
+            try flush(&named, alloc, &defaults, state, cur_name, cur_keys);
+            cur_keys = .{};
+            state = .skipped;
+            if (value.len > 0) {
+                if (std.mem.indexOfAny(u8, value, "*?") != null) {
+                    if (std.mem.eql(u8, value, "*")) state = .default;
+                } else if (std.mem.indexOfAny(u8, value, " \t") == null) {
+                    state = .named;
+                    cur_name = value;
+                }
+            }
+            continue;
+        }
+
+        switch (state) {
+            .none => {
+                if (std.ascii.eqlIgnoreCase(key, "user")) {
+                    if (defaults.user == null) defaults.user = value;
+                } else if (std.ascii.eqlIgnoreCase(key, "hostname")) {
+                    if (defaults.host_name == null) defaults.host_name = value;
+                } else if (std.ascii.eqlIgnoreCase(key, "directory")) {
+                    if (defaults.directory == null) defaults.directory = value;
+                }
+            },
+            .default, .named => {
+                if (std.ascii.eqlIgnoreCase(key, "user")) {
+                    if (cur_keys.user == null) cur_keys.user = value;
+                } else if (std.ascii.eqlIgnoreCase(key, "hostname")) {
+                    if (cur_keys.host_name == null) cur_keys.host_name = value;
+                } else if (std.ascii.eqlIgnoreCase(key, "directory")) {
+                    if (cur_keys.directory == null) cur_keys.directory = value;
+                }
+            },
+            .skipped => {},
+        }
+    }
+    try flush(&named, alloc, &defaults, state, cur_name, cur_keys);
+
+    for (named.items) |b| {
+        const user = b.keys.user orelse defaults.user orelse continue;
+        const host = b.keys.host_name orelse defaults.host_name orelse b.name;
+        const cwd = b.keys.directory orelse defaults.directory orelse "/";
+        const name_d = try alloc.dupe(u8, b.name);
+        errdefer alloc.free(name_d);
+        const user_d = try alloc.dupe(u8, user);
+        errdefer alloc.free(user_d);
+        const host_d = try alloc.dupe(u8, host);
+        errdefer alloc.free(host_d);
+        const cwd_d = try alloc.dupe(u8, cwd);
+        errdefer alloc.free(cwd_d);
+        try list.append(alloc, .{ .name = name_d, .user = user_d, .host = host_d, .cwd = cwd_d });
+    }
+    return list;
+}
+
+/// Load the connectable aliases from ~/.ssh/config into a gpa-backed buffer,
+/// replacing any previous contents. Called on startup and on hot-reload.
+fn loadSshAliases(self: *Self) void {
+    freeSshAliases(self.alloc, self.ssh_aliases.items);
+    self.ssh_aliases.deinit(self.alloc);
+    self.ssh_aliases = .empty;
+
+    const dir = self.ssh_dir orelse return;
+    const content = dir.readFileAlloc(self.io, "config", self.alloc, .limited64(1024 * 1024)) catch return;
+    defer self.alloc.free(content);
+    self.ssh_aliases = parseSshAliases(self.alloc, content) catch return;
+}
+
+/// Look up a connectable alias by its Host name, case-insensitively.
+pub fn findSshAlias(self: *const Self, name: []const u8) ?SshAlias {
+    for (self.ssh_aliases.items) |alias| {
+        if (std.ascii.eqlIgnoreCase(alias.name, name)) return alias;
+    }
+    return null;
+}
+
 /// Load the names of all skills into a gpa-backed buffer, replacing any
 /// previous contents. Called on startup and on hot-reload.
 fn loadSkillNames(self: *Self) void {
@@ -407,6 +575,7 @@ pub fn resetDefs(self: *Self) void {
     });
 
     self.loadSkillNames();
+    self.loadSshAliases();
 }
 
 pub fn add(self: *Self, tool: r.tools.Tool, flags: ToolFlags) !void {
@@ -602,6 +771,8 @@ pub fn deinit(self: *Self) void {
     self.loaded_tools.deinit(self.alloc);
     for (self.skill_names.items) |name| self.alloc.free(name);
     self.skill_names.deinit(self.alloc);
+    freeSshAliases(self.alloc, self.ssh_aliases.items);
+    self.ssh_aliases.deinit(self.alloc);
     self.prompt_arena.deinit();
     self.alloc.destroy(self);
 }
@@ -827,18 +998,34 @@ pub const SkillCommand = struct {
     prompt: []const u8,
 };
 
-pub fn parseSkillCommand(raw: []const u8) ?SkillCommand {
+const ParsedCommand = struct {
+    name: []const u8,
+    rest: []const u8,
+};
+
+fn parsePrefixedCommand(raw: []const u8, prefix: []const u8) ?ParsedCommand {
     if (raw.len < 2) return null;
     if (raw[0] != '/' and raw[0] != ':') return null;
     const rest = raw[1..];
-    if (!std.mem.startsWith(u8, rest, "skill-")) return null;
-    const after = rest["skill-".len..];
+    if (!std.mem.startsWith(u8, rest, prefix)) return null;
+    const after = rest[prefix.len..];
     if (after.len == 0) return null;
     const space = std.mem.indexOfScalar(u8, after, ' ');
     const name = if (space) |idx| after[0..idx] else after;
     if (name.len == 0) return null;
-    const prompt = if (space) |idx| std.mem.trim(u8, after[idx + 1 ..], " \t\r\n") else "";
-    return .{ .name = name, .prompt = prompt };
+    const tail = if (space) |idx| after[idx + 1 ..] else "";
+    return .{ .name = name, .rest = tail };
+}
+
+pub fn parseSkillCommand(raw: []const u8) ?SkillCommand {
+    const parsed = parsePrefixedCommand(raw, "skill-") orelse return null;
+    return .{ .name = parsed.name, .prompt = std.mem.trim(u8, parsed.rest, " \t\r\n") };
+}
+
+/// /ssh-<alias> (or :ssh-<alias>) → the alias name, or null.
+pub fn parseSshAliasCommand(raw: []const u8) ?[]const u8 {
+    const parsed = parsePrefixedCommand(raw, "ssh-") orelse return null;
+    return parsed.name;
 }
 
 pub const LoadedSkill = struct {
@@ -1001,6 +1188,92 @@ test "skill command parse" {
             try std.testing.expect(got == null);
         }
     }
+}
+
+test "ssh alias command parse" {
+    const Case = struct { in: []const u8, name: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .in = "/ssh-mc", .name = "mc" },
+        .{ .in = ":ssh-mc", .name = "mc" },
+        .{ .in = "/ssh-mc do it", .name = "mc" },
+        .{ .in = "/ssh", .name = null },
+        .{ .in = "/ssh-", .name = null },
+        .{ .in = "/foo", .name = null },
+        .{ .in = ":clear", .name = null },
+        .{ .in = "/plan", .name = null },
+        .{ .in = "ssh-mc", .name = null },
+    };
+    for (cases) |c| {
+        const got = parseSshAliasCommand(c.in);
+        if (c.name) |n| {
+            try std.testing.expectEqualStrings(n, got.?);
+        } else {
+            try std.testing.expect(got == null);
+        }
+    }
+}
+
+test "ssh config parse resolves aliases, defaults and skips" {
+    const content =
+        \\User global
+        \\Host *
+        \\    User default
+        \\    Directory /srv
+        \\
+        \\Host laptop
+        \\    HostName 192.168.1.151
+        \\    User lommix
+        \\
+        \\Host prod *.wild
+        \\    User root
+        \\
+        \\Host noport
+        \\    HostName example.com
+        \\    Port 2222
+        \\    Directory /opt
+        \\
+        \\Host nouser
+        \\    HostName nope.example.com
+        \\
+        \\Host bare
+        \\
+        \\Host multi one two
+        \\    User x
+        \\
+        \\Host wild-?
+        \\    User y
+        \\
+        \\Host =
+        \\    User z
+        \\
+    ;
+    var list = try parseSshAliases(std.testing.allocator, content);
+    defer {
+        freeSshAliases(std.testing.allocator, list.items);
+        list.deinit(std.testing.allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 4), list.items.len);
+
+    try std.testing.expectEqualStrings("laptop", list.items[0].name);
+    try std.testing.expectEqualStrings("lommix", list.items[0].user);
+    try std.testing.expectEqualStrings("192.168.1.151", list.items[0].host);
+    try std.testing.expectEqualStrings("/srv", list.items[0].cwd);
+
+    try std.testing.expectEqualStrings("noport", list.items[1].name);
+    try std.testing.expectEqualStrings("default", list.items[1].user);
+    try std.testing.expectEqualStrings("example.com", list.items[1].host);
+    try std.testing.expectEqualStrings("/opt", list.items[1].cwd);
+
+    try std.testing.expectEqualStrings("nouser", list.items[2].name);
+    try std.testing.expectEqualStrings("default", list.items[2].user);
+    try std.testing.expectEqualStrings("nope.example.com", list.items[2].host);
+    try std.testing.expectEqualStrings("/srv", list.items[2].cwd);
+
+    try std.testing.expectEqualStrings("bare", list.items[3].name);
+    try std.testing.expectEqualStrings("default", list.items[3].user);
+    try std.testing.expectEqualStrings("bare", list.items[3].host);
+    try std.testing.expectEqualStrings("/srv", list.items[3].cwd);
 }
 
 test "skill send and chat text" {
