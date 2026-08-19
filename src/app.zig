@@ -833,11 +833,10 @@ pub const App = struct {
         var chat_stack: ?ChatStack = null;
         var content_end_h: usize = 0;
 
-        // The main-agent status line lives inside the input footer, so the
-        // chat keeps all of its rows.
         const progress_line: ?r.tui.Line = mainProgressLine(app, frame_alloc);
         const progress_h: u16 = if (progress_line != null) 1 else 0;
-        const chat_h: u16 = _chat_status_area.height;
+        const footer_h: u16 = input_height +| progress_h;
+        const chat_h: u16 = _chat_status_area.height -| footer_h;
 
         if (is_welcome) {
             var wp = r.tui.Paragraph{
@@ -858,7 +857,6 @@ pub const App = struct {
         // Input sits right after the chat content; once content fills the
         // viewport it pins to the bottom and stays sticky. The footer includes
         // the main-agent status row on top of the input widget.
-        const footer_h: u16 = input_height +| progress_h;
         const max_footer_y: u16 = (area.y +| area.height) -| footer_h;
         const content_cap: u16 = @intCast(@min(content_end_h, @as(usize, chat_h)));
         const footer_y: u16 = @min(
