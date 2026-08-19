@@ -5,11 +5,6 @@ const errors = @import("../errors.zig");
 const opts_mod = @import("../options.zig");
 const rate_limiter = @import("../rate_limit.zig");
 
-pub fn logDroppedToolCall(comptime scope: type, id: []const u8, name: []const u8, input: []const u8) void {
-    const reason = if (id.len == 0) "missing id" else if (name.len == 0) "missing name" else "arguments are not a JSON object";
-    scope.warn("dropped tool call: {s}; id={s} name={s} arguments={s}", .{ reason, id, name, input[0..@min(input.len, 1024)] });
-}
-
 pub fn buildChatRequest(
     a: std.mem.Allocator,
     model_id: []const u8,

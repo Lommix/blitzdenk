@@ -4,7 +4,6 @@ const model = @import("../model.zig");
 const auth = @import("../auth.zig");
 const errors = @import("../errors.zig");
 const jsonx = @import("jsonx.zig");
-const log = std.log.scoped(.openai_provider);
 
 pub const default_base_url = "https://api.openai.com/v1";
 pub const api_key_env = "OPENAI_API_KEY";
@@ -276,10 +275,7 @@ pub fn parseChatResponse(a: std.mem.Allocator, body: []const u8) !*model.Generat
                                             }
                                         }
                                     }
-                                    if (!isValidToolCall(a, id, name, input)) {
-                                        jsonx.logDroppedToolCall(log, id, name, input);
-                                        continue;
-                                    }
+                                    if (!isValidToolCall(a, id, name, input)) continue;
                                     try calls.append(a, .{
                                         .id = try a.dupe(u8, id),
                                         .name = try a.dupe(u8, name),
@@ -490,7 +486,6 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
             sctx.send(.{ .type = .tool_call, .tool_call_id = tc.id, .tool_name = tc.name, .tool_input = tc.input });
             try valid_calls.append(a, tc);
         } else {
-            jsonx.logDroppedToolCall(log, tc.id, tc.name, tc.input);
             a.free(tc.id);
             a.free(tc.name);
             a.free(tc.input);
