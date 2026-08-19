@@ -6,7 +6,9 @@ pub const BashTool = r.Tool{
     .def = .{
         .name = "bash",
         .description =
-        \\Execute a bash command in the current working directory. Returns stdout and stderr. Non-zero exits are reported as `[exit code: N]`, signal kills as `[killed by signal: N]`, timeouts as `[timed out after Nms]`. Output is truncated to the last 1000 lines or 32KB (whichever is hit first); the full output is saved to a file whose path is reported when available. Optionally provide a timeout in seconds. Bash commands require approval.
+        \\Execute a bash command in the current working directory.
+        \\Returns stdout and stderr. Output is truncated to the last 1000 lines or 32KB (whichever is hit first); the full output is saved to a file whose path is reported when available.
+        \\
         ,
         .prompt_snippet = "Execute a bash command",
         .prompt_guidelines = "Prefer specialist tools over bash whenever available",

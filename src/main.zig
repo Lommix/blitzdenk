@@ -949,7 +949,7 @@ fn handleSshUnlock(state: *App, cmd_pool: *r.exec.CmdPool, gpa: std.mem.Allocato
     // Run ssh-add detached from any controlling tty so SSH_ASKPASS is used.
     env_keep = true; // ownership transfers into runAndWait
     const res = cmd_pool.runAndWait(.{
-        .argv = &.{ "setsid", "-w", "ssh-add" },
+        .argv = &.{"ssh-add"},
         .env_overlay = env,
         .force_local = true,
     }) catch {

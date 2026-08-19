@@ -212,8 +212,8 @@ pub const CmdPool = struct {
         slot.exit_code = null;
         slot.signal = null;
 
-        const final_argv = try self.maybeWrapSsh(opts.argv, opts.force_local);
-        errdefer self.freeArgv(final_argv);
+        var final_argv: ?[]const []const u8 = try self.maybeWrapSsh(opts.argv, opts.force_local);
+        errdefer if (final_argv) |a| self.freeArgv(a);
 
         // When SSH-wrapped, the parent cwd must not constrain ssh's own resolution.
         const effective_cwd: ?[]const u8 = if (self.shouldRouteSsh(opts.force_local)) null else opts.cwd;
@@ -230,7 +230,13 @@ pub const CmdPool = struct {
             self.alloc.destroy(b);
         };
 
-        slot.future = std.Io.async(self.io, workerFn, .{ self, slot, final_argv, duped_cwd, duped_stdin, env_box, opts.kill_process_group });
+        const spawned_argv = if (builtin.os.tag == .linux) blk: {
+            const out = try self.wrapSetsid(final_argv.?);
+            final_argv = null;
+            break :blk out;
+        } else final_argv.?;
+
+        slot.future = std.Io.async(self.io, workerFn, .{ self, slot, spawned_argv, duped_cwd, duped_stdin, env_box, opts.kill_process_group });
 
         return @enumFromInt(idx);
     }
@@ -520,6 +526,16 @@ pub const CmdPool = struct {
         self.alloc.free(argv);
     }
 
+    /// Returns argv with "setsid" prepended; takes ownership of argv.
+    fn wrapSetsid(self: *Self, argv: []const []const u8) ![]const []const u8 {
+        const wrapped = try self.alloc.alloc([]const u8, argv.len + 1);
+        errdefer self.alloc.free(wrapped);
+        wrapped[0] = try self.alloc.dupe(u8, "setsid");
+        for (argv, 1..) |a, i| wrapped[i] = a;
+        self.alloc.free(argv);
+        return wrapped;
+    }
+
     /// Builds `cd <quoted-ssh-root> && <quoted-argv0> <quoted-argv1> ...`.
     fn buildRemoteShellLine(
         alloc: std.mem.Allocator,
@@ -673,6 +689,28 @@ test "runAndWait preserves non-zero child exit code" {
 
     try testing.expectEqual(CmdResult.ResType.failed, res.ty);
     try testing.expectEqual(@as(?u8, 7), res.exit_code);
+}
+
+test "no_tty makes /dev/tty reads fail instead of hanging" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const testing = std.testing;
+
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
+    var pool = CmdPool.init(testing.allocator, testing.io, &env);
+    defer pool.deinit();
+
+    const res = try pool.runAndWaitTimeout(.{
+        .argv = &.{ "/bin/sh", "-c", "cat /dev/tty" },
+        .force_local = true,
+    }, 2_000);
+    defer pool.alloc.free(res.stdout);
+    defer pool.alloc.free(res.stderr);
+
+    try testing.expectEqual(CmdResult.ResType.failed, res.ty);
+    try testing.expect(res.exit_code != null);
+    try testing.expect(res.stderr.len > 0);
 }
 
 test "output over cap is reported as truncated success, not failure" {
