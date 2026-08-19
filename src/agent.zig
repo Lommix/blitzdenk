@@ -477,6 +477,15 @@ pub const Agent = struct {
         else
             sdk.options.PrepareStepResult{};
 
+        var base = upstream.messages;
+        var replace = upstream.replace;
+        if (!replace) {
+            if (self.maybeCompactForStep(info.messages)) |compacted| {
+                base = compacted;
+                replace = true;
+            }
+        }
+
         var refreshed_tools: ?[]const sdk.Tool = null;
         if (self.tools_dirty.swap(false, .acq_rel)) {
             if (self.tools_refresh_hook) |hook| {
@@ -492,15 +501,38 @@ pub const Agent = struct {
         else
             null;
         if (self.queued_messages.items.len == 0 and reminder == null) {
-            return .{ .messages = upstream.messages, .replace = upstream.replace, .tools = refreshed_tools };
+            return .{ .messages = base, .replace = replace, .tools = refreshed_tools };
         }
         const alloc = self.injection_arena.allocator();
-        const combined = try alloc.alloc(sdk.Message, upstream.messages.len + self.queued_messages.items.len + @intFromBool(reminder != null));
-        @memcpy(combined[0..upstream.messages.len], upstream.messages);
-        @memcpy(combined[upstream.messages.len..][0..self.queued_messages.items.len], self.queued_messages.items);
+        const combined = try alloc.alloc(sdk.Message, base.len + self.queued_messages.items.len + @intFromBool(reminder != null));
+        @memcpy(combined[0..base.len], base);
+        @memcpy(combined[base.len..][0..self.queued_messages.items.len], self.queued_messages.items);
         if (reminder) |text| combined[combined.len - 1] = sdk.UserMessage(text);
         self.queued_messages.clearRetainingCapacity();
-        return .{ .messages = combined, .replace = upstream.replace, .tools = refreshed_tools };
+        return .{ .messages = combined, .replace = replace, .tools = refreshed_tools };
+    }
+
+    fn maybeCompactForStep(self: *Agent, messages: []const sdk.Message) ?[]const sdk.Message {
+        const estimate = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, messages);
+        self.context_tokens = estimate;
+        if (!self.compaction.shouldStart(messages.len, estimate, self.context_limit)) return null;
+        if (self.model != .response and compact.computeCutIndex(messages) == 0) return null;
+
+        self.status = .compacting;
+        defer self.status = .running;
+
+        var scratch = std.heap.ArenaAllocator.init(self.alloc);
+        defer scratch.deinit();
+        const cancellation = if (self.task) |*task| &task.cancellation else null;
+        var outcome = switch (self.model) {
+            .response => |*model| compact.compactResponses(scratch.allocator(), self.io, model, self.tools, messages, cancellation),
+            inline else => |*model| compact.compactOrdinary(scratch.allocator(), self.io, model.languageModel(), messages, cancellation),
+        } catch return null;
+        defer outcome.deinit();
+
+        const cloned = agent_run.cloneMessages(self.injection_arena.allocator(), outcome.messages.messages) catch return null;
+        self.usage.add(outcome.usage);
+        return cloned;
     }
 
     fn toolCall(ctx: ?*anyopaque, info: sdk.options.ToolCallInfo) void {

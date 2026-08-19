@@ -2458,23 +2458,6 @@ fn buildToolGroupParagraph(
     };
 }
 
-fn buildCompactionIndicatorParagraph(arena: std.mem.Allocator, app: *App) r.tui.Paragraph {
-    var p: r.tui.Paragraph = .{
-        .border = .none,
-        .sides = .left_only,
-        .padding = .{ .left = 1, .right = 1 },
-        .dynamic_border = true,
-        .reverse = true,
-    };
-
-    var line = r.tui.Line{};
-    line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = app.theme.text } }) catch {};
-    line.pushText(arena, " compacting context", .{ .fg = app.theme.muted, .modifier = .{ .bold = true } }) catch {};
-    p.lines.append(arena, line) catch {};
-
-    return p;
-}
-
 fn buildMessageParagraph(
     arena: std.mem.Allocator,
     app: *App,
@@ -2703,13 +2686,6 @@ fn buildChatStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u1
     var scroll_offset_usize: usize = if (app.auto_scroll) 0 else app.scroll_offset;
     const target: usize = @as(usize, inner_h) +| scroll_offset_usize;
 
-    if (app.isMainAgentCompacting()) {
-        var p = buildCompactionIndicatorParagraph(alloc, app);
-        const h = p.totalHeightLong(inner_w);
-        s.items.append(alloc, .{ .p = p, .h = h }) catch {};
-        s.total += h;
-    }
-
     // Failed agent path
     if (app.main_agent_id) |id| {
         const slot = &app.registry.slots[id.index];
@@ -2847,6 +2823,10 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
     var l = r.tui.Line{};
     if (state == .active) {
         const spinner_str = text_utils.spinnerDots(app.frame_count);
+        if (agent.status == .compacting) {
+            l.pushSpanPrint(alloc, "{s} compacting", .{spinner_str}, info) catch {};
+            return l;
+        }
         const exec_pool = app.exec_pool;
         const ssh_suffix: []const u8 = if (exec_pool.ssh_active and exec_pool.ssh_target != null) " (SSH ON)" else "";
 
