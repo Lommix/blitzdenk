@@ -800,7 +800,7 @@ pub const App = struct {
                 .perm_select => {
                     const entry = app.active_permission orelse break :blk 5;
                     if (entry.payload == .ask) {
-                        break :blk askPermissionInputHeight(entry.payload.ask.options.len, entry.payload.ask.header, entry.payload.ask.question, area.width, area.height);
+                        break :blk askPermissionInputHeight(entry.payload.ask.options, entry.payload.ask.header, entry.payload.ask.question, area.width, area.height);
                     }
                     break :blk 6; // .call, .diff, .plan all have header + options
                 },
@@ -2928,15 +2928,18 @@ fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, bu
     // Line 0+: "[header] question" (wrapped)
     var header_buf: [256]u8 = undefined;
     const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ args.header, args.question }) catch args.question;
-    const max_q_rows = inner.height -| @as(u16, @intCast(total_rows)) -| 1;
-    const q_rows = text_utils.renderWrappedText(buf, header_line, inner.x + 1, inner.y, inner.width -| 1, max_q_rows, .{ .fg = app.theme.info });
+    const width = inner.width -| 1;
 
-    // Options and "enter message" tail.
+    var opts_rows: u16 = 1; // "enter message"
+    opts_rows +|= wrappedOptionRows(args.options[0..opts_len], width);
+
+    const max_q_rows = inner.height -| opts_rows -| 1;
+    const q_rows = text_utils.renderWrappedText(buf, header_line, inner.x + 1, inner.y, width, max_q_rows, 0, .{ .fg = app.theme.info });
+
+    // Options and "enter message" tail, each wrapped.
+    var y: u16 = inner.y +| 1 +| q_rows;
     var row: usize = 0;
-    while (row < total_rows) : (row += 1) {
-        const y = inner.y +| @as(u16, @intCast(row + 1)) +| q_rows;
-        if (y >= inner.y +| inner.height) break;
-
+    while (row < total_rows and y < inner.y +| inner.height) : (row += 1) {
         const selected = cur_sel == @as(u8, @intCast(row));
         const style: r.tui.Style = if (selected) .{ .modifier = .{ .reverse = true } } else .{};
         const prefix: []const u8 = if (selected) "> " else "  ";
@@ -2944,18 +2947,33 @@ fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, bu
 
         var line_buf: [512]u8 = undefined;
         const line = std.fmt.bufPrint(&line_buf, "{s}{s}", .{ prefix, label }) catch label;
-        buf.setStringMax(inner.x + 1, y, line, style, inner.width -| 1);
+        const used = text_utils.renderWrappedText(buf, line, inner.x + 1, y, width, inner.y +| inner.height -| y, 2, style);
+        if (used == 0) break;
+        y +|= used;
     }
 }
 
-fn askPermissionInputHeight(options_len: usize, header: []const u8, question: []const u8, area_width: u16, area_height: u16) u16 {
-    const opts: u16 = @intCast(@min(options_len, r.tools.ask.MAX_OPTIONS));
-    const total_rows = opts +| 1;
-    const max_area = area_height -| 1;
+fn askPermissionInputHeight(options: []const []const u8, header: []const u8, question: []const u8, area_width: u16, area_height: u16) u16 {
+    const opts_count: usize = @min(options.len, r.tools.ask.MAX_OPTIONS);
+    const width = area_width -| 3;
+    var rows: u16 = 0;
     var header_buf: [256]u8 = undefined;
     const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ header, question }) catch question;
-    const q_rows = @min(text_utils.wrappedRowCount(header_line, area_width -| 3), max_area -| total_rows -| 3);
-    return @min(total_rows +| q_rows +| 3, max_area);
+    rows +|= text_utils.wrappedRowCount(header_line, width);
+    rows +|= 1; // "enter message"
+    rows +|= wrappedOptionRows(options[0..opts_count], width);
+    const max_area = area_height -| 1;
+    return @min(rows +| 3, max_area);
+}
+
+fn wrappedOptionRows(options: []const []const u8, width: u16) u16 {
+    var rows: u16 = 0;
+    for (options) |opt| {
+        var opt_buf: [512]u8 = undefined;
+        const opt_line = std.fmt.bufPrint(&opt_buf, "  {s}", .{opt}) catch opt;
+        rows +|= text_utils.wrappedRowCount(opt_line, width);
+    }
+    return rows;
 }
 
 fn formatTokenCount(dest: []u8, count: u64) []const u8 {

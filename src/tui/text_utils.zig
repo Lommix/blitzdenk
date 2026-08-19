@@ -150,19 +150,22 @@ pub const LineIterator = struct {
 
 // ── Render Helpers ──
 
-/// Render word-wrapped text into the buffer. Returns number of rows consumed.
-pub fn renderWrappedText(buf: *Buffer, text: []const u8, x: u16, y: u16, width: u16, max_rows: u16, style: Style) u16 {
+/// Render word-wrapped text into the buffer. Continuation rows are indented by
+/// `cont_indent` columns. Returns number of rows consumed.
+pub fn renderWrappedText(buf: *Buffer, text: []const u8, x: u16, y: u16, width: u16, max_rows: u16, cont_indent: u16, style: Style) u16 {
     if (text.len == 0 or width == 0 or max_rows == 0) return 0;
-    var iter = LineIterator{ .text = text, .width = width };
+    var iter = LineIterator{ .text = text, .width = width -| cont_indent };
     var row: u16 = 0;
     while (row < max_rows) : (row += 1) {
         const slice = iter.next() orelse break;
-        buf.setStringMax(x, y +| row, slice, style, width);
+        const ix = if (row == 0) x else x +| cont_indent;
+        buf.setStringMax(ix, y +| row, slice, style, width -| cont_indent);
     }
     return row;
 }
 
 pub fn wrappedRowCount(text: []const u8, width: usize) u16 {
+    if (width == 0) return 0;
     var iter = LineIterator{ .text = text, .width = width };
     var count: u16 = 0;
     while (iter.next() != null) count += 1;
@@ -173,10 +176,10 @@ pub fn renderError(buf: *Buffer, last_error: ?anyerror, detail: ?[]const u8, x: 
     const err_text: []const u8 = if (last_error) |err| @errorName(err) else "unknown error";
     var err_buf: [128]u8 = undefined;
     const display = std.fmt.bufPrint(&err_buf, "Error: {s}", .{err_text}) catch "Error";
-    const rows = renderWrappedText(buf, display, x, y, width, @min(height, 2), .{ .fg = .red });
+    const rows = renderWrappedText(buf, display, x, y, width, @min(height, 2), 0, .{ .fg = .red });
     if (detail) |body| {
         if (body.len > 0 and height > rows + 1) {
-            _ = renderWrappedText(buf, body, x, y +| rows +| 1, width, height - rows - 1, .{ .fg = .red });
+            _ = renderWrappedText(buf, body, x, y +| rows +| 1, width, height - rows - 1, 0, .{ .fg = .red });
         }
     }
 }
