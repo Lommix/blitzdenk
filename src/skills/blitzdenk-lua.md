@@ -2,7 +2,7 @@
 name: blitzdenk-lua
 description: >
     How to configure and extend Blitzdenk in Lua: config file layout, hot reload,
-    tool sets, custom tools, agents, modes, commands, keybinds, MCP, events,
+    tool sets, custom tools, agents, commands, keybinds, MCP, events,
     shared state, and status UI. Load when writing or editing
     ~/.config/blitzdenk/*.lua, ./blitz.lua, or when the user asks to configure
     or extend blitzdenk.
@@ -194,17 +194,6 @@ Command completion actions (custom `blitz.bind` on a key wins over these default
 
 Arrow `<Up>` / `<Down>` traverse the menu while it is open (wrap, same as `<Tab>`).
 
-## Modes
-
-```lua
-local read_mode = blitz.add_mode("READ", "#008F04",
-    "You are in read-only mode!", "You are in read-only mode!")
-blitz.set_mode(read_mode)
-```
-
-Also `blitz.set_mode_prompt(mode, prompt)`, `blitz.set_mode_prompt_sparse(mode, prompt)`,
-`blitz.set_mode_name(mode, name)`. `blitz.MODE_EXEC` is the built-in exec mode.
-
 ## Events
 
 ```lua
@@ -213,14 +202,14 @@ blitz.events.add_listener(blitz.events.AGENT_COMPLETE, function(agent_id)
 end)
 ```
 
-Event tags on `blitz.events.*`: `SESSION_RESET`, `MODE_CHANGED`, `AGENT_CREATED`,
+Event tags on `blitz.events.*`: `SESSION_RESET`, `AGENT_CREATED`,
 `AGENT_STARTED`, `AGENT_COMPLETE`, `AGENT_FAILED`, `AGENT_CANCELLED`,
 `COMPACTION_STARTED`, `COMPACTION_COMPLETE`, `TOOL_CALL_STARTED`,
 `TOOL_CALL_COMPLETE`, `AGENT_BROADCAST`, `PERMISSION_REQUESTED`,
 `PERMISSION_RESOLVED`, `USER_MESSAGE_SENT`, `MCP_TOOLS_RELOADED`, `ON_INJECT`.
 
-Payloads vary: agent events receive an agent id table, `MODE_CHANGED` receives an
-integer, `USER_MESSAGE_SENT` receives a string. Check `meta.lua` for descriptions.
+Payloads vary: agent events receive an agent id table, `USER_MESSAGE_SENT`
+receives a string. Check `meta.lua` for descriptions.
 
 `ON_INJECT` fires for every agent on each step, right before the system reminder
 is built. Return a string to append it to that agent's `<system-reminder>` block:

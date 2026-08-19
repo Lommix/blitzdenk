@@ -60,7 +60,6 @@ pub const Command = union(enum) {
     retry,
     push_notification: []const u8,
     push_chat_entry: ChatEntry,
-    set_mode: u8,
     spawn_agent: SpawnArgs,
     queue_agent_message: QueuedMessageArgs,
     scroll_to: usize,
@@ -136,17 +135,6 @@ pub const Command = union(enum) {
 
                 app.running = false;
                 app.auto_scroll = true;
-            },
-            .set_mode => |m| {
-                const next_mode: r.ContextFactory.Mode = @enumFromInt(m);
-                if (app.mode == next_mode) return;
-
-                app.mode = next_mode;
-                if (app.main_agent_id) |id| {
-                    const agent = app.registry.get(id).?;
-                    agent.mode_idx = m;
-                    agent.force_full_reminder = true;
-                }
             },
             .retry => {
                 if (app.main_agent_id) |id| {
@@ -243,7 +231,6 @@ pub const Command = union(enum) {
                 else
                     try app.registry.activate(arg.agent_id, model_config.?, .{ .identity = .{
                         .type_idx = arg.agent_type,
-                        .mode_idx = @intFromEnum(app.mode),
                         .name = app.context_factory.agentName(@enumFromInt(arg.agent_type)),
                         .parent = if (arg.parent_id) |id| id.pack() else null,
                         .depth = if (arg.parent_id) |id| app.registry.get(id).?.depth + 1 else 0,

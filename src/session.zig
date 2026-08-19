@@ -225,7 +225,6 @@ pub fn loadSession(a: *app.App, w: *std.Io.Reader) !void {
     };
     const agent = try a.registry.activate(id, model_config, .{ .identity = .{
         .type_idx = @intFromEnum(r.ContextFactory.AgentType.general),
-        .mode_idx = @intFromEnum(a.mode),
         .name = a.context_factory.agentName(.general),
         .cwd = a.cwd,
     }, .context_limit = a.default_context_limit });

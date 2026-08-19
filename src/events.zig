@@ -9,7 +9,6 @@ const Role = enum { system, user, agent };
 /// should dispatch from a central `onEvent` call.
 pub const AppEvent = union(enum) {
     session_reset,
-    mode_changed: u8, // done
     agent_created: struct { id: AgentId, type_idx: u8, depth: u16 },
     agent_started: AgentId,
     agent_complete: AgentId, // done
@@ -47,7 +46,6 @@ pub const EventBus = struct {
 
             switch (event) {
                 .session_reset => app.lua_vm.invokeLuaFunction(en.func_ref, {}),
-                .mode_changed => |mode_id| app.lua_vm.invokeLuaFunction(en.func_ref, mode_id),
                 .agent_created => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
                 .agent_started => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
                 .agent_complete => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),

@@ -73,8 +73,6 @@
 ---@class BlitzEventDef
 ---Emitted after the active session is reset.
 ---@field SESSION_RESET integer
----Emitted after the active session mode changes.
----@field MODE_CHANGED integer
 ---Emitted after an agent slot is created.
 ---@field AGENT_CREATED integer
 ---Emitted when an agent starts running.
@@ -106,7 +104,7 @@
 ---Emitted when an agent's system reminder is built. Return a string to append it to the injection.
 ---@field ON_INJECT integer
 ---Bind an event listener.
----Example: blitz.events.add_listener(blitz.events.MODE_CHANGED, function(new_mode_id) end)
+---Example: blitz.events.add_listener(blitz.events.AGENT_COMPLETE, function(agent_id) end)
 ---@field add_listener fun(event: integer, func: function)
 
 ---@class BlitzArgDef
@@ -244,7 +242,6 @@
 ---@field tools BlitzToolDef
 ---@field events BlitzEventDef
 ---@field AGENT_GENERAL integer
----@field MODE_EXEC integer
 ---@field REQ_STATUS_PENDING integer
 ---@field REQ_STATUS_APPROVED integer
 ---@field REQ_STATUS_DENIED integer
@@ -289,16 +286,6 @@
 ---@field set_agent_tools fun(agent_type: integer, tool_names: string[])
 ---Override the system prompt for a given agent type.
 ---@field set_prompt fun(agent_type: integer, prompt: string)
----Override the mode reminder prompt (full variant).
----@field set_mode_prompt fun(mode: integer, prompt: string)
----Override the sparse mode reminder prompt (subsequent turns).
----@field set_mode_prompt_sparse fun(mode: integer, prompt: string)
----Override the display name shown for a mode in the status bar.
----@field set_mode_name fun(mode: integer, name: string)
----Add a custom mode.
----@field add_mode fun(name: string, color: string, prompt: string, sparse: string): integer
----Switch the active session mode. Forces a full mode-reminder on the next turn.
----@field set_mode fun(mode: integer)
 ---Return the current app flags.
 ---@field get_flags fun(): BlitzAppFlags
 ---Set the app flags from a table. Missing fields are set to their default values.

@@ -349,7 +349,6 @@ pub const Blitz = LuaType{
             .{ .name = "tools", .ty = BlitzToolDef },
             .{ .name = "events", .ty = BlitzEventDef },
             .{ .name = "AGENT_GENERAL", .ty = LuaType.integer, .value = .{ .integer = 0 } },
-            .{ .name = "MODE_EXEC", .ty = LuaType.integer, .value = .{ .integer = 0 } },
             .{ .name = "REQ_STATUS_PENDING", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_PENDING } },
             .{ .name = "REQ_STATUS_APPROVED", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_APPROVED } },
             .{ .name = "REQ_STATUS_DENIED", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_DENIED } },
@@ -776,78 +775,6 @@ pub const Blitz = LuaType{
                 } },
             },
             .{
-                .name = "set_mode_prompt",
-                .desc = "Override the mode reminder prompt (full variant).",
-                .ty = LuaType{ .function = .{
-                    .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } },
-                    .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(state: *c.lua_State, a: *r.app.App, mode: r.ContextFactory.Mode, prompt: []const u8) !void {
-                            if (try isToolVm(state)) return;
-                            try a.context_factory.setModePrompt(mode, prompt);
-                        }
-                    }).lua_fn, "set_mode_prompt"),
-                } },
-            },
-            .{
-                .name = "set_mode_prompt_sparse",
-                .desc = "Override the sparse mode reminder prompt (subsequent turns).",
-                .ty = LuaType{ .function = .{
-                    .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "prompt", .ty = LuaType.string } },
-                    .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(state: *c.lua_State, a: *r.app.App, mode: r.ContextFactory.Mode, prompt: []const u8) !void {
-                            if (try isToolVm(state)) return;
-                            try a.context_factory.setSparseModePrompt(mode, prompt);
-                        }
-                    }).lua_fn, "set_mode_prompt_sparse"),
-                } },
-            },
-            .{
-                .name = "set_mode_name",
-                .desc = "Override the display name shown for a mode in the status bar.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{ .{ .name = "mode", .ty = LuaType.integer }, .{ .name = "name", .ty = LuaType.string } },
-                    .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(state: *c.lua_State, a: *r.app.App, mode: r.ContextFactory.Mode, name: []const u8) !void {
-                            if (try isToolVm(state)) return;
-                            try a.context_factory.setModeName(mode, name);
-                            a.dirty = true;
-                        }
-                    }).lua_fn, "set_mode_name"),
-                } },
-            },
-            .{
-                .name = "add_mode",
-                .desc = "Add a custom mode.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{
-                        .{ .name = "name", .ty = LuaType.string },
-                        .{ .name = "color", .ty = LuaType.string },
-                        .{ .name = "prompt", .ty = LuaType.string },
-                        .{ .name = "sparse", .ty = LuaType.string },
-                    },
-                    .ret = &LuaInteger,
-                    .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(state: *c.lua_State, a: *r.app.App, name: []const u8, color: []const u8, prompt: []const u8, sparse: []const u8) !r.ContextFactory.Mode {
-                            if (try isToolVm(state)) return @enumFromInt(0);
-                            return a.context_factory.addMode(name, prompt, sparse, color);
-                        }
-                    }).lua_fn, "add_mode"),
-                } },
-            },
-            .{
-                .name = "set_mode",
-                .desc = "Switch the active session mode. Forces a full mode-reminder on the next turn.",
-                .ty = LuaType{ .function = .{
-                    .args = &.{.{ .name = "mode", .ty = LuaType.integer }},
-                    .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(state: *c.lua_State, a: *r.app.App, mode_id: u8) !void {
-                            if (try isToolVm(state)) return;
-                            try a.cmd_queue.append(a.io, .{ .set_mode = mode_id });
-                        }
-                    }).lua_fn, "set_mode"),
-                } },
-            },
-            .{
                 .name = "get_flags",
                 .desc = "Return the current app flags.",
                 .ty = LuaType{ .function = .{
@@ -1028,34 +955,33 @@ pub const BlitzEventDef = LuaType{
         .name = "BlitzEventDef",
         .fields = &.{
             .{ .name = "SESSION_RESET", .desc = "Emitted after the active session is reset.", .ty = LuaType.integer, .value = .{ .integer = 0 } },
-            .{ .name = "MODE_CHANGED", .desc = "Emitted after the active session mode changes.", .ty = LuaType.integer, .value = .{ .integer = 1 } },
-            .{ .name = "AGENT_CREATED", .desc = "Emitted after an agent slot is created.", .ty = LuaType.integer, .value = .{ .integer = 2 } },
-            .{ .name = "AGENT_STARTED", .desc = "Emitted when an agent starts running.", .ty = LuaType.integer, .value = .{ .integer = 3 } },
-            .{ .name = "AGENT_COMPLETE", .desc = "Emitted when an agent completes.", .ty = LuaType.integer, .value = .{ .integer = 4 } },
-            .{ .name = "AGENT_FAILED", .desc = "Emitted when an agent fails.", .ty = LuaType.integer, .value = .{ .integer = 5 } },
-            .{ .name = "AGENT_CANCELLED", .desc = "Emitted when an agent is cancelled.", .ty = LuaType.integer, .value = .{ .integer = 6 } },
-            .{ .name = "COMPACTION_STARTED", .desc = "Emitted when compaction starts.", .ty = LuaType.integer, .value = .{ .integer = 7 } },
-            .{ .name = "COMPACTION_COMPLETE", .desc = "Emitted when compaction completes.", .ty = LuaType.integer, .value = .{ .integer = 8 } },
-            .{ .name = "TOOL_CALL_STARTED", .desc = "Emitted when a tool call starts.", .ty = LuaType.integer, .value = .{ .integer = 9 } },
-            .{ .name = "TOOL_CALL_COMPLETE", .desc = "Emitted when a tool call completes.", .ty = LuaType.integer, .value = .{ .integer = 10 } },
-            .{ .name = "AGENT_BROADCAST", .desc = "Emitted when an agent broadcasts a message.", .ty = LuaType.integer, .value = .{ .integer = 11 } },
-            .{ .name = "PERMISSION_REQUESTED", .desc = "Emitted when a permission request is created.", .ty = LuaType.integer, .value = .{ .integer = 12 } },
-            .{ .name = "PERMISSION_RESOLVED", .desc = "Emitted when a permission request is resolved.", .ty = LuaType.integer, .value = .{ .integer = 13 } },
-            .{ .name = "USER_MESSAGE_SENT", .desc = "Emitted after the user sends a message.", .ty = LuaType.integer, .value = .{ .integer = 14 } },
-            .{ .name = "MCP_TOOLS_RELOADED", .desc = "Emitted after MCP tools are reloaded.", .ty = LuaType.integer, .value = .{ .integer = 15 } },
-            .{ .name = "ON_INJECT", .desc = "Emitted when an agent's system reminder is built. Return a string to append it to the injection.", .ty = LuaType.integer, .value = .{ .integer = 16 } },
+            .{ .name = "AGENT_CREATED", .desc = "Emitted after an agent slot is created.", .ty = LuaType.integer, .value = .{ .integer = 1 } },
+            .{ .name = "AGENT_STARTED", .desc = "Emitted when an agent starts running.", .ty = LuaType.integer, .value = .{ .integer = 2 } },
+            .{ .name = "AGENT_COMPLETE", .desc = "Emitted when an agent completes.", .ty = LuaType.integer, .value = .{ .integer = 3 } },
+            .{ .name = "AGENT_FAILED", .desc = "Emitted when an agent fails.", .ty = LuaType.integer, .value = .{ .integer = 4 } },
+            .{ .name = "AGENT_CANCELLED", .desc = "Emitted when an agent is cancelled.", .ty = LuaType.integer, .value = .{ .integer = 5 } },
+            .{ .name = "COMPACTION_STARTED", .desc = "Emitted when compaction starts.", .ty = LuaType.integer, .value = .{ .integer = 6 } },
+            .{ .name = "COMPACTION_COMPLETE", .desc = "Emitted when compaction completes.", .ty = LuaType.integer, .value = .{ .integer = 7 } },
+            .{ .name = "TOOL_CALL_STARTED", .desc = "Emitted when a tool call starts.", .ty = LuaType.integer, .value = .{ .integer = 8 } },
+            .{ .name = "TOOL_CALL_COMPLETE", .desc = "Emitted when a tool call completes.", .ty = LuaType.integer, .value = .{ .integer = 9 } },
+            .{ .name = "AGENT_BROADCAST", .desc = "Emitted when an agent broadcasts a message.", .ty = LuaType.integer, .value = .{ .integer = 10 } },
+            .{ .name = "PERMISSION_REQUESTED", .desc = "Emitted when a permission request is created.", .ty = LuaType.integer, .value = .{ .integer = 11 } },
+            .{ .name = "PERMISSION_RESOLVED", .desc = "Emitted when a permission request is resolved.", .ty = LuaType.integer, .value = .{ .integer = 12 } },
+            .{ .name = "USER_MESSAGE_SENT", .desc = "Emitted after the user sends a message.", .ty = LuaType.integer, .value = .{ .integer = 13 } },
+            .{ .name = "MCP_TOOLS_RELOADED", .desc = "Emitted after MCP tools are reloaded.", .ty = LuaType.integer, .value = .{ .integer = 14 } },
+            .{ .name = "ON_INJECT", .desc = "Emitted when an agent's system reminder is built. Return a string to append it to the injection.", .ty = LuaType.integer, .value = .{ .integer = 15 } },
             .{
                 .name = "add_listener",
                 .desc =
                 \\Bind an event listener.
-                \\Example: blitz.events.add_listener(blitz.events.MODE_CHANGED, function(new_mode_id) end)
+                \\Example: blitz.events.add_listener(blitz.events.AGENT_COMPLETE, function(agent_id) end)
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{ .{ .name = "event", .ty = LuaType.integer }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
                     .fn_ptr = LuaFnBind((struct {
                         fn t(state: *c.lua_State, a: *r.app.App, event: u32, func: LuaFnRef) !void {
                             if (try isToolVm(state)) return;
-                            const ev: r.events.AppEventTag = @enumFromInt(event);
+                            const ev = std.enums.fromInt(r.events.AppEventTag, event) orelse return error.UnknownEvent;
                             a.event_bus.addLuaListener(a.gpa, a.io, ev, func.idx) catch {};
                             if (ev == .on_inject) a.lua_inject_hooks_enabled.store(true, .release);
                         }
@@ -1902,9 +1828,10 @@ fn readAnyValueAlloc(
         .@"enum" => {
             if (c.lua_type(state, idx) != c.LUA_TNUMBER) return .Err(name ++ " not a number");
             const n = c.lua_tointegerx(state, idx, null);
-            const tag_type = @typeInfo(T).@"enum".tag_type;
-            if (n < 0 or n > std.math.maxInt(tag_type)) return .Err(name ++ " overflow");
-            return .Ok(@enumFromInt(@as(tag_type, @intCast(n))));
+            const info = @typeInfo(T).@"enum";
+            if (n < 0 or n > std.math.maxInt(info.tag_type)) return .Err(name ++ " overflow");
+            if (info.is_exhaustive and n >= info.fields.len) return .Err(name ++ " invalid enum value");
+            return .Ok(@enumFromInt(@as(info.tag_type, @intCast(n))));
         },
         .array => |arr| {
             if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " not a table");

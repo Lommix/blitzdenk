@@ -20,7 +20,6 @@ pub const InjectionsHooks = struct {
         inline for (.{
             &inject_datetime_information,
             &inject_cwd_information,
-            &inject_mode_information,
             &inject_budget_information,
         }) |cb| {
             try self._hooks.append(alloc, .{ .zig = cb });
@@ -127,23 +126,4 @@ fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.agent.A
     if (under_half) {
         try w.print("[BUDGET] Half of your tool call budget is used up. Consider Summarizing your findings\n", .{});
     }
-}
-
-fn inject_mode_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
-
-    // mode main agent only
-    if (app.mainAgent() != agent) return;
-
-    const mode: r.ContextFactory.Mode = @enumFromInt(agent.mode_idx);
-    const def = app.context_factory.getMode(mode);
-    const reminder = if (agent.force_full_reminder)
-        def.prompt
-    else
-        def.sparse;
-    agent.force_full_reminder = false;
-
-    if (reminder.len == 0) return;
-    _ = try w.print("<system-mode>{s}</system-mode>", .{reminder});
-
-    try w.flush();
 }

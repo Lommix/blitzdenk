@@ -12,10 +12,8 @@ const MAX_AVAILABLE_SYSTEMS = 32;
 // -------------------------------------------------------------------------------
 alloc: std.mem.Allocator,
 loaded_tools: std.ArrayList(ToolEntry) = .empty,
-mode_counter: u32 = 2, // skip first 2 for interal modes
 agent_counter: u32 = 3,
 agents: std.EnumArray(AgentType, ?AgentDef) = .initFill(null),
-modes: std.EnumArray(Mode, ?ModeDef) = .initFill(null),
 // ---
 available_mcp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
 available_mcp_count: usize = 0,
@@ -66,19 +64,6 @@ pub const AgentDef = struct {
     tools: AgentTools = .{},
     model: ?AgentModelConfig = null,
     default_tool_call_budget: u32 = 1024,
-};
-
-pub const ModeDef = struct {
-    name: []const u8,
-    prompt: []const u8,
-    sparse: []const u8,
-    color: r.tui.Color = .white,
-};
-
-pub const Mode = enum(u6) {
-    pub const Set = std.EnumSet(Mode);
-    exec,
-    _,
 };
 
 pub const AgentType = enum(u6) {
@@ -305,45 +290,6 @@ pub fn findAgentType(self: *const Self, name: []const u8) ?AgentType {
     return null;
 }
 
-pub fn setModePrompt(self: *Self, mode: Mode, prompt: []const u8) !void {
-    const slot = self.modes.getPtr(mode);
-    if (slot.* == null) return error.UnknownMode;
-    const dup = try self.prompt_arena.allocator().dupe(u8, prompt);
-    slot.*.?.prompt = dup;
-}
-
-pub fn setModeName(self: *Self, mode: Mode, name: []const u8) !void {
-    const slot = self.modes.getPtr(mode);
-    if (slot.* == null) return error.UnknownMode;
-    const dup = try self.prompt_arena.allocator().dupe(u8, name);
-    slot.*.?.name = dup;
-}
-
-pub fn setSparseModePrompt(self: *Self, mode: Mode, prompt: []const u8) !void {
-    const slot = self.modes.getPtr(mode);
-    if (slot.* == null) return error.UnknownMode;
-    const dup = try self.prompt_arena.allocator().dupe(u8, prompt);
-    slot.*.?.sparse = dup;
-}
-
-pub fn addMode(self: *Self, name: []const u8, prompt: []const u8, sparse: []const u8, color: []const u8) !Mode {
-    if (self.mode_counter > std.math.maxInt(u6)) return error.TooManyModes;
-    const idx: Mode = @enumFromInt(self.mode_counter);
-    const alloc = self.prompt_arena.allocator();
-    self.modes.set(idx, .{
-        .name = try alloc.dupe(u8, name),
-        .prompt = try alloc.dupe(u8, prompt),
-        .sparse = try alloc.dupe(u8, sparse),
-        .color = r.tui.Color.parseStrHex(color) catch .white,
-    });
-    self.mode_counter += 1;
-    return idx;
-}
-
-pub fn getMode(self: *const Self, mode: Mode) ModeDef {
-    return self.modes.get(mode) orelse .{ .name = "UNKNOWN", .prompt = "", .sparse = "" };
-}
-
 pub fn agentName(self: *const Self, agent_type: AgentType) []const u8 {
     return if (self.getAgent(agent_type)) |def| def.name else "UNKNOWN";
 }
@@ -542,11 +488,9 @@ fn loadSkillNames(self: *Self) void {
 /// Restore embedded defaults and free any Lua-installed definitions.
 pub fn resetDefs(self: *Self) void {
     _ = self.prompt_arena.reset(.retain_capacity);
-    self.mode_counter = 2;
     self.agent_counter = 3;
     self.available_mcp_count = 0;
     self.agents = .initFill(null);
-    self.modes = .initFill(null);
 
     self.agents.set(.general, .{
         .name = @tagName(AgentType.general),
@@ -565,13 +509,6 @@ pub fn resetDefs(self: *Self) void {
             r.tools.ask.AskTool.def.name,
             r.tools.start.StartMcpTool.def.name,
         }),
-    });
-
-    self.modes.set(.exec, .{
-        .name = "EXEC",
-        .prompt = "",
-        .sparse = "",
-        .color = .red,
     });
 
     self.loadSkillNames();

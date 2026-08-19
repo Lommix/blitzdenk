@@ -131,7 +131,6 @@ blitz.add_command("/team", function(rem)
 	else
 		blitz.cmd.queue_agent_message(main_id, prompt)
 	end
-	blitz.set_mode_prompt_sparse(blitz.MODE_EXEC, "You are the team lead agent")
 	blitz.cmd.push_chat_entry("user", "[TEAM]: " .. rem)
 end)
 

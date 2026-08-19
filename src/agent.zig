@@ -23,7 +23,6 @@ pub const Activity = enum { idle, thinking, writing, calling, retrying };
 
 pub const Identity = struct {
     type_idx: u8 = 0,
-    mode_idx: u8 = 0,
     name: []const u8 = "",
     parent: ?u32 = null,
     depth: u16 = 0,
@@ -51,7 +50,6 @@ pub const Agent = struct {
     messages: ?agent_run.OwnedMessages = null,
     tools: []const sdk.Tool = &.{},
     type_idx: u8,
-    mode_idx: u8,
     name: []const u8,
     parent: ?u32,
     depth: u16,
@@ -78,7 +76,6 @@ pub const Agent = struct {
     max_tool_calls: u32 = 64,
     tool_call_count: std.atomic.Value(u32) = .init(0),
     stop_requested: std.atomic.Value(bool) = .init(false),
-    force_full_reminder: bool = false,
     reminder_hook: ?*const fn (?*anyopaque, *Agent) anyerror!?[]const u8 = null,
     reminder_hook_ctx: ?*anyopaque = null,
     prepare_hook: ?PrepareHook = null,
@@ -119,7 +116,6 @@ pub const Agent = struct {
             .injection_arena = std.heap.ArenaAllocator.init(alloc),
             .state_arena = .init(alloc),
             .type_idx = options.identity.type_idx,
-            .mode_idx = options.identity.mode_idx,
             .name = name,
             .parent = options.identity.parent,
             .depth = options.identity.depth,
@@ -135,7 +131,6 @@ pub const Agent = struct {
         var child = try initModel(self.alloc, self.io, model, .{
             .identity = .{
                 .type_idx = self.type_idx,
-                .mode_idx = self.mode_idx,
                 .name = self.name,
                 .parent = parent,
                 .depth = self.depth + 1,
@@ -639,7 +634,7 @@ test "agent owns SDK state and adopts completed history" {
         .model = "model",
         .base_url = "https://example.com/v1",
         .provider = .{ .openai = .{} },
-    }, .{ .identity = .{ .name = "worker", .cwd = "/tmp", .type_idx = 2, .mode_idx = 3 } });
+    }, .{ .identity = .{ .name = "worker", .cwd = "/tmp", .type_idx = 2 } });
     defer agent.deinit();
     try agent.setMessages(&.{sdk.UserMessage("old")});
     try agent.queueReminder("queued");

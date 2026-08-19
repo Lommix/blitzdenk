@@ -3,7 +3,6 @@ const r = @import("root.zig");
 const text_utils = r.tui.text_utils;
 const log = std.log.scoped(.app);
 
-pub const FULL_MODE_REMINDER_AFTER_USER_MSG_COUNT = 4;
 pub const PROMPT_HISTORY_FILENAME = "prompt_history.json";
 pub const MAX_HISTORY = 100;
 pub const CONTEXT_LIMIT = 124 * 1024;
@@ -265,7 +264,6 @@ pub const App = struct {
     scroll_offset: usize = 0,
     auto_scroll: bool = true,
     input_mode: InputMode = .{ .text = .{} },
-    mode: r.ContextFactory.Mode = @enumFromInt(0),
     context_factory: *r.ContextFactory,
     theme: Theme = .default,
     cwd: []const u8,
@@ -1887,10 +1885,7 @@ fn insertCompletionToken(self: *App, entry: []const u8) void {
 }
 
 fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
-    const border_color = if (app.running)
-        app.theme.muted
-    else
-        app.context_factory.getMode(app.mode).color;
+    const border_color = app.theme.muted;
 
     var para = r.tui.Paragraph{
         .border = .none,
@@ -1961,11 +1956,7 @@ fn renderInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tu
     }
     para.scroll_offset = app.input_scroll_offset;
 
-    const mode_name = app.context_factory.getMode(app.mode).name;
-    const title = try std.fmt.allocPrint(arena, "┤{s}├", .{mode_name});
     const block = r.tui.Block{
-        .title = title,
-        .title_style = .{ .fg = border_color },
         .style = .{ .fg = border_color, .bg = app.theme.overlay_dark },
         .borders = .{ .top = true, .bottom = false, .left = false, .right = false },
     };
@@ -2124,7 +2115,7 @@ fn renderCenteredStatusText(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer, sta
     const width = @min(statusTextWidth(status), area.width);
     const offset = @divTrunc(area.width -| width, 2);
     buf.setStringMax(area.x + offset, area.y, status, .{
-        .fg = app.context_factory.getMode(app.mode).color,
+        .fg = app.theme.muted,
     }, area.width -| offset);
 }
 
