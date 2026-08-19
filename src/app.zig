@@ -11,10 +11,10 @@ const COMMAND_COMPLETION_ROWS = 8;
 pub const ChatRole = enum { system, user, agent };
 
 const builtin_command_completions: []const []const u8 = &.{
-    ":clear",
-    ":help",
-    ":ssh user@host:/path/to/cwd",
-    ":cd /path/to/new/cwd",
+    "/clear",
+    "/help",
+    "/ssh user@host:/path/to/cwd",
+    "/cd /path/to/new/cwd",
 };
 
 pub const UiState = union(enum) {
@@ -1794,7 +1794,7 @@ fn commandTokenActive(input: []const u8, cursor: u32) bool {
     if (input.len == 0) return false;
     const end = @min(@as(usize, cursor), input.len);
     if (end == 0) return false;
-    if (input[0] != ':' and input[0] != '/') return false;
+    if (input[0] != '/') return false;
     return std.mem.indexOfScalar(u8, input[0..end], ' ') == null;
 }
 
@@ -1822,11 +1822,10 @@ fn appendLuaCommandCompletions(app: *App, prefix: []const u8, out: []?[]const u8
 
 fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?[]const u8, count: *usize) void {
     if (count.* >= out.len) return;
-    const typed: u8 = if (prefix.len > 0 and (prefix[0] == '/' or prefix[0] == ':')) prefix[0] else '/';
 
     for (app.context_factory.skill_names.items) |name| {
         if (count.* >= out.len) return;
-        const formatted = std.fmt.allocPrint(alloc, "{c}skill-{s}", .{ typed, name }) catch return;
+        const formatted = std.fmt.allocPrint(alloc, "/skill-{s}", .{name}) catch return;
         if (!completionMatches(formatted, prefix)) continue;
         if (containsCommandCompletion(out[0..count.*], formatted)) continue;
 
@@ -1837,11 +1836,10 @@ fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []
 
 fn appendSshAliasCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?[]const u8, count: *usize) void {
     if (count.* >= out.len) return;
-    const typed: u8 = if (prefix.len > 0 and (prefix[0] == '/' or prefix[0] == ':')) prefix[0] else '/';
 
     for (app.context_factory.ssh_aliases.items) |alias| {
         if (count.* >= out.len) return;
-        const formatted = std.fmt.allocPrint(alloc, "{c}ssh-{s}", .{ typed, alias.name }) catch return;
+        const formatted = std.fmt.allocPrint(alloc, "/ssh-{s}", .{alias.name}) catch return;
         if (!completionMatches(formatted, prefix)) continue;
         if (containsCommandCompletion(out[0..count.*], formatted)) continue;
 
@@ -3394,7 +3392,7 @@ test "completion visibility rule" {
     try std.testing.expect(completionVisible("/ski", 4, 2));
     try std.testing.expect(!completionVisible("/skill-x ", 9, 2));
     try std.testing.expect(!completionVisible("hello", 5, 2));
-    try std.testing.expect(!completionVisible(":cd /tm", 7, 2));
+    try std.testing.expect(!completionVisible("/cd /tm", 7, 2));
     try std.testing.expect(!completionVisible("/ski", 4, 0));
 }
 

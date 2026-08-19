@@ -634,7 +634,7 @@ pub fn run(
                                 var chat_text: []const u8 = input;
 
                                 // -- user commands (processed even while a session is running)
-                                if (input[0] == ':' or input[0] == '/') {
+                                if (input[0] == '/') {
                                     if (app.lua_vm.vm_mu.tryLock()) {
                                         defer app.lua_vm.vm_mu.unlock(io);
                                         if (app.lua_vm.invokeCommand(input)) {
@@ -647,74 +647,76 @@ pub fn run(
                                         break;
                                     }
 
-                                    const cmd = AppCommand.parse(input);
+                                    if (std.mem.eql(u8, input, "/help")) {
+                                        send_text = "load blitzdenk skill, help the user";
+                                        chat_text = send_text;
+                                    } else {
+                                        const cmd = AppCommand.parse(input);
 
-                                    if (cmd) |c| {
-                                        switch (c) {
-                                            .clear => {
-                                                app.reset();
-                                                break;
-                                            },
-                                            .help => {
-                                                app.pushSystemMessage("Not yet implemented. You are on your own!", .{});
-                                            },
-                                            .ssh => |args| {
-                                                handleSshCommand(&app, app.exec_pool, gpa, args);
-                                                app.input_buffer.clearRetainingCapacity();
-                                            },
-                                            .cd => |path| {
-                                                if (path.len > 0) {
-                                                    const base = app.exec_pool.effectiveCwd(app.cwd);
-                                                    if (std.fs.path.resolve(app.appAlloc(), &.{ base, path })) |resolved| {
-                                                        if (app.exec_pool.ssh_active) {
-                                                            if (app.exec_pool.ssh_target) |*tar| {
-                                                                const new_remote = app.exec_pool.alloc.dupe(u8, resolved) catch break;
-                                                                app.exec_pool.alloc.free(tar.cwd);
-                                                                tar.cwd = new_remote;
+                                        if (cmd) |c| {
+                                            switch (c) {
+                                                .clear => {
+                                                    app.reset();
+                                                    break;
+                                                },
+                                                .ssh => |args| {
+                                                    handleSshCommand(&app, app.exec_pool, gpa, args);
+                                                    app.input_buffer.clearRetainingCapacity();
+                                                },
+                                                .cd => |path| {
+                                                    if (path.len > 0) {
+                                                        const base = app.exec_pool.effectiveCwd(app.cwd);
+                                                        if (std.fs.path.resolve(app.appAlloc(), &.{ base, path })) |resolved| {
+                                                            if (app.exec_pool.ssh_active) {
+                                                                if (app.exec_pool.ssh_target) |*tar| {
+                                                                    const new_remote = app.exec_pool.alloc.dupe(u8, resolved) catch break;
+                                                                    app.exec_pool.alloc.free(tar.cwd);
+                                                                    tar.cwd = new_remote;
+                                                                }
                                                             }
-                                                        }
-                                                        app.cwd = resolved;
-                                                        if (app.main_agent_id) |id| {
-                                                            if (app.registry.get(id)) |ag| ag.setCwd(resolved) catch {};
-                                                        }
-                                                    } else |_| {}
-                                                }
-                                                app.input_buffer.clearRetainingCapacity();
-                                            },
-                                            .ssh_off => {
-                                                app.exec_pool.clearSsh();
-                                                app.notifications.append(gpa, "SSH mode disabled", .{}) catch {};
-                                                app.input_buffer.clearRetainingCapacity();
-                                            },
+                                                            app.cwd = resolved;
+                                                            if (app.main_agent_id) |id| {
+                                                                if (app.registry.get(id)) |ag| ag.setCwd(resolved) catch {};
+                                                            }
+                                                        } else |_| {}
+                                                    }
+                                                    app.input_buffer.clearRetainingCapacity();
+                                                },
+                                                .ssh_off => {
+                                                    app.exec_pool.clearSsh();
+                                                    app.notifications.append(gpa, "SSH mode disabled", .{}) catch {};
+                                                    app.input_buffer.clearRetainingCapacity();
+                                                },
+                                            }
+                                            break;
                                         }
-                                        break;
-                                    }
 
-                                    if (reg.parseSshAliasCommand(input)) |alias| {
-                                        if (app.context_factory.findSshAlias(alias)) |target| {
-                                            handleSshCommand(&app, app.exec_pool, gpa, .{
-                                                .user = target.user,
-                                                .host = target.host,
-                                                .cwd = target.cwd,
-                                            });
-                                        } else {
-                                            app.pushSystemMessage("unknown ssh alias: {s}", .{alias});
-                                        }
-                                        app.input_buffer.clearRetainingCapacity();
-                                        break;
-                                    }
-
-                                    if (reg.parseSkillCommand(input)) |sc| {
-                                        if (reg.findSkill(app.context_factory.skill_dir, app.io, app.sessionAlloc(), sc.name)) |skill| {
-                                            send_text = reg.skillSendText(app.sessionAlloc(), skill.body, sc.prompt) catch break;
-                                            chat_text = reg.skillChatText(app.sessionAlloc(), skill.name, sc.prompt) catch break;
-                                        } else {
-                                            app.pushSystemMessage("unknown skill: {s}", .{sc.name});
+                                        if (reg.parseSshAliasCommand(input)) |alias| {
+                                            if (app.context_factory.findSshAlias(alias)) |target| {
+                                                handleSshCommand(&app, app.exec_pool, gpa, .{
+                                                    .user = target.user,
+                                                    .host = target.host,
+                                                    .cwd = target.cwd,
+                                                });
+                                            } else {
+                                                app.pushSystemMessage("unknown ssh alias: {s}", .{alias});
+                                            }
                                             app.input_buffer.clearRetainingCapacity();
                                             break;
                                         }
-                                    } else {
-                                        break;
+
+                                        if (reg.parseSkillCommand(input)) |sc| {
+                                            if (reg.findSkill(app.context_factory.skill_dir, app.io, app.sessionAlloc(), sc.name)) |skill| {
+                                                send_text = reg.skillSendText(app.sessionAlloc(), skill.body, sc.prompt) catch break;
+                                                chat_text = reg.skillChatText(app.sessionAlloc(), skill.name, sc.prompt) catch break;
+                                            } else {
+                                                app.pushSystemMessage("unknown skill: {s}", .{sc.name});
+                                                app.input_buffer.clearRetainingCapacity();
+                                                break;
+                                            }
+                                        } else {
+                                            break;
+                                        }
                                     }
                                 }
 
@@ -800,7 +802,7 @@ pub fn run(
                         .esc => switch (app.input_mode) {
                             .text => {
                                 const input = app.inputSlice();
-                                if (input.len > 0 and input[0] == ':') {
+                                if (input.len > 0 and input[0] == '/') {
                                     app.input_buffer.clearRetainingCapacity();
                                     app.input_cursor = 0;
                                 }
@@ -1001,10 +1003,9 @@ fn handleSshUnlock(state: *App, cmd_pool: *r.exec.CmdPool, gpa: std.mem.Allocato
 
 pub const AppCommand = union(enum) {
     clear,
-    help,
-    /// :ssh user@domain:/path/to/cwd
+    /// /ssh user@domain:/path/to/cwd
     ssh: SshArgs,
-    /// :ssh off  (or bare :ssh)
+    /// /ssh off  (or bare /ssh)
     ssh_off,
     /// change CWD
     cd: []const u8,
@@ -1012,7 +1013,7 @@ pub const AppCommand = union(enum) {
     pub const SshArgs = struct { user: []const u8, host: []const u8, cwd: []const u8 };
 
     pub fn parse(raw: []const u8) ?AppCommand {
-        const input = if (raw.len > 0 and (raw[0] == ':' or raw[1] == '/')) raw[1..] else raw;
+        const input = if (raw.len > 0 and raw[0] == '/') raw[1..] else raw;
         var it = std.mem.splitScalar(u8, input, ' ');
         const verb = it.first();
         const rest = it.rest();
@@ -1022,7 +1023,6 @@ pub const AppCommand = union(enum) {
         }
 
         if (std.mem.eql(u8, verb, "clear")) return .clear;
-        if (std.mem.eql(u8, verb, "help")) return .help;
         if (std.mem.eql(u8, verb, "ssh")) {
             if (rest.len == 0 or std.mem.eql(u8, rest, "off")) return .ssh_off;
             return parseSsh(rest);

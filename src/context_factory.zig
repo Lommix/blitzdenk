@@ -941,8 +941,7 @@ const ParsedCommand = struct {
 };
 
 fn parsePrefixedCommand(raw: []const u8, prefix: []const u8) ?ParsedCommand {
-    if (raw.len < 2) return null;
-    if (raw[0] != '/' and raw[0] != ':') return null;
+    if (raw.len == 0 or raw[0] != '/') return null;
     const rest = raw[1..];
     if (!std.mem.startsWith(u8, rest, prefix)) return null;
     const after = rest[prefix.len..];
@@ -959,7 +958,7 @@ pub fn parseSkillCommand(raw: []const u8) ?SkillCommand {
     return .{ .name = parsed.name, .prompt = std.mem.trim(u8, parsed.rest, " \t\r\n") };
 }
 
-/// /ssh-<alias> (or :ssh-<alias>) → the alias name, or null.
+/// /ssh-<alias> → the alias name, or null.
 pub fn parseSshAliasCommand(raw: []const u8) ?[]const u8 {
     const parsed = parsePrefixedCommand(raw, "ssh-") orelse return null;
     return parsed.name;
@@ -1102,7 +1101,6 @@ test "skill command parse" {
     const Case = struct { in: []const u8, name: ?[]const u8, prompt: []const u8 };
     const cases = [_]Case{
         .{ .in = "/skill-zig", .name = "zig", .prompt = "" },
-        .{ .in = ":skill-zig", .name = "zig", .prompt = "" },
         .{ .in = "/skill-zig fix the allocator", .name = "zig", .prompt = "fix the allocator" },
         .{ .in = "/skill-ponytail-review", .name = "ponytail-review", .prompt = "" },
         .{ .in = "/skill-ponytail-review do it", .name = "ponytail-review", .prompt = "do it" },
@@ -1131,7 +1129,6 @@ test "ssh alias command parse" {
     const Case = struct { in: []const u8, name: ?[]const u8 };
     const cases = [_]Case{
         .{ .in = "/ssh-mc", .name = "mc" },
-        .{ .in = ":ssh-mc", .name = "mc" },
         .{ .in = "/ssh-mc do it", .name = "mc" },
         .{ .in = "/ssh", .name = null },
         .{ .in = "/ssh-", .name = null },

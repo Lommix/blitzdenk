@@ -720,8 +720,8 @@ pub const Blitz = LuaType{
             .{
                 .name = "add_command",
                 .desc =
-                \\Bind a colon command to a Lua callback.
-                \\Example: blitz.add_command(":help", function(args) end)
+                \\Bind a slash command to a Lua callback.
+                \\Example: blitz.add_command("/help", function(args) end)
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{ .{ .name = "command", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
@@ -730,7 +730,7 @@ pub const Blitz = LuaType{
                             if (try isToolVm(state)) return;
                             const vm = &a.lua_vm;
                             if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) return error.TooManyCommands;
-                            if (name.len == 0 or (name[0] != ':' and name[0] != '/')) return error.InvalidCommandPrefix;
+                            if (name.len == 0 or name[0] != '/') return error.InvalidCommandPrefix;
                             if (std.mem.indexOfScalar(u8, name, ' ') != null) return error.InvalidCommandName;
                             if (name.len > 128) return error.CommandNameTooLong;
 
@@ -2276,7 +2276,7 @@ pub const LuaVm = struct {
     }
 
     /// Invoke a registered lua command. `input` may be the full typed command
-    /// (":name args") or only the command name; returns false when unhandled.
+    /// ("/name args") or only the command name; returns false when unhandled.
     pub fn invokeCommand(self: *LuaVm, input: []const u8) bool {
         if (input.len == 0) return false;
 
@@ -2498,7 +2498,7 @@ pub fn getAppFromRegistry(L: *c.lua_State) ?*app.App {
 }
 
 /// blitz.bind(vim_key_combo_string, lua func)
-/// blitz.add_command(":command", lua func)
+/// blitz.add_command("/command", lua func)
 fn readAnyArg(
     comptime T: type,
     state: *c.lua_State,

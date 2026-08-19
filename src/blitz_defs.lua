@@ -278,8 +278,8 @@
 ---Bind a vim-style key combo to a Lua callback.
 ---Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
 ---@field bind fun(key: string, func: function)
----Bind a colon command to a Lua callback.
----Example: blitz.add_command(":help", function(args) end)
+---Bind a slash command to a Lua callback.
+---Example: blitz.add_command("/help", function(args) end)
 ---@field add_command fun(command: string, func: function)
 ---Override the tool set for a given agent type. Replaces defaults entirely.
 ---Names must match built-in tool names or names of tools registered via blitz.register_tool.
