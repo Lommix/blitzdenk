@@ -1,8 +1,6 @@
 const r = @import("root.zig");
 const std = @import("std");
 
-/// Bad models always read to little or cut at bad lines. Padding the read scope helps
-const READ_PADDING = 1;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 pub const ReadTool = r.Tool{
@@ -53,17 +51,9 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         limit: ?u64 = null,
     };
 
-    var args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments: expected {\"file_path\": \"...\"}");
-
-    if (args.offset) |off| {
-        args.offset = off -| READ_PADDING;
-    }
-
-    if (args.limit) |off| {
-        args.limit = off + READ_PADDING;
-    }
 
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
 
