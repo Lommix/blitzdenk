@@ -7,8 +7,10 @@ pub const BashTool = r.Tool{
         .name = "bash",
         .description =
         \\Execute a bash command in the current working directory.
-        \\Returns stdout and stderr. Output is truncated to the last 1000 lines or 32KB (whichever is hit first); the full output is saved to a file whose path is reported when available.
-        \\
+        \\Returns stdout and stderr. Output is truncated to the last 
+        ++ r.DISPLAY_CAP_TEXT ++
+            \\ (whichever is hit first); the full output is saved to a file whose path is reported when available.
+            \\
         ,
         .prompt_snippet = "Execute a bash command",
         .prompt_guidelines = "Prefer specialist tools over bash whenever available",

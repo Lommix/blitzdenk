@@ -10,9 +10,11 @@ pub const GlobTool = r.Tool{
         .description =
         \\Find files by path glob. Use this whenever you need to discover files by name, extension, or path shape; use grep when you need to search file contents.
         \\
-        \\`pattern` is a gitignore-style glob matched against paths, e.g. `**/*.zig` or `src/**/*.zig`. `file_path` narrows the directory being searched. Results respect ignore files, are sorted by path, and are truncated to 1000 lines or 32 KB.
-        \\
-        \\Every field is data, not a shell fragment. Do not add `rg`, `find`, shell syntax, or pipes to any argument.
+        \\`pattern` is a gitignore-style glob matched against paths, e.g. `**/*.zig` or `src/**/*.zig`. `file_path` narrows the directory being searched. Results respect ignore files, are sorted by path, and are truncated to
+        ++ r.DISPLAY_CAP_TEXT ++
+            \\.
+            \\
+            \\Every field is data, not a shell fragment. Do not add `rg`, `find`, shell syntax, or pipes to any argument.
         ,
         .prompt_snippet = "Find files by glob",
         .prompt_guidelines = "Use glob to discover files by name or path shape.",
@@ -36,9 +38,11 @@ pub const GrepTool = r.Tool{
         .description =
         \\Search file contents for patterns. Use this for definitions, references, error messages, configuration keys, and any other content search; use glob when you only need filenames.
         \\
-        \\`pattern` is a regular expression by default; set `literal` when punctuation must be matched literally. `file_path` narrows the search, `glob` filters files, and `context` includes surrounding lines. Results respect .gitignore, include file paths and line numbers, and are truncated to 1000 lines or 32 KB.
-        \\
-        \\Every field is data, not a shell fragment. Do not add `rg`, shell quoting, or pipes to any argument.
+        \\`pattern` is a regular expression by default; set `literal` when punctuation must be matched literally. `file_path` narrows the search, `glob` filters files, and `context` includes surrounding lines. Results respect .gitignore, include file paths and line numbers, and are truncated to
+        ++ r.DISPLAY_CAP_TEXT ++
+            \\.
+            \\
+            \\Every field is data, not a shell fragment. Do not add `rg`, shell quoting, or pipes to any argument.
         ,
         .prompt_snippet = "Search file contents",
         .prompt_guidelines = "Use grep to find definitions, references, and error messages in code.",

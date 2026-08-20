@@ -8,8 +8,8 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 pub const ReadTool = r.Tool{
     .def = .{
         .name = "read",
-        .description = "Read the contents of a file. For text files, output is truncated to " ++ std.fmt.comptimePrint("{d} lines or {d}KB", .{ r.MAX_DISPLAY_LINES, @divTrunc(r.MAX_DISPLAY_BYTES, 1024) }) ++
-            \\(whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
+        .description = "Read the contents of a file. For text files, output is truncated to " ++ r.DISPLAY_CAP_TEXT ++
+            \\ (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
         ,
         .prompt_snippet = "Read file contents",
         .prompt_guidelines = "Use read to examine files instead of cat or sed.",
