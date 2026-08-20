@@ -1,25 +1,36 @@
 ---
 name: blitzdenk-lua
 description: >
-    How to configure and extend Blitzdenk in Lua: config file layout, hot reload,
-    tool sets, custom tools, agents, commands, keybinds, MCP, events,
-    shared state, and status UI. Load wehn writing or editing ~/.config/blitzdenk/*.lua or ./blitz.lua, or when the
-    user asks to configure or extend blitzdenk in Lua.
+    How to configure and extend Blitzdenk. Load on any blitz related question/task.
 ---
 
 # Blitzdenk Lua configuration
 
-Blitzdenk is a Zig binary with vendored Lua. All workflow customization lives in
-Lua via the global `blitz` table. `src/blitz_default.lua` in the repo is the
-reference config; match its style.
+Blitzdenk is a Zig binary with vendored Lua. Workflow customization lives in
+Lua through the global `blitz` table. `~/.config/blitzdenk/blitz.lua` is a
+working config; `src/blitz_default.lua` in the repo is its template. Match the
+style of whichever exists.
+
+## Find the answer fast
+
+Two files settle most questions:
+
+- `~/.config/blitzdenk/meta.lua` is the source of truth for every `blitz.*`
+  signature, field, and constant. Read it before writing code.
+- `~/.config/blitzdenk/blitz.lua` is a working example of the config.
+
+For a question about any `blitz.*` call, open `meta.lua` and read the class
+for that call. Each section below hides a buried list (event names, provider
+fields, status constants). For those, the meta file is the list: inspect the
+class and use it, do not enumerate.
 
 ## File layout
 
-- `~/.config/blitzdenk/blitz.lua` — global user config, loaded at startup.
-- `./blitz.lua` — optional project-local config, loaded after the global config.
-- `~/.config/blitzdenk/meta.lua` — generated LuaLS type hints. Source of truth for signatures.
-- `~/.config/blitzdenk/.luarc.json` — points LuaLS at `meta.lua`.
-- `src/blitz_defs.lua` in the repo is the generated meta source; `src/blitz_default.lua` is the default config template.
+- `~/.config/blitzdenk/blitz.lua`, global user config, loaded at startup.
+- `./blitz.lua`, optional project-local config, loaded after it.
+- `~/.config/blitzdenk/meta.lua`, generated type hints, signature truth.
+- `~/.config/blitzdenk/.luarc.json`, points the Lua server at `meta.lua`.
+- `src/blitz_defs.lua` in the repo is the generated meta; `src/blitz_default.lua` the default config. `meta.lua` is the source of truth for both.
 
 ## Loading and hot reload
 
@@ -56,28 +67,23 @@ local deepseek = blitz.add_model({
 blitz.set_model_agent(blitz.AGENT_GENERAL, deepseek, "max")
 ```
 
-`add_provider` returns an integer handle. Other optional provider fields:
-`max_completion_tokens`, `max_output_tokens`, `top_p`, `top_k`,
-`frequency_penalty`, `presence_penalty`, `enable_thinking`, `thinking = { type = ..., budget_tokens = ... }`,
-`rate_limit` (requests per minute, shared per provider URL, `0` = unlimited).
+`add_provider` and `add_model` return integer handles. `vision` (default
+false) gates the `view_image` tool and image pasting; `cost` is optional and
+absent means free. Bind a model per agent with `blitz.set_model_agent(agent_type,
+handle, effort?)` (effort defaults to `"medium"`) or `model = handle` in
+`blitz.add_agent`. Every agent needs a bound model; unbound agents fail to
+spawn. Effort: `"none"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`.
 
-`add_model` returns an integer handle. `vision` (default false) gates the
-`view_image` tool and image pasting for agents using the model. `cost` is
-optional; absent means the model is free. Bind a model per agent with
-`blitz.set_model_agent(agent_type, handle, effort?)` (effort defaults to
-`"medium"`) or with `model = handle` in `blitz.add_agent`. Every agent must
-have a bound model; unbound agents fail to spawn.
-
-Effort values: `"none"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`.
-
-Read the current model name bound to an agent with `blitz.get_model_name(agent_type)`.
+The typed fields for provider, model, and cost live in `BlitzProviderDef`,
+`BlitzModelDef`, and `BlitzModelCost` in `meta.lua`. Read the model name with
+`blitz.get_model_name(agent_type)`.
 
 ## Tool sets
 
 `blitz.tools.*` are string constants for the built-in tool names.
 
 Built-in names: `BASH`, `READ`, `VIEW_IMAGE`,
-`WRITE`, `EDIT`, `PATCH`, `AGENT`, `ASK`, `GLOB`, `GREP`, `START_MCP`.
+`WRITE`, `EDIT`, `PATCH`, `AGENT`, `ASK`, `GLOB`, `GREP`, `START_MCP`, `SKILL`.
 
 - `blitz.set_agent_tools(agent_type, {names})` replaces the whole tool set.
 - `blitz.add_tool(agent_type, tool_name)` adds one tool to the current set.
@@ -127,11 +133,14 @@ Tool function rules:
   `ctx:ask(header, question, options)`. `approve`/`plan`/`ask` return a status
   integer plus an optional string; compare with `blitz.REQ_STATUS_*`.
 - Return `{ msg = "..." }`. To attach an image:
-  `{ msg = "...", img = { media_type = "image/png", data = bytes } }`.
+  `{ msg = "...", img = { media_type = "image/png", data = bytes } }`. Set
+  `exit_loop = true` to end the agent loop.
 - Raise `error("...")` for failure.
-- `return blitz.exit_loop("done")` exits the agent loop.
+- `blitz.exit_loop("done")` returns a result that ends the loop.
 - `blitz.shell(cmd)` returns `output, ok` (two values).
 - `blitz.json.encode(obj)` / `blitz.json.decode(str)` return the value plus an ok boolean.
+  The `BlitzToolDef`, `BlitzToolResult`, `BlitzCtx`, and `BlitzCall` classes in
+  `meta.lua` list the exact fields.
 
 ## Agents
 
@@ -168,9 +177,12 @@ end)
 Queue API: `reset_session`, `cancel`, `retry`, `compact`, `cd(path)`,
 `prompt(text)`,
 `push_chat_entry(role, text)`, `queue_agent_message(agent_id, text)`, `spawn_agent(args)`, `await_agent(agent_id)`,
-`await_agent_result(agent_id)` (returns an `AWAIT_*` status), `save_session(path)`, `load_session(path)`,
+`await_agent_result(agent_id)` returns the agent's last assistant text string.
+`await_agent(agent_id)` blocks and returns an `AWAIT_*` status
+(`AWAIT_COMPLETE`, `AWAIT_FAILED`, `AWAIT_CANCELED`, `AWAIT_INVALID`).
+`save_session(path)`, `load_session(path)`,
 `attach_screenshot(data, media_type)`. `spawn_agent` args: `parent_id`,
-`prompt`, `agent_type`, `fork`.
+`prompt`, `agent_type`, `fork` (`BlitzSpawnArgs` in `meta.lua`).
 
 `blitz.cmd.prompt(text)` is the "say something" command: it echoes the text into
 the chat log and sends it to the main agent (queued while it runs, restarted when
@@ -199,7 +211,7 @@ Command completion actions (custom `blitz.bind` on a key wins over these default
 - `completion_prev` — `<C-p>`. Cycle backward and insert. Wraps.
 - `completion_accept` — `<C-y>`. Insert the selected entry without cycling.
 
-Arrow `<Up>` / `<Down>` traverse the menu while it is open (wrap, same as `<Tab>`).
+Menu arrow `<Up>` / `<Down>` traverse while open (wrap, same as `<Tab>`).
 
 ## Events
 
@@ -215,8 +227,8 @@ Event tags on `blitz.events.*`: `SESSION_RESET`, `AGENT_CREATED`,
 `TOOL_CALL_COMPLETE`, `AGENT_BROADCAST`, `PERMISSION_REQUESTED`,
 `PERMISSION_RESOLVED`, `USER_MESSAGE_SENT`, `MCP_TOOLS_RELOADED`, `ON_INJECT`.
 
-Payloads vary: agent events receive an agent id table, `USER_MESSAGE_SENT`
-receives a string. Check `meta.lua` for descriptions.
+Do not enumerate payloads; read the `BlitzEventDef` class in `meta.lua`, which
+lists each tag with a one-line meaning.
 
 `ON_INJECT` fires for every agent on each step, right before the system reminder
 is built. Return a string to append it to that agent's `<system-reminder>` block:
@@ -258,7 +270,7 @@ blitz.mcp.enable(pw)
 ```
 
 `add` registers a stdio server (disabled) and returns an integer id. `enable`
-turns it on. Optional field: `transport`.
+turns it on. Optional fields: `transport`, `tools_prefix`.
 
 ## UI and status
 
@@ -271,12 +283,10 @@ blitz.status_bar_render = function()
 end
 ```
 
-Also: `blitz.get_flags()` / `blitz.set_flags(t)` for `show_thinking`, `debug_log`,
-`skip_permissions`; `blitz.get_theme()` / `blitz.set_theme(t)` for hex colors
-(`"transparent"` clears a field);
-`blitz.push_notification(msg)`; `blitz.log(msg)`; `blitz.set_compact_edge(tokens)`.
-`blitz.token_usage()` also returns `cost` (total USD, computed from the model
-registry).
+Other `blitz.*` calls: flags, theme, notifications, logging, compact edge, and
+the `cost` field on `token_usage` are all in `meta.lua` under `BlitzAppFlags`,
+`BlitzTheme`, and `BlitzTokenUsage`. Read those classes for the fields instead
+of memorizing the list.
 
 ## Skills
 
@@ -290,13 +300,3 @@ Frontmatter keys: `name` (kebab-case), `description`, optional `whenToUse`,
 `user-invocable` (default true), and `disable-model-invocation` (default
 false). Unknown keys are ignored. Descriptions support YAML folded (`>`) and
 literal (`|`) block scalars.
-
-Blitzdenk no longer lists skill paths in the system prompt. Model-invocable
-skills appear in an `<available_skills>` system reminder only when the catalog
-changes; the model loads a body with the `skill` tool. `/skill-<name>` still
-pastes the body plus prompt into chat, and is rejected for `user-invocable:
-false`.
-
-## Reference
-
-- `meta.lua` — generated Lua API meta (source of truth).
