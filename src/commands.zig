@@ -186,6 +186,7 @@ pub const Command = union(enum) {
                         }
                     }
                     app.cwd = resolved;
+                    app.context_factory.rescanSkills(resolved);
                     if (app.main_agent_id) |id| {
                         if (app.registry.get(id)) |ag| ag.setCwd(resolved) catch {};
                     }

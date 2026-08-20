@@ -14,6 +14,7 @@ const BlitzdenkCfg = r.config.BlitzdenkCfg;
 const ChatEntry = r.app.ChatEntry;
 const lua = r.lua;
 const reg = r.ContextFactory;
+const skills = r.skills;
 const keys = r.keys;
 const util = r.util;
 const session = r.session;
@@ -181,7 +182,7 @@ pub fn run(
     const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;
 
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
-    const context_factory = try r.ContextFactory.init(gpa, io, HOME);
+    const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
     context_factory.flags.skip_local_context_file = flags.no_context;
 
     var term = try tui.Terminal.init(arena, io);
@@ -668,15 +669,24 @@ pub fn run(
                                         break;
                                     }
 
-                                    if (reg.parseSkillCommand(input)) |sc| {
-                                        if (reg.findSkill(app.context_factory.skill_dir, app.io, app.sessionAlloc(), sc.name)) |skill| {
-                                            send_text = reg.skillSendText(app.sessionAlloc(), skill.body, sc.prompt) catch break;
-                                            chat_text = reg.skillChatText(app.sessionAlloc(), skill.name, sc.prompt) catch break;
-                                        } else {
+                                    if (skills.parseSkillCommand(input)) |sc| {
+                                        const entry = app.context_factory.skills.find(sc.name) orelse {
                                             app.pushSystemMessage("unknown skill: {s}", .{sc.name});
                                             app.input_buffer.clearRetainingCapacity();
                                             break;
+                                        };
+                                        if (!entry.meta.user_invocable) {
+                                            app.pushSystemMessage("skill '{s}' is not user-invocable", .{entry.meta.name});
+                                            app.input_buffer.clearRetainingCapacity();
+                                            break;
                                         }
+                                        const loaded = skills.loadSkill(app.io, app.sessionAlloc(), entry) orelse {
+                                            app.pushSystemMessage("unknown skill: {s}", .{sc.name});
+                                            app.input_buffer.clearRetainingCapacity();
+                                            break;
+                                        };
+                                        send_text = skills.skillSendText(app.sessionAlloc(), loaded.body, sc.prompt) catch break;
+                                        chat_text = skills.skillChatText(app.sessionAlloc(), entry.meta.name, sc.prompt) catch break;
                                     } else {
                                         break;
                                     }

@@ -953,6 +953,7 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "GLOB", .ty = LuaType.string, .value = .{ .string = tl.search.GlobTool.def.name } },
             .{ .name = "GREP", .ty = LuaType.string, .value = .{ .string = tl.search.GrepTool.def.name } },
             .{ .name = "START_MCP", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },
+            .{ .name = "SKILL", .ty = LuaType.string, .value = .{ .string = tl.skill.SkillTool.def.name } },
         },
     },
 };

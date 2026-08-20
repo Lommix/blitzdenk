@@ -34,6 +34,10 @@ pub const InitOptions = struct {
     context_limit: u64 = 128 * 1024,
 };
 
+pub const Flags = struct {
+    cwd_seen: bool = false,
+};
+
 pub const Agent = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -49,12 +53,14 @@ pub const Agent = struct {
     compaction: compact.State = .{},
     messages: ?agent_run.OwnedMessages = null,
     tools: []const sdk.Tool = &.{},
+    flags: Flags = .{},
     type_idx: u8,
     name: []const u8,
     parent: ?u32,
     depth: u16,
     cwd: []const u8,
     system_prompt: []const u8 = "",
+    skill_catalog_digest: ?u64 = null,
     session_id: [32]u8,
     usage: sdk.Usage = .{},
     context_tokens: u64 = 0,
@@ -176,6 +182,7 @@ pub const Agent = struct {
 
     pub fn setCwd(self: *Agent, cwd: []const u8) !void {
         self.cwd = try self.metadata.allocator().dupe(u8, cwd);
+        self.flags.cwd_seen = false;
     }
 
     pub fn setTools(self: *Agent, tools: []const sdk.Tool) !void {

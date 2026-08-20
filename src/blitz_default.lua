@@ -40,6 +40,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.WRITE,
 	blitz.tools.ASK,
 	blitz.tools.AGENT,
+	blitz.tools.SKILL,
 	-- blitz.tools.PATCH, -- EDIT/WRITE alternative
 	-- blitz.tools.START_MCP,
 })

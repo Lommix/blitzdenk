@@ -1,12 +1,7 @@
 const std = @import("std");
 const r = @import("root.zig");
 
-pub const ZigCallback = *const fn (w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) anyerror!void;
-
-pub const Callback = union(enum) {
-    zig: ZigCallback,
-    lua: c_int,
-};
+pub const Callback = *const fn (w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) anyerror!void;
 
 ///!Inject system reminder on tool turn finish
 ///!Too make models behave and don't loose focus
@@ -20,9 +15,9 @@ pub const InjectionsHooks = struct {
         inline for (.{
             &inject_datetime_information,
             &inject_cwd_information,
-            &inject_budget_information,
+            &inject_available_skills,
         }) |cb| {
-            try self._hooks.append(alloc, .{ .zig = cb });
+            try self._hooks.append(alloc, cb);
         }
 
         return self;
@@ -44,14 +39,7 @@ pub const InjectionsHooks = struct {
         for (self._hooks.items) |cb| {
             var hook_w = std.Io.Writer.Allocating.init(alloc);
 
-            switch (cb) {
-                .zig => |call| {
-                    try call(&hook_w.writer, app, agent);
-                },
-                .lua => {
-                    @panic("not yet implemented");
-                },
-            }
+            try cb(&hook_w.writer, app, agent);
 
             const hook_res = try hook_w.toOwnedSlice();
             defer alloc.free(hook_res);
@@ -84,9 +72,26 @@ pub const InjectionsHooks = struct {
 };
 
 fn inject_cwd_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    if (agent.flags.cwd_seen) return;
+    agent.flags.cwd_seen = true;
+
+    const os_res = app.exec_pool.runAndWait(.{ .argv = &.{ "uname", "-s" } }) catch null;
+    defer if (os_res) |ores| {
+        app.exec_pool.alloc.free(ores.stdout);
+        app.exec_pool.alloc.free(ores.stderr);
+    };
+
     const cwd = app.exec_pool.effectiveCwd(if (agent.cwd.len > 0) agent.cwd else app.cwd);
-    if (cwd.len == 0) return;
-    try w.print("[CWD] {s}\n", .{cwd});
+
+    const os_name = if (os_res) |ores|
+        if (ores.ty == .success and ores.stdout.len > 0)
+            std.mem.trimEnd(u8, ores.stdout, "\n")
+        else
+            "unknown"
+    else
+        "unknown";
+
+    try w.print("[CWD] {s}\n[OS] {s}\n", .{ cwd, os_name });
 }
 
 fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.Agent) !void {
@@ -96,34 +101,57 @@ fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.A
     if (res.ty != .success or res.stdout.len == 0) return;
 
     const datetime = std.mem.trimEnd(u8, res.stdout, "\n");
-
-    const os_res = app.exec_pool.runAndWait(.{ .argv = &.{ "uname", "-s" } }) catch null;
-    defer if (os_res) |ores| {
-        app.exec_pool.alloc.free(ores.stdout);
-        app.exec_pool.alloc.free(ores.stderr);
-    };
-    const os_name = if (os_res) |ores|
-        if (ores.ty == .success and ores.stdout.len > 0)
-            std.mem.trimEnd(u8, ores.stdout, "\n")
-        else
-            "unknown"
-    else
-        "unknown";
-
-    try w.print("[TIME] {s} os={s}\n", .{ datetime, os_name });
+    try w.print("[TIME] {s}\n", .{datetime});
 }
 
-fn inject_budget_information(w: *std.Io.Writer, _: *r.app.App, agent: *r.agent.Agent) !void {
-    const count = agent.tool_call_count.load(.acquire);
-    const under_half = (agent.max_tool_calls / 2) < count;
-    const tool_call_limit_reached = count >= agent.max_tool_calls;
+fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    const alloc = app.gpa;
+    const reg = &app.context_factory.skills;
+    var rows = std.Io.Writer.Allocating.init(alloc);
+    var count: usize = 0;
 
-    if (tool_call_limit_reached) {
-        try w.print("[BUDGET] Tool call limit reached. Summarize your findings and report back to the user\n", .{});
-        return;
+    for (reg.entries.items) |entry| {
+        if (!entry.meta.model_invocable) continue;
+        count += 1;
+        try rows.writer.print("- `{s}`: ", .{entry.meta.name});
+        try writeCatalogField(&rows.writer, entry.meta.description);
+        try rows.writer.writeByte('\n');
     }
 
-    if (under_half) {
-        try w.print("[BUDGET] Half of your tool call budget is used up. Consider Summarizing your findings\n", .{});
+    const serialized = try rows.toOwnedSlice();
+    defer alloc.free(serialized);
+
+    const digest = std.hash.Wyhash.hash(0, serialized);
+    if (agent.skill_catalog_digest) |last| {
+        if (last == digest) return;
     }
+    agent.skill_catalog_digest = digest;
+
+    try w.writeAll("<available_skills>\n");
+    if (count == 0) {
+        try w.writeAll("(none)\n");
+    } else {
+        try w.writeAll(serialized);
+    }
+    try w.writeAll("</available_skills>\n");
+}
+
+fn writeCatalogField(w: *std.Io.Writer, value: []const u8) !void {
+    const truncated = truncateCatalog(value, 300);
+    for (truncated) |c| {
+        switch (c) {
+            '&' => try w.writeAll("&amp;"),
+            '<' => try w.writeAll("&lt;"),
+            '>' => try w.writeAll("&gt;"),
+            '\n', '\r' => try w.writeByte(' '),
+            else => try w.writeByte(c),
+        }
+    }
+}
+
+fn truncateCatalog(value: []const u8, max: usize) []const u8 {
+    if (value.len <= max) return value;
+    var end = max;
+    while (end > 0 and (value[end] & 0xC0) == 0x80) end -= 1;
+    return value[0..end];
 }

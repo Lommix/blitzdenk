@@ -15,6 +15,7 @@ pub const exec = @import("exec");
 pub const report = @import("report.zig");
 pub const permissions = @import("permissions");
 pub const ContextFactory = @import("context_factory.zig");
+pub const skills = @import("skills.zig");
 pub const session = @import("session.zig");
 pub const util = @import("util.zig");
 pub const clipboard = @import("clipboard.zig");

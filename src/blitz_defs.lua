@@ -73,6 +73,7 @@
 ---@field GLOB string
 ---@field GREP string
 ---@field START_MCP string
+---@field SKILL string
 
 ---@class BlitzEventDef
 ---Emitted after the active session is reset.

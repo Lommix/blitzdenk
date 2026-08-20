@@ -114,16 +114,7 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
     try out.append(alloc, line);
 
     {
-        var skill_count: usize = 0;
-        if (app.context_factory.skill_dir) |skill_dir| {
-            var it = skill_dir.iterate();
-            while (true) {
-                const entry = it.next(app.io) catch break orelse break;
-                if (std.mem.endsWith(u8, entry.name, ".md")) {
-                    skill_count += 1;
-                }
-            }
-        }
+        const skill_count = app.context_factory.skills.entries.items.len;
 
         var l = r.tui.Line{};
         try l.pushSpan(alloc, .{ .content = "├[context:  ", .style = .{ .fg = app.theme.muted } });
