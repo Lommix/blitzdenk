@@ -36,6 +36,8 @@ pub const InitOptions = struct {
 
 pub const Flags = struct {
     cwd_seen: bool = false,
+    cancel: bool = false,
+    overflow_recovery: bool = false,
 };
 
 pub const Agent = struct {
@@ -77,10 +79,7 @@ pub const Agent = struct {
     stream_started_ns: i128 = 0,
     stream_output_bytes: u64 = 0,
     tokens_per_second: f32 = 0,
-    max_tool_calls: u32 = 64,
-    tool_call_count: std.atomic.Value(u32) = .init(0),
     stop_requested: std.atomic.Value(bool) = .init(false),
-    cancel_requested: bool = false,
     reminder_hook: ?*const fn (?*anyopaque, *Agent) anyerror!?[]const u8 = null,
     reminder_hook_ctx: ?*anyopaque = null,
     prepare_hook: ?PrepareHook = null,
@@ -96,7 +95,6 @@ pub const Agent = struct {
     compact_task: ?compact.Task = null,
     resume_options: ?agent_run.OwnedOptions = null,
     run_model: ?sdk.LanguageModel = null,
-    overflow_recovery_attempted: bool = false,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, config: models.Config, options: InitOptions) !Agent {
         var model = try models.Model.init(alloc, config);
@@ -141,7 +139,6 @@ pub const Agent = struct {
             .context_limit = self.context_limit,
         });
         errdefer child.deinit();
-        child.max_tool_calls = self.max_tool_calls;
         try child.setSystemPrompt(self.system_prompt);
         var prior_messages = self.history();
         if (prior_messages.len > 0 and hasToolCall(prior_messages[prior_messages.len - 1])) prior_messages = prior_messages[0 .. prior_messages.len - 1];
@@ -231,7 +228,7 @@ pub const Agent = struct {
             self.resume_options.?.deinit();
             self.resume_options = null;
         }
-        self.overflow_recovery_attempted = false;
+        self.flags.overflow_recovery = false;
         try self.startModel(self.model.languageModel(), options);
     }
 
@@ -265,7 +262,7 @@ pub const Agent = struct {
         self.last_error = null;
         self.last_provider_error = null;
         self.stop_requested.store(false, .release);
-        self.cancel_requested = false;
+        self.flags.cancel = false;
         self.retry_at_ns = 0;
         self.run_started_ns = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
         self.run_ended_ns = 0;
@@ -367,7 +364,7 @@ pub const Agent = struct {
         const completed = task.result != null;
         const next_messages = if (completed) task.takeMessages() else null;
         const is_overflow = if (failure) |err| err == error.ContextOverflow else false;
-        const checkpoint = if (is_overflow and !self.overflow_recovery_attempted)
+        const checkpoint = if (is_overflow and !self.flags.overflow_recovery)
             task.takeCheckpoint()
         else
             null;
@@ -382,11 +379,11 @@ pub const Agent = struct {
             self.last_provider_error = null;
             self.retry_count = 0;
             self.retry_at_ns = 0;
-            self.overflow_recovery_attempted = false;
+            self.flags.overflow_recovery = false;
             if (self.resume_options) |*options| options.deinit();
             self.resume_options = null;
         } else if (checkpoint) |owned| {
-            self.overflow_recovery_attempted = true;
+            self.flags.overflow_recovery = true;
             if (self.messages) |*previous| previous.deinit();
             self.messages = owned;
             self.requestCompaction(.auto, true);
@@ -400,13 +397,13 @@ pub const Agent = struct {
                 self.scheduleRetry();
                 return true;
             }
-            if (self.status != .canceled or !self.cancel_requested) self.status = .failed;
+            if (self.status != .canceled or !self.flags.cancel) self.status = .failed;
         }
         return true;
     }
 
     pub fn shouldAutoRetry(self: *const Agent, failure: anyerror) bool {
-        return !self.cancel_requested and self.willAutoRetry(failure);
+        return !self.flags.cancel and self.willAutoRetry(failure);
     }
 
     pub fn willAutoRetry(self: *const Agent, failure: anyerror) bool {
@@ -440,7 +437,7 @@ pub const Agent = struct {
     }
 
     pub fn cancel(self: *Agent) void {
-        self.cancel_requested = true;
+        self.flags.cancel = true;
         if (self.compact_task) |*task| task.cancel();
         if (self.task) |*task| task.cancel();
         self.status = .canceled;
@@ -536,14 +533,13 @@ pub const Agent = struct {
 
     fn toolCall(ctx: ?*anyopaque, info: sdk.options.ToolCallInfo) void {
         const self: *Agent = @ptrCast(@alignCast(ctx.?));
-        _ = self.tool_call_count.fetchAdd(1, .monotonic);
         if (self.tool_call_hook) |hook| hook(self.tool_call_hook_ctx, info);
     }
 
     fn stopWhen(ctx: ?*anyopaque, info: sdk.options.StopInfo) bool {
         const self: *Agent = @ptrCast(@alignCast(ctx.?));
         if (self.stop_hook) |hook| if (hook(self.stop_hook_ctx, info)) return true;
-        return self.stop_requested.load(.acquire) or self.tool_call_count.load(.acquire) >= self.max_tool_calls;
+        return self.stop_requested.load(.acquire);
     }
 
     fn clearRunHooks(self: *Agent) void {
@@ -696,9 +692,8 @@ test "agent owns SDK state and adopts completed history" {
     try std.testing.expectEqual(@as(u64, 15), agent.usage.total_tokens);
     try std.testing.expectEqualStrings("worker", agent.name);
     try std.testing.expectEqualStrings("/tmp", agent.cwd);
-    agent.max_tool_calls = 1;
     Agent.toolCall(&agent, .{ .tool_call_id = "call", .tool_name = "run", .step = 1 });
-    try std.testing.expect(Agent.stopWhen(&agent, .{ .step = 1, .messages = &.{}, .tool_results = &.{} }));
+    try std.testing.expectFalse(Agent.stopWhen(&agent, .{ .step = 1, .messages = &.{}, .tool_results = &.{} }));
 }
 
 test "prepare step merges queued messages and reminder" {

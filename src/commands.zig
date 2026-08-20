@@ -258,10 +258,6 @@ pub const Command = union(enum) {
                 constructed = true;
                 try app.configureAgent(arg.agent_id, agent);
 
-                if (app.context_factory.agents.get(@enumFromInt(arg.agent_type))) |meta| {
-                    agent.max_tool_calls = meta.default_tool_call_budget;
-                }
-
                 try app.event_bus.emit(app, .{
                     .agent_created = .{ .id = arg.agent_id, .type_idx = agent.type_idx, .depth = agent.depth },
                 });
@@ -273,7 +269,6 @@ pub const Command = union(enum) {
                         app.registry.release(ag_id);
                     }
                     app.main_agent_id = arg.agent_id;
-                    agent.max_tool_calls = std.math.maxInt(u32);
                 }
 
                 if (arg.chat_entry) |en| {

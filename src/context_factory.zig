@@ -67,7 +67,6 @@ pub const AgentDef = struct {
     in_agent_tool: bool = true,
     tools: AgentTools = .{},
     model: ?AgentModelConfig = null,
-    default_tool_call_budget: u32 = 1024,
 };
 
 pub const AgentType = enum(u6) {

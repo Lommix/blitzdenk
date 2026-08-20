@@ -3,13 +3,6 @@
 ---------------------------------------------------------------------------------------------------
 --- Provider configuration
 ---------------------------------------------------------------------------------------------------
-local novita = blitz.add_provider({
-	type = "openai",
-	url = "https://api.novita.ai/openai/v1",
-	key_envar = "NOVITA_API_KEY",
-	max_tokens = 32000,
-})
-
 local opencode = blitz.add_provider({
 	type = "openai",
 	url = "https://opencode.ai/zen/go/v1",
@@ -17,12 +10,18 @@ local opencode = blitz.add_provider({
 	max_tokens = 32000,
 })
 
+local router = blitz.add_provider({
+	type = "response",
+	url = "https://openrouter.ai/api/v1",
+	key_envar = "OPENROUTER_API_KEY",
+})
+
 ---------------------------------------------------------------------------------------------------
 --- Model configuration
 ---------------------------------------------------------------------------------------------------
 local deepseek = blitz.add_model({
-	name = "deepseek/deepseek-v4-flash-0731",
-	provider = novita,
+	name = "deepseek-v4-flash",
+	provider = opencode,
 	cost = { input = 0.14, output = 0.28, cache = 0.028 },
 })
 
