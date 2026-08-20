@@ -61,7 +61,6 @@ pub const Agent = struct {
     cwd: []const u8,
     system_prompt: []const u8 = "",
     skill_catalog_digest: ?u64 = null,
-    session_id: [32]u8,
     usage: sdk.Usage = .{},
     context_tokens: u64 = 0,
     context_limit: u64,
@@ -70,7 +69,6 @@ pub const Agent = struct {
     last_error: ?anyerror = null,
     last_provider_error: ?agent_run.ProviderError = null,
     retry_count: u32 = 0,
-    retry_after_ms: ?u64 = null,
     max_retries: u32 = 10,
     retry_delay_ms: u64 = 10_000,
     retry_at_ns: i128 = 0,
@@ -111,8 +109,6 @@ pub const Agent = struct {
         errdefer metadata.deinit();
         const name = try metadata.allocator().dupe(u8, options.identity.name);
         const cwd = try metadata.allocator().dupe(u8, options.identity.cwd);
-        var random: [16]u8 = undefined;
-        io.random(&random);
         return .{
             .alloc = alloc,
             .io = io,
@@ -127,7 +123,6 @@ pub const Agent = struct {
             .parent = options.identity.parent,
             .depth = options.identity.depth,
             .cwd = cwd,
-            .session_id = std.fmt.bytesToHex(random, .lower),
             .context_limit = options.context_limit,
         };
     }
@@ -271,7 +266,6 @@ pub const Agent = struct {
         self.last_provider_error = null;
         self.stop_requested.store(false, .release);
         self.cancel_requested = false;
-        self.retry_after_ms = null;
         self.retry_at_ns = 0;
         self.run_started_ns = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
         self.run_ended_ns = 0;
@@ -342,7 +336,6 @@ pub const Agent = struct {
                     .attempt = provider_error.attempt,
                 };
                 if (provider_error.will_retry) {
-                    self.retry_after_ms = provider_error.retry_after_ms;
                     self.status = .retrying;
                     self.activity = .retrying;
                 }
@@ -387,7 +380,6 @@ pub const Agent = struct {
             self.status = .complete;
             self.last_error = null;
             self.last_provider_error = null;
-            self.retry_after_ms = null;
             self.retry_count = 0;
             self.retry_at_ns = 0;
             self.overflow_recovery_attempted = false;
