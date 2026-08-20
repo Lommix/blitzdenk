@@ -80,7 +80,8 @@ pub const RunTask = struct {
     tool_call_hook: ?*const fn (?*anyopaque, sdk.options.ToolCallInfo) void = null,
     tool_call_hook_ctx: ?*anyopaque = null,
     result: ?*sdk.TextResult = null,
-    checkpoint: ?OwnedMessages = null,
+    checkpoint_arena: std.heap.ArenaAllocator,
+    checkpoint: ?[]const sdk.Message = null,
     failure: ?anyerror = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, model: sdk.LanguageModel, options: sdk.GenerateOptions) !RunTask {
@@ -89,6 +90,7 @@ pub const RunTask = struct {
             .io = io,
             .arena = std.heap.ArenaAllocator.init(alloc),
             .queue = EventQueue.init(alloc, io),
+            .checkpoint_arena = std.heap.ArenaAllocator.init(alloc),
             .model = model,
             .options = .{},
         };
@@ -125,7 +127,7 @@ pub const RunTask = struct {
         self.cancel();
         self.wait();
         self.queue.deinit();
-        if (self.checkpoint) |*checkpoint| checkpoint.deinit();
+        self.checkpoint_arena.deinit();
         self.arena.deinit();
         self.* = undefined;
     }
@@ -144,9 +146,11 @@ pub const RunTask = struct {
     }
 
     pub fn takeCheckpoint(self: *RunTask) ?OwnedMessages {
-        const checkpoint = self.checkpoint;
+        const checkpoint = self.checkpoint orelse return null;
+        const arena = self.checkpoint_arena;
+        self.checkpoint_arena = std.heap.ArenaAllocator.init(self.alloc);
         self.checkpoint = null;
-        return checkpoint;
+        return .{ .arena = arena, .messages = checkpoint };
     }
 
     fn run(self: *RunTask) void {
@@ -257,9 +261,12 @@ pub const RunTask = struct {
     fn onCheckpoint(ctx: ?*anyopaque, messages: []const sdk.Message) void {
         const self: *RunTask = @ptrCast(@alignCast(ctx.?));
         if (self.checkpoint_hook) |hook| hook(self.checkpoint_hook_ctx, messages);
-        const checkpoint = OwnedMessages.clone(self.alloc, messages) catch return;
-        if (self.checkpoint) |*previous| previous.deinit();
-        self.checkpoint = checkpoint;
+        _ = self.checkpoint_arena.reset(.free_all);
+        const cloned = cloneMessages(self.checkpoint_arena.allocator(), messages) catch {
+            self.checkpoint = null;
+            return;
+        };
+        self.checkpoint = cloned;
     }
 };
 
