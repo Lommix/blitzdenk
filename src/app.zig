@@ -836,7 +836,7 @@ pub const App = struct {
         const progress_line: ?r.tui.Line = mainProgressLine(app, frame_alloc);
         const progress_h: u16 = if (progress_line != null) 1 else 0;
         const footer_h: u16 = input_height +| progress_h;
-        const chat_h: u16 = _chat_status_area.height -| footer_h;
+        const chat_h: u16 = _chat_status_area.height -| progress_h;
 
         if (is_welcome) {
             var wp = r.tui.Paragraph{
