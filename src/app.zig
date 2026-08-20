@@ -281,6 +281,8 @@ pub const App = struct {
     sdk_preview_parts: std.ArrayList(SdkPreviewPart) = .empty,
     sdk_preview_flushed: bool = false,
     sdk_usage: r.sdk.Usage = .{},
+    /// model round-trips of the main agent, incremented on .step events
+    step_count: u32 = 0,
     compaction_indicator_active: bool = false,
     compaction_completion_seen_count: usize = 0,
     current_plan_file: ?[]const u8 = null,
@@ -452,6 +454,7 @@ pub const App = struct {
         self.sdk_preview_parts = .empty;
         self.sdk_preview_flushed = false;
         self.sdk_usage = .{};
+        self.step_count = 0;
         self.compaction_indicator_active = false;
         self.compaction_completion_seen_count = 0;
         self.registry.reset();
@@ -1217,7 +1220,10 @@ pub const App = struct {
                 });
             },
             .step => |step| {
-                if (is_main) self.sdk_usage.add(step.usage);
+                if (is_main) {
+                    self.sdk_usage.add(step.usage);
+                    self.step_count += 1;
+                }
                 const status = self.tool_status_entries.lock(self.io);
                 defer status.unlock();
                 for (step.tool_results) |result| try status.ptr.setResult(alloc, agent_id, .{
@@ -1315,6 +1321,36 @@ pub const App = struct {
 
     pub fn appendChatEntry(self: *App, alloc: std.mem.Allocator, entry: ChatEntry) !void {
         try self.chat_entries.append(alloc, entry);
+    }
+
+    /// Send a user prompt to the main agent: emit hook, queue messages, run.
+    /// Shared by the TUI Enter handler and headless mode.
+    pub fn sendPrompt(self: *App, io: std.Io, parts: []const r.sdk.Part, chat_text: []const u8) !void {
+        const alloc = self.sessionAlloc();
+        const chat_entry = try ChatEntry.userMessageSimple(alloc, .user, chat_text);
+        try self.event_bus.emit(self, .{ .user_message_sent = chat_text });
+
+        if (self.main_agent_id) |id| {
+            try self.appendChatEntry(alloc, chat_entry);
+            const agent = self.registry.get(id).?;
+            try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
+            try self.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
+        } else {
+            const id = self.registry.reserve().?;
+            self.cmd_queue.append(io, .{
+                .spawn_agent = .{
+                    .agent_id = id,
+                    .agent_type = @intFromEnum(r.ContextFactory.AgentType.general),
+                    .prompt = parts,
+                    .chat_entry = chat_entry,
+                    .cwd = self.cwd,
+                },
+            }) catch |err| {
+                self.registry.releaseReservation(id);
+                return err;
+            };
+        }
+        self.running = true;
     }
 
     pub fn flushSdkPreview(self: *App) !void {

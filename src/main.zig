@@ -110,7 +110,9 @@ pub fn main(init: std.process.Init) !void {
     const command_result = CliCommand.parse(split.positional);
     if (cli_flags.debug_log or builtin.mode == .Debug) openDebugLog(init.io);
 
-    const cmd: CliCommand = switch (command_result) {
+    const cmd: CliCommand = if (split.prompt) |p|
+        CliCommand{ .prompt = p }
+    else switch (command_result) {
         .err => |txt| {
             std.debug.print("Error: {s}", .{txt});
             return;
@@ -118,6 +120,11 @@ pub fn main(init: std.process.Init) !void {
         .cmd => |cmd| cmd,
         .none => CliCommand{ .run = "." },
     };
+
+    if (cli_flags.headless and cmd != .prompt) {
+        std.debug.print("Error: --headless requires --prompt\n", .{});
+        std.process.exit(1);
+    }
 
     switch (cmd) {
         .run => |cwd_arg| {
@@ -132,11 +139,13 @@ pub fn main(init: std.process.Init) !void {
                 init.environ_map,
                 cli_flags,
                 null,
+                false,
             );
         },
         .prompt => |prompt| {
             var cwd_buffer: [std.posix.PATH_MAX]u8 = undefined;
-            const len = try std.Io.Dir.cwd().realPathFile(init.io, ".", &cwd_buffer);
+            const cwd_arg: []const u8 = if (split.prompt != null and split.positional.len > 0) split.positional[0] else ".";
+            const len = try std.Io.Dir.cwd().realPathFile(init.io, cwd_arg, &cwd_buffer);
             const cwd = cwd_buffer[0..len];
             try run(
                 cwd,
@@ -146,6 +155,7 @@ pub fn main(init: std.process.Init) !void {
                 init.environ_map,
                 cli_flags,
                 prompt,
+                cli_flags.headless,
             );
         },
         .help => {
@@ -163,6 +173,8 @@ pub fn main(init: std.process.Init) !void {
                 \\  --strict           request permissions
                 \\  --clean            skip local user context
                 \\  --report           write per-agent markdown reports on exit
+                \\  --prompt "STRING"  prefill input in current cwd
+                \\  --headless         with --prompt: run headless, print final message
                 \\
             , .{});
         },
@@ -177,6 +189,7 @@ pub fn run(
     env: *const std.process.Environ.Map,
     flags: CliFlags,
     prompt: ?[]const u8,
+    headless: bool,
 ) !void {
     // Ensure config blitz.lua exists, get paths
     const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;
@@ -184,10 +197,6 @@ pub fn run(
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
     const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
     context_factory.flags.skip_local_context_file = flags.no_context;
-
-    var term = try tui.Terminal.init(arena, io);
-    errdefer term.deinit();
-    defer term.deinit();
 
     var app = try App.init(io, gpa, context_factory, cwd);
     var registry = r.agent_registry.Registry.init(gpa, io);
@@ -263,10 +272,19 @@ pub fn run(
 
     if (config_lua) |info| app.loadHistory(info.dir_path);
 
+    if (headless) {
+        try runHeadless(&app, io, prompt.?);
+        return;
+    }
+
     if (prompt) |p| {
         try app.input_buffer.appendSlice(app.sessionAlloc(), p);
         app.input_cursor = @intCast(app.input_buffer.items.len);
     }
+
+    var term = try tui.Terminal.init(arena, io);
+    errdefer term.deinit();
+    defer term.deinit();
 
     main_loop: while (true) {
         // tick notifications
@@ -726,7 +744,6 @@ pub fn run(
 
                                 app.pushHistory(input);
                                 if (config_lua) |info| app.saveHistory(info.dir_path);
-                                try app.event_bus.emit(&app, .{ .user_message_sent = chat_text });
 
                                 const alloc = app.sessionAlloc();
                                 const parts: []const r.sdk.Part = if (app.screenshot_buf) |img_data|
@@ -741,30 +758,7 @@ pub fn run(
 
                                 app.screenshot_buf = null;
 
-                                const chat_entry = try ChatEntry.userMessageSimple(app.sessionAlloc(), .user, chat_text);
-
-                                if (app.main_agent_id) |id| {
-                                    try app.appendChatEntry(app.sessionAlloc(), chat_entry);
-                                    const agent = app.registry.get(id).?;
-                                    try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
-                                    try app.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
-                                } else {
-                                    const id = app.registry.reserve().?;
-                                    app.cmd_queue.append(io, .{
-                                        .spawn_agent = .{
-                                            .agent_id = id,
-                                            .agent_type = @intFromEnum(reg.AgentType.general),
-                                            .prompt = parts,
-                                            .chat_entry = chat_entry,
-                                            .cwd = app.cwd,
-                                        },
-                                    }) catch |err| {
-                                        app.registry.releaseReservation(id);
-                                        return err;
-                                    };
-                                }
-
-                                app.running = true;
+                                try app.sendPrompt(io, parts, chat_text);
                                 app.input_buffer.clearRetainingCapacity();
                             },
                             .passphrase => {
@@ -819,6 +813,84 @@ pub fn run(
 
         try app.cmd_queue.apply(io, &app);
     }
+}
+
+/// Headless mode: send the prompt, drain the agent loop, print the final
+/// assistant message to stdout. Permissions are always skipped; ask_user
+/// auto-picks the "(recommended)" option.
+fn runHeadless(app: *App, io: std.Io, prompt: []const u8) !void {
+    const alloc = app.sessionAlloc();
+    const parts = try alloc.dupe(r.sdk.Part, &.{.{ .text = prompt }});
+    try app.sendPrompt(io, parts, prompt);
+
+    while (app.running) {
+        try app.cmd_queue.apply(io, app);
+        try app.tick();
+        resolvePermissionsHeadless(app, io);
+        try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    }
+
+    const out = std.Io.File.stdout();
+    var found = false;
+    var i = app.chat_entries.items.len;
+    while (i > 0) {
+        i -= 1;
+        const entry = app.chat_entries.items[i];
+        if (entry.role != .agent) continue;
+        for (entry.parts) |part| switch (part) {
+            .message, .plain_text => |m| {
+                try out.writeStreamingAll(io, m);
+                try out.writeStreamingAll(io, "\n");
+            },
+            else => {},
+        };
+        found = true;
+        break;
+    }
+    if (!found) {
+        std.debug.print("Error: no agent response\n", .{});
+        std.process.exit(1);
+    }
+    printHeadlessFooter(app, io);
+}
+
+fn printHeadlessFooter(app: *App, io: std.Io) void {
+    const agent = app.mainAgent() orelse return;
+    const g = app.tool_status_entries.lock(io);
+    const tool_count = g.ptr.agents[app.main_agent_id.?.index].entries.count();
+    g.unlock();
+    const cost = app.config.modelCost(agent.model.languageModel().modelId(), app.sdk_usage);
+
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    w.print("\n[turns: {d}  tool-calls: {d}  tokens: {d}  cost: ${d:.4}]\n", .{
+        app.step_count,
+        tool_count,
+        app.sdk_usage.total_tokens,
+        cost,
+    }) catch return;
+    std.debug.print("{s}", .{buf[0..w.end]});
+}
+
+fn resolvePermissionsHeadless(app: *App, io: std.Io) void {
+    const g = app.permission_queue.lock(io);
+    defer g.unlock();
+    while (g.ptr.items.len > 0) {
+        const next = g.ptr.swapRemove(0);
+        if (app.registry.state(next.agent_id) != .active) continue;
+        next.state = switch (next.payload) {
+            .ask => |a| .{ .choice = recommendedOption(a.options) },
+            else => .approved,
+        };
+        next.event.set(io);
+    }
+}
+
+fn recommendedOption(options: []const []const u8) u8 {
+    for (options, 0..) |opt, i| {
+        if (std.mem.indexOf(u8, opt, "(recommended)") != null) return @intCast(i);
+    }
+    return 0;
 }
 
 /// Probe `ssh -o BatchMode=yes user@host true`. On success → set SSH target
@@ -1016,6 +1088,8 @@ pub const CliFlags = packed struct {
     no_context: bool = false,
     /// write per-agent markdown reports on exit
     report: bool = false,
+    /// run --prompt headless, print final message instead of tui
+    headless: bool = false,
 
     fn applyToken(self: *CliFlags, tok: []const u8) bool {
         if (std.mem.eql(u8, tok, "--log")) {
@@ -1038,6 +1112,11 @@ pub const CliFlags = packed struct {
             return true;
         }
 
+        if (std.mem.eql(u8, tok, "--headless")) {
+            self.headless = true;
+            return true;
+        }
+
         return false;
     }
 };
@@ -1048,16 +1127,33 @@ pub const CliFlags = packed struct {
 pub const CliArgs = struct {
     flags: CliFlags,
     positional: []const [:0]const u8,
+    /// value of `--prompt`; maps onto the `prompt` command, headless when combined with --headless
+    prompt: ?[:0]const u8 = null,
 
     pub fn split(args: std.process.Args, buf: [][:0]const u8) CliArgs {
         var flags = CliFlags{};
         var n: usize = 0;
+        var prompt: ?[:0]const u8 = null;
 
         var it = args.iterate();
         _ = it.next(); // skip exe name
 
+        var pending_prompt = false;
         while (it.next()) |arg| {
+            if (pending_prompt) {
+                pending_prompt = false;
+                if (arg.len >= 2 and arg[0] == '-' and arg[1] == '-') {
+                    _ = flags.applyToken(arg);
+                } else {
+                    prompt = arg;
+                }
+                continue;
+            }
             if (arg.len >= 2 and arg[0] == '-' and arg[1] == '-') {
+                if (std.mem.eql(u8, arg, "--prompt")) {
+                    pending_prompt = true;
+                    continue;
+                }
                 _ = flags.applyToken(arg);
                 continue;
             }
@@ -1067,7 +1163,7 @@ pub const CliArgs = struct {
             }
         }
 
-        return .{ .flags = flags, .positional = buf[0..n] };
+        return .{ .flags = flags, .positional = buf[0..n], .prompt = prompt };
     }
 };
 
