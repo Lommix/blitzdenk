@@ -7,8 +7,8 @@ pub const AskTool = r.Tool{
     .def = .{
         .name = "ask_user",
         .description =
-        \\Ask the user a multiple-choice question to clarify intent, resolve ambiguity, or let them pick an approach.
-        \\This tool is a must call if any ambiguity is found in the current task. Always tag your recommendation with "(recommended)"!
+        \\Ask the user a multiple-choice question when you cannot resolve an ambiguity on your own.
+        \\Mark your recommended option with "(recommended)".
         \\
         ,
         .prompt_snippet = "Ask the user a question",
