@@ -1298,7 +1298,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
     },
     .{
         .name = "compact",
-        .desc = "Request compaction for the main agent.",
+        .desc = "Compact the main agent now when idle, or before its next turn while running.",
         .ty = LuaType{ .function = .{
             .fn_ptr = LuaFnBind((struct {
                 fn lua_fn(state: *c.lua_State, a: *r.app.App) !void {

@@ -40,7 +40,7 @@
 ---@field cancel fun()
 ---Retry the main agent's last turn.
 ---@field retry fun()
----Request compaction for the main agent.
+---Compact the main agent now when idle, or before its next turn while running.
 ---@field compact fun()
 ---Push a chat entry into the chat log.
 ---@field push_chat_entry fun(role: string, text: string)

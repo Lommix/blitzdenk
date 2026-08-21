@@ -773,10 +773,9 @@ pub const App = struct {
             return;
         }
 
-        if (!self.compaction_indicator_active) return;
-        self.compaction_indicator_active = false;
+        if (self.compaction_indicator_active) self.compaction_indicator_active = false;
 
-        const compacted_count = agent.compaction.must_progress_past_message_count;
+        const compacted_count = agent.compaction.completion_count.load(.acquire);
         if (compacted_count == 0 or compacted_count == self.compaction_completion_seen_count) return;
 
         self.compaction_completion_seen_count = compacted_count;
@@ -3192,6 +3191,26 @@ test "appendChatEntry preserves parts order" {
     try std.testing.expectEqualStrings("answer", entry.parts[1].message);
     try std.testing.expectEqualStrings("think", entry.parts[2].thinking);
     try std.testing.expectEqualStrings("call_2", entry.parts[3].tool_call.call_id);
+}
+
+test "flushed preview precedes compact status" {
+    var app: App = undefined;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.arena_streaming_preview = .init(std.testing.allocator);
+    defer app.arena_streaming_preview.deinit();
+    app.chat_entries = .empty;
+    app.sdk_preview_parts = .empty;
+    app.sdk_preview_flushed = false;
+    var parts = [_]ChatPart{.{ .message = "latest agent output" }};
+    app.streaming_entry = .{ .role = .agent, .parts = &parts };
+
+    try app.flushSdkPreview();
+    app.pushSystemMessage("compaction queued for the next turn", .{});
+
+    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
+    try std.testing.expectEqual(ChatRole.agent, app.chat_entries.items[0].role);
+    try std.testing.expectEqual(ChatRole.system, app.chat_entries.items[1].role);
 }
 
 test "ToolStatusStore retains terminal tool result" {

@@ -194,10 +194,19 @@ pub const Command = union(enum) {
             },
             .compact => {
                 if (app.main_agent_id) |id| {
-                    try app.event_bus.emit(app, .{ .agent_complete = id });
-                    _ = try app.registry.compact(id, false);
+                    const result = try app.registry.compact(id);
+                    if (app.streaming_entry != null) try app.flushSdkPreview();
+                    switch (result) {
+                        .started => app.pushSystemMessage("compaction started", .{}),
+                        .queued => app.pushSystemMessage("compaction queued for the next turn", .{}),
+                        .empty => app.pushSystemMessage("nothing to compact", .{}),
+                    }
                     app.running = true;
                     app.auto_scroll = true;
+                    app.dirty = true;
+                } else {
+                    app.pushSystemMessage("no agent to compact", .{});
+                    app.dirty = true;
                 }
             },
             .reload_mcp => {

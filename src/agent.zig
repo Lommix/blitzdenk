@@ -240,9 +240,9 @@ pub const Agent = struct {
         try self.startModel(self.model.languageModel(), options);
     }
 
-    pub fn requestCompaction(self: *Agent, reason: compact.Reason, continue_after: bool) void {
-        self.compaction.request(reason);
+    pub fn requestCompaction(self: *Agent, reason: compact.Request, continue_after: bool) void {
         self.compaction.continue_after = continue_after;
+        self.compaction.request(reason);
     }
 
     pub fn startCompaction(self: *Agent) !bool {
@@ -250,14 +250,13 @@ pub const Agent = struct {
         const estimate = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, self.history());
         self.context_tokens = estimate;
         if (!self.compaction.shouldStart(self.history().len, estimate, self.context_limit)) return false;
-        if (compact.computeCutIndex(self.history()) == 0 and self.model != .response) {
-            self.compaction.requested = false;
-            return false;
-        }
-        self.compaction.requested = false;
+        const request = self.compaction.requested.swap(.none, .acq_rel);
+        const force = request == .external;
+        const cut_index = if (force) compact.computeForcedCutIndex(self.history()) else compact.computeCutIndex(self.history());
+        if (cut_index == 0 and self.model != .response) return false;
         self.compaction.completed_continue_after = null;
         self.compaction.estimated_input_tokens = estimate;
-        self.compact_task = compact.Task.init(self.alloc, self.io, &self.model, self.tools, self.history());
+        self.compact_task = compact.Task.init(self.alloc, self.io, &self.model, self.tools, self.history(), force);
         self.status = .compacting;
         self.compact_task.?.start();
         return true;
@@ -522,7 +521,10 @@ pub const Agent = struct {
         const estimate = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, messages);
         self.context_tokens = estimate;
         if (!self.compaction.shouldStart(messages.len, estimate, self.context_limit)) return null;
-        if (self.model != .response and compact.computeCutIndex(messages) == 0) return null;
+        const request = self.compaction.requested.swap(.none, .acq_rel);
+        const force = request == .external;
+        const cut_index = if (force) compact.computeForcedCutIndex(messages) else compact.computeCutIndex(messages);
+        if (self.model != .response and cut_index == 0) return null;
 
         self.status = .compacting;
         defer self.status = .running;
@@ -532,12 +534,18 @@ pub const Agent = struct {
         const cancellation = if (self.task) |*task| &task.cancellation else null;
         var outcome = switch (self.model) {
             .response => |*model| compact.compactResponses(scratch.allocator(), self.io, model, self.tools, messages, cancellation),
-            inline else => |*model| compact.compactOrdinary(scratch.allocator(), self.io, model.languageModel(), messages, cancellation),
+            inline else => |*model| compact.compactOrdinary(scratch.allocator(), self.io, model.languageModel(), messages, cancellation, force),
         } catch return null;
         defer outcome.deinit();
 
         const cloned = agent_run.cloneMessages(self.injection_arena.allocator(), outcome.messages.messages) catch return null;
         self.usage.add(outcome.usage);
+        self.context_tokens = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, cloned);
+        self.compaction.last_compacted_message_count = cloned.len;
+        self.compaction.last_compacted_estimate = self.context_tokens;
+        self.compaction.must_progress_past_message_count = cloned.len;
+        self.compaction.resetInFlight();
+        _ = self.compaction.completion_count.fetchAdd(1, .release);
         return cloned;
     }
 
@@ -574,10 +582,11 @@ pub const Agent = struct {
             self.compaction.last_compacted_estimate = self.context_tokens;
             self.compaction.must_progress_past_message_count = self.history().len;
             self.compaction.resetInFlight();
+            _ = self.compaction.completion_count.fetchAdd(1, .release);
             const display = self.tool_display.lock(self.io);
             display.ptr.clearRetainingCapacity();
             display.unlock();
-            self.status = .idle;
+            self.status = .complete;
             self.last_error = null;
             if (self.compaction.completed_continue_after == true and self.resume_options != null) {
                 var options = self.resume_options.?.value;
@@ -738,14 +747,14 @@ test "agent adopts compacted SDK history and preserves durable tool state" {
         .messages = try compact.installSummary(std.testing.allocator, agent.history(), "summary"),
         .usage = .{ .input_tokens = 10, .output_tokens = 2, .total_tokens = 12 },
     };
-    agent.compact_task = compact.Task.init(agent.alloc, agent.io, &agent.model, agent.tools, agent.history());
+    agent.compact_task = compact.Task.init(agent.alloc, agent.io, &agent.model, agent.tools, agent.history(), false);
     agent.compact_task.?.result = outcome;
     outcome = undefined;
     agent.compact_task.?.finished.store(true, .release);
     agent.compaction.continue_after = false;
     agent.status = .compacting;
     try std.testing.expect(agent.reap());
-    try std.testing.expectEqual(Status.idle, agent.status);
+    try std.testing.expectEqual(Status.complete, agent.status);
     try std.testing.expectEqual(@as(u64, 12), agent.usage.total_tokens);
     try std.testing.expectEqual(false, agent.compaction.completed_continue_after.?);
     try std.testing.expect(std.mem.endsWith(u8, agent.history()[agent.history().len - 1].text(), "summary"));

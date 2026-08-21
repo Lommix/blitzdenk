@@ -54,31 +54,31 @@ pub const SUMMARY_PREFIX =
     \\
 ;
 
-pub const KEEP_RECENT_TOKENS: u64 = 20_000;
+pub const KEEP_RECENT_TOKENS: u64 = 1024 * 16;
 pub const TOOL_RESULT_MAX_CHARS: usize = COMPACT_HEAD_CHARS + COMPACT_TAIL_CHARS;
 pub const COMPACT_HEAD_CHARS: usize = 4096;
 pub const COMPACT_TAIL_CHARS: usize = 1024;
-pub const RESERVE_TOKENS: u64 = 16_384;
+pub const RESERVE_TOKENS: u64 = 1024 * 8;
 pub const TIMEOUT_MS: u64 = 5 * 60_000;
 
-pub const Reason = enum {
+pub const Request = enum(u8) {
+    none,
     auto,
     external,
 };
 
 pub const State = struct {
-    requested: bool = false,
-    reason: Reason = .auto,
+    requested: std.atomic.Value(Request) = .init(.none),
     estimated_input_tokens: u64 = 0,
     last_compacted_message_count: usize = 0,
     last_compacted_estimate: u64 = 0,
     must_progress_past_message_count: usize = 0,
     continue_after: bool = true,
     completed_continue_after: ?bool = null,
+    completion_count: std.atomic.Value(usize) = .init(0),
 
-    pub fn request(self: *State, reason: Reason) void {
-        self.requested = true;
-        self.reason = reason;
+    pub fn request(self: *State, reason: Request) void {
+        self.requested.store(reason, .release);
     }
 
     pub fn resetInFlight(self: *State) void {
@@ -87,8 +87,8 @@ pub const State = struct {
     }
 
     pub fn shouldStart(self: *const State, message_count: usize, estimate: u64, context_limit: u64) bool {
+        if (self.requested.load(.acquire) != .none) return true;
         if (self.must_progress_past_message_count != 0 and message_count <= self.must_progress_past_message_count) return false;
-        if (self.requested) return true;
         if (message_count <= 3) return false;
         if (self.last_compacted_message_count == message_count and self.last_compacted_estimate >= autoCompactLimit(context_limit)) return false;
         return estimate >= autoCompactLimit(context_limit);
@@ -111,14 +111,15 @@ pub const Task = struct {
     model: *models.Model,
     tools: []const sdk.Tool,
     messages: []const sdk.Message,
+    force: bool,
     cancellation: sdk.CancellationToken = .{},
     finished: std.atomic.Value(bool) = .init(false),
     future: ?std.Io.Future(void) = null,
     result: ?Outcome = null,
     failure: ?anyerror = null,
 
-    pub fn init(alloc: std.mem.Allocator, io: std.Io, model: *models.Model, tools: []const sdk.Tool, messages: []const sdk.Message) Task {
-        return .{ .alloc = alloc, .io = io, .model = model, .tools = tools, .messages = messages };
+    pub fn init(alloc: std.mem.Allocator, io: std.Io, model: *models.Model, tools: []const sdk.Tool, messages: []const sdk.Message, force: bool) Task {
+        return .{ .alloc = alloc, .io = io, .model = model, .tools = tools, .messages = messages, .force = force };
     }
 
     pub fn start(self: *Task) void {
@@ -161,7 +162,7 @@ pub const Task = struct {
         defer self.finished.store(true, .release);
         self.result = switch (self.model.*) {
             .response => |*model| compactResponses(self.alloc, self.io, model, self.tools, self.messages, &self.cancellation),
-            inline else => |*model| compactOrdinary(self.alloc, self.io, model.languageModel(), self.messages, &self.cancellation),
+            inline else => |*model| compactOrdinary(self.alloc, self.io, model.languageModel(), self.messages, &self.cancellation, self.force),
         } catch |err| {
             self.failure = err;
             return;
@@ -202,6 +203,11 @@ pub fn computeCutIndex(messages: []const sdk.Message) usize {
     return 0;
 }
 
+pub fn computeForcedCutIndex(messages: []const sdk.Message) usize {
+    for (messages) |message| if (message.role != .system) return messages.len;
+    return 0;
+}
+
 pub fn buildCompactPrompt(alloc: std.mem.Allocator, io: std.Io, messages: []const sdk.Message, cut_index: usize) ![]const sdk.Message {
     var transcript: std.Io.Writer.Allocating = .init(alloc);
     errdefer transcript.deinit();
@@ -221,7 +227,10 @@ pub fn buildCompactPrompt(alloc: std.mem.Allocator, io: std.Io, messages: []cons
 }
 
 pub fn installSummary(alloc: std.mem.Allocator, messages: []const sdk.Message, summary: []const u8) !agent_run.OwnedMessages {
-    const cut_index = computeCutIndex(messages);
+    return installSummaryAt(alloc, messages, summary, computeCutIndex(messages));
+}
+
+fn installSummaryAt(alloc: std.mem.Allocator, messages: []const sdk.Message, summary: []const u8, cut_index: usize) !agent_run.OwnedMessages {
     var next: std.ArrayList(sdk.Message) = .empty;
     defer next.deinit(alloc);
     if (findSystemMessage(messages)) |system| try next.append(alloc, system);
@@ -248,8 +257,9 @@ pub fn compactOrdinary(
     model: sdk.LanguageModel,
     messages: []const sdk.Message,
     cancellation: ?*sdk.CancellationToken,
+    force: bool,
 ) !Outcome {
-    const cut_index = computeCutIndex(messages);
+    const cut_index = if (force) computeForcedCutIndex(messages) else computeCutIndex(messages);
     if (cut_index == 0) return error.NothingToCompact;
     var scratch = std.heap.ArenaAllocator.init(alloc);
     defer scratch.deinit();
@@ -263,7 +273,7 @@ pub fn compactOrdinary(
     });
     const summary = if (result.text.len > 0) result.text else summaryFromMessages(result.messages);
     return .{
-        .messages = try installSummary(alloc, messages, if (summary.len > 0) summary else "(no summary available)"),
+        .messages = try installSummaryAt(alloc, messages, if (summary.len > 0) summary else "(no summary available)", cut_index),
         .usage = result.total_usage,
     };
 }
@@ -539,6 +549,12 @@ test "SDK compaction installs summaries and response parts" {
     defer response.deinit();
     try std.testing.expectEqual(@as(usize, 2), response.messages.len);
     try std.testing.expectEqualStrings("opaque", response.messages[1].parts()[0].provider_data.data);
+
+    try std.testing.expectEqual(messages.len, computeForcedCutIndex(&messages));
+    var forced = try installSummaryAt(std.testing.allocator, &messages, "forced", computeForcedCutIndex(&messages));
+    defer forced.deinit();
+    try std.testing.expectEqual(@as(usize, 2), forced.messages.len);
+    try std.testing.expect(std.mem.endsWith(u8, forced.messages[1].text(), "forced"));
 }
 
 test "ordinary SDK compaction generates and installs a summary" {
@@ -564,8 +580,14 @@ test "ordinary SDK compaction generates and installs a summary" {
     const messages = [_]sdk.Message{ sdk.SystemMessage("system"), sdk.UserMessage(big), sdk.UserMessage("recent") };
     var fixture: u8 = 0;
     const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
-    var outcome = try compactOrdinary(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, &messages, null);
+    var outcome = try compactOrdinary(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, &messages, null, false);
     defer outcome.deinit();
     try std.testing.expectEqual(@as(u64, 12), outcome.usage.total_tokens);
     try std.testing.expect(std.mem.endsWith(u8, outcome.messages.messages[outcome.messages.messages.len - 1].text(), "generated summary"));
+
+    const small = [_]sdk.Message{ sdk.SystemMessage("system"), sdk.UserMessage("small conversation") };
+    var forced = try compactOrdinary(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, &small, null, true);
+    defer forced.deinit();
+    try std.testing.expectEqual(@as(usize, 2), forced.messages.messages.len);
+    try std.testing.expect(std.mem.endsWith(u8, forced.messages.messages[1].text(), "generated summary"));
 }

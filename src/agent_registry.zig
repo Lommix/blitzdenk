@@ -3,6 +3,7 @@ const sdk = @import("blitz-sdk");
 const agent_mod = @import("agent.zig");
 const agent_id = @import("agent-id");
 const agent_run = @import("agent_run.zig");
+const compact = @import("compact.zig");
 const models = @import("models");
 const report = @import("report.zig");
 const log = std.log.scoped(.agent_registry);
@@ -29,6 +30,12 @@ pub const Slot = struct {
 pub const ModelUsage = struct {
     model: []const u8,
     usage: sdk.Usage,
+};
+
+pub const CompactRequestResult = enum {
+    started,
+    queued,
+    empty,
 };
 
 pub const Registry = struct {
@@ -205,16 +212,18 @@ pub const Registry = struct {
         try self.retry(id, options);
     }
 
-    pub fn compact(self: *Registry, id: AgentId, continue_after: bool) !bool {
+    pub fn compact(self: *Registry, id: AgentId) !CompactRequestResult {
         const slot = self.slotFor(id) orelse return error.AgentNotFound;
         const agent = if (slot.agent) |*value| value else return error.AgentNotFound;
-        agent.requestCompaction(.external, continue_after);
+        const running = agent.task != null;
+        agent.requestCompaction(.external, running);
+        if (running) return .queued;
         const started = try agent.startCompaction();
         if (started) {
             slot.event.reset();
             slot.state.store(.active, .release);
         }
-        return started;
+        return if (started) .started else .empty;
     }
 
     pub fn drain(self: *Registry, id: AgentId, max: usize, ctx: ?*anyopaque, handler: *const fn (?*anyopaque, agent_run.Event) void) usize {
@@ -466,7 +475,7 @@ test "usageByModel includes live unaccounted slot usage" {
     try std.testing.expectEqual(@as(u64, 7), by_model[0].usage.total_tokens);
 }
 
-test "registry accepts explicit idle compaction without runnable history" {
+test "registry reports empty explicit idle compaction without history" {
     var registry = Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
     const id = registry.reserve().?;
@@ -476,10 +485,53 @@ test "registry accepts explicit idle compaction without runnable history" {
         .base_url = "https://example.com/v1",
         .provider = .{ .openai = .{} },
     }, .{});
-    try agent.setMessages(&.{sdk.UserMessage("short")});
-    try std.testing.expect(!try registry.compact(id, false));
-    try std.testing.expect(!agent.compaction.requested);
+    try std.testing.expectEqual(CompactRequestResult.empty, try registry.compact(id));
+    try std.testing.expectEqual(compact.Request.none, agent.compaction.requested.load(.acquire));
     try std.testing.expectEqual(agent_mod.Status.idle, agent.status);
+}
+
+test "registry completes after standalone compaction" {
+    var registry = Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    const big = "x" ** 70_000;
+    try agent.setMessages(&.{ sdk.UserMessage(big), sdk.UserMessage("recent") });
+    agent.compact_task = compact.Task.init(agent.alloc, agent.io, &agent.model, agent.tools, agent.history(), false);
+    agent.compact_task.?.result = .{
+        .messages = try compact.installSummary(std.testing.allocator, agent.history(), "summary"),
+        .usage = .{},
+    };
+    agent.compact_task.?.finished.store(true, .release);
+    agent.compaction.continue_after = false;
+    agent.status = .compacting;
+    try std.testing.expect(registry.reap(id));
+    try std.testing.expectEqual(SlotState.complete, registry.state(id).?);
+    try std.testing.expectEqual(agent_mod.Status.complete, agent.status);
+}
+
+test "registry queues explicit compaction while agent runs" {
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    var registry = Registry.init(std.testing.allocator, io);
+    defer registry.deinit();
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    try registry.run(id, .{ .max_steps = 0 });
+    try std.testing.expectEqual(CompactRequestResult.queued, try registry.compact(id));
+    try std.testing.expectEqual(compact.Request.external, agent.compaction.requested.load(.acquire));
+    try std.testing.expect(agent.compaction.continue_after);
+    try std.testing.expect(agent.compact_task == null);
 }
 
 test "registry retry is allowed while an agent is retrying" {
