@@ -698,7 +698,7 @@ test "agent owns SDK state and adopts completed history" {
     try std.testing.expectEqualStrings("worker", agent.name);
     try std.testing.expectEqualStrings("/tmp", agent.cwd);
     Agent.toolCall(&agent, .{ .tool_call_id = "call", .tool_name = "run", .step = 1 });
-    try std.testing.expectFalse(Agent.stopWhen(&agent, .{ .step = 1, .messages = &.{}, .tool_results = &.{} }));
+    try std.testing.expect(!Agent.stopWhen(&agent, .{ .step = 1, .messages = &.{}, .tool_results = &.{} }));
 }
 
 test "prepare step merges queued messages and reminder" {

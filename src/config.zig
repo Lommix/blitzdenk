@@ -95,9 +95,6 @@ pub const BlitzdenkCfg = struct {
         const provider_idx = @intFromEnum(provider);
         if (provider_idx >= self.provider_count or !self.providers[provider_idx].active) return error.UnknownProvider;
         if (name.len > 256) return error.NameTooLong;
-        for (self.models[0..self.model_count]) |*m| {
-            if (std.mem.eql(u8, m.getName(), name)) return error.DuplicateModel;
-        }
         const slot = &self.models[self.model_count];
         slot.* = .{};
         @memcpy(slot.name[0..name.len], name);
