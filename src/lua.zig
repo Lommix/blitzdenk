@@ -382,15 +382,20 @@ pub const Blitz = LuaType{
                                     entry.guidelines_len = len;
                                 }
 
-                                // schema (string) OR args (table) — at least one required
                                 if (getStringField(state, def.idx, "schema", &entry.schema)) |len| {
                                     entry.schema_len = len;
                                 } else {
                                     _ = c.lua_getfield(state, def.idx, "args");
                                     defer c.lua_pop(state, 1);
-                                    if (c.lua_type(state, -1) != c.LUA_TTABLE) return error.SchemaOrArgsRequired;
-                                    const json = try argsTableToJsonSchema(state, -1, &entry.schema);
-                                    entry.schema_len = json.len;
+                                    const args_type = c.lua_type(state, -1);
+                                    if (args_type == c.LUA_TTABLE) {
+                                        const json = try argsTableToJsonSchema(state, -1, &entry.schema);
+                                        entry.schema_len = json.len;
+                                    } else if (args_type == c.LUA_TNIL) {
+                                        const schema = "{\"type\":\"object\",\"properties\":{}}";
+                                        @memcpy(entry.schema[0..schema.len], schema);
+                                        entry.schema_len = schema.len;
+                                    } else return error.InvalidToolArgs;
                                 }
 
                                 entry.L = state;

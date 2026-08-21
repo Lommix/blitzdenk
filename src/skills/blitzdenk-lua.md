@@ -106,6 +106,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 ## Custom tools
 
 `blitz.register_tool` returns the tool name string to use in tool sets.
+Omit both `args` and `schema` for a tool that takes no arguments.
 
 ```lua
 local my_tool = blitz.register_tool({
@@ -124,6 +125,42 @@ local my_tool = blitz.register_tool({
     end,
 })
 ```
+
+The `args` shorthand supports only `type`, `description`, and `required`. Use
+`schema` for arrays, nested objects, enums, or other JSON Schema constraints:
+
+```lua
+local process_files = blitz.register_tool({
+    name = "process_files",
+    description = "Process several files",
+    schema = [[
+{
+  "type": "object",
+  "properties": {
+    "paths": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Files to process"
+    }
+  },
+  "required": ["paths"],
+  "additionalProperties": false
+}
+]],
+    func = function(ctx, call)
+        for _, path in ipairs(call.arguments.paths) do
+            print(path)
+        end
+        return { msg = "done" }
+    end,
+})
+```
+
+`schema` must be a JSON Schema string no longer than 2048 bytes. If both
+`schema` and `args` are present, `schema` is used. JSON arrays are passed to
+the tool function as 1-indexed Lua tables. Blitzdenk does not validate tool
+arguments against the schema before calling the function, so validate critical
+inputs in the function.
 
 Tool function rules:
 
