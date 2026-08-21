@@ -5,14 +5,14 @@ pub const MAX_OPTIONS = 8;
 
 pub const AskTool = r.Tool{
     .def = .{
-        .name = "ask_user",
+        .name = "ask",
         .description =
         \\Ask the user a multiple-choice question when you cannot resolve an ambiguity on your own.
         \\Mark your recommended option with "(recommended)".
         \\
         ,
         .prompt_snippet = "Ask the user a question",
-        .prompt_guidelines = "Call ask_user when the task is ambiguous.",
+        .prompt_guidelines = "Call ask when the task is ambiguous.",
         .parameters_schema =
         \\{
         \\  "type": "object",
