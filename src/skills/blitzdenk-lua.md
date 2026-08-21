@@ -129,7 +129,7 @@ Tool function rules:
 
 - `call.name`, `call.id`, `call.arguments` (table of parsed args).
 - `ctx` fields/methods: `ctx.cwd`, `ctx.vision` (calling model supports images), `ctx.agent_id`, `ctx.state`, `ctx:set_status(msg)`,
-  `ctx:set_child_id(id)`, `ctx:approve(name, args)`, `ctx:plan(path, text)`,
+  `ctx:set_child_id(id)`, `ctx:approve(description)`, `ctx:plan(path, text)`,
   `ctx:ask(header, question, options)`. `approve`/`plan`/`ask` return a status
   integer plus an optional string; compare with `blitz.REQ_STATUS_*`.
 - Return `{ msg = "..." }`. To attach an image:

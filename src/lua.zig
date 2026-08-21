@@ -186,7 +186,7 @@ const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "state", .ty = LuaType.table },
     .{ .name = "set_status", .ty = LuaType{ .raw = "fun(self: BlitzCtx, msg: string)" }, .desc = "Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines." },
     .{ .name = "set_child_id", .ty = LuaType{ .raw = "fun(self: BlitzCtx, agent_id: BlitzAgentId)" } },
-    .{ .name = "approve", .ty = LuaType{ .raw = "fun(self: BlitzCtx, tool_name: string, tool_arguments: string): integer, string|nil" } },
+    .{ .name = "approve", .ty = LuaType{ .raw = "fun(self: BlitzCtx, description: string): integer, string|nil" } },
     .{ .name = "plan", .ty = LuaType{ .raw = "fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil" } },
     .{ .name = "ask", .ty = LuaType{ .raw = "fun(self: BlitzCtx, header: string, question: string, options: string[]): integer, string|nil" } },
 } } };
@@ -2896,18 +2896,16 @@ fn luaApprove(L: ?*c.lua_State) callconv(.c) c_int {
         return pushStatusNil(state, REQ_STATUS_DENIED);
     };
 
-    if (c.lua_type(state, 2) != c.LUA_TSTRING or c.lua_type(state, 3) != c.LUA_TSTRING) {
+    if (c.lua_type(state, 2) != c.LUA_TSTRING) {
         return pushStatusNil(state, REQ_STATUS_DENIED);
     }
 
-    const tool_name = readAnyValue([]const u8, state, 2).?;
-    const tool_arguments = readAnyValue([]const u8, state, 3).?;
+    const description = readAnyValue([]const u8, state, 2).?;
 
     var req = r.permissions.Request{
         .agent_id = bridge.tool_ctx.base.self_id,
         .payload = .{ .call = .{
-            .tool_name = tool_name,
-            .tool_arguments = tool_arguments,
+            .description = description,
         } },
     };
 

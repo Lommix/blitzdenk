@@ -124,7 +124,7 @@
 ---Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines.
 ---@field set_status fun(self: BlitzCtx, msg: string)
 ---@field set_child_id fun(self: BlitzCtx, agent_id: BlitzAgentId)
----@field approve fun(self: BlitzCtx, tool_name: string, tool_arguments: string): integer, string|nil
+---@field approve fun(self: BlitzCtx, description: string): integer, string|nil
 ---@field plan fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil
 ---@field ask fun(self: BlitzCtx, header: string, question: string, options: string[]): integer, string|nil
 

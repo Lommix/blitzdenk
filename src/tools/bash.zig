@@ -7,7 +7,7 @@ pub const BashTool = r.Tool{
         .name = "bash",
         .description =
         \\Execute a bash command in the current working directory.
-        \\Returns stdout and stderr. Output is truncated to the last 
+        \\Returns stdout and stderr. Output is truncated to the last
         ++ r.DISPLAY_CAP_TEXT ++
             \\ (whichever is hit first); the full output is saved to a file whose path is reported when available.
             \\
@@ -28,7 +28,7 @@ pub const BashTool = r.Tool{
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct {
         command: []const u8,
-        description: ?[]const u8 = null,
+        description: []const u8,
         timeout: ?f64 = null,
     };
 
@@ -53,16 +53,22 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     var w = r.tui.AnsiWriter.init(&sgr_buf);
 
     w.styled(.{ .modifier = .{ .bold = true } }, "bash ");
-    w.styled(.{ .fg = app.theme.info }, args.description orelse "");
+    w.styled(.{ .fg = app.theme.info }, args.description);
     w.writeAll(" ");
     w.styled(.{ .fg = app.theme.muted }, cleaned_command_str);
 
     r.setToolStatus(ctx, call, w.finish()) catch {};
 
+    const description = std.fmt.allocPrint(
+        ctx.alloc,
+        "{s}\n\nRun: `{s}` ?",
+        .{ args.description, args.command },
+    ) catch args.description;
+
     const decision = ctx.requestPermission(call.id, .{ .call = .{
-        .tool_name = call.name,
-        .tool_arguments = call.input,
+        .description = description,
     } });
+
     switch (decision) {
         .approved => {},
         .denied => return r.errResult(call, "User declined bash"),

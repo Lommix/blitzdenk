@@ -8,8 +8,7 @@ pub const ToolDiff = struct {
 };
 
 pub const ToolCallPayload = struct {
-    tool_name: []const u8,
-    tool_arguments: []const u8,
+    description: []const u8,
 };
 
 pub const AskPayload = struct {

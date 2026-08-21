@@ -125,8 +125,13 @@ pub const LineIterator = struct {
         var byte_end: usize = 0;
         var col: usize = 0;
         var last_space_byte: ?usize = null;
+        var explicit_break = false;
         while (byte_end < remaining.len and col < self.width) {
             const b = remaining[byte_end];
+            if (b == '\n') {
+                explicit_break = true;
+                break;
+            }
             if (b == ' ') last_space_byte = byte_end;
             const cp_len = std.unicode.utf8ByteSequenceLength(b) catch break;
             if (byte_end + cp_len > remaining.len) break;
@@ -135,7 +140,7 @@ pub const LineIterator = struct {
         }
 
         var end = byte_end;
-        if (byte_end < remaining.len) {
+        if (byte_end < remaining.len and !explicit_break) {
             // Line exceeds width — break at last space if possible
             if (last_space_byte) |sp| {
                 if (sp > 0) end = sp;
@@ -143,7 +148,7 @@ pub const LineIterator = struct {
         }
         const slice = remaining[0..end];
         self.pos += end;
-        if (self.pos < self.text.len and self.text[self.pos] == ' ') self.pos += 1;
+        if (self.pos < self.text.len and (self.text[self.pos] == ' ' or self.text[self.pos] == '\n')) self.pos += 1;
         return slice;
     }
 };
@@ -170,6 +175,12 @@ pub fn wrappedRowCount(text: []const u8, width: usize) u16 {
     var count: u16 = 0;
     while (iter.next() != null) count += 1;
     return count;
+}
+
+test "wrapped rows honor newlines" {
+    try std.testing.expectEqual(@as(u16, 3), wrappedRowCount("first\nsecond line", 6));
+    try std.testing.expectEqual(@as(u16, 3), wrappedRowCount("first\n\nlast", 20));
+    try std.testing.expectEqual(@as(u16, 2), wrappedRowCount("first line\nlast", 20));
 }
 
 pub fn renderError(buf: *Buffer, last_error: ?anyerror, detail: ?[]const u8, x: u16, y: u16, width: u16, height: u16) void {

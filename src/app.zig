@@ -808,7 +808,11 @@ pub const App = struct {
                     if (entry.payload == .ask) {
                         break :blk askPermissionInputHeight(entry.payload.ask.options, entry.payload.ask.header, entry.payload.ask.question, area.width, area.height);
                     }
-                    break :blk 9; // header + options + status + 2 padding
+                    if (entry.payload == .call) {
+                        const rows = text_utils.wrappedRowCount(entry.payload.call.description, area.width -| 7);
+                        break :blk @min(8 +| rows, area.height -| 1);
+                    }
+                    break :blk 9;
                 },
             }
         };
@@ -1908,7 +1912,7 @@ fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, prog
     switch (app.input_mode) {
         .text => renderInputContent(app, arena, input_area, buf) catch {},
         .passphrase => renderPassphraseInput(app, input_area, buf),
-        .perm_message => renderPermMessageContent(app, input_area, buf),
+        .perm_message => |*pm| renderPermMessageContent(app, pm, input_area, buf),
         .perm_select => renderPermissionContent(app, input_area, buf),
     }
 
@@ -2009,8 +2013,7 @@ fn inputWrappedRows(app: *App, arena: std.mem.Allocator, inner_w: u16) u16 {
     return @max(rows, 1);
 }
 
-fn renderPermMessageContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const pm = &app.input_mode.perm_message;
+fn renderPermMessageContent(app: *App, pm: *const InputMode.PermMessage, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const input_widget: r.tui.Input = .{
         .text = pm.buf[0..pm.len],
         .border_style = .{ .fg = app.theme.warn },
@@ -2722,14 +2725,9 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
         return;
     }
 
-    // Render header line with call/diff/plan summary (single line, truncated)
     var header_buf: [256]u8 = undefined;
     const header_line: []const u8 = switch (entry.payload) {
-        .call => |p| blk: {
-            const args_trunc = if (p.tool_arguments.len > 60) p.tool_arguments[0..60] else p.tool_arguments;
-            const n = std.fmt.bufPrint(&header_buf, "{s}({s})", .{ p.tool_name, args_trunc }) catch "{s}";
-            break :blk n;
-        },
+        .call => |p| p.description,
         .diff => |p| blk: {
             const n = std.fmt.bufPrint(&header_buf, "edit: {s}", .{p.path}) catch "edit";
             break :blk n;
@@ -2741,7 +2739,10 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
         },
         .ask => unreachable,
     };
-    buf.setStringMax(inner.x + 1, inner.y, header_line, .{ .fg = app.theme.warn }, inner.width -| 1);
+
+    const width = inner.width -| 1;
+    const header_rows = text_utils.wrappedRowCount(header_line, width);
+    _ = text_utils.renderWrappedText(buf, header_line, inner.x + 1, inner.y, width, header_rows, 0, .{ .fg = app.theme.warn });
 
     const labels = [3][]const u8{ "allow?  yes", "        no", "        enter message" };
     const labels_sel = [3][]const u8{ "allow? >yes", "       >no", "       >enter message" };
@@ -2754,7 +2755,7 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
 
     const cur_sel = currentSelection(app);
     for (0..count) |i| {
-        const y = inner.y + 1 + @as(u16, @intCast(i));
+        const y = inner.y + header_rows + @as(u16, @intCast(i));
         if (y >= inner.y +| inner.height) break;
         const selected = cur_sel == @as(u8, @intCast(i));
         const style: r.tui.Style = if (selected) .{ .modifier = .{ .reverse = true } } else .{};
@@ -2772,10 +2773,8 @@ fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, bu
     const total_rows: usize = opts_len + 1; // + "enter message"
 
     // Clamp selection.
-    if (app.input_mode == .perm_select) {
-        const ps = &app.input_mode.perm_select;
-        if (ps.selected >= total_rows) ps.selected = @intCast(total_rows - 1);
-    }
+    const ps = &app.input_mode.perm_select;
+    if (ps.selected >= total_rows) ps.selected = @intCast(total_rows - 1);
     const cur_sel = currentSelection(app);
 
     // Line 0+: "[header] question" (wrapped)
@@ -2808,7 +2807,7 @@ fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, bu
 
 fn askPermissionInputHeight(options: []const []const u8, header: []const u8, question: []const u8, area_width: u16, area_height: u16) u16 {
     const opts_count: usize = @min(options.len, r.tools.ask.MAX_OPTIONS);
-    const width = area_width -| 3;
+    const width = area_width -| 7;
     var rows: u16 = 0;
     var header_buf: [256]u8 = undefined;
     const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ header, question }) catch question;
@@ -2816,7 +2815,7 @@ fn askPermissionInputHeight(options: []const []const u8, header: []const u8, que
     rows +|= 1; // "enter message"
     rows +|= wrappedOptionRows(options[0..opts_count], width);
     const max_area = area_height -| 1;
-    return @min(rows +| 3, max_area);
+    return @min(rows +| 6, max_area);
 }
 
 fn wrappedOptionRows(options: []const []const u8, width: u16) u16 {
@@ -2824,7 +2823,7 @@ fn wrappedOptionRows(options: []const []const u8, width: u16) u16 {
     for (options) |opt| {
         var opt_buf: [512]u8 = undefined;
         const opt_line = std.fmt.bufPrint(&opt_buf, "  {s}", .{opt}) catch opt;
-        rows +|= text_utils.wrappedRowCount(opt_line, width);
+        rows +|= text_utils.wrappedRowCount(opt_line, width -| 2);
     }
     return rows;
 }
