@@ -712,10 +712,10 @@ pub const App = struct {
     pub fn configureAgent(self: *const App, id: r.AgentId, agent: *r.agent.Agent) !void {
         try self.context_factory.configureAgent(&self.config, agent, self.toolBase(id));
         agent.context_limit = self.default_context_limit;
-        agent.reminder_hook = buildReminderOpaque;
-        agent.reminder_hook_ctx = @ptrCast(@constCast(self));
-        agent.tools_refresh_hook = refreshRunningAgentTools;
-        agent.tools_refresh_hook_ctx = @ptrCast(@constCast(self));
+        agent.lifetime.reminder = buildReminderOpaque;
+        agent.lifetime.reminder_ctx = @ptrCast(@constCast(self));
+        agent.lifetime.refresh_tools = refreshRunningAgentTools;
+        agent.lifetime.refresh_tools_ctx = @ptrCast(@constCast(self));
     }
 
     pub fn toolBase(self: *const App, id: r.AgentId) r.tools.context.BaseContext {

@@ -9,6 +9,22 @@ const PrepareHook = *const fn (?*anyopaque, sdk.options.PrepareStepInfo) anyerro
 const ToolCallHook = *const fn (?*anyopaque, sdk.options.ToolCallInfo) void;
 const StopHook = *const fn (?*anyopaque, sdk.options.StopInfo) bool;
 
+const LifetimeHooks = struct {
+    reminder: ?*const fn (?*anyopaque, *Agent) anyerror!?[]const u8 = null,
+    reminder_ctx: ?*anyopaque = null,
+    refresh_tools: ?*const fn (?*anyopaque, *Agent) anyerror!void = null,
+    refresh_tools_ctx: ?*anyopaque = null,
+};
+
+const RunHooks = struct {
+    prepare: ?PrepareHook = null,
+    prepare_ctx: ?*anyopaque = null,
+    tool_call: ?ToolCallHook = null,
+    tool_call_ctx: ?*anyopaque = null,
+    stop: ?StopHook = null,
+    stop_ctx: ?*anyopaque = null,
+};
+
 pub const Status = enum {
     idle,
     running,
@@ -80,16 +96,8 @@ pub const Agent = struct {
     stream_output_bytes: u64 = 0,
     tokens_per_second: f32 = 0,
     stop_requested: std.atomic.Value(bool) = .init(false),
-    reminder_hook: ?*const fn (?*anyopaque, *Agent) anyerror!?[]const u8 = null,
-    reminder_hook_ctx: ?*anyopaque = null,
-    prepare_hook: ?PrepareHook = null,
-    prepare_hook_ctx: ?*anyopaque = null,
-    tool_call_hook: ?ToolCallHook = null,
-    tool_call_hook_ctx: ?*anyopaque = null,
-    stop_hook: ?StopHook = null,
-    stop_hook_ctx: ?*anyopaque = null,
-    tools_refresh_hook: ?*const fn (?*anyopaque, *Agent) anyerror!void = null,
-    tools_refresh_hook_ctx: ?*anyopaque = null,
+    lifetime: LifetimeHooks = .{},
+    run_hooks: RunHooks = .{},
     tools_dirty: std.atomic.Value(bool) = .init(false),
     task: ?agent_run.RunTask = null,
     compact_task: ?compact.Task = null,
@@ -275,12 +283,14 @@ pub const Agent = struct {
         }
         run_options.messages = self.history();
         run_options.tools = self.tools;
-        self.prepare_hook = run_options.hooks.on_prepare_step;
-        self.prepare_hook_ctx = run_options.hooks.on_prepare_step_ctx;
-        self.tool_call_hook = run_options.hooks.on_tool_call;
-        self.tool_call_hook_ctx = run_options.hooks.on_tool_call_ctx;
-        self.stop_hook = run_options.hooks.stop_when;
-        self.stop_hook_ctx = run_options.hooks.stop_when_ctx;
+        self.run_hooks = .{
+            .prepare = run_options.hooks.on_prepare_step,
+            .prepare_ctx = run_options.hooks.on_prepare_step_ctx,
+            .tool_call = run_options.hooks.on_tool_call,
+            .tool_call_ctx = run_options.hooks.on_tool_call_ctx,
+            .stop = run_options.hooks.stop_when,
+            .stop_ctx = run_options.hooks.stop_when_ctx,
+        };
         run_options.hooks.on_prepare_step = prepareStep;
         run_options.hooks.on_prepare_step_ctx = self;
         run_options.hooks.on_tool_call = toolCall;
@@ -468,8 +478,8 @@ pub const Agent = struct {
         const self: *Agent = @ptrCast(@alignCast(ctx.?));
         self.injection_mutex.lockUncancelable(self.io);
         defer self.injection_mutex.unlock(self.io);
-        const upstream = if (self.prepare_hook) |hook|
-            try hook(self.prepare_hook_ctx, info)
+        const upstream = if (self.run_hooks.prepare) |hook|
+            try hook(self.run_hooks.prepare_ctx, info)
         else
             sdk.options.PrepareStepResult{};
 
@@ -484,8 +494,8 @@ pub const Agent = struct {
 
         var refreshed_tools: ?[]const sdk.Tool = null;
         if (self.tools_dirty.swap(false, .acq_rel)) {
-            if (self.tools_refresh_hook) |hook| {
-                hook(self.tools_refresh_hook_ctx, self) catch |err| {
+            if (self.lifetime.refresh_tools) |hook| {
+                hook(self.lifetime.refresh_tools_ctx, self) catch |err| {
                     std.log.scoped(.agent).warn("tool refresh failed: {s}", .{@errorName(err)});
                 };
             }
@@ -493,7 +503,7 @@ pub const Agent = struct {
         }
 
         const reminder = if (info.number > 0)
-            if (self.reminder_hook) |hook| try hook(self.reminder_hook_ctx, self) else null
+            if (self.lifetime.reminder) |hook| try hook(self.lifetime.reminder_ctx, self) else null
         else
             null;
         if (self.queued_messages.items.len == 0 and reminder == null) {
@@ -533,22 +543,17 @@ pub const Agent = struct {
 
     fn toolCall(ctx: ?*anyopaque, info: sdk.options.ToolCallInfo) void {
         const self: *Agent = @ptrCast(@alignCast(ctx.?));
-        if (self.tool_call_hook) |hook| hook(self.tool_call_hook_ctx, info);
+        if (self.run_hooks.tool_call) |hook| hook(self.run_hooks.tool_call_ctx, info);
     }
 
     fn stopWhen(ctx: ?*anyopaque, info: sdk.options.StopInfo) bool {
         const self: *Agent = @ptrCast(@alignCast(ctx.?));
-        if (self.stop_hook) |hook| if (hook(self.stop_hook_ctx, info)) return true;
+        if (self.run_hooks.stop) |hook| if (hook(self.run_hooks.stop_ctx, info)) return true;
         return self.stop_requested.load(.acquire);
     }
 
     fn clearRunHooks(self: *Agent) void {
-        self.prepare_hook = null;
-        self.prepare_hook_ctx = null;
-        self.tool_call_hook = null;
-        self.tool_call_hook_ctx = null;
-        self.stop_hook = null;
-        self.stop_hook_ctx = null;
+        self.run_hooks = .{};
         self.stop_requested.store(false, .release);
     }
 
@@ -710,7 +715,7 @@ test "prepare step merges queued messages and reminder" {
         .provider = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
-    agent.reminder_hook = Fixture.reminder;
+    agent.lifetime.reminder = Fixture.reminder;
     try agent.queueReminder("queued");
 
     const prepared = try Agent.prepareStep(&agent, .{ .number = 1, .messages = &.{} });
