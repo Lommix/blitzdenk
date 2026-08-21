@@ -17,6 +17,7 @@ pub const EditTool = r.Tool{
         \\
         ,
         .prompt_snippet = "Edit a single file using text replacement",
+        .prompt_guidelines = "Always prefer edit over bash for editing files",
         .parameters_schema =
         \\{
         \\  "type": "object",
