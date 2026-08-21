@@ -122,11 +122,11 @@
 ---@field agent_id BlitzAgentId
 ---@field state table
 ---Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines.
----@field set_status fun(msg: string)
----@field set_child_id fun(agent_id: BlitzAgentId)
----@field approve fun(tool_name: string, tool_arguments: string): integer, string|nil
----@field plan fun(path: string, plan_text: string): integer, string|nil
----@field ask fun(header: string, question: string, options: string[]): integer, string|nil
+---@field set_status fun(self: BlitzCtx, msg: string)
+---@field set_child_id fun(self: BlitzCtx, agent_id: BlitzAgentId)
+---@field approve fun(self: BlitzCtx, tool_name: string, tool_arguments: string): integer, string|nil
+---@field plan fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil
+---@field ask fun(self: BlitzCtx, header: string, question: string, options: string[]): integer, string|nil
 
 ---@class BlitzCall
 ---@field id string
@@ -306,6 +306,8 @@
 ---Push a new popup notification with a lifetime of 8s to the top right corner.
 ---@field push_notification fun(message: string)
 ---@field state BlitzState
+---Override the status bar text. Return a string to display, or nil to keep the default.
+---@field status_bar_render fun(): string|nil
 
 ---@type Blitz
 blitz = {}
