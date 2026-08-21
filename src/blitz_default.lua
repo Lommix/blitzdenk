@@ -7,7 +7,6 @@ local opencode = blitz.add_provider({
 	type = "openai",
 	url = "https://opencode.ai/zen/go/v1",
 	key_envar = "OPENCODE_API_KEY",
-	max_tokens = 32000,
 })
 
 local router = blitz.add_provider({
@@ -40,8 +39,8 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.ASK,
 	blitz.tools.AGENT,
 	blitz.tools.SKILL,
+	blitz.tools.START_MCP,
 	-- blitz.tools.PATCH, -- EDIT/WRITE alternative
-	-- blitz.tools.START_MCP,
 })
 
 ---------------------------------------------------------------------------------------------------
@@ -143,14 +142,29 @@ blitz.status_bar_render = function()
 	local orange = "\27[38;5;208m"
 	local red = "\27[31m"
 	local reset = "\27[0m"
-	return white .. blitz.get_model_name(blitz.AGENT_GENERAL) .. reset
-		.. " | Cache:" .. green .. fmt(use.cache) .. reset
-		.. " | In:" .. orange .. fmt(use.input) .. reset
-		.. " | Out:" .. orange .. fmt(use.output) .. reset
+	return white
+		.. blitz.get_model_name(blitz.AGENT_GENERAL)
+		.. reset
+		.. " | Cache:"
+		.. green
+		.. fmt(use.cache)
+		.. reset
+		.. " | In:"
+		.. orange
+		.. fmt(use.input)
+		.. reset
+		.. " | Out:"
+		.. orange
+		.. fmt(use.output)
+		.. reset
 		.. " | Ctx:"
 		.. math.floor(blitz.context_percent())
 		.. "%"
-		.. " | Cost:" .. red .. string.format("%.2f", use.cost) .. reset .. "$"
+		.. " | Cost:"
+		.. red
+		.. string.format("%.2f", use.cost)
+		.. reset
+		.. "$"
 end
 
 ---------------------------------------------------------------------------------------------------
