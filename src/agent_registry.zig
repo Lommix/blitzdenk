@@ -35,6 +35,7 @@ pub const ModelUsage = struct {
 pub const CompactRequestResult = enum {
     started,
     queued,
+    running,
     empty,
 };
 
@@ -215,6 +216,7 @@ pub const Registry = struct {
     pub fn compact(self: *Registry, id: AgentId) !CompactRequestResult {
         const slot = self.slotFor(id) orelse return error.AgentNotFound;
         const agent = if (slot.agent) |*value| value else return error.AgentNotFound;
+        if (agent.compact_task != null) return .running;
         const running = agent.task != null;
         agent.requestCompaction(.external, running);
         if (running) return .queued;
@@ -490,7 +492,7 @@ test "registry reports empty explicit idle compaction without history" {
     try std.testing.expectEqual(agent_mod.Status.idle, agent.status);
 }
 
-test "registry completes after standalone compaction" {
+test "registry reports and completes standalone compaction" {
     var registry = Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
     const id = registry.reserve().?;
@@ -510,6 +512,8 @@ test "registry completes after standalone compaction" {
     agent.compact_task.?.finished.store(true, .release);
     agent.compaction.continue_after = false;
     agent.status = .compacting;
+    try std.testing.expectEqual(CompactRequestResult.running, try registry.compact(id));
+    try std.testing.expectEqual(compact.Request.none, agent.compaction.requested.load(.acquire));
     try std.testing.expect(registry.reap(id));
     try std.testing.expectEqual(SlotState.complete, registry.state(id).?);
     try std.testing.expectEqual(agent_mod.Status.complete, agent.status);

@@ -199,6 +199,7 @@ pub const Command = union(enum) {
                     switch (result) {
                         .started => app.pushSystemMessage("compaction started", .{}),
                         .queued => app.pushSystemMessage("compaction queued for the next turn", .{}),
+                        .running => app.pushSystemMessage("compaction already running", .{}),
                         .empty => app.pushSystemMessage("nothing to compact", .{}),
                     }
                     app.running = true;
