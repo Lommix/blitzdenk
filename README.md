@@ -18,7 +18,7 @@ Extend in Lua with hot reload. Let the harness code itself.
 
 ## Defaults
 
-The default config comes with some useful commands for quick testing
+The default config comes with some useful commands for quick testing.
 
 - `/plan <prompt>`: Plan with the agent - based on grill-me skill
 - `/review <?prompt>`: Launch multiple challenger agents to review what was done.
@@ -40,62 +40,19 @@ Open the blitz.lua configuration at `~/.config/blitzdenk/blitz.lua`
 Setup at least on provider. The **key_envar** is not the API key! It's the environment var holding your key.
 
 ```lua
-local anthropic = blitz.add_provider({
-	type = "anthropic",
-	url = "https://api.anthropic.com/v1/",
-	key_envar = "CLAUDE_API_KEY",
-	max_tokens = 32000,
-	temperature = 1,
+local opencode = blitz.add_provider({
+	type = "openai", -- "response" | "anthropic"
+	url = "https://opencode.ai/zen/go/v1",
+	key_envar = "OPENCODE_API_KEY",
 })
 
-local llama = blitz.add_provider({
-	type = "openai",
-	url = "http://127.0.0.1:8118",
-	key_envar = "",
-	max_tokens = 32000,
-})
-
-local novita = blitz.add_provider({
-	type = "openai",
-	url = "https://api.novita.ai/openai/v1",
-	key_envar = "NOVITA_API_KEY",
-	temperature = 1,
-	max_tokens = 32000,
-})
-
-local openrouter = blitz.add_provider({
-	type = "openai",
-	url = "https://openrouter.ai/api/v1",
-	key_envar = "OPENROUTER_API_KEY",
-	temperature = 1,
-	max_tokens = 32000,
-})
-
-local xai = blitz.add_provider({
-	type = "response",
-	url = "https://api.x.ai/v1",
-	key_envar = "XAI_API_KEY",
-	temperature = 1,
-	max_tokens = 32000,
-})
-
-local openai = blitz.add_provider({
-	type = "response",
-	url = "https://api.openai.com/v1",
-	key_envar = "OPENAI_API_KEY",
-	max_tokens = 32000,
-})
-```
-
-Then bind a model to each agent
-
-```lua
-local ds_flash = blitz.add_model({
-	name = "deepseek/deepseek-v4-flash-0731",
-	provider = novita,
+local opencode_ds_flash = blitz.add_model({
+	name = "deepseek-v4-flash",
+	provider = opencode,
 	cost = { input = 0.14, output = 0.28, cache = 0.028 },
 })
-blitz.set_model_agent(blitz.AGENT_GENERAL, ds_flash, "max")
+
+blitz.set_model_agent(blitz.AGENT_GENERAL, opencode_ds_flash, "max")
 ```
 
 ## Documentation
