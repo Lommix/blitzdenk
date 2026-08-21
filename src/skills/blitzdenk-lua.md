@@ -266,7 +266,7 @@ local pw = blitz.mcp.add({
     args = { "-y", "@playwright/mcp@latest", "--browser=chromium" },
     tools_prefix = "pw_",
 })
-blitz.mcp.enable(pw)
+blitz.mcp.enable(pw) -- start on load (optional)
 ```
 
 `add` registers a stdio server (disabled) and returns an integer id. `enable`
