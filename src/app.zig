@@ -6,7 +6,7 @@ const log = std.log.scoped(.app);
 pub const PROMPT_HISTORY_FILENAME = "prompt_history.json";
 pub const MAX_HISTORY = 100;
 pub const CONTEXT_LIMIT = 124 * 1024;
-const COMMAND_COMPLETION_ROWS = 8;
+const COMMAND_COMPLETION_ROWS = 64;
 
 pub const ChatRole = enum { system, user, agent };
 
@@ -586,10 +586,12 @@ pub const App = struct {
         switch (move) {
             .accept => {},
             .next => {
-                if (already) t.completion_selected = (t.completion_selected + 1) % rows.len;
+                if (already) {
+                    if (t.completion_selected + 1 < rows.len) t.completion_selected += 1;
+                }
             },
             .prev => {
-                if (already) t.completion_selected = (t.completion_selected + rows.len - 1) % rows.len;
+                if (already and t.completion_selected > 0) t.completion_selected -= 1;
             },
         }
 
@@ -923,9 +925,12 @@ pub const App = struct {
                 p.border = .single;
                 p.style.bg = app.theme.overlay_dark;
 
+                const visible = 8;
                 const selected = @min(app.input_mode.text.completion_selected, completions.len - 1);
-                for (completions.items[0..completions.len], 0..) |cmp, i| {
-                    const style: r.tui.Style = if (i == selected)
+                const start = if (selected >= visible) selected + 1 - visible else 0;
+                const end = @min(completions.len, start + visible);
+                for (completions.items[start..end], 0..) |cmp, i| {
+                    const style: r.tui.Style = if (start + i == selected)
                         .{ .modifier = .{ .bold = true, .reverse = true } }
                     else
                         .{ .modifier = .{ .bold = true } };
