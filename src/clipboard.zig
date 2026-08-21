@@ -1,16 +1,9 @@
-// Clipboard image paste support: reads an image off the system clipboard
-// (Wayland via wl-paste, X11 via xclip), writes it to a temp file under
-// `/tmp/blitz` and returns a `file://` URL. Text pastes are untouched.
 const std = @import("std");
 const exec = @import("exec");
 const util = @import("util.zig");
 
-/// Display token that stands in for a pasted-image URL in the input buffer.
 pub const TOKEN = "[Image]";
-pub const TOKEN_LEN = TOKEN.len;
 
-/// Fixed URL prefix every pasted image gets. The display masks anything
-/// starting with this into `[Image]`, and backspace deletes it as one unit.
 pub const PREFIX = "file://" ++ util.TMP_DIR ++ "/paste_";
 
 const MAX_CLIP_IMAGE_BYTES = 4 * 1024 * 1024;
@@ -20,14 +13,11 @@ pub const ImageData = struct {
     ext: []const u8,
 };
 
-/// Byte range of a pasted-image URL in the input buffer.
 pub const PasteRange = struct {
     start: usize,
     end: usize,
 };
 
-/// If the character left of `pos` is inside a pasted-image URL, returns its
-/// byte range. Mirrors deleteChar's "remove the char before the cursor" rule.
 pub fn findPasteAt(buffer: []const u8, pos: usize) ?PasteRange {
     var i: usize = 0;
     while (std.mem.indexOfPos(u8, buffer, i, PREFIX)) |start| {
@@ -43,54 +33,46 @@ pub const Display = struct {
     cursor: usize,
 };
 
-/// Maps a raw input buffer to its rendered form: pasted-image URLs are masked
-/// with `[Image]` and `cursor` is remapped to the display position. `text` is
-/// allocated with `alloc`; the caller owns it.
 pub fn toDisplay(alloc: std.mem.Allocator, buffer: []const u8, cursor: usize) !Display {
     var out: std.ArrayList(u8) = .empty;
     var display_cursor: usize = 0;
     var cursor_resolved = false;
-    var out_len: usize = 0;
     var i: usize = 0;
     while (i < buffer.len) {
         if (std.mem.indexOfPos(u8, buffer, i, PREFIX)) |start| {
             if (start > i) {
                 if (!cursor_resolved and cursor < start) {
-                    display_cursor = out_len + (cursor - i);
+                    display_cursor = out.items.len + (cursor - i);
                     cursor_resolved = true;
                 }
                 try out.appendSlice(alloc, buffer[i..start]);
-                out_len += start - i;
                 i = start;
             }
             const end = urlEnd(buffer, start);
             if (!cursor_resolved) {
                 if (cursor <= start) {
-                    display_cursor = out_len;
+                    display_cursor = out.items.len;
                     cursor_resolved = true;
                 } else if (cursor <= end) {
-                    display_cursor = out_len + TOKEN_LEN;
+                    display_cursor = out.items.len + TOKEN.len;
                     cursor_resolved = true;
                 }
             }
             try out.appendSlice(alloc, TOKEN);
-            out_len += TOKEN_LEN;
             i = end;
             continue;
         }
         if (!cursor_resolved) {
-            display_cursor = out_len + (cursor - i);
+            display_cursor = out.items.len + (cursor - i);
             cursor_resolved = true;
         }
         try out.appendSlice(alloc, buffer[i..]);
         return .{ .text = out.items, .cursor = display_cursor };
     }
-    if (!cursor_resolved) display_cursor = out_len;
+    if (!cursor_resolved) display_cursor = out.items.len;
     return .{ .text = out.items, .cursor = display_cursor };
 }
 
-/// End offset of the pasted-image URL starting at `start`. The tail is the
-/// generated filename (`paste_<timestamp><ext>`), so consume filename chars.
 fn urlEnd(buffer: []const u8, start: usize) usize {
     var i = start + PREFIX.len;
     while (i < buffer.len and
@@ -111,9 +93,6 @@ fn readMime(alloc: std.mem.Allocator, pool: *exec.CmdPool, argv: []const []const
     return null;
 }
 
-/// Reads the first supported image type found on the clipboard.
-/// Returns `null` when the clipboard holds no image (or no tool is available).
-/// Caller frees `data`.
 pub fn readImage(alloc: std.mem.Allocator, pool: *exec.CmdPool) !?ImageData {
     const env = pool.env;
 
@@ -136,9 +115,6 @@ pub fn readImage(alloc: std.mem.Allocator, pool: *exec.CmdPool) !?ImageData {
     return null;
 }
 
-/// Writes raw image bytes to `<TMP_DIR>/paste_<ts><ext>` and returns a `file://`
-/// URL pointing at it. Caller frees the returned string. `/tmp` is cleared on
-/// reboot, so pastes are low-value cache that cleans up on its own.
 pub fn saveImage(io: std.Io, alloc: std.mem.Allocator, data: []const u8, ext: []const u8) ![]const u8 {
     std.Io.Dir.createDirAbsolute(io, util.TMP_DIR, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -172,8 +148,8 @@ test "saveImage writes bytes and returns file URL" {
 
 test "findPasteAt hits inside and at the end of a pasted URL" {
     const buffer = "hi " ++ PREFIX ++ "123.png bye";
-    const start: usize = 3; // past the "hi " prefix
-    const end = start + PREFIX.len + 7; // "123.png"
+    const start: usize = 3;
+    const end = start + PREFIX.len + 7;
 
     try std.testing.expectEqual(@as(usize, start), findPasteAt(buffer, start + 1).?.start);
     try std.testing.expectEqual(@as(usize, end), findPasteAt(buffer, end).?.end);
@@ -190,27 +166,23 @@ test "toDisplay masks urls and remaps cursor" {
     const url = PREFIX ++ "123.png";
     const buffer = "ab " ++ url ++ " cd";
 
-    // cursor after the url (at its end)
     {
         const d = try toDisplay(a, buffer, 3 + url.len);
         try std.testing.expectEqualStrings("ab [Image] cd", d.text);
-        try std.testing.expectEqual(@as(usize, 3 + TOKEN_LEN), d.cursor);
+        try std.testing.expectEqual(@as(usize, 3 + TOKEN.len), d.cursor);
     }
-    // cursor inside the url
     {
         const d = try toDisplay(a, buffer, 3 + 5);
-        try std.testing.expectEqual(@as(usize, 3 + TOKEN_LEN), d.cursor);
+        try std.testing.expectEqual(@as(usize, 3 + TOKEN.len), d.cursor);
     }
-    // cursor before the url
     {
         const d = try toDisplay(a, buffer, 3);
         try std.testing.expectEqualStrings("ab [Image] cd", d.text);
         try std.testing.expectEqual(@as(usize, 3), d.cursor);
     }
-    // cursor at end of buffer
     {
         const d = try toDisplay(a, buffer, buffer.len);
-        try std.testing.expectEqual(@as(usize, buffer.len - url.len + TOKEN_LEN), d.cursor);
+        try std.testing.expectEqual(@as(usize, buffer.len - url.len + TOKEN.len), d.cursor);
     }
 }
 
@@ -224,5 +196,5 @@ test "toDisplay masks multiple urls and cursor shift" {
     const buffer = url1 ++ " mid " ++ url2;
     const d = try toDisplay(a, buffer, buffer.len);
     try std.testing.expectEqualStrings("[Image] mid [Image]", d.text);
-    try std.testing.expectEqual(@as(usize, TOKEN_LEN + 5 + TOKEN_LEN), d.cursor);
+    try std.testing.expectEqual(@as(usize, TOKEN.len + 5 + TOKEN.len), d.cursor);
 }

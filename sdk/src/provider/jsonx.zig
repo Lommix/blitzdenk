@@ -39,6 +39,11 @@ pub fn buildChatRequest(
     }
     for (params.messages) |msg| {
         if (msg.role == .tool) {
+            var tool_image: ?types.Part = null;
+            for (msg.parts()) |part| switch (part) {
+                .image => tool_image = part,
+                else => {},
+            };
             for (msg.parts()) |part| {
                 const result = switch (part) {
                     .tool_result => |result| result,
@@ -51,7 +56,14 @@ pub fn buildChatRequest(
                 try s.objectField("tool_call_id");
                 try s.write(result.id);
                 try s.objectField("content");
-                try s.write(result.output);
+                if (tool_image) |image_part| {
+                    try s.beginArray();
+                    try writePart(&s, .{ .text = result.output });
+                    try writePart(&s, image_part);
+                    try s.endArray();
+                } else {
+                    try s.write(result.output);
+                }
                 try s.endObject();
             }
             continue;
@@ -896,6 +908,21 @@ test "chat tool messages use OpenAI fields" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tool_call_id\":\"call_1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"tool_call\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":false") != null);
+}
+
+test "chat tool messages carry image parts" {
+    const messages = [_]types.Message{
+        .{ .role = .assistant, .content = &.{types.Part.toolCallPart("call_1", "view_image", "{\"file_path\":\"x.png\"}")} },
+        .{ .role = .tool, .content = &.{
+            types.Part.toolResultPart("call_1", "view_image", "Loaded image"),
+            types.Part.imagePart("data:image/png;base64,aW1n", "image/png"),
+        } },
+    };
+    const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":[{\"type\":\"text\",\"text\":\"Loaded image\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"image_url\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "data:image/png;base64,aW1n") != null);
 }
 
 test "chat structured output and tool choice" {

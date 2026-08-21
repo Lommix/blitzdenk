@@ -6,7 +6,7 @@ pub const SkillTool = r.Tool{
         .name = "skill",
         .description = "Load a skill on demand by name. Returns the skill instructions",
         .prompt_snippet = "Load a skill by name",
-        .prompt_guidelines = "Load skills when the task matches their use case",
+        .prompt_guidelines = "Load a skill when its description matches the task, before acting",
         .parameters_schema =
         \\{
         \\  "type": "object",

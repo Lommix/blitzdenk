@@ -19,8 +19,9 @@ local router = blitz.add_provider({
 --- Model configuration
 ---------------------------------------------------------------------------------------------------
 local deepseek = blitz.add_model({
-	name = "deepseek-v4-flash",
+	name = "deepseek-v4-flash-vision-exp",
 	provider = opencode,
+    vision = true,
 	cost = { input = 0.14, output = 0.28, cache = 0.028 },
 })
 
@@ -40,6 +41,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.AGENT,
 	blitz.tools.SKILL,
 	blitz.tools.START_MCP,
+	blitz.tools.VIEW_IMAGE,
 	-- blitz.tools.PATCH, -- EDIT/WRITE alternative
 })
 
