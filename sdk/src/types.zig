@@ -246,6 +246,29 @@ pub const StepResult = struct {
     finish_reason: FinishReason = .other,
     usage: Usage = .{},
     response: ResponseMetadata = .{},
+
+    pub fn deinit(self: StepResult, alloc: std.mem.Allocator) void {
+        alloc.free(self.text);
+        alloc.free(self.reasoning);
+        for (self.tool_calls) |call| {
+            alloc.free(call.id);
+            alloc.free(call.name);
+            alloc.free(call.input);
+        }
+        alloc.free(self.tool_calls);
+        for (self.tool_results) |result| {
+            alloc.free(result.tool_call_id);
+            alloc.free(result.tool_name);
+            alloc.free(result.output);
+            if (result.image) |image| {
+                alloc.free(image.url);
+                alloc.free(image.media_type);
+            }
+        }
+        alloc.free(self.tool_results);
+        alloc.free(self.response.id);
+        alloc.free(self.response.model);
+    }
 };
 
 pub const TextResult = struct {
@@ -264,12 +287,7 @@ pub const TextResult = struct {
         alloc.free(self.text);
         alloc.free(self.reasoning);
         alloc.free(self.tool_calls);
-        for (self.steps) |step| {
-            alloc.free(step.tool_calls);
-            alloc.free(step.tool_results);
-            alloc.free(step.response.id);
-            alloc.free(step.response.model);
-        }
+        for (self.steps) |step| step.deinit(alloc);
         alloc.free(self.steps);
         alloc.free(self.response.id);
         alloc.free(self.response.model);

@@ -145,6 +145,101 @@ test "sdk smoke: tool loop with fake model" {
     try std.testing.expectEqual(types.Role.assistant, result.messages[3].role);
 }
 
+test "sdk steps survive prepare hook history replacement" {
+    const types = sdk.types;
+    const model = sdk.model;
+
+    const Fixture = struct {
+        calls: usize = 0,
+
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generateFn(
+            ctx: *anyopaque,
+            alloc: std.mem.Allocator,
+            _: std.Io,
+            params: model.GenerateParams,
+            _: ?*std.http.Client,
+            _: u32,
+        ) anyerror!*model.GenerateResult {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            const result = try alloc.create(model.GenerateResult);
+            if (self.calls == 1) {
+                const tool_calls = try alloc.alloc(types.ToolCall, 1);
+                tool_calls[0] = .{
+                    .id = try alloc.dupe(u8, "call-1"),
+                    .name = try alloc.dupe(u8, "echo"),
+                    .input = try alloc.dupe(u8, "{}"),
+                };
+                result.* = .{
+                    .text = try alloc.dupe(u8, "before"),
+                    .tool_calls = tool_calls,
+                    .finish_reason = .tool_calls,
+                };
+            } else {
+                try std.testing.expectEqual(@as(usize, 1), params.messages.len);
+                try std.testing.expectEqualStrings("compacted", params.messages[0].text());
+                result.* = .{ .text = try alloc.dupe(u8, "after"), .finish_reason = .stop };
+            }
+            return result;
+        }
+
+        fn stream(
+            ctx: *anyopaque,
+            alloc: std.mem.Allocator,
+            io: std.Io,
+            params: model.GenerateParams,
+            client: ?*std.http.Client,
+            retries: u32,
+            _: *model.StreamContext,
+        ) anyerror!*model.GenerateResult {
+            return generateFn(ctx, alloc, io, params, client, retries);
+        }
+    };
+
+    const Hooks = struct {
+        fn prepare(_: ?*anyopaque, info: sdk.options.PrepareStepInfo) anyerror!sdk.options.PrepareStepResult {
+            if (info.number != 2) return .{};
+            return .{ .messages = &.{sdk.UserMessage("compacted")}, .replace = true };
+        }
+    };
+
+    const Tool = struct {
+        fn execute(_: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: sdk.ToolCall) anyerror!sdk.ToolOutput {
+            return .{ .content = "tool output" };
+        }
+    };
+
+    var fixture = Fixture{};
+    const vtable = model.ModelVTable{
+        .model_id = Fixture.modelId,
+        .generate = Fixture.generateFn,
+        .stream = Fixture.stream,
+    };
+    const chat = model.LanguageModel{ .ctx = &fixture, .vtable = &vtable };
+    const tools = [_]sdk.Tool{.{ .name = "echo", .execute = Tool.execute }};
+
+    var result = try sdk.complete(std.testing.allocator, std.testing.io, chat, .{
+        .prompt = "hi",
+        .tools = &tools,
+        .max_steps = 2,
+        .hooks = .{ .on_prepare_step = Hooks.prepare },
+    });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("beforeafter", result.text);
+    try std.testing.expectEqual(@as(usize, 2), result.steps.len);
+    try std.testing.expectEqualStrings("before", result.steps[0].text);
+    try std.testing.expectEqualStrings("call-1", result.steps[0].tool_calls[0].id);
+    try std.testing.expectEqualStrings("tool output", result.steps[0].tool_results[0].output);
+    try std.testing.expectEqualStrings("after", result.steps[1].text);
+    try std.testing.expectEqual(@as(usize, 2), result.messages.len);
+    try std.testing.expectEqualStrings("compacted", result.messages[0].text());
+}
+
 test "sdk smoke: reminder hook injects user message" {
     const types = sdk.types;
     const model = sdk.model;

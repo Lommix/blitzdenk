@@ -57,16 +57,6 @@ fn streamEmit(ctx: ?*anyopaque, chunk: types.StreamChunk) void {
     }
 }
 
-const StepScratch = struct {
-    number: usize,
-    finish_reason: types.FinishReason,
-    usage: types.Usage,
-    response_id: []const u8 = "",
-    response_model: []const u8 = "",
-    assistant_index: usize,
-    tool_count: usize = 0,
-};
-
 fn run(
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -89,12 +79,9 @@ fn run(
         });
     }
 
-    var steps: std.ArrayList(StepScratch) = .empty;
+    var steps: std.ArrayList(types.StepResult) = .empty;
     errdefer {
-        for (steps.items) |sc| {
-            alloc.free(sc.response_id);
-            alloc.free(sc.response_model);
-        }
+        for (steps.items) |step| step.deinit(alloc);
         steps.deinit(alloc);
     }
 
@@ -214,21 +201,7 @@ fn run(
             errdefer types.freeMessage(alloc, assistant_message);
             try history.append(alloc, assistant_message);
         }
-
-        {
-            const resp_id = try alloc.dupe(u8, result.response.id);
-            errdefer alloc.free(resp_id);
-            const resp_model = try alloc.dupe(u8, result.response.model);
-            errdefer alloc.free(resp_model);
-            try steps.append(alloc, .{
-                .number = step_no,
-                .finish_reason = result.finish_reason,
-                .usage = result.usage,
-                .response_id = resp_id,
-                .response_model = resp_model,
-                .assistant_index = history.items.len - 1,
-            });
-        }
+        const assistant_msg = history.items[history.items.len - 1];
 
         const has_tools = result.tool_calls.len > 0;
         if (!has_tools and result.finish_reason == .tool_calls) {
@@ -246,7 +219,6 @@ fn run(
         };
         if (execute_tools) {
             try appendToolMessages(alloc, &history, tool_results);
-            steps.items[steps.items.len - 1].tool_count = tool_results.len;
         }
 
         var should_stop = false;
@@ -283,6 +255,14 @@ fn run(
             });
         }
 
+        try steps.append(alloc, try makeStepResult(
+            alloc,
+            step_no,
+            assistant_msg,
+            tool_results,
+            result,
+        ));
+
         result.deinit(alloc);
         alloc.destroy(result);
         if (!execute_tools or should_stop) break;
@@ -293,40 +273,13 @@ fn run(
     var reasoning: std.ArrayList(u8) = .empty;
     errdefer reasoning.deinit(alloc);
 
-    var final_steps: std.ArrayList(types.StepResult) = .empty;
-    errdefer {
-        for (final_steps.items) |step| {
-            alloc.free(step.tool_calls);
-            alloc.free(step.tool_results);
-            alloc.free(step.response.id);
-            alloc.free(step.response.model);
-        }
-        final_steps.deinit(alloc);
-    }
-
-    for (steps.items) |*sc| {
-        const assistant_msg = history.items[sc.assistant_index];
-        const tool_msgs = history.items[sc.assistant_index + 1 .. sc.assistant_index + 1 + sc.tool_count];
-        try final_steps.append(alloc, .{
-            .number = sc.number,
-            .text = assistant_msg.text(),
-            .reasoning = assistantReasoning(assistant_msg),
-            .tool_calls = try stepToolCalls(alloc, assistant_msg),
-            .tool_results = try stepToolResults(alloc, tool_msgs),
-            .finish_reason = sc.finish_reason,
-            .usage = sc.usage,
-            .response = .{ .id = sc.response_id, .model = sc.response_model },
-        });
-        sc.response_id = "";
-        sc.response_model = "";
-        const step = &final_steps.items[final_steps.items.len - 1];
+    for (steps.items) |*step| {
         try text.appendSlice(alloc, step.text);
         if (step.reasoning.len > 0) try reasoning.appendSlice(alloc, step.reasoning);
     }
-    steps.deinit(alloc);
 
-    const last_step_calls = if (final_steps.items.len > 0)
-        final_steps.items[final_steps.items.len - 1].tool_calls
+    const last_step_calls = if (steps.items.len > 0)
+        steps.items[steps.items.len - 1].tool_calls
     else
         &.{};
     const final_tool_calls = try alloc.alloc(types.ToolCall, last_step_calls.len);
@@ -337,14 +290,9 @@ fn run(
     errdefer alloc.free(final_text);
     const final_reasoning = try reasoning.toOwnedSlice(alloc);
     errdefer alloc.free(final_reasoning);
-    const final_steps_slice = try final_steps.toOwnedSlice(alloc);
+    const final_steps_slice = try steps.toOwnedSlice(alloc);
     errdefer {
-        for (final_steps_slice) |step| {
-            alloc.free(step.tool_calls);
-            alloc.free(step.tool_results);
-            alloc.free(step.response.id);
-            alloc.free(step.response.model);
-        }
+        for (final_steps_slice) |step| step.deinit(alloc);
         alloc.free(final_steps_slice);
     }
 
@@ -486,40 +434,87 @@ fn assistantReasoning(msg: Message) []const u8 {
     return "";
 }
 
-fn stepToolCalls(alloc: std.mem.Allocator, msg: Message) ![]const types.ToolCall {
+fn makeStepResult(
+    alloc: std.mem.Allocator,
+    number: usize,
+    assistant_msg: Message,
+    tool_results: []const types.ToolResult,
+    result: *const model.GenerateResult,
+) !types.StepResult {
+    var step = types.StepResult{
+        .number = number,
+        .finish_reason = result.finish_reason,
+        .usage = result.usage,
+    };
+    errdefer step.deinit(alloc);
+    step.text = try alloc.dupe(u8, assistant_msg.text());
+    step.reasoning = try alloc.dupe(u8, assistantReasoning(assistant_msg));
+    step.tool_calls = try cloneStepToolCalls(alloc, assistant_msg);
+    step.tool_results = try cloneStepToolResults(alloc, tool_results);
+    step.response.id = try alloc.dupe(u8, result.response.id);
+    step.response.model = try alloc.dupe(u8, result.response.model);
+    return step;
+}
+
+fn cloneStepToolCalls(alloc: std.mem.Allocator, msg: Message) ![]const types.ToolCall {
     var calls: std.ArrayList(types.ToolCall) = .empty;
+    errdefer {
+        for (calls.items) |call| {
+            alloc.free(call.id);
+            alloc.free(call.name);
+            alloc.free(call.input);
+        }
+        calls.deinit(alloc);
+    }
     for (msg.parts()) |part| {
         switch (part) {
-            .tool_call => |call| try calls.append(alloc, .{ .id = call.id, .name = call.name, .input = call.input }),
+            .tool_call => |call| {
+                const id = try alloc.dupe(u8, call.id);
+                errdefer alloc.free(id);
+                const name = try alloc.dupe(u8, call.name);
+                errdefer alloc.free(name);
+                const input = try alloc.dupe(u8, call.input);
+                errdefer alloc.free(input);
+                try calls.append(alloc, .{ .id = id, .name = name, .input = input });
+            },
             else => {},
         }
     }
     return calls.toOwnedSlice(alloc);
 }
 
-fn stepToolResults(alloc: std.mem.Allocator, tool_msgs: []const Message) ![]const types.ToolResult {
+fn cloneStepToolResults(alloc: std.mem.Allocator, values: []const types.ToolResult) ![]const types.ToolResult {
     var results: std.ArrayList(types.ToolResult) = .empty;
-    for (tool_msgs) |msg| {
-        for (msg.parts()) |part| {
-            switch (part) {
-                .tool_result => |result| {
-                    var image: ?types.ToolImage = null;
-                    for (msg.parts()) |candidate| switch (candidate) {
-                        .image => |value| image = .{ .url = value.url, .media_type = value.media_type },
-                        else => {},
-                    };
-                    try results.append(alloc, .{
-                        .tool_call_id = result.id,
-                        .tool_name = result.name,
-                        .output = result.output,
-                        .is_error = result.is_error,
-                        .exit_loop = result.exit_loop,
-                        .image = image,
-                    });
-                },
-                else => {},
-            }
+    errdefer {
+        freeToolResults(alloc, results.items);
+        results.deinit(alloc);
+    }
+    for (values) |value| {
+        const tool_call_id = try alloc.dupe(u8, value.tool_call_id);
+        errdefer alloc.free(tool_call_id);
+        const tool_name = try alloc.dupe(u8, value.tool_name);
+        errdefer alloc.free(tool_name);
+        const output = try alloc.dupe(u8, value.output);
+        errdefer alloc.free(output);
+        var image: ?types.ToolImage = null;
+        if (value.image) |source| {
+            const url = try alloc.dupe(u8, source.url);
+            errdefer alloc.free(url);
+            const media_type = try alloc.dupe(u8, source.media_type);
+            errdefer alloc.free(media_type);
+            image = .{
+                .url = url,
+                .media_type = media_type,
+            };
         }
+        try results.append(alloc, .{
+            .tool_call_id = tool_call_id,
+            .tool_name = tool_name,
+            .output = output,
+            .is_error = value.is_error,
+            .exit_loop = value.exit_loop,
+            .image = image,
+        });
     }
     return results.toOwnedSlice(alloc);
 }

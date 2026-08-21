@@ -5,7 +5,7 @@ Extend in Lua with hot reload. Let the harness code itself.
 
 **_[WIP]: The harness is fine tuned on deepseek-v4-flash, Lua-Api may change/still unfinished _**
 
-![demo](docs/assets/demo.mp4)
+![demo](docs/assets/demo.gif)
 
 ## Core features and patterns
 
