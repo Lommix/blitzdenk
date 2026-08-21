@@ -5,7 +5,7 @@ pub const AgentTool = r.Tool{
     .def = .{
         .name = "agent",
         .description =
-        \\Launch a new agent to handle a tasks autonomously.
+        \\Launch a new agent to handle a task autonomously.
         \\
         ,
         .prompt_snippet = "Launch a subagent",
