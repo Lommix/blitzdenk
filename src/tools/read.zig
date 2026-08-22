@@ -29,8 +29,8 @@ pub const ReadTool = r.Tool{
 pub const ViewImageTool = r.Tool{
     .def = .{
         .name = "view_image",
-        .description = "Load an image from a local path or HTTP(S) URL into the model context. Supports PNG, JPEG, GIF, and WebP images up to 4 MB.",
-        .prompt_snippet = "Load an image into the model context",
+        .description = "Load an image from a local path or HTTP(S) URL into the context (PNG, JPEG, GIF, WebP)",
+        .prompt_snippet = "Load an image into the context",
         .parameters_schema =
         \\{
         \\  "type": "object",
