@@ -28,7 +28,15 @@ The default config comes with some useful commands for quick testing.
 
 ## Install
 
-You can download the pre compiled binaries from [the release page](https://github.com/Lommix/blitzdenk/releases) or build it yourself:
+One line, no sudo. Installs to `~/.local/bin/blitz`
+
+```
+curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/main/install.sh | sh
+```
+
+You can also download the pre compiled binaries by hand on [the release page](https://github.com/Lommix/blitzdenk/releases)
+
+build yourself:
 
 ```
 zig build --release=small
