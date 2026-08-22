@@ -97,9 +97,17 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     defer ctx.base.exec_pool.alloc.free(read_res.stderr);
 
     const out = read_res.toOwned(ctx.alloc) catch return r.errResult(call, "oom");
+    if (looksBinary(out)) {
+        ctx.alloc.free(out);
+        return r.errResult(call, "binary file (NUL byte or invalid UTF-8); use view_image for images, or bash with xxd/strings/base64 to inspect");
+    }
     const truncated = r.truncateOutputToOwned(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES);
     if (truncated.ptr != out.ptr) ctx.alloc.free(out);
     return r.okResult(call, truncated);
+}
+
+fn looksBinary(data: []const u8) bool {
+    return std.mem.indexOfScalar(u8, data, 0) != null or !std.unicode.utf8ValidateSlice(data);
 }
 
 fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
@@ -241,4 +249,22 @@ test "detect image media type from magic bytes" {
     try std.testing.expectEqualStrings("image/gif", detectImageMediaType("GIF89arest").?);
     try std.testing.expectEqualStrings("image/webp", detectImageMediaType("RIFFxxxxWEBPrest").?);
     try std.testing.expect(detectImageMediaType("not an image") == null);
+}
+
+test "looksBinary rejects NUL byte anywhere" {
+    var data: [8208]u8 = @splat('a');
+    data[data.len - 1] = 0;
+    try std.testing.expect(looksBinary(&data));
+    try std.testing.expect(looksBinary("a\x00b"));
+}
+
+test "looksBinary rejects invalid utf8 beyond sample window" {
+    const data = "plain text prefix" ++ ("\xff" ** 4) ++ "\n";
+    try std.testing.expect(looksBinary(data));
+}
+
+test "looksBinary accepts valid text" {
+    try std.testing.expect(!looksBinary("line one\nline two\n"));
+    try std.testing.expect(!looksBinary(""));
+    try std.testing.expect(!looksBinary("héllo wörld ✓\n"));
 }
