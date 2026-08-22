@@ -23,6 +23,7 @@ pub const AppFlags = packed struct {
     show_thinking: bool = false,
     debug_log: bool = true,
     skip_permissions: bool = true,
+    skip_ssh_permissions: bool = false,
 };
 
 pub const Theme = struct {

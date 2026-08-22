@@ -173,6 +173,7 @@ pub fn main(init: std.process.Init) !void {
                 \\  --strict           request permissions
                 \\  --clean            skip local user context
                 \\  --report           write per-agent markdown reports on exit
+                \\  --yolo             auto-approve all requests in ssh sessions
                 \\  --prompt "STRING"  prefill input in current cwd
                 \\  --headless         with --prompt: run headless, print final message
                 \\
@@ -268,6 +269,7 @@ pub fn run(
 
     app.reset();
     app.flags.skip_permissions = !flags.strict_mode;
+    app.flags.skip_ssh_permissions = flags.yolo;
     app.warnUnboundAgentModels();
 
     if (config_lua) |info| app.loadHistory(info.dir_path);
@@ -319,8 +321,16 @@ pub fn run(
                 // check permission level against flags
                 app.mu.lockUncancelable(app.io);
                 const skip_permissions = app.flags.skip_permissions;
+                const skip_ssh_permissions = app.flags.skip_ssh_permissions;
                 app.mu.unlock(app.io);
                 if (skip_permissions and !app.exec_pool.ssh_active and !is_ask) {
+                    try app.persist_permission_to_history(next);
+                    next.state = .approved;
+                    next.event.set(app.io);
+                    continue;
+                }
+
+                if (skip_ssh_permissions and !is_ask) {
                     try app.persist_permission_to_history(next);
                     next.state = .approved;
                     next.event.set(app.io);
@@ -1090,6 +1100,8 @@ pub const CliFlags = packed struct {
     report: bool = false,
     /// run --prompt headless, print final message instead of tui
     headless: bool = false,
+    /// auto-approve every request during ssh sessions
+    yolo: bool = false,
 
     fn applyToken(self: *CliFlags, tok: []const u8) bool {
         if (std.mem.eql(u8, tok, "--log")) {
@@ -1114,6 +1126,11 @@ pub const CliFlags = packed struct {
 
         if (std.mem.eql(u8, tok, "--headless")) {
             self.headless = true;
+            return true;
+        }
+
+        if (std.mem.eql(u8, tok, "--yolo")) {
+            self.yolo = true;
             return true;
         }
 
