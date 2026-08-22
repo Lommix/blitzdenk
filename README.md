@@ -24,6 +24,7 @@ The default config comes with some useful commands for quick testing.
 - `/review <?prompt>`: Launch multiple challenger agents to review what was done.
 - `/team <?prompt>`: Multiagent orchestrator mode
 - `/show <?prompt>`: explain something with mermaid diagrams
+- `/ssh-<myconfig>..`: autocomplete your ssh config entries for quick connection.
 
 ## Install
 
