@@ -21,7 +21,7 @@ local router = blitz.add_provider({
 local deepseek = blitz.add_model({
 	name = "deepseek-v4-flash-vision-exp",
 	provider = opencode,
-    vision = true,
+	vision = true,
 	cost = { input = 0.14, output = 0.28, cache = 0.028 },
 })
 
@@ -217,6 +217,8 @@ Keep it under 10 lines unless the question genuinely needs more.
 	tools = {
 		blitz.tools.READ,
 		blitz.tools.BASH,
+		blitz.tools.SKILL,
+		blitz.tools.VIEW_IMAGE,
 	},
 })
 
@@ -273,10 +275,12 @@ Numbered findings, each: severity (critical/major/minor) | file:line | why it's 
 (one paragraph) | concrete fix. Then a short "Verified OK" list for checked-but-clean
 items. Do not overstate severity. Tone: matter-of-fact, no flattery, no filler.
 	]],
-	effort = "max",
+	effort = "high",
 	model = deepseek,
 	tools = {
 		blitz.tools.READ,
 		blitz.tools.BASH,
+		blitz.tools.SKILL,
+		blitz.tools.VIEW_IMAGE,
 	},
 })
