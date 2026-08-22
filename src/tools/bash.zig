@@ -13,7 +13,7 @@ pub const BashTool = r.Tool{
             \\
         ,
         .prompt_snippet = "Execute a bash command",
-        .prompt_guidelines = "Prefer specialist tools over bash whenever available",
+        .prompt_guidelines = "Prefer specialist tools over bash whenever available. You can run bash in parallel",
         .parameters_schema =
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Bash command to execute"},
