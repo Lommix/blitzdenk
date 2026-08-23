@@ -1,7 +1,6 @@
 const std = @import("std");
 const r = @import("root.zig");
 const AgentId = r.AgentId;
-const Role = enum { system, user, agent };
 
 /// Events emitted by the app and agent subsystems. The AppEvent
 /// union is the single source of truth — any code that needs to react to
@@ -16,13 +15,6 @@ pub const AppEvent = union(enum) {
     agent_cancelled: struct { id: AgentId },
     compaction_started: struct { id: AgentId }, // done
     compaction_complete: struct { id: AgentId },
-    // TODO: emit from agent.zig — needs event bus accessible from Agent
-    tool_call_started: struct { agent_id: AgentId, call_id: []const u8, name: []const u8 },
-    // TODO: emit from agent.zig — needs event bus accessible from Agent
-    tool_call_complete: struct { agent_id: AgentId, call_id: []const u8, name: []const u8, is_error: bool },
-    agent_broadcast: struct { id: AgentId, role: Role },
-    permission_requested: struct { call_id: ?[]const u8 },
-    permission_resolved: struct { call_id: ?[]const u8, state: r.permissions.State },
     user_message_sent: []const u8,
     mcp_tools_reloaded,
     on_inject: AgentId,
@@ -53,11 +45,6 @@ pub const EventBus = struct {
                 .agent_cancelled => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
                 .compaction_started => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
                 .compaction_complete => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                .tool_call_started => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                .tool_call_complete => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                .agent_broadcast => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                // .permission_requested => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                // .permission_resolved => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
                 .user_message_sent => |msg| app.lua_vm.invokeLuaFunction(en.func_ref, msg),
                 .mcp_tools_reloaded => app.lua_vm.invokeLuaFunction(en.func_ref, {}),
                 else => {},

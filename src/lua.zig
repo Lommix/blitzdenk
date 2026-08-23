@@ -976,14 +976,9 @@ pub const BlitzEventDef = LuaType{
             .{ .name = "AGENT_CANCELLED", .desc = "Emitted when an agent is cancelled.", .ty = LuaType.integer, .value = .{ .integer = 5 } },
             .{ .name = "COMPACTION_STARTED", .desc = "Emitted when compaction starts.", .ty = LuaType.integer, .value = .{ .integer = 6 } },
             .{ .name = "COMPACTION_COMPLETE", .desc = "Emitted when compaction completes.", .ty = LuaType.integer, .value = .{ .integer = 7 } },
-            .{ .name = "TOOL_CALL_STARTED", .desc = "Emitted when a tool call starts.", .ty = LuaType.integer, .value = .{ .integer = 8 } },
-            .{ .name = "TOOL_CALL_COMPLETE", .desc = "Emitted when a tool call completes.", .ty = LuaType.integer, .value = .{ .integer = 9 } },
-            .{ .name = "AGENT_BROADCAST", .desc = "Emitted when an agent broadcasts a message.", .ty = LuaType.integer, .value = .{ .integer = 10 } },
-            .{ .name = "PERMISSION_REQUESTED", .desc = "Emitted when a permission request is created.", .ty = LuaType.integer, .value = .{ .integer = 11 } },
-            .{ .name = "PERMISSION_RESOLVED", .desc = "Emitted when a permission request is resolved.", .ty = LuaType.integer, .value = .{ .integer = 12 } },
-            .{ .name = "USER_MESSAGE_SENT", .desc = "Emitted after the user sends a message.", .ty = LuaType.integer, .value = .{ .integer = 13 } },
-            .{ .name = "MCP_TOOLS_RELOADED", .desc = "Emitted after MCP tools are reloaded.", .ty = LuaType.integer, .value = .{ .integer = 14 } },
-            .{ .name = "ON_INJECT", .desc = "Emitted when an agent's system reminder is built. Return a string to append it to the injection.", .ty = LuaType.integer, .value = .{ .integer = 15 } },
+            .{ .name = "USER_MESSAGE_SENT", .desc = "Emitted after the user sends a message.", .ty = LuaType.integer, .value = .{ .integer = 8 } },
+            .{ .name = "MCP_TOOLS_RELOADED", .desc = "Emitted after MCP tools are reloaded.", .ty = LuaType.integer, .value = .{ .integer = 9 } },
+            .{ .name = "ON_INJECT", .desc = "Emitted when an agent's system reminder is built. Return a string to append it to the injection.", .ty = LuaType.integer, .value = .{ .integer = 10 } },
             .{
                 .name = "add_listener",
                 .desc =
