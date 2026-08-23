@@ -893,9 +893,12 @@ pub const Blitz = LuaType{
             },
             .{
                 .name = "shell",
-                .desc = "Execute a shell command.",
+                .desc = "Execute a shell command. Returns output, ok. Optionally a timeout in seconds.",
                 .ty = LuaType{ .function = .{
-                    .args = &.{.{ .name = "cmd", .ty = LuaType.string }},
+                    .args = &.{
+                        .{ .name = "cmd", .ty = LuaType.string },
+                        .{ .name = "timeout", .ty = LuaType.number, .optional = true, .desc = "Timeout in seconds." },
+                    },
                     .ret = &LuaAny,
                     .fn_ptr = (struct {
                         fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
@@ -906,10 +909,19 @@ pub const Blitz = LuaType{
                             };
                             const cmd = readAnyArg([]const u8, state, "shell", 1) orelse return pushNilBool(state, false);
                             const cwd: ?[]const u8 = if (a.cwd.len > 0) a.cwd else null;
-                            const result = a.exec_pool.runAndWait(.{
-                                .cwd = cwd,
-                                .argv = &.{ "/bin/sh", "-c", cmd },
-                            }) catch {
+
+                            var timeout_ms: ?i64 = null;
+                            if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL) {
+                                const t = c.lua_tonumberx(state, 2, null);
+                                if (!std.math.isFinite(t) or t <= 0) return pushNilBool(state, false);
+                                timeout_ms = @intFromFloat(@min(t, 2_147_483.0) * 1000);
+                            }
+
+                            const opts: @TypeOf(a.exec_pool.*).RunOpts = .{ .cwd = cwd, .argv = &.{ "/bin/sh", "-c", cmd } };
+                            const result = (if (timeout_ms) |ms|
+                                a.exec_pool.runAndWaitTimeout(opts, ms)
+                            else
+                                a.exec_pool.runAndWait(opts)) catch {
                                 _ = c.lua_pushliteral(state, "failed to execute command");
                                 c.lua_pushboolean(state, 0);
                                 return 2;

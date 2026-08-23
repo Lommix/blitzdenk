@@ -175,6 +175,7 @@ Tool function rules:
 - Raise `error("...")` for failure.
 - `blitz.exit_loop("done")` returns a result that ends the loop.
 - `blitz.shell(cmd)` returns `output, ok` (two values).
+- `blitz.shell(cmd, timeout)` accepts an optional timeout in seconds.
 - `blitz.json.encode(obj)` / `blitz.json.decode(str)` return the value plus an ok boolean.
   The `BlitzToolDef`, `BlitzToolResult`, `BlitzCtx`, and `BlitzCall` classes in
   `meta.lua` list the exact fields.

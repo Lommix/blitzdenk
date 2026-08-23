@@ -291,8 +291,8 @@
 ---@field set_theme fun(theme: BlitzTheme)
 ---Write a debug log line.
 ---@field log fun(msg: string)
----Execute a shell command.
----@field shell fun(cmd: string): any
+---Execute a shell command. Returns output, ok. Optionally a timeout in seconds.
+---@field shell fun(cmd: string, timeout?: number): any
 ---Push a new popup notification with a lifetime of 8s to the top right corner.
 ---@field push_notification fun(message: string)
 ---@field state BlitzState
