@@ -552,8 +552,8 @@ fn renderFlowchart(alloc: std.mem.Allocator, output_alloc: std.mem.Allocator, sr
 
     for (edges.items) |e| drawFlowEdgeLine(&c, e, nodes.items, dir, edgeStyle(&c, e.kind));
     for (edges.items) |e| drawFlowEdgeLabel(&c, e, nodes.items, dir);
-    fixJunctions(&c);
     for (nodes.items) |*n| drawFlowNode(&c, n);
+    fixJunctions(&c);
     for (edges.items) |e| drawFlowEdgeArrow(&c, e, nodes.items, dir, edgeStyle(&c, e.kind));
 
     try canvasToLines(&c, output_alloc, width, out);
@@ -1040,6 +1040,11 @@ fn nodeLeft(n: *const Node) isize {
     return n.left;
 }
 
+fn edgeBend(s: *const Node, t: *const Node, vertical: bool) isize {
+    if (vertical) return if (t.layer > s.layer) nodeBottom(s) + 2 else nodeTop(s) - 2;
+    return if (t.layer > s.layer) nodeRight(s) + 2 else nodeLeft(s) - 2;
+}
+
 fn drawFlowEdgeLine(c: *Canvas, e: Edge, nodes: []const Node, dir: Dir, style: Style) void {
     const s = &nodes[e.from];
     const t = &nodes[e.to];
@@ -1059,12 +1064,12 @@ fn drawFlowEdgeLine(c: *Canvas, e: Edge, nodes: []const Node, dir: Dir, style: S
                 drawHLine(c, nodeRight(t), nodeLeft(s) - 1, s.center_y, g.h, style);
             }
         } else if (t.layer > s.layer) {
-            const ymid = nodeBottom(s) + 1;
+            const ymid = edgeBend(s, t, true);
             drawVLine(c, s.center_x, nodeBottom(s), ymid, g.v, style);
             drawHLine(c, s.center_x, t.center_x, ymid, g.h, style);
             drawVLine(c, t.center_x, ymid, nodeTop(t) - 1, g.v, style);
         } else {
-            const ymid = nodeTop(s) - 1;
+            const ymid = edgeBend(s, t, true);
             drawVLine(c, s.center_x, ymid, nodeTop(s), g.v, style);
             drawHLine(c, s.center_x, t.center_x, ymid, g.h, style);
             drawVLine(c, t.center_x, nodeBottom(t) + 1, ymid, g.v, style);
@@ -1077,12 +1082,12 @@ fn drawFlowEdgeLine(c: *Canvas, e: Edge, nodes: []const Node, dir: Dir, style: S
                 drawVLine(c, s.center_x, nodeBottom(t), nodeTop(s) - 1, g.v, style);
             }
         } else if (t.layer > s.layer) {
-            const xmid = nodeRight(s) + 1;
+            const xmid = edgeBend(s, t, false);
             drawHLine(c, nodeRight(s), xmid, s.center_y, g.h, style);
             drawVLine(c, xmid, s.center_y, t.center_y, g.v, style);
             drawHLine(c, xmid, nodeLeft(t) - 1, t.center_y, g.h, style);
         } else {
-            const xmid = nodeLeft(s) - 1;
+            const xmid = edgeBend(s, t, false);
             drawHLine(c, xmid, nodeLeft(s), s.center_y, g.h, style);
             drawVLine(c, xmid, s.center_y, t.center_y, g.v, style);
             drawHLine(c, nodeRight(t) + 1, xmid, t.center_y, g.h, style);
@@ -1157,18 +1162,18 @@ fn drawFlowEdgeLabel(c: *Canvas, e: Edge, nodes: []const Node, dir: Dir) void {
             putTextLines(c, x, nodeTop(s) - 1 - @as(isize, @intCast(lines.len)), lines, c.theme.accent);
         }
     } else {
-        const mid = @divTrunc(s.center_y + t.center_y, 2);
-        const y = mid - @divTrunc(@as(isize, @intCast(lines.len)), 2);
         if (t.layer == s.layer) {
+            const mid = @divTrunc(s.center_y + t.center_y, 2);
+            const y = mid - @divTrunc(@as(isize, @intCast(lines.len)), 2);
             putTextLines(c, s.center_x + 1, y, lines, c.theme.accent);
+        } else if (t.layer > s.layer) {
+            const x = edgeBend(s, t, false) + 2;
+            putTextPaddedH(c, x, t.center_y, lines[0], c.theme.accent, g.h, line_style);
+            if (lines.len > 1) putTextLines(c, x, t.center_y + 1, lines[1..], c.theme.accent);
         } else {
-            if (t.layer > s.layer) {
-                const x = nodeRight(s) + 1;
-                putTextLines(c, x + 1, y, lines, c.theme.accent);
-            } else {
-                const x = nodeLeft(s) - 1;
-                putTextLines(c, x - width - 1, y, lines, c.theme.accent);
-            }
+            const x = edgeBend(s, t, false) - width - 1;
+            putTextPaddedH(c, x, t.center_y, lines[0], c.theme.accent, g.h, line_style);
+            if (lines.len > 1) putTextLines(c, x, t.center_y + 1, lines[1..], c.theme.accent);
         }
     }
 }
@@ -2061,6 +2066,31 @@ test "mermaid nodes preserve horizontal padding at narrow widths" {
     try std.testing.expect(found_junction);
 }
 
+test "mermaid flowchart joins node borders and places horizontal labels on edges" {
+    const alloc = std.testing.allocator;
+    var out = std.ArrayList(Line).empty;
+    defer deinitLines(alloc, &out);
+
+    try render(alloc, 80,
+        \\flowchart LR
+        \\A[Agent] -- owns --> J[Job]
+        \\A -- polls --> S[Session]
+        \\M[Model] -- polls --> S
+        \\
+    , &out);
+
+    var text = std.ArrayList(u8).empty;
+    defer text.deinit(alloc);
+    for (out.items) |*line| {
+        for (line.spans.items) |span| try text.appendSlice(alloc, span.content);
+        try text.append(alloc, '\n');
+    }
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "│ Agent ├─┤") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "┌─owns────▶┤ Job │") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "├─polls─▶┤ Session │") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "│ Model ├─┘") != null);
+}
+
 test "mermaid sequence separates message text from arrows" {
     const alloc = std.testing.allocator;
     var out = std.ArrayList(Line).empty;
@@ -2111,7 +2141,7 @@ test "mermaid class renders compartmented boxes and relationships" {
         const text = try widgets.lineText(alloc, line);
         defer alloc.free(text);
         if (std.mem.indexOf(u8, text, "Animal") != null) header_row = row;
-        if (std.mem.indexOf(u8, text, "├") != null and std.mem.indexOf(u8, text, "┤") != null) separator_row = row;
+        if (std.mem.indexOf(u8, text, "▶") == null and std.mem.indexOf(u8, text, "├") != null and std.mem.indexOf(u8, text, "┤") != null) separator_row = row;
         if (std.mem.indexOf(u8, text, "+String name") != null) member_row = row;
         if (std.mem.indexOf(u8, text, "Duck") != null) found_duck = true;
     }
