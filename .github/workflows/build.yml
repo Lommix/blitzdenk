@@ -26,7 +26,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           cache-size-limit: 4096
-      - run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall -j1
+      - run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall -Dversion="${GITHUB_REF_NAME#v}" -j1
       - name: rename binary
         run: mv zig-out/bin/blitz zig-out/bin/blitz-${{ matrix.target }}
       - name: gzip binary

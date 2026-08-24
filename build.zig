@@ -4,7 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const options = b.addOptions();
-    options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    const version = b.option([]const u8, "version", "Application version") orelse @import("build.zig.zon").version;
+    options.addOption([]const u8, "version", version);
     const options_mod = options.createModule();
 
     const blitz_sdk_dep = b.dependency("blitz_sdk", .{
