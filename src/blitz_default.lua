@@ -87,9 +87,16 @@ end)
 
 blitz.add_command("show", function(rem)
 	local prompt = [[
-Explain the answer in a visual way using short and precise mermaid diagrams
-(flow, sequence, class, er, state) in markdown code blocks ```mermaid ... ``` whenever a diagram
-clarifies the explanation better than text alone.
+Explain the answer visually. Pick the one mermaid diagram type that best fits the shape of what you are explaining and render it in a markdown code block ```mermaid ... ```.
+
+Choose the type by the structure of the idea:
+- flowchart: steps, decisions, branching logic, pipelines
+- sequence: message passing over time between actors or components
+- class: object types, fields, methods, and their relationships
+- er: entities and their relationships (tables, records, keys)
+- state: states and the transitions a thing moves through
+
+Use a diagram only when it clarifies more than text alone. Keep it short and precise: label every edge, drop any node or arrow that carries no meaning, and prefer the smallest diagram that tells the whole story.
 
 Task: ]] .. rem
 	blitz.cmd.prompt(prompt)

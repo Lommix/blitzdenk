@@ -3,6 +3,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    const options_mod = options.createModule();
 
     const blitz_sdk_dep = b.dependency("blitz_sdk", .{
         .target = target,
@@ -54,6 +57,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "models", .module = models_mod },
                 .{ .name = "permissions", .module = permissions_mod },
                 .{ .name = "c", .module = lua_c_mod },
+                .{ .name = "build_options", .module = options_mod },
             },
         }),
     });
@@ -82,6 +86,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "models", .module = models_mod },
                 .{ .name = "permissions", .module = permissions_mod },
                 .{ .name = "c", .module = lua_c_mod },
+                .{ .name = "build_options", .module = options_mod },
             },
         }),
     });

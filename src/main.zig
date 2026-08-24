@@ -158,15 +158,19 @@ pub fn main(init: std.process.Init) !void {
                 cli_flags.headless,
             );
         },
+        .update => {
+            try updateCli(init.io, init.gpa, init.environ_map);
+        },
         .help => {
             std.debug.print(
-                \\Blitzdenk tui v0.1
+                \\Blitzdenk tui v{s}
                 \\Usage: blitz CMD --flag
                 \\
                 \\Commands:
                 \\/any/path            start tui in rel path to current cwd (optional)
                 \\help                 display this
                 \\prompt "STRING"      run in current cwd with initial input
+                \\update               download and replace the running binary
                 \\
                 \\Flags:
                 \\  --log              write debug.log in path
@@ -177,9 +181,31 @@ pub fn main(init: std.process.Init) !void {
                 \\  --prompt "STRING"  prefill input in current cwd
                 \\  --headless         with --prompt: run headless, print final message
                 \\
-            , .{});
+            , .{r.VERSION});
         },
     }
+}
+
+fn updateCli(io: std.Io, gpa: std.mem.Allocator, env: *const std.process.Environ.Map) !void {
+    var pool = r.exec.CmdPool.init(gpa, io, env);
+    defer pool.deinit();
+
+    const update = r.update.checkForUpdate(&pool, gpa) catch |err| {
+        std.debug.print("blitz: update check failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer update.deinit(gpa);
+
+    if (!update.available) {
+        std.debug.print("blitz is up to date ({s})\n", .{r.VERSION});
+        return;
+    }
+
+    r.update.installUpdate(io, &pool, gpa, update) catch |err| {
+        std.debug.print("blitz: update failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    std.debug.print("blitz updated to {s} - restart to apply\n", .{update.latest});
 }
 
 pub fn run(
@@ -1188,6 +1214,7 @@ pub const CliCommand = union(enum) {
     run: []const u8, // '.', './', /full/path/to/dir
     prompt: []const u8, // prefill input in CWD
     help,
+    update,
 
     pub const ParseResult = union(enum) {
         cmd: CliCommand,
@@ -1205,6 +1232,8 @@ pub const CliCommand = union(enum) {
             const sub = rest[0];
             return .{ .cmd = .{ .prompt = sub } };
         }
+
+        if (std.mem.eql(u8, head, "update")) return .{ .cmd = .update };
 
         if (std.mem.eql(u8, head, "help")) return .{ .cmd = .help };
 

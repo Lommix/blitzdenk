@@ -1,4 +1,4 @@
-pub const VERSION = "0.3.4";
+pub const VERSION = @import("build_options").version;
 
 pub const sdk = @import("blitz-sdk");
 pub const models = @import("models");
@@ -27,6 +27,7 @@ pub const mcp = @import("mcp.zig");
 pub const tools = @import("tools/root.zig");
 pub const tui = @import("tui/root.zig");
 pub const cmd = @import("commands.zig");
+pub const update = @import("update.zig");
 pub const c = @import("c");
 pub const inject = @import("inject.zig");
 pub const dash = @import("dashboard.zig");
