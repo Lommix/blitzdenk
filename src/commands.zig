@@ -97,6 +97,7 @@ pub const Command = union(enum) {
         fork: bool = false,
         chat_entry: ?ChatEntry = null,
         cwd: []const u8 = "",
+        background: bool = false,
     };
 
     pub const CustomCmd = struct {
@@ -271,6 +272,7 @@ pub const Command = union(enum) {
                         .cwd = cwd,
                     }, .context_limit = app.default_context_limit });
                 constructed = true;
+                agent.background = arg.background;
                 try app.configureAgent(arg.agent_id, agent);
 
                 try app.event_bus.emit(app, .{

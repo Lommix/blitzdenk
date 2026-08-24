@@ -503,7 +503,7 @@ pub const App = struct {
             const id = r.AgentId{ .index = @intCast(index), .generation = slot.generation };
             var drain_context = RegistryDrainContext{ .app = self, .id = id };
             _ = self.registry.drain(id, 64, &drain_context, applyRegistryEvent);
-            _ = self.registry.reap(id);
+            if (self.registry.reap(id)) try self.handleReapedAgent(id);
         }
         self.registry.retryDue();
         self.running = self.registry.countActive() > 0;
@@ -513,6 +513,74 @@ pub const App = struct {
         {}
 
         self.syncCompactionIndicator();
+    }
+
+    fn handleReapedAgent(self: *App, agent_id: r.AgentId) !void {
+        const agent = self.registry.get(agent_id) orelse return;
+        const state = self.registry.state(agent_id) orelse return;
+        if (agent.background and state != .active) {
+            try self.finishBackgroundAgent(agent_id, agent);
+            return;
+        }
+        if (state == .active or agent.queued_messages.items.len == 0) return;
+        try self.registry.run(agent_id, .{ .max_steps = std.math.maxInt(usize) });
+        try self.event_bus.emit(self, .{ .agent_started = agent_id });
+    }
+
+    fn finishBackgroundAgent(self: *App, agent_id: r.AgentId, agent: *r.agent.Agent) !void {
+        defer self.registry.release(agent_id);
+        var path_buf: [96]u8 = undefined;
+        var notice_buf: [160]u8 = undefined;
+        const notice = if (self.writeBackgroundResult(agent_id, agent, &path_buf)) |path|
+            try std.fmt.bufPrint(&notice_buf, "Agent result done: {s}", .{path})
+        else |err|
+            try std.fmt.bufPrint(&notice_buf, "Agent result failed to save: {s}", .{@errorName(err)});
+
+        if (agent.parent) |packed_id| {
+            const parent_id = r.AgentId.unpack(packed_id);
+            if (self.registry.get(parent_id)) |parent| {
+                try parent.queueReminder(notice);
+                if (parent.task == null and parent.compact_task == null and parent.status != .retrying and parent.status != .compacting) {
+                    try self.registry.run(parent_id, .{ .max_steps = std.math.maxInt(usize) });
+                    try self.event_bus.emit(self, .{ .agent_started = parent_id });
+                }
+            }
+        }
+    }
+
+    fn writeBackgroundResult(self: *App, agent_id: r.AgentId, agent: *const r.agent.Agent, path_buf: []u8) ![]const u8 {
+        var dir_buf: [32]u8 = undefined;
+        const dir_path = try std.fmt.bufPrint(&dir_buf, "/tmp/blitz/{d}", .{std.c.getpid()});
+        try std.Io.Dir.cwd().createDirPath(self.io, dir_path);
+        const path = try std.fmt.bufPrint(path_buf, "{s}/agent-{d}.md", .{ dir_path, agent_id.pack() });
+        const file = try std.Io.Dir.createFileAbsolute(self.io, path, .{});
+        defer file.close(self.io);
+        var buf: [4096]u8 = undefined;
+        var writer = file.writer(self.io, &buf);
+        var wrote_text = false;
+        var index = agent.history().len;
+        while (index > 0) {
+            index -= 1;
+            const message = agent.history()[index];
+            if (message.role != .assistant) continue;
+            for (message.parts()) |part| switch (part) {
+                .text => |text| {
+                    if (text.len == 0) continue;
+                    try writer.interface.writeAll(text);
+                    wrote_text = true;
+                },
+                else => {},
+            };
+            if (wrote_text) break;
+        }
+        if (!wrote_text) {
+            if (agent.last_error) |err|
+                try writer.interface.print("Agent failed: {s}\n", .{@errorName(err)})
+            else
+                try writer.interface.writeAll("Agent produced no text output.\n");
+        }
+        try writer.interface.flush();
+        return path;
     }
 
     pub fn enterPermSelect(self: *App) void {
@@ -3360,6 +3428,28 @@ test "subagent events preserve the main tool call preview" {
     try std.testing.expectEqual(@as(usize, 1), app.streaming_entry.?.parts.len);
     try std.testing.expectEqualStrings("agent_1", app.streaming_entry.?.parts[0].tool_call.call_id);
     try std.testing.expectEqual(@as(usize, 4), app.tool_status_entries.value.agents[child_id.index].entries.count());
+}
+
+test "background agent result is written for read" {
+    var agent = try r.agent.Agent.init(std.testing.allocator, std.testing.io, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    const parts = [_]r.sdk.Part{ r.sdk.Part.textPart("result"), r.sdk.Part.textPart(" done") };
+    try agent.setMessages(&.{.{ .role = .assistant, .content = &parts }});
+
+    var app: App = undefined;
+    app.io = std.testing.io;
+    var path_buf: [96]u8 = undefined;
+    const path = try app.writeBackgroundResult(.{ .index = 127, .generation = 65535 }, &agent, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, path) catch {};
+    try std.testing.expect(std.mem.startsWith(u8, path, "/tmp/blitz/"));
+    const content = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited64(1024));
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("result done", content);
 }
 
 test "appendChatEntry preserves parts order" {

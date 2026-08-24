@@ -76,6 +76,7 @@ pub const Agent = struct {
     name: []const u8,
     parent: ?u32,
     depth: u16,
+    background: bool = false,
     cwd: []const u8,
     system_prompt: []const u8 = "",
     skill_catalog_digest: ?u64 = null,

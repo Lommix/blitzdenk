@@ -242,7 +242,7 @@ pub fn run(
         registry.deinit();
         exec_pool.deinit();
     }
-    registry.report_enabled = flags.report or builtin.mode == .Debug;
+    registry.report_enabled = flags.report;
 
     // Lua VM holds an opaque pointer to App + a getter for the mutable cfg
     // (swarm.cfg is *const, so a sibling accessor unwraps the const).

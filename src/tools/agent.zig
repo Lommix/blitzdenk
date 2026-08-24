@@ -5,7 +5,9 @@ pub const AgentTool = r.Tool{
     .def = .{
         .name = "agent",
         .description =
-        \\Launch a new agent to handle a task autonomously.
+        \\Launch a new background agent to handle a task autonomously. The tool returns immediately.
+        \\When the agent finishes, you receive a result file path.
+        \\You can idle while waiting by ending your turn. Subagents will wake you up; do not poll or use sleep.
         \\
         ,
         .prompt_snippet = "Launch a subagent",
@@ -113,6 +115,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
             .agent_type = @intFromEnum(agent_type),
             .prompt = parts,
             .cwd = cwd,
+            .background = true,
         },
     }) catch {
         ctx.base.registry.releaseReservation(child_id);
@@ -128,74 +131,5 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     w.styledPrint(.{ .modifier = .{ .bold = true } }, "{s}", .{args.description});
     r.setToolStatus(ctx, call, w.finish()) catch {};
 
-    return awaitChildResult(ctx, call, child_id, true);
-}
-
-fn childGone(call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
-    return r.errResult(call, "child agent spawn failed or was canceled");
-}
-
-fn bail(ctx: r.ToolContext, call: r.r.sdk.ToolCall, child_id: r.r.AgentId, msg: []const u8) r.r.sdk.ToolOutput {
-    releaseChild(ctx, child_id);
-    return r.errResult(call, msg);
-}
-
-fn releaseChild(ctx: r.ToolContext, child_id: r.r.AgentId) void {
-    const st = ctx.base.registry.state(child_id) orelse return;
-    switch (st) {
-        .reserved => ctx.base.registry.releaseReservation(child_id),
-        else => ctx.base.registry.release(child_id),
-    }
-}
-
-fn awaitChildResult(
-    ctx: r.ToolContext,
-    call: r.r.sdk.ToolCall,
-    child_id: r.r.AgentId,
-    despawn: bool,
-) r.r.sdk.ToolOutput {
-    while (true) {
-        const state = ctx.base.registry.state(child_id) orelse return childGone(call);
-        if (state != .active and state != .reserved) break;
-        if (waitForChild(ctx, child_id)) break;
-        if (ctx.isCanceled()) return bail(ctx, call, child_id, "canceled");
-    }
-
-    const state = ctx.base.registry.state(child_id) orelse return childGone(call);
-    const is_err = state == .failed;
-    const text = extractChildResult(ctx.base.registry, child_id);
-    const owned = ctx.alloc.dupe(u8, text) catch return bail(ctx, call, child_id, "oom");
-
-    if (despawn) releaseChild(ctx, child_id);
-
-    return .{ .content = owned, .is_error = is_err };
-}
-
-fn waitForChild(ctx: r.ToolContext, child_id: r.r.AgentId) bool {
-    const registry = ctx.base.registry;
-    const token = ctx.cancellation() orelse {
-        _ = registry.wait(child_id) catch return true;
-        return false;
-    };
-    while (true) {
-        const state = registry.state(child_id) orelse return true;
-        if (state != .active and state != .reserved) return true;
-        if (token.isCancelled()) return false;
-        std.Io.sleep(ctx.io, .fromMilliseconds(100), .awake) catch return false;
-    }
-}
-
-fn extractChildResult(registry: *r.r.agent_registry.Registry, child_id: r.r.AgentId) []const u8 {
-    const child = registry.get(child_id) orelse return "child agent not found";
-    var index = child.history().len;
-    while (index > 0) {
-        index -= 1;
-        const message = child.history()[index];
-        if (message.role != .assistant) continue;
-        for (message.parts()) |part| switch (part) {
-            .text => |text| return text,
-            else => {},
-        };
-    }
-    return "child produced no text output";
+    return r.okResult(call, "Agent started in background.");
 }
