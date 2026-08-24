@@ -2788,9 +2788,8 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
 
     const agent = if (slot.agent) |*value| value else return null;
     const now: i128 = @intCast(std.Io.Timestamp.now(app.io, .real).nanoseconds);
-    const end = if (agent.run_ended_ns != 0) agent.run_ended_ns else now;
-    const elapsed = if (agent.run_started_ns == 0) 0 else @max(0, end - agent.run_started_ns);
-    const secs: u32 = @intCast(@divTrunc(elapsed, std.time.ns_per_s));
+    const live = if (state == .active and agent.run_started_ns != 0) @max(0, now - agent.run_started_ns) else 0;
+    const secs: u32 = @intCast(@divTrunc(agent.session_run_ns + live, std.time.ns_per_s));
 
     const hl: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .bold = true } };
     const info: r.tui.Style = .{ .fg = app.theme.info };

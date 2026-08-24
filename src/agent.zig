@@ -93,6 +93,7 @@ pub const Agent = struct {
     retry_at_ns: i128 = 0,
     run_started_ns: i128 = 0,
     run_ended_ns: i128 = 0,
+    session_run_ns: i128 = 0,
     stream_started_ns: i128 = 0,
     stream_output_bytes: u64 = 0,
     tokens_per_second: f32 = 0,
