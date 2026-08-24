@@ -1,7 +1,8 @@
 # Blitzdenk
 
 Universal Coding harness for posix. No deps, no chain, vendored Lua.
-Extend in Lua with hot reload. Let the harness code itself.
+This coding agent molds itself around your requirements by extending its Lua sandbox exactly the way you need it.
+Ask it to create custom tools in a project local blitz.lua file to integrate with your project.
 
 ![demo](docs/assets/demo.gif)
 

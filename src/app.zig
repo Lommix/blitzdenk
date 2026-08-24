@@ -240,6 +240,7 @@ pub const App = struct {
     arena_session: std.heap.ArenaAllocator,
     /// streaming arena
     arena_streaming_preview: std.heap.ArenaAllocator,
+    arena_streaming_snapshot: std.heap.ArenaAllocator,
     /// frame render arena
     arena_frame: std.heap.ArenaAllocator,
     mu: std.Io.Mutex = .init,
@@ -319,6 +320,7 @@ pub const App = struct {
             .arena_app = .init(gpa),
             .arena_session = .init(gpa),
             .arena_streaming_preview = .init(gpa),
+            .arena_streaming_snapshot = .init(gpa),
             .arena_frame = .init(gpa),
             .context_factory = agent_factory,
             .io = io,
@@ -348,6 +350,7 @@ pub const App = struct {
         self.history.deinit(self.gpa);
         self.context_factory.deinit();
         self.arena_streaming_preview.deinit();
+        self.arena_streaming_snapshot.deinit();
         self.arena_frame.deinit();
         self.arena_session.deinit();
         self.arena_app.deinit();
@@ -1214,6 +1217,7 @@ pub const App = struct {
     pub fn dropStreamingPreview(self: *App) void {
         self.streaming_entry = null;
         self.sdk_preview_parts = .empty;
+        _ = self.arena_streaming_snapshot.reset(.free_all);
         _ = self.arena_streaming_preview.reset(.free_all);
     }
 
@@ -1281,6 +1285,7 @@ pub const App = struct {
                     .output = result.output,
                     .is_error = result.is_error,
                 });
+                if (is_main) try self.flushSdkPreview();
             },
             .provider_error => |provider_error| {
                 if (provider_error.will_retry) return;
@@ -1342,7 +1347,9 @@ pub const App = struct {
     }
 
     fn refreshSdkPreview(self: *App, agent_id: r.AgentId) !void {
-        const alloc = self.arena_streaming_preview.allocator();
+        self.streaming_entry = null;
+        _ = self.arena_streaming_snapshot.reset(.free_all);
+        const alloc = self.arena_streaming_snapshot.allocator();
         var parts: std.ArrayList(ChatPart) = .empty;
         for (self.sdk_preview_parts.items) |item| switch (item.kind) {
             .thinking => {
@@ -1417,7 +1424,10 @@ pub const App = struct {
     }
 
     pub fn flushSdkPreview(self: *App) !void {
-        const entry = self.streaming_entry orelse return;
+        const entry = self.streaming_entry orelse {
+            self.dropStreamingPreview();
+            return;
+        };
         const alloc = self.sessionAlloc();
         try self.appendChatEntry(alloc, try r.util.deepClone(ChatEntry, entry, alloc));
         self.sdk_preview_flushed = true;
@@ -3037,6 +3047,8 @@ test "persisted diff owns path" {
     defer app.arena_session.deinit();
     app.arena_streaming_preview = .init(std.testing.allocator);
     defer app.arena_streaming_preview.deinit();
+    app.arena_streaming_snapshot = .init(std.testing.allocator);
+    defer app.arena_streaming_snapshot.deinit();
     app.chat_entries = .empty;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
@@ -3182,6 +3194,8 @@ test "SDK run events preserve preview final rendering and usage" {
     defer app.arena_session.deinit();
     app.arena_streaming_preview = .init(std.testing.allocator);
     defer app.arena_streaming_preview.deinit();
+    app.arena_streaming_snapshot = .init(std.testing.allocator);
+    defer app.arena_streaming_snapshot.deinit();
     app.chat_entries = .empty;
     app.streaming_entry = null;
     app.sdk_preview_parts = .empty;
@@ -3214,6 +3228,10 @@ test "SDK run events preserve preview final rendering and usage" {
     try std.testing.expectEqual(@as(u64, 7), app.sdk_usage.total_tokens);
     const status = &app.tool_status_entries.value.agents[agent_id.index];
     try std.testing.expectEqual(false, status.entries.get("call_1").?.is_error.?);
+    try std.testing.expect(app.streaming_entry == null);
+    try std.testing.expectEqual(@as(usize, 0), app.sdk_preview_parts.items.len);
+    try std.testing.expectEqual(@as(usize, 0), app.arena_streaming_preview.queryCapacity());
+    try std.testing.expectEqual(@as(usize, 0), app.arena_streaming_snapshot.queryCapacity());
 
     const final_parts = [_]r.sdk.Part{
         r.sdk.Part.reasoningPart("plan", ""),
@@ -3235,6 +3253,8 @@ test "SDK preview coalesces same-type deltas and keeps part order" {
     defer app.arena_session.deinit();
     app.arena_streaming_preview = .init(std.testing.allocator);
     defer app.arena_streaming_preview.deinit();
+    app.arena_streaming_snapshot = .init(std.testing.allocator);
+    defer app.arena_streaming_snapshot.deinit();
     app.chat_entries = .empty;
     app.streaming_entry = null;
     app.sdk_preview_parts = .empty;
@@ -3280,6 +3300,8 @@ test "subagent events preserve the main tool call preview" {
     defer app.arena_session.deinit();
     app.arena_streaming_preview = .init(std.testing.allocator);
     defer app.arena_streaming_preview.deinit();
+    app.arena_streaming_snapshot = .init(std.testing.allocator);
+    defer app.arena_streaming_snapshot.deinit();
     app.chat_entries = .empty;
     app.streaming_entry = null;
     app.sdk_preview_parts = .empty;
@@ -3346,6 +3368,8 @@ test "flushed preview precedes compact status" {
     defer app.arena_session.deinit();
     app.arena_streaming_preview = .init(std.testing.allocator);
     defer app.arena_streaming_preview.deinit();
+    app.arena_streaming_snapshot = .init(std.testing.allocator);
+    defer app.arena_streaming_snapshot.deinit();
     app.chat_entries = .empty;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;

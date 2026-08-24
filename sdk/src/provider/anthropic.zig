@@ -100,11 +100,15 @@ pub const Chat = struct {
     ) anyerror!*model.GenerateResult {
         const self: *Chat = @ptrCast(@alignCast(ctx));
         const body = try buildRequest(alloc, self.model_id, params, true);
+        defer alloc.free(body);
         const headers = try self.authHeaders(alloc, params.headers);
+        defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/messages", .{self.base_url});
+        defer alloc.free(url);
         const request_options = requestOptions(self, params);
         var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
         const sse_text = try jsonx.postSseWithRetry(alloc, io, client, url, body, headers, max_retries, request_options, &live, emitLiveEvent);
+        defer alloc.free(sse_text);
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
         return parseStream(alloc, sse_text, &final_ctx);
     }
@@ -141,6 +145,7 @@ fn emitLiveEvent(ctx: ?*anyopaque, data: []const u8) !void {
     const live: *LiveStream = @ptrCast(@alignCast(ctx.?));
     if (jsonx.reportStreamError(live.alloc, live.options, data)) |err| return err;
     const event = try std.fmt.allocPrint(live.alloc, "data: {s}\n", .{data});
+    defer live.alloc.free(event);
     var event_ctx = model.StreamContext{ .emit = emitLive, .emit_ctx = live.sctx };
     _ = try parseStream(live.alloc, event, &event_ctx);
 }

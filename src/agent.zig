@@ -369,9 +369,9 @@ pub const Agent = struct {
         };
         if (!task.isFinished() or task.queue.count() != 0) return false;
         task.wait();
-        const failure = task.failure;
         const completed = task.result != null;
         const next_messages = if (completed) task.takeMessages() else null;
+        const failure = task.failure;
         const is_overflow = if (failure) |err| err == error.ContextOverflow else false;
         const checkpoint = if (!completed) task.takeCheckpoint() else null;
         task.deinit();

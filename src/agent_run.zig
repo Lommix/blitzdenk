@@ -126,6 +126,10 @@ pub const RunTask = struct {
     pub fn deinit(self: *RunTask) void {
         self.cancel();
         self.wait();
+        if (self.result) |result| {
+            result.deinit(self.alloc);
+            self.alloc.destroy(result);
+        }
         self.queue.deinit();
         self.checkpoint_arena.deinit();
         self.arena.deinit();
@@ -135,14 +139,17 @@ pub const RunTask = struct {
     pub fn takeMessages(self: *RunTask) ?OwnedMessages {
         self.wait();
         const result = self.result orelse return null;
-        var arena = self.arena;
-        self.arena = std.heap.ArenaAllocator.init(self.alloc);
-        const messages = result.messages;
-        result.messages = &.{};
-        result.deinit(arena.allocator());
-        arena.allocator().destroy(result);
+        const messages = OwnedMessages.clone(self.alloc, result.messages) catch {
+            self.failure = error.OutOfMemory;
+            result.deinit(self.alloc);
+            self.alloc.destroy(result);
+            self.result = null;
+            return null;
+        };
+        result.deinit(self.alloc);
+        self.alloc.destroy(result);
         self.result = null;
-        return .{ .arena = arena, .messages = messages };
+        return messages;
     }
 
     pub fn takeCheckpoint(self: *RunTask) ?OwnedMessages {
@@ -179,7 +186,7 @@ pub const RunTask = struct {
         options.hooks.on_checkpoint_ctx = self;
         self.checkpoint_hook = checkpoint_hook;
         self.checkpoint_hook_ctx = checkpoint_hook_ctx;
-        var result = sdk.streamText(self.arena.allocator(), self.io, self.model, options) catch |err| {
+        var result = sdk.streamText(self.alloc, self.io, self.model, options) catch |err| {
             self.failure = err;
             if (!builtin.is_test) log.warn("stream failed: {s}", .{@errorName(err)});
             if (!self.provider_error_seen.load(.acquire)) self.queue.append(.{ .failed = err }) catch |queue_err| {
@@ -187,8 +194,8 @@ pub const RunTask = struct {
             };
             return;
         };
-        const owned = self.arena.allocator().create(sdk.TextResult) catch {
-            result.deinit(self.arena.allocator());
+        const owned = self.alloc.create(sdk.TextResult) catch {
+            result.deinit(self.alloc);
             self.queue.append(.{ .failed = error.OutOfMemory }) catch |err| {
                 log.err("dropped out-of-memory stream failure event: {s}", .{@errorName(err)});
             };
@@ -638,6 +645,8 @@ test "completed messages outlive the run task" {
         }
 
         fn generate(_: *anyopaque, a: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            const temporary = try a.alloc(u8, 1024 * 1024);
+            a.free(temporary);
             const result = try a.create(sdk.model.GenerateResult);
             result.* = .{ .text = try a.dupe(u8, "done"), .finish_reason = .stop };
             return result;
@@ -656,6 +665,7 @@ test "completed messages outlive the run task" {
     var task = try RunTask.init(std.testing.allocator, io_state.io(), .{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = "hi" });
     task.start();
     task.wait();
+    try std.testing.expect(task.arena.queryCapacity() < 1024 * 1024);
     _ = task.queue.drain(8, null, Fixture.discard);
     var messages = task.takeMessages().?;
     task.deinit();
