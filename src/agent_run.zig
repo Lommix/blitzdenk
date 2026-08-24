@@ -12,12 +12,23 @@ pub const ProviderError = struct {
     attempt: u32 = 0,
 };
 
+pub const ToolResultEvent = struct {
+    tool_call_id: []const u8,
+    is_error: bool,
+};
+
+pub const StepEvent = struct {
+    number: usize,
+    tool_results: []const ToolResultEvent = &.{},
+    usage: sdk.Usage = .{},
+};
+
 pub const Event = union(enum) {
     text: []const u8,
     reasoning: []const u8,
     tool: sdk.StreamChunk,
-    tool_done: sdk.options.ToolCallInfo,
-    step: sdk.options.StepInfo,
+    tool_done: ToolResultEvent,
+    step: StepEvent,
     provider_error: ProviderError,
     complete: *sdk.TextResult,
     failed: anyerror,
@@ -42,6 +53,17 @@ pub const EventQueue = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         try self.events.append(self.arena.allocator(), try cloneEvent(self.arena.allocator(), event));
+    }
+
+    fn appendStep(self: *EventQueue, step: sdk.options.StepInfo) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const alloc = self.arena.allocator();
+        try self.events.append(alloc, .{ .step = .{
+            .number = step.number,
+            .tool_results = try cloneToolResultEvents(alloc, step.tool_results),
+            .usage = step.usage,
+        } });
     }
 
     pub fn drain(self: *EventQueue, max: usize, ctx: ?*anyopaque, handler: *const fn (?*anyopaque, Event) void) usize {
@@ -234,14 +256,17 @@ pub const RunTask = struct {
     fn onToolDone(ctx: ?*anyopaque, info: sdk.options.ToolCallInfo) void {
         const self: *RunTask = @ptrCast(@alignCast(ctx.?));
         if (self.tool_call_hook) |hook| hook(self.tool_call_hook_ctx, info);
-        self.queue.append(.{ .tool_done = info }) catch |err| {
+        self.queue.append(.{ .tool_done = .{
+            .tool_call_id = info.tool_call_id,
+            .is_error = info.is_error,
+        } }) catch |err| {
             log.err("dropped tool done event id={s} name={s}: {s}", .{ info.tool_call_id, info.tool_name, @errorName(err) });
         };
     }
 
     fn onStep(ctx: ?*anyopaque, step: sdk.options.StepInfo) void {
         const self: *RunTask = @ptrCast(@alignCast(ctx.?));
-        self.queue.append(.{ .step = step }) catch |err| {
+        self.queue.appendStep(step) catch |err| {
             log.err("dropped step event step={d} calls={d} results={d}: {s}", .{ step.number, step.tool_calls.len, step.tool_results.len, @errorName(err) });
         };
     }
@@ -316,20 +341,11 @@ fn cloneEvent(alloc: std.mem.Allocator, event: Event) !Event {
         } },
         .tool_done => |value| .{ .tool_done = .{
             .tool_call_id = try alloc.dupe(u8, value.tool_call_id),
-            .tool_name = try alloc.dupe(u8, value.tool_name),
-            .step = value.step,
-            .input = try alloc.dupe(u8, value.input),
-            .output = try alloc.dupe(u8, value.output),
             .is_error = value.is_error,
-            .duration_ms = value.duration_ms,
-            .err = value.err,
         } },
         .step => |value| .{ .step = .{
             .number = value.number,
-            .text = try alloc.dupe(u8, value.text),
-            .tool_calls = try cloneToolCalls(alloc, value.tool_calls),
-            .tool_results = try cloneToolResults(alloc, value.tool_results),
-            .finish_reason = value.finish_reason,
+            .tool_results = try cloneToolResultEvents(alloc, value.tool_results),
             .usage = value.usage,
         } },
         .provider_error => |value| .{ .provider_error = .{
@@ -345,28 +361,11 @@ fn cloneEvent(alloc: std.mem.Allocator, event: Event) !Event {
     };
 }
 
-fn cloneToolCalls(alloc: std.mem.Allocator, values: []const sdk.ToolCall) ![]const sdk.ToolCall {
-    const cloned = try alloc.alloc(sdk.ToolCall, values.len);
-    for (values, 0..) |value, i| cloned[i] = .{
-        .id = try alloc.dupe(u8, value.id),
-        .name = try alloc.dupe(u8, value.name),
-        .input = try alloc.dupe(u8, value.input),
-    };
-    return cloned;
-}
-
-fn cloneToolResults(alloc: std.mem.Allocator, values: []const sdk.ToolResult) ![]const sdk.ToolResult {
-    const cloned = try alloc.alloc(sdk.ToolResult, values.len);
+fn cloneToolResultEvents(alloc: std.mem.Allocator, values: anytype) ![]const ToolResultEvent {
+    const cloned = try alloc.alloc(ToolResultEvent, values.len);
     for (values, 0..) |value, i| cloned[i] = .{
         .tool_call_id = try alloc.dupe(u8, value.tool_call_id),
-        .tool_name = try alloc.dupe(u8, value.tool_name),
-        .output = try alloc.dupe(u8, value.output),
         .is_error = value.is_error,
-        .exit_loop = value.exit_loop,
-        .image = if (value.image) |image| .{
-            .url = try alloc.dupe(u8, image.url),
-            .media_type = try alloc.dupe(u8, image.media_type),
-        } else null,
     };
     return cloned;
 }
@@ -492,6 +491,29 @@ fn cloneJson(alloc: std.mem.Allocator, value: std.json.Value) !std.json.Value {
             break :blk .{ .object = cloned };
         },
     };
+}
+
+test "event queue compacts tool completion payloads" {
+    var queue = EventQueue.init(std.testing.allocator, std.testing.io);
+    defer queue.deinit();
+
+    const payload = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 'x');
+
+    const calls = [_]sdk.ToolCall{.{ .id = "call_1", .name = "write", .input = payload }};
+    const results = [_]sdk.ToolResult{.{ .tool_call_id = "call_1", .tool_name = "write", .output = payload }};
+    try queue.appendStep(.{
+        .number = 1,
+        .text = payload,
+        .tool_calls = &calls,
+        .tool_results = &results,
+    });
+    try queue.append(.{ .tool_done = .{ .tool_call_id = "call_1", .is_error = false } });
+
+    try std.testing.expect(queue.arena.queryCapacity() < 64 * 1024);
+    try std.testing.expect(!@hasField(ToolResultEvent, "output"));
+    try std.testing.expect(!@hasField(StepEvent, "tool_calls"));
 }
 
 test "run task queues owned SDK events with a drain limit" {

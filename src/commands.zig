@@ -133,14 +133,16 @@ pub const Command = union(enum) {
                 app.exec_pool.cancelAll();
                 app.dropStreamingPreview();
                 if (app.main_agent_id) |id| {
-                    if (checkpoint_start) |start| try app.appendAgentHistory(id, start);
+                    if (checkpoint_start) |start| try app.appendAgentHistory(id, start, app.sdk_run_rendered_steps);
                 }
+                app.sdk_run_rendered_steps = 0;
 
                 app.running = false;
                 app.auto_scroll = true;
             },
             .retry => {
                 if (app.main_agent_id) |id| {
+                    app.sdk_run_rendered_steps = 0;
                     try app.registry.retry(id, .{ .max_steps = std.math.maxInt(usize) });
                     app.running = true;
                     app.auto_scroll = true;
@@ -173,6 +175,7 @@ pub const Command = union(enum) {
 
                 const state = app.registry.state(arg.agent_id);
                 if (state != .active) {
+                    if (app.main_agent_id == arg.agent_id) app.sdk_run_rendered_steps = 0;
                     try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
                 }
             },
@@ -289,6 +292,7 @@ pub const Command = union(enum) {
                 }
 
                 try agent.setMessages(&.{.{ .role = .user, .content = arg.prompt }});
+                if (arg.parent_id == null) app.sdk_run_rendered_steps = 0;
                 try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
                 try app.event_bus.emit(app, .{ .agent_started = arg.agent_id });
                 app.running = true;

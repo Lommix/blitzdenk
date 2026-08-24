@@ -219,16 +219,16 @@ const ToolStatusAgent = struct {
 const ToolStatusStore = struct {
     agents: [r.agent_registry.max_agents]ToolStatusAgent = [_]ToolStatusAgent{.{}} ** r.agent_registry.max_agents,
 
-    fn setResult(self: *ToolStatusStore, alloc: std.mem.Allocator, agent_id: r.AgentId, result: r.sdk.ToolResult) !void {
+    fn setResult(self: *ToolStatusStore, alloc: std.mem.Allocator, agent_id: r.AgentId, call_id: []const u8, is_error: bool) !void {
         const agent = &self.agents[agent_id.index];
         if (agent.generation != agent_id.generation) agent.* = .{ .generation = agent_id.generation };
 
-        const entry = try agent.entries.getOrPut(alloc, result.tool_call_id);
+        const entry = try agent.entries.getOrPut(alloc, call_id);
         if (!entry.found_existing) {
-            entry.key_ptr.* = try alloc.dupe(u8, result.tool_call_id);
+            entry.key_ptr.* = try alloc.dupe(u8, call_id);
             entry.value_ptr.* = .{};
         }
-        entry.value_ptr.is_error = result.is_error;
+        entry.value_ptr.is_error = is_error;
     }
 };
 
@@ -283,6 +283,7 @@ pub const App = struct {
     streaming_entry: ?ChatEntry = null,
     sdk_preview_parts: std.ArrayList(SdkPreviewPart) = .empty,
     sdk_preview_flushed: bool = false,
+    sdk_run_rendered_steps: usize = 0,
     sdk_usage: r.sdk.Usage = .{},
     /// model round-trips of the main agent, incremented on .step events
     step_count: u32 = 0,
@@ -432,11 +433,11 @@ pub const App = struct {
         res.value_ptr.child_id = child_id;
     }
 
-    pub fn setToolResult(self: *App, agent_id: r.AgentId, result: r.sdk.ToolResult) !void {
+    pub fn setToolResult(self: *App, agent_id: r.AgentId, call_id: []const u8, is_error: bool) !void {
         if (agent_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
         const g = self.tool_status_entries.lock(self.io);
         defer g.unlock();
-        try g.ptr.setResult(self.sessionAlloc(), agent_id, result);
+        try g.ptr.setResult(self.sessionAlloc(), agent_id, call_id, is_error);
     }
 
     /// App-scoped allocator. Survives session resets.
@@ -469,6 +470,7 @@ pub const App = struct {
         self.streaming_entry = null;
         self.sdk_preview_parts = .empty;
         self.sdk_preview_flushed = false;
+        self.sdk_run_rendered_steps = 0;
         self.sdk_usage = .{};
         self.step_count = 0;
         self.compaction_indicator_active = false;
@@ -1265,26 +1267,17 @@ pub const App = struct {
                 try self.refreshSdkPreview(agent_id);
             },
             .tool_done => |info| {
-                try self.setToolResult(agent_id, .{
-                    .tool_call_id = info.tool_call_id,
-                    .tool_name = info.tool_name,
-                    .output = info.output,
-                    .is_error = info.is_error,
-                });
+                try self.setToolResult(agent_id, info.tool_call_id, info.is_error);
             },
             .step => |step| {
                 if (is_main) {
                     self.sdk_usage.add(step.usage);
                     self.step_count += 1;
+                    self.sdk_run_rendered_steps = step.number;
                 }
                 const status = self.tool_status_entries.lock(self.io);
                 defer status.unlock();
-                for (step.tool_results) |result| try status.ptr.setResult(alloc, agent_id, .{
-                    .tool_call_id = result.tool_call_id,
-                    .tool_name = result.tool_name,
-                    .output = result.output,
-                    .is_error = result.is_error,
-                });
+                for (step.tool_results) |result| try status.ptr.setResult(alloc, agent_id, result.tool_call_id, result.is_error);
                 if (is_main) try self.flushSdkPreview();
             },
             .provider_error => |provider_error| {
@@ -1331,7 +1324,10 @@ pub const App = struct {
             .failed => |err| {
                 if (self.registry.get(agent_id)) |agent| {
                     if (agent.shouldAutoRetry(err)) {
-                        if (is_main) self.dropStreamingPreview();
+                        if (is_main) {
+                            self.dropStreamingPreview();
+                            self.sdk_run_rendered_steps = 0;
+                        }
                         return;
                     }
                 }
@@ -1379,15 +1375,20 @@ pub const App = struct {
         try self.chat_entries.append(alloc, entry);
     }
 
-    pub fn appendAgentHistory(self: *App, agent_id: r.AgentId, start: usize) !void {
+    pub fn appendAgentHistory(self: *App, agent_id: r.AgentId, start: usize, skip: usize) !void {
         const agent = self.registry.get(agent_id) orelse return;
-        try self.appendSdkHistory(agent_id, agent.history(), start);
+        try self.appendSdkHistory(agent_id, agent.history(), start, skip);
     }
 
-    fn appendSdkHistory(self: *App, agent_id: r.AgentId, messages: []const r.sdk.Message, start: usize) !void {
+    fn appendSdkHistory(self: *App, agent_id: r.AgentId, messages: []const r.sdk.Message, start: usize, skip: usize) !void {
         const alloc = self.sessionAlloc();
+        var remaining = skip;
         for (messages[@min(start, messages.len)..]) |message| {
             if (message.role != .assistant) continue;
+            if (remaining > 0) {
+                remaining -= 1;
+                continue;
+            }
             const parts = renderSdkParts(alloc, agent_id, message.parts()) orelse continue;
             try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
         }
@@ -1404,6 +1405,7 @@ pub const App = struct {
             try self.appendChatEntry(alloc, chat_entry);
             const agent = self.registry.get(id).?;
             try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
+            self.sdk_run_rendered_steps = 0;
             try self.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
         } else {
             const id = self.registry.reserve().?;
@@ -3122,10 +3124,31 @@ test "checkpoint history appends only new assistant messages" {
         .{ .role = .tool, .content = &result_parts },
     };
 
-    try app.appendSdkHistory(.{ .index = 0, .generation = 0 }, &messages, 1);
+    try app.appendSdkHistory(.{ .index = 0, .generation = 0 }, &messages, 1, 0);
     try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
     try std.testing.expectEqualStrings("kept", app.chat_entries.items[0].parts[0].message);
     try std.testing.expectEqualStrings("call_1", app.chat_entries.items[0].parts[1].tool_call.call_id);
+}
+
+test "checkpoint history skips rendered assistant steps" {
+    var app: App = undefined;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.chat_entries = .empty;
+
+    const old_parts = [_]r.sdk.Part{r.sdk.Part.textPart("old")};
+    const rendered_parts = [_]r.sdk.Part{r.sdk.Part.textPart("rendered")};
+    const pending_parts = [_]r.sdk.Part{r.sdk.Part.textPart("pending")};
+    const messages = [_]r.sdk.Message{
+        .{ .role = .assistant, .content = &old_parts },
+        r.sdk.UserMessage("continue"),
+        .{ .role = .assistant, .content = &rendered_parts },
+        .{ .role = .assistant, .content = &pending_parts },
+    };
+
+    try app.appendSdkHistory(.{ .index = 0, .generation = 0 }, &messages, 1, 1);
+    try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
+    try std.testing.expectEqualStrings("pending", app.chat_entries.items[0].parts[0].message);
 }
 
 test "undoLastUserMessage pops the last user message into the input" {
@@ -3223,7 +3246,7 @@ test "SDK run events preserve preview final rendering and usage" {
     try app.applyRunEvent(agent_id, .{ .step = .{
         .number = 1,
         .usage = .{ .input_tokens = 5, .output_tokens = 2, .total_tokens = 7 },
-        .tool_results = &.{.{ .tool_call_id = "call_1", .tool_name = "read", .output = "done" }},
+        .tool_results = &.{.{ .tool_call_id = "call_1", .is_error = false }},
     } });
     try std.testing.expectEqual(@as(u64, 7), app.sdk_usage.total_tokens);
     const status = &app.tool_status_entries.value.agents[agent_id.index];
@@ -3325,10 +3348,10 @@ test "subagent events preserve the main tool call preview" {
     try app.applyRunEvent(child_id, .{ .step = .{
         .number = 1,
         .tool_results = &.{
-            .{ .tool_call_id = "child_1", .tool_name = "read", .output = "" },
-            .{ .tool_call_id = "child_2", .tool_name = "search", .output = "" },
-            .{ .tool_call_id = "child_3", .tool_name = "edit", .output = "" },
-            .{ .tool_call_id = "child_4", .tool_name = "bash", .output = "" },
+            .{ .tool_call_id = "child_1", .is_error = false },
+            .{ .tool_call_id = "child_2", .is_error = false },
+            .{ .tool_call_id = "child_3", .is_error = false },
+            .{ .tool_call_id = "child_4", .is_error = false },
         },
     } });
     var result = r.sdk.TextResult{};
@@ -3390,12 +3413,7 @@ test "ToolStatusStore retains terminal tool result" {
 
     var store: ToolStatusStore = .{};
     const agent_id: r.AgentId = .{ .index = 1, .generation = 2 };
-    try store.setResult(arena.allocator(), agent_id, .{
-        .tool_call_id = "call_1",
-        .tool_name = "bash",
-        .output = "failed",
-        .is_error = true,
-    });
+    try store.setResult(arena.allocator(), agent_id, "call_1", true);
 
     const agent = &store.agents[agent_id.index];
     try std.testing.expectEqual(agent_id.generation, agent.generation);
