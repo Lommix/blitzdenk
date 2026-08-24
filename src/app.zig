@@ -458,8 +458,8 @@ pub const App = struct {
     pub fn reset(self: *App) void {
         self.dropStreamingPreview();
         self.cancelPermissions();
-        self.registry.cancelAll();
         self.exec_pool.cancelAll();
+        self.registry.cancelAll();
 
         self.main_agent_id = null;
         self.running = false;

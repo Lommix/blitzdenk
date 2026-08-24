@@ -130,8 +130,8 @@ pub const Command = union(enum) {
                     app.event_bus.emit(app, .{ .agent_cancelled = .{ .id = id } }) catch {};
                 }
                 app.cancelPermissions();
-                app.registry.cancelAll();
                 app.exec_pool.cancelAll();
+                app.registry.cancelAll();
                 app.dropStreamingPreview();
                 if (app.main_agent_id) |id| {
                     if (checkpoint_start) |start| try app.appendAgentHistory(id, start, app.sdk_run_rendered_steps);

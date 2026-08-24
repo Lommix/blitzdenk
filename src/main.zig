@@ -236,9 +236,9 @@ pub fn run(
     }
     defer {
         app.cancelPermissions();
+        exec_pool.cancelAll();
         registry.cancelAll();
         app.deinit();
-        exec_pool.cancelAll();
         registry.deinit();
         exec_pool.deinit();
     }
