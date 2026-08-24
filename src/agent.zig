@@ -373,10 +373,7 @@ pub const Agent = struct {
         const completed = task.result != null;
         const next_messages = if (completed) task.takeMessages() else null;
         const is_overflow = if (failure) |err| err == error.ContextOverflow else false;
-        const checkpoint = if (is_overflow and !self.flags.overflow_recovery)
-            task.takeCheckpoint()
-        else
-            null;
+        const checkpoint = if (!completed) task.takeCheckpoint() else null;
         task.deinit();
         self.task = null;
         self.clearRunHooks();
@@ -391,22 +388,27 @@ pub const Agent = struct {
             self.flags.overflow_recovery = false;
             if (self.resume_options) |*options| options.deinit();
             self.resume_options = null;
-        } else if (checkpoint) |owned| {
-            self.flags.overflow_recovery = true;
-            if (self.messages) |*previous| previous.deinit();
-            self.messages = owned;
-            self.requestCompaction(.auto, true);
-            if (!(self.startCompaction() catch false)) {
-                self.last_error = error.ContextOverflow;
-                self.status = .failed;
+        } else {
+            const has_checkpoint = checkpoint != null;
+            if (checkpoint) |owned| {
+                if (self.messages) |*previous| previous.deinit();
+                self.messages = owned;
             }
-        } else if (failure) |err| {
-            self.last_error = err;
-            if (self.shouldAutoRetry(err)) {
-                self.scheduleRetry();
-                return true;
+            if (is_overflow and !self.flags.overflow_recovery and has_checkpoint) {
+                self.flags.overflow_recovery = true;
+                self.requestCompaction(.auto, true);
+                if (!(self.startCompaction() catch false)) {
+                    self.last_error = error.ContextOverflow;
+                    self.status = .failed;
+                }
+            } else if (failure) |err| {
+                self.last_error = err;
+                if (self.shouldAutoRetry(err)) {
+                    self.scheduleRetry();
+                    return true;
+                }
+                if (self.status != .canceled or !self.flags.cancel) self.status = .failed;
             }
-            if (self.status != .canceled or !self.flags.cancel) self.status = .failed;
         }
         return true;
     }
@@ -1058,4 +1060,67 @@ test "explicit cancel does not auto retry on stream failure" {
     try std.testing.expect(agent.reap());
     try std.testing.expectEqual(Status.canceled, agent.status);
     try std.testing.expectEqual(@as(u32, 0), agent.retry_count);
+}
+
+test "explicit cancel adopts the latest valid request checkpoint" {
+    const Fixture = struct {
+        calls: usize = 0,
+
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generate(ctx: *anyopaque, alloc: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            if (self.calls == 2) return error.Canceled;
+            const calls = try alloc.alloc(sdk.ToolCall, 1);
+            calls[0] = .{
+                .id = try alloc.dupe(u8, "call_1"),
+                .name = try alloc.dupe(u8, "test"),
+                .input = try alloc.dupe(u8, "{}"),
+            };
+            const result = try alloc.create(sdk.model.GenerateResult);
+            result.* = .{ .tool_calls = calls, .finish_reason = .tool_calls };
+            return result;
+        }
+
+        fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            return generate(ctx, alloc, io, params, client, retries);
+        }
+
+        fn tool(_: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: sdk.ToolCall) anyerror!sdk.ToolOutput {
+            return .{ .content = "tool output" };
+        }
+
+        fn collect(ctx: ?*anyopaque, event: agent_run.Event) void {
+            const agent: *Agent = @ptrCast(@alignCast(ctx.?));
+            agent.observe(event) catch unreachable;
+        }
+    };
+
+    var fixture = Fixture{};
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    try agent.setTools(&.{.{ .name = "test", .execute = Fixture.tool }});
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{
+        .prompt = "prompt",
+        .max_steps = 3,
+    });
+    agent.task.?.wait();
+    agent.cancel();
+    while (agent.drain(2, &agent, Fixture.collect) != 0) {}
+    try std.testing.expect(agent.reap());
+    try std.testing.expectEqual(Status.canceled, agent.status);
+    try std.testing.expectEqual(@as(usize, 3), agent.history().len);
+    try std.testing.expectEqualStrings("prompt", agent.history()[0].text());
+    try std.testing.expectEqual(sdk.Role.assistant, agent.history()[1].role);
+    try std.testing.expectEqualStrings("tool output", agent.history()[2].parts()[0].tool_result.output);
 }

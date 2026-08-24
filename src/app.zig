@@ -1344,6 +1344,20 @@ pub const App = struct {
         try self.chat_entries.append(alloc, entry);
     }
 
+    pub fn appendAgentHistory(self: *App, agent_id: r.AgentId, start: usize) !void {
+        const agent = self.registry.get(agent_id) orelse return;
+        try self.appendSdkHistory(agent_id, agent.history(), start);
+    }
+
+    fn appendSdkHistory(self: *App, agent_id: r.AgentId, messages: []const r.sdk.Message, start: usize) !void {
+        const alloc = self.sessionAlloc();
+        for (messages[@min(start, messages.len)..]) |message| {
+            if (message.role != .assistant) continue;
+            const parts = renderSdkParts(alloc, agent_id, message.parts()) orelse continue;
+            try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
+        }
+    }
+
     /// Send a user prompt to the main agent: emit hook, queue messages, run.
     /// Shared by the TUI Enter handler and headless mode.
     pub fn sendPrompt(self: *App, io: std.Io, parts: []const r.sdk.Part, chat_text: []const u8) !void {
@@ -3039,6 +3053,30 @@ test "renderSdkParts keeps streamed final parts together" {
     try std.testing.expectEqualStrings("call_1", rendered[2].tool_call.call_id);
     try std.testing.expectEqualStrings("bash", rendered[2].tool_call.tool_name);
     try std.testing.expectEqual(agent_id, rendered[2].tool_call.agent_id);
+}
+
+test "checkpoint history appends only new assistant messages" {
+    var app: App = undefined;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.chat_entries = .empty;
+
+    const first_parts = [_]r.sdk.Part{r.sdk.Part.textPart("old")};
+    const checkpoint_parts = [_]r.sdk.Part{
+        r.sdk.Part.textPart("kept"),
+        r.sdk.Part.toolCallPart("call_1", "read", "{}"),
+    };
+    const result_parts = [_]r.sdk.Part{r.sdk.Part.toolResultPart("call_1", "read", "done")};
+    const messages = [_]r.sdk.Message{
+        .{ .role = .assistant, .content = &first_parts },
+        .{ .role = .assistant, .content = &checkpoint_parts },
+        .{ .role = .tool, .content = &result_parts },
+    };
+
+    try app.appendSdkHistory(.{ .index = 0, .generation = 0 }, &messages, 1);
+    try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
+    try std.testing.expectEqualStrings("kept", app.chat_entries.items[0].parts[0].message);
+    try std.testing.expectEqualStrings("call_1", app.chat_entries.items[0].parts[1].tool_call.call_id);
 }
 
 test "SDK run events preserve preview final rendering and usage" {

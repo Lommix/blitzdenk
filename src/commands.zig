@@ -121,6 +121,10 @@ pub const Command = union(enum) {
         switch (self.*) {
             .reset_session => app.reset(),
             .cancel => {
+                const checkpoint_start = if (app.main_agent_id) |id|
+                    if (app.registry.get(id)) |agent| agent.history().len else null
+                else
+                    null;
                 if (app.main_agent_id) |id| {
                     app.event_bus.emit(app, .{ .agent_cancelled = .{ .id = id } }) catch {};
                 }
@@ -128,10 +132,8 @@ pub const Command = union(enum) {
                 app.registry.cancelAll();
                 app.exec_pool.cancelAll();
                 app.dropStreamingPreview();
-
-                if (app.streaming_entry) |*en| {
-                    en.free(app.sessionAlloc());
-                    app.streaming_entry = null;
+                if (app.main_agent_id) |id| {
+                    if (checkpoint_start) |start| try app.appendAgentHistory(id, start);
                 }
 
                 app.running = false;
