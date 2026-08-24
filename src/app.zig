@@ -1106,6 +1106,34 @@ pub const App = struct {
         self.syncCompletion();
     }
 
+    pub fn undoLastUserMessage(self: *App) void {
+        if (self.input_mode != .text) return;
+        if (self.running) return;
+        if (self.chat_entries.items.len == 0) return;
+
+        const last = self.chat_entries.items[self.chat_entries.items.len - 1];
+        if (last.role != .user) return;
+        const text = chatEntryUserText(last) orelse return;
+
+        const agent = self.mainAgent() orelse return;
+        const history = agent.history();
+        if (history.len == 0 or history[history.len - 1].role != .user) return;
+        agent.setMessages(history[0 .. history.len - 1]) catch return;
+
+        const alloc = self.sessionAlloc();
+        self.input_buffer.clearRetainingCapacity();
+        self.input_buffer.appendSlice(alloc, text) catch return;
+        self.input_cursor = @intCast(self.input_buffer.items.len);
+
+        _ = self.chat_entries.pop();
+        if (self.textState()) |t| {
+            t.completion_open = false;
+            t.completion_selected = 0;
+            t.completion_query_len = 0;
+        }
+        self.dirty = true;
+    }
+
     pub const PromptEntry = struct {
         text: []const u8,
         timestamp: i128,
@@ -1601,6 +1629,15 @@ pub const ChatPart = union(enum) {
         diff_lines: []const r.tui.DiffLine,
     };
 };
+
+fn chatEntryUserText(entry: ChatEntry) ?[]const u8 {
+    for (entry.parts) |part| switch (part) {
+        .message => |m| return m,
+        .plain_text => |t| return t,
+        else => {},
+    };
+    return null;
+}
 
 const SdkPreviewCall = struct {
     call_id: []const u8,
@@ -3077,6 +3114,65 @@ test "checkpoint history appends only new assistant messages" {
     try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
     try std.testing.expectEqualStrings("kept", app.chat_entries.items[0].parts[0].message);
     try std.testing.expectEqualStrings("call_1", app.chat_entries.items[0].parts[1].tool_call.call_id);
+}
+
+test "undoLastUserMessage pops the last user message into the input" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.chat_entries = .empty;
+    app.input_buffer = .empty;
+    app.input_cursor = 0;
+    app.input_mode = .{ .text = .{} };
+    app.running = false;
+    app.dirty = false;
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .name = "main", .cwd = "/tmp" } });
+    try agent.setMessages(&.{ r.sdk.UserMessage("old"), r.sdk.UserMessage("hello") });
+    app.main_agent_id = id;
+    app.registry = &registry;
+
+    const alloc = app.sessionAlloc();
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "hello"));
+    try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
+
+    app.undoLastUserMessage();
+
+    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
+    try std.testing.expectEqualStrings("hello", app.input_buffer.items);
+    try std.testing.expectEqual(@as(usize, 1), agent.history().len);
+    try std.testing.expectEqualStrings("old", agent.history()[0].text());
+}
+
+test "undoLastUserMessage does not fire while running" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.chat_entries = .empty;
+    app.input_buffer = .empty;
+    app.input_cursor = 0;
+    app.input_mode = .{ .text = .{} };
+    app.running = true;
+    app.dirty = false;
+
+    const alloc = app.sessionAlloc();
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "hello"));
+    app.main_agent_id = null;
+
+    app.undoLastUserMessage();
+
+    try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
 }
 
 test "SDK run events preserve preview final rendering and usage" {

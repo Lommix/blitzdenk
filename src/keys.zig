@@ -17,6 +17,7 @@ pub const Action = union(enum) {
     completion_prev,
     completion_accept,
     paste_image,
+    undo,
     lua: c_int,
 };
 
@@ -40,6 +41,7 @@ pub const KeyMap = struct {
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'x' } }, .action = .clear_session },
         KeyBind{ .key = .{ .code = .esc }, .action = .cancel },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'v' } }, .action = .paste_image },
+        KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'z' } }, .action = .undo },
     };
 
     pub fn parse(self: *const KeyMap, key: tui.Key) ?Action {
@@ -271,6 +273,11 @@ test "parseKeyString round-trip with KeyMap defaults" {
     const k = parseKeyString("<C-c>").?;
     var map = KeyMap{};
     try std.testing.expectEqual(Action.exit, map.parse(k).?);
+}
+
+test "KeyMap defaults bind ctrl-z to undo" {
+    var map = KeyMap{};
+    try std.testing.expectEqual(Action.undo, map.parse(.{ .mods = .{ .ctrl = true }, .code = .{ .char = 'z' } }).?);
 }
 
 test "KeyMap defaults bind completion actions" {

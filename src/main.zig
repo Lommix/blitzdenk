@@ -545,6 +545,10 @@ pub fn run(
                                 app.handleCompletion(.accept);
                                 continue;
                             },
+                            .undo => {
+                                app.undoLastUserMessage();
+                                continue;
+                            },
                             .paste_image => {
                                 if (app.input_mode == .text) app.pasteImage();
                                 continue;
