@@ -17,6 +17,43 @@ pub const VersionInfo = struct {
     }
 };
 
+pub const CheckTask = struct {
+    pool: *exec.CmdPool,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    finished: std.atomic.Value(bool) = .init(false),
+    future: ?std.Io.Future(void) = null,
+    result: ?VersionInfo = null,
+
+    pub fn init(pool: *exec.CmdPool, gpa: std.mem.Allocator, io: std.Io) CheckTask {
+        return .{ .pool = pool, .gpa = gpa, .io = io };
+    }
+
+    pub fn start(self: *CheckTask) void {
+        self.future = std.Io.concurrent(self.io, run, .{self}) catch {
+            self.finished.store(true, .release);
+            return;
+        };
+    }
+
+    pub fn availableVersion(self: *const CheckTask) ?[]const u8 {
+        if (!self.finished.load(.acquire)) return null;
+        const result = self.result orelse return null;
+        return if (result.available) result.latest else null;
+    }
+
+    pub fn deinit(self: *CheckTask) void {
+        if (self.future) |*future| future.cancel(self.io);
+        if (self.result) |result| result.deinit(self.gpa);
+        self.* = undefined;
+    }
+
+    fn run(self: *CheckTask) void {
+        defer self.finished.store(true, .release);
+        self.result = checkForUpdate(self.pool, self.gpa) catch return;
+    }
+};
+
 const Release = struct {
     tag_name: []const u8,
     assets: []const Asset,
@@ -127,7 +164,10 @@ fn download(pool: *exec.CmdPool, gpa: std.mem.Allocator, url: []const u8, timeou
         &.{ "wget", "-qO-", url },
     };
     for (commands) |argv| {
-        const res = pool.runAndWaitTimeout(.{ .argv = argv, .force_local = true }, timeout_ms) catch continue;
+        const res = pool.runAndWaitTimeout(.{ .argv = argv, .force_local = true, .skip_agent_overlay = true }, timeout_ms) catch |err| switch (err) {
+            error.Canceled => return err,
+            else => continue,
+        };
         gpa.free(res.stderr);
         if (res.ty == .success and res.stdout.len > 0) return res.stdout;
         gpa.free(res.stdout);

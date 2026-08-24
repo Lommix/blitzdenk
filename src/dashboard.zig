@@ -64,6 +64,13 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
         , .{r.VERSION}, .{ .fg = app.theme.muted }),
     );
 
+    if (app.availableUpdateVersion()) |version| {
+        try out.append(
+            alloc,
+            try r.tui.Line.new(alloc, "├[update {s} available, run 'blitz update'", .{version}, .{ .fg = app.theme.warn }),
+        );
+    }
+
     try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
 
     {

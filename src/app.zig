@@ -255,6 +255,7 @@ pub const App = struct {
     active_permission: ?*r.permissions.Request = null,
     registry: *r.agent_registry.Registry = undefined,
     exec_pool: *r.exec.CmdPool = undefined,
+    update_check: ?r.update.CheckTask = null,
     config: r.config.BlitzdenkCfg = .{},
     main_agent_id: ?r.AgentId = null,
     running: bool = false,
@@ -333,6 +334,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        if (self.update_check) |*task| task.deinit();
         self.mcp_manager.deinit();
         self.lua_vm.deinit();
         self.lua_state.deinit(self.gpa);
@@ -437,6 +439,16 @@ pub const App = struct {
     /// App-scoped allocator. Survives session resets.
     pub fn appAlloc(self: *App) std.mem.Allocator {
         return self.arena_app.allocator();
+    }
+
+    pub fn startUpdateCheck(self: *App) void {
+        self.update_check = .init(self.exec_pool, self.gpa, self.io);
+        self.update_check.?.start();
+    }
+
+    pub fn availableUpdateVersion(self: *const App) ?[]const u8 {
+        const task = if (self.update_check) |*task| task else return null;
+        return task.availableVersion();
     }
 
     pub fn reset(self: *App) void {

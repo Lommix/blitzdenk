@@ -237,8 +237,8 @@ pub fn run(
     defer {
         app.cancelPermissions();
         registry.cancelAll();
-        exec_pool.cancelAll();
         app.deinit();
+        exec_pool.cancelAll();
         registry.deinit();
         exec_pool.deinit();
     }
@@ -304,6 +304,8 @@ pub fn run(
         try runHeadless(&app, io, prompt.?);
         return;
     }
+
+    app.startUpdateCheck();
 
     if (prompt) |p| {
         try app.input_buffer.appendSlice(app.sessionAlloc(), p);
