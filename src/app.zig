@@ -2821,6 +2821,9 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
     var dur_buf: [32]u8 = undefined;
     const dur = formatDuration(&dur_buf, secs);
 
+    const exec_pool = app.exec_pool;
+    const ssh_suffix: []const u8 = if (exec_pool.ssh_active and exec_pool.ssh_target != null) " (SSH ON)" else "";
+
     var l = r.tui.Line{};
     if (state == .active) {
         const spinner_str = text_utils.spinnerDots(app.frame_count);
@@ -2828,8 +2831,6 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
             l.pushSpanPrint(alloc, "{s} compacting", .{spinner_str}, info) catch {};
             return l;
         }
-        const exec_pool = app.exec_pool;
-        const ssh_suffix: []const u8 = if (exec_pool.ssh_active and exec_pool.ssh_target != null) " (SSH ON)" else "";
 
         var queued_buf: [64]u8 = undefined;
         const queued_count = app.queued.count();
@@ -2861,7 +2862,7 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
         l.pushSpanPrint(alloc, "{s} {s}", .{ ssh_suffix, queued_suffix }, info) catch {};
     } else {
         const label = if (state == .complete) "Done" else "Failed";
-        l.pushSpanPrint(alloc, "{s} ({s})", .{ label, dur }, info) catch {};
+        l.pushSpanPrint(alloc, "{s} ({s}){s}", .{ label, dur, ssh_suffix }, info) catch {};
     }
     return l;
 }
