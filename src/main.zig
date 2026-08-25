@@ -25,6 +25,8 @@ const tools = r.tools;
 pub const DEFAULT_CONFIG_PATH = r.defaults.CONFIG_DIR;
 pub const DEFAULT_CACHE_PATH = "cache.zon";
 pub const DEFAULT_LUA_CONFIG = "blitz.lua";
+const IO_THREAD_STACK_SIZE = 2 * 1024 * 1024;
+const IO_THREAD_LIMIT = 64;
 
 test {
     std.testing.refAllDecls(@This());
@@ -104,11 +106,21 @@ fn cwdBlitzLuaExists(io: std.Io) bool {
 }
 
 pub fn main(init: std.process.Init) !void {
+    var io_state = std.Io.Threaded.init(init.gpa, .{
+        .stack_size = IO_THREAD_STACK_SIZE,
+        .async_limit = .limited(IO_THREAD_LIMIT),
+        .concurrent_limit = .limited(IO_THREAD_LIMIT),
+        .argv0 = .init(init.minimal.args),
+        .environ = init.minimal.environ,
+    });
+    defer io_state.deinit();
+    const io = io_state.io();
+
     var pos_buf: [16][:0]const u8 = undefined;
     const split = CliArgs.split(init.minimal.args, &pos_buf);
     const cli_flags = split.flags;
     const command_result = CliCommand.parse(split.positional);
-    if (cli_flags.debug_log or builtin.mode == .Debug) openDebugLog(init.io);
+    if (cli_flags.debug_log or builtin.mode == .Debug) openDebugLog(io);
 
     const cmd: CliCommand = if (split.prompt) |p|
         CliCommand{ .prompt = p }
@@ -129,13 +141,13 @@ pub fn main(init: std.process.Init) !void {
     switch (cmd) {
         .run => |cwd_arg| {
             var cwd_buffer: [std.posix.PATH_MAX]u8 = undefined;
-            const len = try std.Io.Dir.cwd().realPathFile(init.io, cwd_arg, &cwd_buffer);
+            const len = try std.Io.Dir.cwd().realPathFile(io, cwd_arg, &cwd_buffer);
             const cwd = cwd_buffer[0..len];
             try run(
                 cwd,
                 init.gpa,
                 init.arena.allocator(),
-                init.io,
+                io,
                 init.environ_map,
                 cli_flags,
                 null,
@@ -145,13 +157,13 @@ pub fn main(init: std.process.Init) !void {
         .prompt => |prompt| {
             var cwd_buffer: [std.posix.PATH_MAX]u8 = undefined;
             const cwd_arg: []const u8 = if (split.prompt != null and split.positional.len > 0) split.positional[0] else ".";
-            const len = try std.Io.Dir.cwd().realPathFile(init.io, cwd_arg, &cwd_buffer);
+            const len = try std.Io.Dir.cwd().realPathFile(io, cwd_arg, &cwd_buffer);
             const cwd = cwd_buffer[0..len];
             try run(
                 cwd,
                 init.gpa,
                 init.arena.allocator(),
-                init.io,
+                io,
                 init.environ_map,
                 cli_flags,
                 prompt,
@@ -159,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
             );
         },
         .update => {
-            try updateCli(init.io, init.gpa, init.environ_map);
+            try updateCli(io, init.gpa, init.environ_map);
         },
         .help => {
             std.debug.print(
