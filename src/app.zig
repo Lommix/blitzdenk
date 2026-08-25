@@ -10,8 +10,13 @@ const COMMAND_COMPLETION_ROWS = 64;
 
 pub const ChatRole = enum { system, user, agent };
 
-const builtin_command_completions: []const []const u8 = &.{
-    "/ssh",
+pub const CommandCompletion = struct {
+    text: []const u8,
+    description: ?[]const u8 = null,
+};
+
+const builtin_command_completions: []const CommandCompletion = &.{
+    .{ .text = "/ssh", .description = "connect user@host:cwd" },
 };
 
 pub const UiState = union(enum) {
@@ -667,7 +672,7 @@ pub const App = struct {
         if (t.completion_selected >= rows.len) t.completion_selected = 0;
 
         const cur_end = @min(@as(usize, self.input_cursor), self.input_buffer.items.len);
-        const already = std.ascii.eqlIgnoreCase(self.input_buffer.items[0..cur_end], rows.items[t.completion_selected]);
+        const already = std.ascii.eqlIgnoreCase(self.input_buffer.items[0..cur_end], rows.items[t.completion_selected].text);
 
         switch (move) {
             .accept => {},
@@ -681,7 +686,7 @@ pub const App = struct {
             },
         }
 
-        insertCompletionToken(self, rows.items[t.completion_selected]);
+        insertCompletionToken(self, rows.items[t.completion_selected].text);
 
         if (move == .accept) {
             t.completion_open = false;
@@ -1024,6 +1029,12 @@ pub const App = struct {
         if (app.input_mode == .text and app.input_mode.text.completion_open) {
             const completions = commandCompletions(app, frame_alloc, app.input_buffer.items, app.input_cursor);
             if (completions.len > 0) {
+                var max_width: usize = 0;
+                for (completions.items[0..completions.len]) |cmp| {
+                    const width = textWidthCols(cmp.text) + 1 + descriptionWidth(cmp.description);
+                    if (width > max_width) max_width = width;
+                }
+
                 var p = r.tui.Paragraph{};
                 p.border = .single;
                 p.style.bg = app.theme.overlay_dark;
@@ -1033,11 +1044,16 @@ pub const App = struct {
                 const start = if (selected >= visible) selected + 1 - visible else 0;
                 const end = @min(completions.len, start + visible);
                 for (completions.items[start..end], 0..) |cmp, i| {
-                    const style: r.tui.Style = if (start + i == selected)
-                        .{ .modifier = .{ .bold = true, .reverse = true } }
-                    else
-                        .{ .modifier = .{ .bold = true } };
-                    p.appendText(frame_alloc, cmp, style) catch {};
+                    const sel = start + i == selected;
+                    const cmd_style: r.tui.Style = .{ .modifier = .{ .bold = true, .reverse = sel } };
+                    const desc_style: r.tui.Style = if (sel) cmd_style else .{ .fg = app.theme.muted };
+                    var line = r.tui.Line{};
+                    line.pushText(frame_alloc, cmp.text, cmd_style) catch {};
+                    if (cmp.description) |desc| {
+                        line.pushText(frame_alloc, " ", desc_style) catch {};
+                        line.pushText(frame_alloc, desc, desc_style) catch {};
+                    }
+                    p.lines.append(frame_alloc, line) catch {};
                 }
 
                 if (p.lines.items.len > 0) {
@@ -1045,7 +1061,7 @@ pub const App = struct {
                     const completion_area = r.tui.Rect{
                         .x = _input_area.x + 1,
                         .y = _input_area.y -| height + 1,
-                        .width = 32,
+                        .width = @intCast(@min(max_width + 2, std.math.maxInt(u16))),
                         .height = height,
                     };
                     p.renderSimple(frame_alloc, completion_area, buf);
@@ -1940,10 +1956,10 @@ fn filterPrefix(input: []const u8, cursor: u32, query_len: usize, open: bool) []
     return commandCompletionPrefix(input, cursor);
 }
 
-fn containsCommandCompletion(items: []?[]const u8, needle: []const u8) bool {
+fn containsCommandCompletion(items: []?CommandCompletion, needle: []const u8) bool {
     for (items) |item| {
         const value = item orelse continue;
-        if (std.mem.eql(u8, value, needle)) return true;
+        if (std.mem.eql(u8, value.text, needle)) return true;
     }
     return false;
 }
@@ -1972,25 +1988,34 @@ fn completionVisible(input: []const u8, cursor: u32, match_count: usize) bool {
     return match_count > 0 and commandTokenActive(input, cursor);
 }
 
-fn appendBuiltinCommandCompletions(prefix: []const u8, out: []?[]const u8, count: *usize) void {
+fn textWidthCols(text: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(text) catch text.len;
+}
+
+fn descriptionWidth(description: ?[]const u8) usize {
+    const desc = description orelse return 0;
+    return textWidthCols(desc);
+}
+
+fn appendBuiltinCommandCompletions(prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
     for (builtin_command_completions) |completion| {
         if (count.* >= out.len) return;
-        if (!completionMatches(completion, prefix)) continue;
-        if (containsCommandCompletion(out[0..count.*], completion)) continue;
+        if (!completionMatches(completion.text, prefix)) continue;
+        if (containsCommandCompletion(out[0..count.*], completion.text)) continue;
 
         out[count.*] = completion;
         count.* += 1;
     }
 }
 
-fn appendLuaCommandCompletions(app: *App, prefix: []const u8, out: []?[]const u8, count: *usize) void {
+fn appendLuaCommandCompletions(app: *App, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
     if (count.* >= out.len) return;
     if (!app.lua_vm.vm_mu.tryLock()) return;
     defer app.lua_vm.vm_mu.unlock(app.io);
     app.lua_vm.appendCommandCompletions(prefix, out, count);
 }
 
-fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?[]const u8, count: *usize) void {
+fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
     if (count.* >= out.len) return;
 
     for (app.context_factory.skill_names.items) |name| {
@@ -1999,12 +2024,12 @@ fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []
         if (!completionMatches(formatted, prefix)) continue;
         if (containsCommandCompletion(out[0..count.*], formatted)) continue;
 
-        out[count.*] = formatted;
+        out[count.*] = .{ .text = formatted };
         count.* += 1;
     }
 }
 
-fn appendSshAliasCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?[]const u8, count: *usize) void {
+fn appendSshAliasCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
     if (count.* >= out.len) return;
 
     for (app.context_factory.ssh_aliases.items) |alias| {
@@ -2013,18 +2038,18 @@ fn appendSshAliasCompletions(app: *App, alloc: std.mem.Allocator, prefix: []cons
         if (!completionMatches(formatted, prefix)) continue;
         if (containsCommandCompletion(out[0..count.*], formatted)) continue;
 
-        out[count.*] = formatted;
+        out[count.*] = .{ .text = formatted };
         count.* += 1;
     }
 }
 
 const CompletionRows = struct {
-    items: [COMMAND_COMPLETION_ROWS][]const u8 = [_][]const u8{""} ** COMMAND_COMPLETION_ROWS,
+    items: [COMMAND_COMPLETION_ROWS]CommandCompletion = [_]CommandCompletion{.{ .text = "" }} ** COMMAND_COMPLETION_ROWS,
     len: usize = 0,
 };
 
 fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: u32) CompletionRows {
-    var matches: [COMMAND_COMPLETION_ROWS]?[]const u8 = [_]?[]const u8{null} ** COMMAND_COMPLETION_ROWS;
+    var matches: [COMMAND_COMPLETION_ROWS]?CommandCompletion = [_]?CommandCompletion{null} ** COMMAND_COMPLETION_ROWS;
     var count: usize = 0;
 
     const prefix = switch (app.input_mode) {
@@ -2039,7 +2064,7 @@ fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cu
     var rows = CompletionRows{};
     for (matches[0..count]) |item| {
         const value = item orelse continue;
-        if (!completionMatches(value, prefix)) continue;
+        if (!completionMatches(value.text, prefix)) continue;
         rows.items[rows.len] = value;
         rows.len += 1;
     }

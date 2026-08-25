@@ -203,6 +203,9 @@ general agent's sub-agent tool.
 
 ## Commands and cmd
 
+`blitz.add_command(name, func, description?)`. The description is optional and
+shows next to the command in the completion popup.
+
 ```lua
 blitz.add_command("plan", function(rem)
     blitz.cmd.reset_session()
@@ -211,7 +214,7 @@ blitz.add_command("plan", function(rem)
         prompt = "Plan, do not edit. Request:\n" .. rem,
     })
     blitz.cmd.push_chat_entry("user", "[PLAN]: " .. rem)
-end)
+end, "plan a task without editing")
 ```
 
 Queue API: `reset_session`, `cancel`, `retry`, `compact`, `cd(path)`,

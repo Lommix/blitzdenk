@@ -729,11 +729,16 @@ pub const Blitz = LuaType{
                 .desc =
                 \\Bind a slash command to a Lua callback. The leading "/" is added automatically.
                 \\Example: blitz.add_command("help", function(args) end)
+                \\
                 ,
                 .ty = LuaType{ .function = .{
-                    .args = &.{ .{ .name = "command", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
+                    .args = &.{
+                        .{ .name = "command", .ty = LuaType.string },
+                        .{ .name = "func", .ty = LuaType{ .function = .{} } },
+                        .{ .name = "description", .ty = LuaType.string, .optional = true, .desc = "shown next to the command in the completion popup" },
+                    },
                     .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(a: *r.app.App, state: *c.lua_State, name: []const u8, func: LuaFnRef) !void {
+                        fn lua_fn(a: *r.app.App, state: *c.lua_State, name: []const u8, func: LuaFnRef, description: ?[]const u8) !void {
                             if (try isToolVm(state)) return;
                             const vm = &a.lua_vm;
                             if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) return error.TooManyCommands;
@@ -742,6 +747,8 @@ pub const Blitz = LuaType{
                             if (stripped.len == 0) return error.InvalidCommandName;
                             if (std.mem.indexOfScalar(u8, stripped, ' ') != null) return error.InvalidCommandName;
                             if (stripped.len + 1 > 128) return error.CommandNameTooLong;
+                            const desc_len = if (description) |d| d.len else 0;
+                            if (desc_len > 128) return error.CommandDescriptionTooLong;
 
                             var buf: [128]u8 = undefined;
                             buf[0] = '/';
@@ -750,10 +757,12 @@ pub const Blitz = LuaType{
 
                             var entry = LuaCommandEntry{
                                 .name_len = cmd_name.len,
+                                .description_len = desc_len,
                                 .func_ref = func.idx,
                                 .L = state,
                             };
                             @memcpy(entry.name[0..cmd_name.len], cmd_name);
+                            if (description) |d| @memcpy(entry.description[0..d.len], d);
                             vm.command_entries.appendAssumeCapacity(entry);
                         }
                     }).lua_fn, "add_command"),
@@ -1742,11 +1751,18 @@ const LuaBindEntry = struct {
 const LuaCommandEntry = struct {
     name: [128]u8 = undefined,
     name_len: usize = 0,
+    description: [128]u8 = undefined,
+    description_len: usize = 0,
     func_ref: c_int = c.LUA_NOREF,
     L: ?*c.lua_State = null,
 
     fn nameSlice(self: *const LuaCommandEntry) []const u8 {
         return self.name[0..self.name_len];
+    }
+
+    fn descriptionSlice(self: *const LuaCommandEntry) ?[]const u8 {
+        if (self.description_len == 0) return null;
+        return self.description[0..self.description_len];
     }
 };
 
@@ -2457,7 +2473,7 @@ pub const LuaVm = struct {
     pub fn appendCommandCompletions(
         self: *LuaVm,
         prefix: []const u8,
-        out: []?[]const u8,
+        out: []?app.CommandCompletion,
         count: *usize,
     ) void {
         for (self.command_entries.items) |*entry| {
@@ -2469,7 +2485,7 @@ pub const LuaVm = struct {
                 var dup = false;
                 for (out[0..count.*]) |item| {
                     const value = item orelse continue;
-                    if (std.mem.eql(u8, value, name)) {
+                    if (std.mem.eql(u8, value.text, name)) {
                         dup = true;
                         break;
                     }
@@ -2477,7 +2493,7 @@ pub const LuaVm = struct {
                 if (dup) continue;
             }
 
-            out[count.*] = name;
+            out[count.*] = .{ .text = name, .description = entry.descriptionSlice() };
             count.* += 1;
         }
     }

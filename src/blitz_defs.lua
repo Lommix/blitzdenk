@@ -282,7 +282,8 @@
 ---@field bind fun(key: string, func: function)
 ---Bind a slash command to a Lua callback. The leading "/" is added automatically.
 ---Example: blitz.add_command("help", function(args) end)
----@field add_command fun(command: string, func: function)
+---
+---@field add_command fun(command: string, func: function, description?: string)
 ---Override the tool set for a given agent type. Replaces defaults entirely.
 ---Names must match built-in tool names or names of tools registered via blitz.register_tool.
 ---@field set_agent_tools fun(agent_type: integer, tool_names: string[])

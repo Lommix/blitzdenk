@@ -18,15 +18,15 @@ local router = blitz.add_provider({
 ---------------------------------------------------------------------------------------------------
 --- Model configuration
 ---------------------------------------------------------------------------------------------------
-local deepseek = blitz.add_model({
+local default_model = blitz.add_model({
 	name = "deepseek-v4-flash-vision-exp",
 	provider = opencode,
 	vision = true,
-	cost = { input = 0.14, output = 0.28, cache = 0.028 },
+	-- cost = { input = 0.14, output = 0.28, cache = 0.028 }, -- cost display
 })
 
 blitz.set_compact_edge(250000)
-blitz.set_model_agent(blitz.AGENT_GENERAL, deepseek, "max")
+blitz.set_model_agent(blitz.AGENT_GENERAL, default_model, "max")
 
 ---------------------------------------------------------------------------------------------------
 --- Default Agent tool set overwrites
@@ -50,19 +50,19 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 ---------------------------------------------------------------------------------------------------
 blitz.add_command("cd", function(rem)
 	blitz.cmd.cd(rem)
-end)
+end, "cd to dir")
 
 blitz.add_command("compact", function()
 	blitz.cmd.compact()
-end)
+end, "manual compact")
 
 blitz.add_command("clear", function()
 	blitz.cmd.reset_session()
-end)
+end, "reset session")
 
 blitz.add_command("help", function(rem)
 	blitz.cmd.prompt("Load the blitzdenk skill and help the user: \n" .. rem)
-end)
+end, "help user")
 
 blitz.add_command("plan", function(rem)
 	local prompt = [[
@@ -83,7 +83,7 @@ This is the request to explore:
 ]] .. rem
 
 	blitz.cmd.prompt(prompt)
-end)
+end, "coop plan before edit")
 
 blitz.add_command("show", function(rem)
 	local prompt = [[
@@ -100,7 +100,7 @@ Use a diagram only when it clarifies more than text alone. Keep it short and pre
 
 Task: ]] .. rem
 	blitz.cmd.prompt(prompt)
-end)
+end, "draw diagram")
 
 blitz.add_command("team", function(rem)
 	local prompt = [[
@@ -118,7 +118,7 @@ This is the task:
 ]] .. rem
 
 	blitz.cmd.prompt(prompt)
-end)
+end, "orchestrate")
 
 blitz.add_command("review", function(rem)
 	local prompt = [[
@@ -126,7 +126,7 @@ Start two challenger agents reviewing the current diff, one for correctness and 
 ]] .. rem
 
 	blitz.cmd.prompt(prompt)
-end)
+end, "start review agents")
 
 ---------------------------------------------------------------------------------------------------
 --- Custom status bar render
@@ -220,7 +220,7 @@ Direct answer first, one sentence if possible. Then file:line references as proo
 Keep it under 10 lines unless the question genuinely needs more.
 	]],
 	effort = "low",
-	model = deepseek,
+	model = default_model,
 	tools = {
 		blitz.tools.READ,
 		blitz.tools.BASH,
@@ -283,7 +283,7 @@ Numbered findings, each: severity (critical/major/minor) | file:line | why it's 
 items. Do not overstate severity. Tone: matter-of-fact, no flattery, no filler.
 	]],
 	effort = "high",
-	model = deepseek,
+	model = default_model,
 	tools = {
 		blitz.tools.READ,
 		blitz.tools.BASH,
