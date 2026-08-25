@@ -122,11 +122,14 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
 
     {
         const skill_count = app.context_factory.skills.entries.items.len;
+        const sys_size: usize = app.context_factory.general_prompt_size;
+        var sys_buf: [16]u8 = undefined;
 
         var l = r.tui.Line{};
         try l.pushSpan(alloc, .{ .content = "├[context:  ", .style = .{ .fg = app.theme.muted } });
         try l.pushSpanPrint(alloc, "skills: {}", .{skill_count}, .{ .fg = app.theme.info });
         try l.pushSpanPrint(alloc, "  mcp: {}", .{app.lua_vm.mcp_entries.items.len}, .{ .fg = app.theme.info });
+        try l.pushSpanPrint(alloc, "  sys-prompt: {s}", .{formatSize(&sys_buf, sys_size)}, .{ .fg = app.theme.info });
         try out.append(alloc, l);
     }
 
@@ -158,5 +161,37 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
         try l.pushSpanPrint(alloc, "{s: <28} ", .{model_name}, .{ .fg = app.theme.info });
         try l.pushSpanPrint(alloc, "@{s} ", .{@tagName(model.effort)}, .{ .fg = app.theme.text });
         try out.append(alloc, l);
+    }
+}
+
+fn formatSize(dest: []u8, count: usize) []const u8 {
+    if (count < 1000) {
+        return std.fmt.bufPrint(dest, "{d}b", .{count}) catch "0b";
+    } else if (count < 1_000_000) {
+        const k = @as(f64, @floatFromInt(count)) / 1000.0;
+        return std.fmt.bufPrint(dest, "{d:.1}kb", .{k}) catch "0kb";
+    } else if (count < 1_000_000_000) {
+        const m = @as(f64, @floatFromInt(count)) / 1_000_000.0;
+        return std.fmt.bufPrint(dest, "{d:.1}mb", .{m}) catch "0mb";
+    } else {
+        const g = @as(f64, @floatFromInt(count)) / 1_000_000_000.0;
+        return std.fmt.bufPrint(dest, "{d:.1}gb", .{g}) catch "0gb";
+    }
+}
+
+test "formatSize" {
+    const Case = struct { count: usize, expect: []const u8 };
+    const cases = [_]Case{
+        .{ .count = 0, .expect = "0b" },
+        .{ .count = 512, .expect = "512b" },
+        .{ .count = 999, .expect = "999b" },
+        .{ .count = 1000, .expect = "1.0kb" },
+        .{ .count = 6300, .expect = "6.3kb" },
+        .{ .count = 120_000, .expect = "120.0kb" },
+        .{ .count = 1_500_000, .expect = "1.5mb" },
+    };
+    var buf: [32]u8 = undefined;
+    for (cases) |c| {
+        try std.testing.expectEqualStrings(c.expect, formatSize(&buf, c.count));
     }
 }

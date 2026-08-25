@@ -32,6 +32,7 @@ cwd: []const u8 = "",
 ssh_dir: ?std.Io.Dir = null,
 ssh_aliases: std.ArrayList(SshAlias) = .empty,
 flags: Flags = .{},
+general_prompt_size: usize = 0,
 // -------------------------------------------------------------------------------
 
 const CliCapability = struct {
@@ -830,6 +831,16 @@ pub fn build_system_prompt(
     return allocating.written();
 }
 
+pub fn precalcGeneralPromptSize(self: *Self) void {
+    var arena = std.heap.ArenaAllocator.init(self.alloc);
+    defer arena.deinit();
+    const prompt = self.build_system_prompt(arena.allocator(), .general) catch {
+        self.general_prompt_size = 0;
+        return;
+    };
+    self.general_prompt_size = prompt.len;
+}
+
 const ParsedCommand = struct {
     name: []const u8,
     rest: []const u8,
@@ -1110,4 +1121,19 @@ test "system_prompt" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- bash: Execute a bash command") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# Guidelines:") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- Use read to examine files instead of cat or sed.") != null);
+}
+
+test "precalcGeneralPromptSize measures the general system prompt" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const io = std.testing.io_instance;
+    const home_dir = io.environ.process_environ.getPosix("HOME") orelse "/root";
+
+    var factory = try Self.init(alloc, std.testing.io, home_dir, "/");
+    defer factory.prompt_arena.deinit();
+
+    factory.precalcGeneralPromptSize();
+    try std.testing.expect(factory.general_prompt_size > 0);
 }
