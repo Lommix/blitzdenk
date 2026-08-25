@@ -21,6 +21,12 @@
 ---JSON arrays become 1-indexed Lua tables; objects become Lua tables; JSON null becomes nil.
 ---@field decode fun(json: string): any, boolean
 
+---@class BlitzBase64
+---Encode a binary-safe Lua string as standard padded Base64.
+---@field encode fun(data: string): string|nil, boolean
+---Decode standard padded Base64 into a binary-safe Lua string.
+---@field decode fun(base64: string): string|nil, boolean
+
 ---@class BlitzAgentId
 ---@field index integer
 ---@field generation integer
@@ -233,6 +239,7 @@
 ---@class Blitz
 ---@field mcp BlitzMcp
 ---@field json BlitzJson
+---@field base64 BlitzBase64
 ---@field cmd BlitzCmd
 ---@field tools BlitzToolDef
 ---@field events BlitzEventDef

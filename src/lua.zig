@@ -169,6 +169,7 @@ const AgentIdOrNilDef = LuaType{ .raw = "BlitzAgentId|nil" };
 const StringOrNilDef = LuaType{ .raw = "string|nil" };
 const JsonEncodeRet = LuaType{ .raw = "string|nil, boolean" };
 const JsonDecodeRet = LuaType{ .raw = "any, boolean" };
+const Base64Ret = LuaType{ .raw = "string|nil, boolean" };
 
 const StringListDef = LuaType{ .raw = "string[]" };
 const ToolResultDef = LuaType{ .table_def = .{ .name = "BlitzToolResult", .fields = &.{
@@ -345,6 +346,7 @@ pub const Blitz = LuaType{
         .fields = &.{
             .{ .name = "mcp", .ty = BlitzMcp },
             .{ .name = "json", .ty = BlitzJson },
+            .{ .name = "base64", .ty = BlitzBase64 },
             .{ .name = "cmd", .ty = BlitzCmd },
             .{ .name = "tools", .ty = BlitzToolDef },
             .{ .name = "events", .ty = BlitzEventDef },
@@ -1109,6 +1111,51 @@ const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
                 var arena = std.heap.ArenaAllocator.init(vm.parent);
                 defer arena.deinit();
                 pushJsonValue(arena.allocator(), state, ptr[0..len]) catch return pushNilBool(state, false);
+                c.lua_pushboolean(state, 1);
+                return 2;
+            }
+        }).lua_fn,
+    } } },
+} } };
+
+const BlitzBase64 = LuaType{ .table_def = .{ .name = "BlitzBase64", .fields = &.{
+    .{ .name = "encode", .desc = "Encode a binary-safe Lua string as standard padded Base64.", .ty = LuaType{ .function = .{
+        .args = &.{.{ .name = "data", .ty = LuaType.string }},
+        .ret = &Base64Ret,
+        .fn_ptr = (struct {
+            fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                const state = L.?;
+                const vm = fromState(state) orelse return pushNilBool(state, false);
+                if (c.lua_type(state, 1) != c.LUA_TSTRING) return pushNilBool(state, false);
+                var len: usize = 0;
+                const ptr = c.lua_tolstring(state, 1, &len) orelse return pushNilBool(state, false);
+                var arena = std.heap.ArenaAllocator.init(vm.parent);
+                defer arena.deinit();
+                const dest = arena.allocator().alloc(u8, std.base64.standard.Encoder.calcSize(len)) catch return pushNilBool(state, false);
+                const encoded = std.base64.standard.Encoder.encode(dest, ptr[0..len]);
+                _ = c.lua_pushlstring(state, encoded.ptr, encoded.len);
+                c.lua_pushboolean(state, 1);
+                return 2;
+            }
+        }).lua_fn,
+    } } },
+    .{ .name = "decode", .desc = "Decode standard padded Base64 into a binary-safe Lua string.", .ty = LuaType{ .function = .{
+        .args = &.{.{ .name = "base64", .ty = LuaType.string }},
+        .ret = &Base64Ret,
+        .fn_ptr = (struct {
+            fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                const state = L.?;
+                const vm = fromState(state) orelse return pushNilBool(state, false);
+                if (c.lua_type(state, 1) != c.LUA_TSTRING) return pushNilBool(state, false);
+                var len: usize = 0;
+                const ptr = c.lua_tolstring(state, 1, &len) orelse return pushNilBool(state, false);
+                const source = ptr[0..len];
+                const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(source) catch return pushNilBool(state, false);
+                var arena = std.heap.ArenaAllocator.init(vm.parent);
+                defer arena.deinit();
+                const decoded = arena.allocator().alloc(u8, decoded_len) catch return pushNilBool(state, false);
+                std.base64.standard.Decoder.decode(decoded, source) catch return pushNilBool(state, false);
+                _ = c.lua_pushlstring(state, decoded.ptr, decoded.len);
                 c.lua_pushboolean(state, 1);
                 return 2;
             }
@@ -3241,6 +3288,23 @@ test "LuaType defines recursive Lua globals" {
     c.lua_pop(state, 1);
     try std.testing.expectEqual(c.LUA_TTABLE, c.lua_getfield(state, -1, "cmd"));
     try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "await_agent"));
+}
+
+test "base64 Lua API round-trips binary strings" {
+    var vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.bindLuaAllocator();
+    vm.installOwner();
+
+    try vm.exec(
+        \\local data = string.char(0, 1, 127, 128, 255) .. "image data"
+        \\local encoded, encode_ok = blitz.base64.encode(data)
+        \\assert(encode_ok and encoded == "AAF/gP9pbWFnZSBkYXRh")
+        \\local decoded, decode_ok = blitz.base64.decode(encoded)
+        \\assert(decode_ok and decoded == data)
+        \\local invalid, invalid_ok = blitz.base64.decode("not base64")
+        \\assert(invalid == nil and invalid_ok == false)
+    );
 }
 
 test "tool VMs resolve their owner and isolate globals" {

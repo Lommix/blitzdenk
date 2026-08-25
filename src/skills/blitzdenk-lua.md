@@ -177,6 +177,7 @@ Tool function rules:
 - `blitz.shell(cmd)` returns `output, ok` (two values).
 - `blitz.shell(cmd, timeout)` accepts an optional timeout in seconds.
 - `blitz.json.encode(obj)` / `blitz.json.decode(str)` return the value plus an ok boolean.
+- `blitz.base64.encode(data)` / `blitz.base64.decode(str)` convert binary-safe Lua strings using standard padded Base64 and return the value plus an ok boolean.
   The `BlitzToolDef`, `BlitzToolResult`, `BlitzCtx`, and `BlitzCall` classes in
   `meta.lua` list the exact fields.
 
