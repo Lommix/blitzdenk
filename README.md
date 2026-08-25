@@ -8,11 +8,14 @@ This coding-agent molds itself around your requirements by extending its Lua san
 ## Core features and patterns
 
 - All IO goes through GNU core utils (ls, tee, cat, etc.)
-- Optional SSH layer: Execute remote.
+- Optional SSH tunnel layer: seamless remote tool execution.
 - MCP and Skill support.
 - Multi-provider: Any OpenAI or Anthropic chat/response schema supported, including local AI.
 - Mermaid diagram render in tui.
-- Lua hot reload. Agents can code tools and debug them at the same time.
+- Lua hot reload
+    - Agents can code tools and debug them at the same time.
+    - Global or project local. Mold the tool to your needs.
+- version management. Simply run `blitz update` on new releases.
 
 ## Defaults
 
@@ -23,6 +26,8 @@ The default config comes with some useful commands for quick testing.
 - `/team <?prompt>`: Multiagent orchestrator mode
 - `/show <?prompt>`: explain something with mermaid diagrams
 - `/ssh-<myconfig>..`: autocomplete your ssh config entries for quick connection.
+
+Connect remote without ssh config entries `/ssh user@host:/path/to/cwd`
 
 ## Install
 
