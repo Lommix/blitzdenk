@@ -9,13 +9,13 @@ ships as a single binary under 2 MB, and runs in under 100 MB of RAM.
 ## Core features and patterns
 
 - All IO goes through GNU core utils (ls, tee, cat, etc.)
-- Optional SSH tunnel layer. Tools run on the remote host.
+- Optional SSH tunnel layer. Tools run on a remote host.
 - MCP and Skill support.
 - Multi-provider: any OpenAI or Anthropic chat/response schema supported, including local AI.
 - Mermaid diagram render in tui.
 - Lua hot reload
     - Agents can code tools and debug them at the same time.
-    - Supports global or project local configs.
+    - Supports global and project local configs.
 - Version management: run `blitz update` on new releases.
 
 ## Defaults
@@ -49,7 +49,7 @@ cp zig-out/bin/blitz ~/.local/bin/blitz
 
 ## Minimal configuration
 
-Open the blitz.lua configuration at `~/.config/blitzdenk/blitz.lua`
+Open the blitz.lua configuration at `~/.config/blitzdenk/blitz.lua` or in pwd `./blitz.lua`
 Setup at least on provider. The **key_envar** is not the API key! It's the environment var holding your key.
 
 ```lua
@@ -62,6 +62,7 @@ local opencode = blitz.add_provider({
 local opencode_ds_flash = blitz.add_model({
 	name = "deepseek-v4-flash",
 	provider = opencode,
+    vision = false,
 	cost = { input = 0.14, output = 0.28, cache = 0.028 },
 })
 
