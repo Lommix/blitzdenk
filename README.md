@@ -1,21 +1,22 @@
 # Blitzdenk
 
-Universal Coding harness for posix. No deps, no chain, vendored Lua.
-This coding-agent molds itself around your requirements by extending its Lua sandbox exactly the way you need it.
+A coding harness for POSIX. No dependencies, vendored Lua.
+It extends its own Lua sandbox on demand to fit your project,
+ships as a single binary under 2 MB, and runs in under 100 MB of RAM.
 
 ![demo](docs/assets/demo.gif)
 
 ## Core features and patterns
 
 - All IO goes through GNU core utils (ls, tee, cat, etc.)
-- Optional SSH tunnel layer: seamless remote tool execution.
+- Optional SSH tunnel layer. Tools run on the remote host.
 - MCP and Skill support.
-- Multi-provider: Any OpenAI or Anthropic chat/response schema supported, including local AI.
+- Multi-provider: any OpenAI or Anthropic chat/response schema supported, including local AI.
 - Mermaid diagram render in tui.
 - Lua hot reload
     - Agents can code tools and debug them at the same time.
-    - Global or project local. Mold the tool to your needs.
-- version management. Simply run `blitz update` on new releases.
+    - Supports global or project local configs.
+- Version management: run `blitz update` on new releases.
 
 ## Defaults
 
