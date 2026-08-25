@@ -1118,7 +1118,7 @@ pub const App = struct {
     /// present, otherwise appends the raw paste `text`.
     pub fn pasteImageOrText(self: *App, text: []const u8) void {
         if (!self.context_factory.agentVision(&self.config, .general)) {
-            self.appendBytes(text);
+            self.appendPathRef(text);
             return;
         }
         const img = r.clipboard.readImage(self.sessionAlloc(), self.exec_pool) catch null;
@@ -1130,6 +1130,11 @@ pub const App = struct {
             }
             return;
         }
+        self.appendPathRef(text);
+    }
+
+    fn appendPathRef(self: *App, text: []const u8) void {
+        if (text.len > 0 and text[0] == '/') self.appendBytes("@");
         self.appendBytes(text);
     }
 
