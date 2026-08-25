@@ -64,6 +64,7 @@ pub const Manager = struct {
 
         for (configs) |cfg| {
             self.addServer(cfg) catch |err| {
+                if (err == error.Canceled) return;
                 log.warn("failed to load MCP server '{s}': {s}", .{ cfg.name, @errorName(err) });
             };
         }
@@ -116,6 +117,45 @@ pub const Manager = struct {
     }
 };
 
+pub const LoadTask = struct {
+    io: std.Io,
+    manager: *Manager,
+    configs: []const ServerConfig,
+    finished: std.atomic.Value(bool) = .init(false),
+    future: ?std.Io.Future(void) = null,
+
+    pub fn init(io: std.Io, manager: *Manager, configs: []const ServerConfig) LoadTask {
+        return .{
+            .io = io,
+            .manager = manager,
+            .configs = configs,
+        };
+    }
+
+    pub fn start(self: *LoadTask) void {
+        self.future = std.Io.concurrent(self.io, run, .{self}) catch return self.run();
+    }
+
+    pub fn isFinished(self: *const LoadTask) bool {
+        return self.finished.load(.acquire);
+    }
+
+    pub fn wait(self: *LoadTask) void {
+        if (self.future) |*future| future.await(self.io);
+        self.future = null;
+    }
+
+    pub fn deinit(self: *LoadTask) void {
+        if (self.future) |*future| future.cancel(self.io);
+        self.* = undefined;
+    }
+
+    fn run(self: *LoadTask) void {
+        defer self.finished.store(true, .release);
+        self.manager.loadServers(self.configs);
+    }
+};
+
 var active_manager: ?*Manager = null;
 
 fn toolTrampoline(ctx: r.tools.ToolContext, call: r.sdk.ToolCall) r.sdk.ToolOutput {
@@ -135,6 +175,16 @@ fn toolTrampoline(ctx: r.tools.ToolContext, call: r.sdk.ToolCall) r.sdk.ToolOutp
 
 fn errResult(_: r.sdk.ToolCall, msg: []const u8) r.sdk.ToolOutput {
     return .{ .content = msg, .is_error = true };
+}
+
+test "MCP load task completes" {
+    var manager = Manager.init(std.testing.allocator, std.testing.io);
+    defer manager.deinit();
+    var task = LoadTask.init(std.testing.io, &manager, &.{});
+    defer task.deinit();
+    task.start();
+    task.wait();
+    try std.testing.expect(task.isFinished());
 }
 
 const RemoteTool = struct {

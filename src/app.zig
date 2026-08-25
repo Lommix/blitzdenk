@@ -302,6 +302,7 @@ pub const App = struct {
     lua_status_bar_cache_len: usize = 0,
     lua_inject_hooks_enabled: std.atomic.Value(bool) = .init(false),
     mcp_manager: r.mcp.Manager,
+    mcp_load: ?r.mcp.LoadTask = null,
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
     injection_hooks: r.inject.InjectionsHooks = .{},
@@ -338,6 +339,7 @@ pub const App = struct {
 
     pub fn deinit(self: *App) void {
         if (self.update_check) |*task| task.deinit();
+        if (self.mcp_load) |*task| task.deinit();
         self.mcp_manager.deinit();
         self.lua_vm.deinit();
         self.lua_state.deinit(self.gpa);
@@ -456,6 +458,8 @@ pub const App = struct {
     }
 
     pub fn reset(self: *App) void {
+        if (self.mcp_load) |*task| task.deinit();
+        self.mcp_load = null;
         self.dropStreamingPreview();
         self.cancelPermissions();
         self.exec_pool.cancelAll();
@@ -497,6 +501,7 @@ pub const App = struct {
     }
 
     pub fn tick(self: *App) !void {
+        try self.finishMcpLoad(false);
         for (&self.registry.slots, 0..) |*slot, index| {
             const state = slot.state.load(.acquire);
             if (state == .free or state == .reserved) continue;
@@ -696,14 +701,32 @@ pub const App = struct {
         self.lua_vm.vm_mu.lockUncancelable(self.io);
         defer self.lua_vm.vm_mu.unlock(self.io);
 
-        const old_tools = self.mcp_manager.registeredTools();
-        for (old_tools) |entry| self.context_factory.remove(entry.tool.def.name);
-
         const servers = try self.lua_vm.getEnabledMcpServers(alloc);
-        self.mcp_manager.loadServers(servers);
+        self.loadMcpTools(servers);
+    }
 
-        const new_tools = self.mcp_manager.registeredTools();
-        for (new_tools) |entry| try self.context_factory.add(entry.tool, entry.flags);
+    pub fn loadMcpTools(self: *App, servers: []const r.mcp.ServerConfig) void {
+        if (self.mcp_load != null) return;
+        for (self.mcp_manager.registeredTools()) |entry| self.context_factory.remove(entry.tool.def.name);
+
+        self.mcp_load = .init(self.io, &self.mcp_manager, servers);
+        self.mcp_load.?.start();
+    }
+
+    pub fn waitForMcpTools(self: *App) !void {
+        try self.finishMcpLoad(true);
+    }
+
+    fn finishMcpLoad(self: *App, wait: bool) !void {
+        const task = if (self.mcp_load) |*task| task else return;
+        if (!wait and !task.isFinished()) return;
+        task.wait();
+        defer {
+            task.deinit();
+            self.mcp_load = null;
+        }
+
+        for (self.mcp_manager.registeredTools()) |entry| try self.context_factory.add(entry.tool, entry.flags);
 
         try self.refreshLiveAgentTools();
         self.event_bus.emit(self, .mcp_tools_reloaded) catch {};
@@ -1470,6 +1493,7 @@ pub const App = struct {
     /// Send a user prompt to the main agent: emit hook, queue messages, run.
     /// Shared by the TUI Enter handler and headless mode.
     pub fn sendPrompt(self: *App, io: std.Io, parts: []const r.sdk.Part, chat_text: []const u8) !void {
+        try self.waitForMcpTools();
         const alloc = self.sessionAlloc();
         const chat_entry = try ChatEntry.userMessageSimple(alloc, .user, chat_text);
         try self.event_bus.emit(self, .{ .user_message_sent = chat_text });

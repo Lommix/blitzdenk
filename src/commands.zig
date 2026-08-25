@@ -224,6 +224,7 @@ pub const Command = union(enum) {
                 try app.reloadMcpTools();
             },
             .spawn_agent => |arg| {
+                try app.waitForMcpTools();
                 var model_config: ?r.models.Config = null;
                 if (!arg.fork) {
                     if (app.registry.state(arg.agent_id) != .reserved) return;

@@ -271,15 +271,9 @@ pub fn run(
     try app.lua_vm.publishAvailableSystems(context_factory);
     var lua_tools = try app.lua_vm.getRegisteredTools(arena);
     var lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
-    const mcp_servers = try app.lua_vm.getEnabledMcpServers(arena);
-    app.mcp_manager.loadServers(mcp_servers);
-    var mcp_tools = app.mcp_manager.registeredTools();
 
     for (lua_tools) |tool| {
         try context_factory.add(tool, .all);
-    }
-    for (mcp_tools) |tool| {
-        try context_factory.add(tool.tool, tool.flags);
     }
 
     for (lua_binds) |bind| {
@@ -299,6 +293,7 @@ pub fn run(
     app.warnUnboundAgentModels();
 
     if (config_lua) |info| app.loadHistory(info.dir_path);
+    try app.cmd_queue.apply(io, &app);
 
     if (headless) {
         try runHeadless(&app, io, prompt.?);
@@ -395,6 +390,7 @@ pub fn run(
                 // vm_mu. Skip this tick if busy — mtime stays unchanged so we retry.
                 if (!app.lua_vm.vm_mu.tryLock()) break :blk;
                 defer app.lua_vm.vm_mu.unlock(io);
+                try app.waitForMcpTools();
 
                 cwd_lua_mtime = new_cwd_mtime;
                 config_lua_mtime = new_config_mtime;
@@ -451,9 +447,7 @@ pub fn run(
                     }
                     break :blk;
                 };
-                app.mcp_manager.loadServers(reloaded_mcp_servers);
-                mcp_tools = app.mcp_manager.registeredTools();
-                for (mcp_tools) |tool| try context_factory.add(tool.tool, tool.flags);
+                app.loadMcpTools(reloaded_mcp_servers);
 
                 lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
                 app.keymap.custom.clearRetainingCapacity();

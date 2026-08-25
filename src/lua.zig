@@ -1060,8 +1060,9 @@ const BlitzMcp = LuaType{
                                 if (try isToolVm(state)) return;
                                 const vm = &a.lua_vm;
                                 if (mcp_id == 0 or mcp_id > vm.mcp_entries.items.len) return error.InvalidMcpId;
-                                vm.mcp_entries.items[mcp_id - 1].enabled = true;
-                                try a.cmd_queue.append(a.io, .reload_mcp);
+                        vm.mcp_entries.items[mcp_id - 1].enabled = true;
+                        vm.mcp_entries.items[mcp_id - 1].conf_enabled = true;
+                        try a.cmd_queue.append(a.io, .reload_mcp);
                             }
                         }).lua_fn, "mcp.enable"),
                     },
@@ -2092,6 +2093,7 @@ pub const LuaMcpServerEntry = struct {
     args: [][]const u8,
     tools_prefix: []const u8,
     enabled: bool = false,
+    conf_enabled: bool = false,
 };
 
 pub const LuaVm = struct {
@@ -2350,7 +2352,7 @@ pub const LuaVm = struct {
     }
 
     pub fn disableAllMcp(self: *LuaVm) void {
-        for (self.mcp_entries.items) |*entry| entry.enabled = false;
+        for (self.mcp_entries.items) |*entry| entry.enabled = entry.conf_enabled;
     }
 
     pub fn hasMcp(self: *LuaVm, name: []const u8) bool {
