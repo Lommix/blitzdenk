@@ -140,49 +140,12 @@ pub fn isOversized(output: []const u8, max_bytes: usize, max_lines: usize) bool 
 
 const MAX_SPILL_BYTES: usize = 64 * 1024 * 1024;
 
-/// Write `content` to a best-effort OS-temp spill file, capped at MAX_SPILL_BYTES.
-/// Returns an owned path on success, or null on any failure. Never propagates errors to the caller.
-pub fn writeSpillFile(app_ctx: ?*anyopaque, io: std.Io, alloc: std.mem.Allocator, call_id: []const u8, content: []const u8) ?[]const u8 {
-    const base = tmpDir(alloc, app_ctx) orelse return null;
-    defer alloc.free(base);
-    const safe_id = sanitizeCallId(alloc, call_id) orelse return null;
-    defer alloc.free(safe_id);
-    const basename = std.fmt.allocPrint(alloc, "blitz-spill-{s}.txt", .{safe_id}) catch return null;
+pub fn writeSpillFile(pool: *@import("exec").CmdPool, alloc: std.mem.Allocator, call_id: []const u8, content: []const u8) ?[]const u8 {
+    const basename = std.fmt.allocPrint(alloc, "blitz-spill-{s}.txt", .{call_id}) catch return null;
     defer alloc.free(basename);
-    const path = std.fs.path.join(alloc, &.{ base, basename }) catch return null;
-    errdefer alloc.free(path);
-
-    const file = std.Io.Dir.cwd().createFile(io, path, .{}) catch return null;
-    defer file.close(io);
     var cut = content.len -| MAX_SPILL_BYTES;
     while (cut < content.len and (content[cut] & 0xC0) == 0x80) cut += 1;
-    var buf: [8192]u8 = undefined;
-    var writer = file.writer(io, &buf);
-    writer.interface.writeAll(content[cut..]) catch return null;
-    writer.interface.flush() catch return null;
-    return path;
-}
-
-/// Keep only filename-safe characters so a hostile call id cannot escape the
-/// temp dir. Never returns empty.
-fn sanitizeCallId(alloc: std.mem.Allocator, call_id: []const u8) ?[]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(alloc);
-    for (call_id) |c| {
-        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
-            (c >= '0' and c <= '9') or c == '_' or c == '-';
-        out.append(alloc, if (ok) c else '_') catch return null;
-    }
-    if (out.items.len == 0) out.appendSlice(alloc, "id") catch return null;
-    return alloc.dupe(u8, out.items) catch null;
-}
-
-fn tmpDir(alloc: std.mem.Allocator, app_ctx: ?*anyopaque) ?[]const u8 {
-    if (app_ctx) |ptr| {
-        const self: *r.app.App = @ptrCast(@alignCast(ptr));
-        if (self.exec_pool.env.get("TMPDIR")) |dir| return alloc.dupe(u8, dir) catch null;
-    }
-    return alloc.dupe(u8, "/tmp") catch null;
+    return r.artifact.write(pool, alloc, basename, content[cut..]) catch null;
 }
 
 /// Collect trailing lines from the end of `output`: the last `max_lines`
@@ -309,18 +272,21 @@ test "truncateOutputToOwned does not split multi-byte utf8" {
 
 test "writeSpillFile persists a small payload and sanitizes the call id" {
     const testing = std.testing;
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
+    var pool = @import("exec").CmdPool.init(testing.allocator, testing.io, &env);
+    defer pool.deinit();
     const payload = "hello spill\n";
-    const path = writeSpillFile(null, testing.io, testing.allocator, "b.a/d/1", payload).?;
+    const path = writeSpillFile(&pool, testing.allocator, "b.a/d/1", payload).?;
     defer testing.allocator.free(path);
+    defer std.Io.Dir.cwd().deleteFile(testing.io, path) catch {};
 
     const content = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited64(1024)) catch
         return error.TestUnexpectedResult;
     defer testing.allocator.free(content);
     try testing.expectEqualStrings(payload, content);
 
-    // The hostile call id must not escape into the basename (slashes/dots are
-    // replaced), so the filename only ever lands under the temp dir.
     const base = std.fs.path.basename(path);
     try testing.expect(std.mem.indexOf(u8, base, "/") == null);
-    try testing.expect(std.mem.eql(u8, base, "blitz-spill-b_a_d_1.txt"));
+    try testing.expect(std.mem.eql(u8, base, "blitz-spill-b.a_d_1.txt"));
 }

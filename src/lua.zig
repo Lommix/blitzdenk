@@ -941,6 +941,35 @@ pub const Blitz = LuaType{
                 } },
             },
             .{
+                .name = "write_tempfile",
+                .desc = "Write content to a named file in the active session temp directory and return its path.",
+                .ty = LuaType{ .function = .{
+                    .args = &.{
+                        .{ .name = "name", .ty = LuaType.string },
+                        .{ .name = "content", .ty = LuaType.string },
+                    },
+                    .ret = &LuaString,
+                    .fn_ptr = (struct {
+                        fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                            const state = L.?;
+                            const a = getAppFromRegistry(state) orelse {
+                                _ = c.luaL_error(state, "write_tempfile: app not initialized");
+                                return 0;
+                            };
+                            const name = readAnyArg([]const u8, state, "write_tempfile", 1) orelse return 0;
+                            const content = readAnyArg([]const u8, state, "write_tempfile", 2) orelse return 0;
+                            const path = r.artifact.write(a.exec_pool, a.gpa, name, content) catch |err| {
+                                _ = c.luaL_error(state, "write_tempfile failed with '%s'", @errorName(err).ptr);
+                                return 0;
+                            };
+                            defer a.gpa.free(path);
+                            _ = c.lua_pushlstring(state, path.ptr, path.len);
+                            return 1;
+                        }
+                    }).lua_fn,
+                } },
+            },
+            .{
                 .name = "push_notification",
                 .desc = "Push a new popup notification with a lifetime of 8s to the top right corner.",
                 .ty = LuaType{ .function = .{
@@ -1060,9 +1089,9 @@ const BlitzMcp = LuaType{
                                 if (try isToolVm(state)) return;
                                 const vm = &a.lua_vm;
                                 if (mcp_id == 0 or mcp_id > vm.mcp_entries.items.len) return error.InvalidMcpId;
-                        vm.mcp_entries.items[mcp_id - 1].enabled = true;
-                        vm.mcp_entries.items[mcp_id - 1].conf_enabled = true;
-                        try a.cmd_queue.append(a.io, .reload_mcp);
+                                vm.mcp_entries.items[mcp_id - 1].enabled = true;
+                                vm.mcp_entries.items[mcp_id - 1].conf_enabled = true;
+                                try a.cmd_queue.append(a.io, .reload_mcp);
                             }
                         }).lua_fn, "mcp.enable"),
                     },
@@ -3287,6 +3316,8 @@ test "LuaType defines recursive Lua globals" {
 
     try std.testing.expectEqual(c.LUA_TTABLE, c.lua_getglobal(state, "blitz"));
     try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "register_tool"));
+    c.lua_pop(state, 1);
+    try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "write_tempfile"));
     c.lua_pop(state, 1);
     try std.testing.expectEqual(c.LUA_TTABLE, c.lua_getfield(state, -1, "cmd"));
     try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "await_agent"));

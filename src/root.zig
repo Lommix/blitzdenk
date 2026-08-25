@@ -13,6 +13,7 @@ pub const agent_run = @import("agent_run.zig");
 pub const compact = @import("compact.zig");
 pub const exec = @import("exec");
 pub const report = @import("report.zig");
+pub const artifact = @import("artifact.zig");
 pub const permissions = @import("permissions");
 pub const ContextFactory = @import("context_factory.zig");
 pub const skills = @import("skills.zig");

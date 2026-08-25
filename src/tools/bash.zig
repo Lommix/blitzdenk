@@ -106,7 +106,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, "oom");
 
     const spill = if (r.isOversized(full, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES))
-        r.writeSpillFile(ctx.base.app, ctx.io, ctx.alloc, call.id, full)
+        r.writeSpillFile(ctx.base.exec_pool, ctx.alloc, call.id, full)
     else
         null;
     defer if (spill) |s| ctx.alloc.free(s);

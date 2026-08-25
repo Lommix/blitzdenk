@@ -238,6 +238,7 @@ pub fn run(
         app.cancelPermissions();
         exec_pool.cancelAll();
         registry.cancelAll();
+        r.artifact.cleanup(&exec_pool);
         app.deinit();
         registry.deinit();
         exec_pool.deinit();
@@ -1141,7 +1142,7 @@ pub const CliFlags = packed struct {
         }
 
         if (std.mem.eql(u8, tok, "--clean")) {
-            self.strict_mode = true;
+            self.no_context = true;
             return true;
         }
 

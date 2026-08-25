@@ -306,7 +306,7 @@ fn lastErrorDetail(stderr: []const u8) ?[]const u8 {
 /// needed.
 fn copyTruncatedSpill(ctx: r.ToolContext, call_id: []const u8, borrowed: []const u8) ![]const u8 {
     const spill = if (r.isOversized(borrowed, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES))
-        r.writeSpillFile(ctx.base.app, ctx.io, ctx.alloc, call_id, borrowed)
+        r.writeSpillFile(ctx.base.exec_pool, ctx.alloc, call_id, borrowed)
     else
         null;
     defer if (spill) |s| ctx.alloc.free(s);

@@ -464,6 +464,7 @@ pub const App = struct {
         self.cancelPermissions();
         self.exec_pool.cancelAll();
         self.registry.cancelAll();
+        r.artifact.cleanup(self.exec_pool);
 
         self.main_agent_id = null;
         self.running = false;
@@ -534,12 +535,11 @@ pub const App = struct {
 
     fn finishBackgroundAgent(self: *App, agent_id: r.AgentId, agent: *r.agent.Agent) !void {
         defer self.registry.release(agent_id);
-        var path_buf: [96]u8 = undefined;
         var notice_buf: [160]u8 = undefined;
-        const notice = if (self.writeBackgroundResult(agent_id, agent, &path_buf)) |path|
-            try std.fmt.bufPrint(&notice_buf, "Agent result done: {s}", .{path})
-        else |err|
-            try std.fmt.bufPrint(&notice_buf, "Agent result failed to save: {s}", .{@errorName(err)});
+        const notice = if (self.writeBackgroundResult(agent_id, agent)) |path| blk: {
+            defer self.gpa.free(path);
+            break :blk try std.fmt.bufPrint(&notice_buf, "Agent result done: {s}", .{path});
+        } else |err| try std.fmt.bufPrint(&notice_buf, "Agent result failed to save: {s}", .{@errorName(err)});
 
         if (agent.parent) |packed_id| {
             const parent_id = r.AgentId.unpack(packed_id);
@@ -553,15 +553,9 @@ pub const App = struct {
         }
     }
 
-    fn writeBackgroundResult(self: *App, agent_id: r.AgentId, agent: *const r.agent.Agent, path_buf: []u8) ![]const u8 {
-        var dir_buf: [32]u8 = undefined;
-        const dir_path = try std.fmt.bufPrint(&dir_buf, "/tmp/blitz/{d}", .{std.c.getpid()});
-        try std.Io.Dir.cwd().createDirPath(self.io, dir_path);
-        const path = try std.fmt.bufPrint(path_buf, "{s}/agent-{d}.md", .{ dir_path, agent_id.pack() });
-        const file = try std.Io.Dir.createFileAbsolute(self.io, path, .{});
-        defer file.close(self.io);
-        var buf: [4096]u8 = undefined;
-        var writer = file.writer(self.io, &buf);
+    fn writeBackgroundResult(self: *App, agent_id: r.AgentId, agent: *const r.agent.Agent) ![]const u8 {
+        var content: std.ArrayList(u8) = .empty;
+        defer content.deinit(self.gpa);
         var wrote_text = false;
         var index = agent.history().len;
         while (index > 0) {
@@ -571,7 +565,7 @@ pub const App = struct {
             for (message.parts()) |part| switch (part) {
                 .text => |text| {
                     if (text.len == 0) continue;
-                    try writer.interface.writeAll(text);
+                    try content.appendSlice(self.gpa, text);
                     wrote_text = true;
                 },
                 else => {},
@@ -580,12 +574,13 @@ pub const App = struct {
         }
         if (!wrote_text) {
             if (agent.last_error) |err|
-                try writer.interface.print("Agent failed: {s}\n", .{@errorName(err)})
+                try content.print(self.gpa, "Agent failed: {s}\n", .{@errorName(err)})
             else
-                try writer.interface.writeAll("Agent produced no text output.\n");
+                try content.appendSlice(self.gpa, "Agent produced no text output.\n");
         }
-        try writer.interface.flush();
-        return path;
+        var name_buf: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "agent-{d}.md", .{agent_id.pack()});
+        return r.artifact.write(self.exec_pool, self.gpa, name, content.items);
     }
 
     pub fn enterPermSelect(self: *App) void {
@@ -3471,8 +3466,14 @@ test "background agent result is written for read" {
 
     var app: App = undefined;
     app.io = std.testing.io;
-    var path_buf: [96]u8 = undefined;
-    const path = try app.writeBackgroundResult(.{ .index = 127, .generation = 65535 }, &agent, &path_buf);
+    app.gpa = std.testing.allocator;
+    var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
+    defer env.deinit();
+    var pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &env);
+    defer pool.deinit();
+    app.exec_pool = &pool;
+    const path = try app.writeBackgroundResult(.{ .index = 127, .generation = 65535 }, &agent);
+    defer std.testing.allocator.free(path);
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, path) catch {};
     try std.testing.expect(std.mem.startsWith(u8, path, "/tmp/blitz/"));
     const content = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited64(1024));

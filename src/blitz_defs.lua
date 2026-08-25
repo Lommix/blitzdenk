@@ -300,6 +300,8 @@
 ---@field log fun(msg: string)
 ---Execute a shell command. Returns output, ok. Optionally a timeout in seconds.
 ---@field shell fun(cmd: string, timeout?: number): any
+---Write content to a named file in the active session temp directory and return its path.
+---@field write_tempfile fun(name: string, content: string): string
 ---Push a new popup notification with a lifetime of 8s to the top right corner.
 ---@field push_notification fun(message: string)
 ---@field state BlitzState

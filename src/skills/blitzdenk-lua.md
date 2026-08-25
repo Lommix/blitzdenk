@@ -176,6 +176,7 @@ Tool function rules:
 - `blitz.exit_loop("done")` returns a result that ends the loop.
 - `blitz.shell(cmd)` returns `output, ok` (two values).
 - `blitz.shell(cmd, timeout)` accepts an optional timeout in seconds.
+- `blitz.write_tempfile(name, content)` writes into `/tmp/blitz/<session-pid>` on the active execution machine and returns the file path.
 - `blitz.json.encode(obj)` / `blitz.json.decode(str)` return the value plus an ok boolean.
 - `blitz.base64.encode(data)` / `blitz.base64.decode(str)` convert binary-safe Lua strings using standard padded Base64 and return the value plus an ok boolean.
   The `BlitzToolDef`, `BlitzToolResult`, `BlitzCtx`, and `BlitzCall` classes in
