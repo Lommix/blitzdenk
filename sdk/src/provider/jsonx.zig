@@ -434,11 +434,12 @@ pub fn reportStreamError(a: std.mem.Allocator, options: RequestOptions, body: []
     var parsed = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch return null;
     defer parsed.deinit();
     if (parsed.value != .object) return null;
+    const root = parsed.value.object;
     const event_type = blk: {
-        const value = parsed.value.object.get("type") orelse break :blk "";
+        const value = root.get("type") orelse break :blk "";
         break :blk if (value == .string) value.string else "";
     };
-    const failed = parsed.value.object.get("error") != null or
+    const failed = root.get("error") != null or
         std.mem.eql(u8, event_type, "error") or
         std.mem.eql(u8, event_type, "response.failed") or
         std.mem.eql(u8, event_type, "response.incomplete");
@@ -446,7 +447,10 @@ pub fn reportStreamError(a: std.mem.Allocator, options: RequestOptions, body: []
     const context_overflow = errors.isOverflow(body);
     const retryable = std.ascii.indexOfIgnoreCase(body, "rate_limit") != null or
         std.ascii.indexOfIgnoreCase(body, "overloaded") != null or
-        std.ascii.indexOfIgnoreCase(body, "unavailable") != null;
+        std.ascii.indexOfIgnoreCase(body, "unavailable") != null or
+        std.ascii.indexOfIgnoreCase(body, "server") != null or
+        std.ascii.indexOfIgnoreCase(body, "timeout") != null or
+        std.ascii.indexOfIgnoreCase(body, "unmapped") != null;
     if (options.on_provider_error) |callback| callback(options.on_provider_error_ctx, .{
         .status_code = 0,
         .response_body = body,
