@@ -245,10 +245,9 @@ pub fn run(
     }
     registry.report_enabled = flags.report;
 
-    // Lua VM holds an opaque pointer to App + a getter for the mutable cfg
-    // (swarm.cfg is *const, so a sibling accessor unwraps the const).
     app.lua_vm.setApp(&app);
     app.lua_vm.clearLastError();
+
     var lua_load_failed = false;
     if (config_lua) |info| {
         const inject = try std.fmt.allocPrint(arena, "package.path = \"{s}?.lua;\" .. package.path", .{info.dir_path});

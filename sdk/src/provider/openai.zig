@@ -226,7 +226,9 @@ fn emitLiveEvent(ctx: ?*anyopaque, data: []const u8) !void {
     const event = try std.fmt.allocPrint(live.alloc, "data: {s}\n", .{data});
     defer live.alloc.free(event);
     var event_ctx = model.StreamContext{ .emit = emitLive, .emit_ctx = live.sctx };
-    _ = try parseChatStream(live.alloc, event, &event_ctx);
+    const result = try parseChatStream(live.alloc, event, &event_ctx);
+    defer live.alloc.destroy(result);
+    defer result.deinit(live.alloc);
 }
 
 pub fn parseChatResponse(a: std.mem.Allocator, body: []const u8) !*model.GenerateResult {
@@ -661,6 +663,12 @@ pub fn parseImageResponse(a: std.mem.Allocator, body: []const u8) !*types.ImageR
 }
 
 fn discardChunk(_: ?*anyopaque, _: types.StreamChunk) void {}
+
+test "live stream event releases parsed result" {
+    var stream = model.StreamContext{ .emit = discardChunk };
+    var live = LiveStream{ .alloc = std.testing.allocator, .sctx = &stream, .options = .{} };
+    try emitLiveEvent(&live, "{\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}");
+}
 
 test "stream preserves parallel tool calls and replaces resent arguments" {
     const body =

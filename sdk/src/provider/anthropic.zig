@@ -147,7 +147,9 @@ fn emitLiveEvent(ctx: ?*anyopaque, data: []const u8) !void {
     const event = try std.fmt.allocPrint(live.alloc, "data: {s}\n", .{data});
     defer live.alloc.free(event);
     var event_ctx = model.StreamContext{ .emit = emitLive, .emit_ctx = live.sctx };
-    _ = try parseStream(live.alloc, event, &event_ctx);
+    const result = try parseStream(live.alloc, event, &event_ctx);
+    defer live.alloc.destroy(result);
+    defer result.deinit(live.alloc);
 }
 
 fn buildRequest(
@@ -715,6 +717,12 @@ test "stream seeds tool input from content block start" {
     }
     try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
     try std.testing.expectEqualStrings("{\"file_path\":\"src/main.zig\"}", result.tool_calls[0].input);
+}
+
+test "live stream event releases parsed result" {
+    var stream = model.StreamContext{ .emit = discardChunk };
+    var live = LiveStream{ .alloc = std.testing.allocator, .sctx = &stream, .options = .{} };
+    try emitLiveEvent(&live, "{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}");
 }
 
 fn discardChunk(_: ?*anyopaque, _: types.StreamChunk) void {}

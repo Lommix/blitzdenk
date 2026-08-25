@@ -183,7 +183,9 @@ fn emitLiveEvent(ctx: ?*anyopaque, data: []const u8) !void {
     const event = try std.fmt.allocPrint(live.alloc, "data: {s}\n", .{data});
     defer live.alloc.free(event);
     var event_ctx = model.StreamContext{ .emit = emitLive, .emit_ctx = live.sctx };
-    _ = try parseStream(live.alloc, event, &event_ctx);
+    const result = try parseStream(live.alloc, event, &event_ctx);
+    defer live.alloc.destroy(result);
+    defer result.deinit(live.alloc);
 }
 
 fn buildRequest(
@@ -769,6 +771,12 @@ test "request and stream filter invalid function calls" {
     try std.testing.expectEqual(@as(usize, 1), result.tool_calls.len);
     try std.testing.expectEqualStrings("call_ok", result.tool_calls[0].id);
     try std.testing.expectEqual(@as(usize, 1), result.provider_parts.len);
+}
+
+test "live stream event releases parsed result" {
+    var stream = model.StreamContext{ .emit = discardChunk };
+    var live = LiveStream{ .alloc = std.testing.allocator, .sctx = &stream, .options = .{} };
+    try emitLiveEvent(&live, "{\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}");
 }
 
 fn discardChunk(_: ?*anyopaque, _: types.StreamChunk) void {}
