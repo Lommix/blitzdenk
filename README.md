@@ -1,7 +1,7 @@
 # Blitzdenk
 
 A coding harness for POSIX. No dependencies, vendored Lua.
-It extends its own Lua sandbox on demand to fit your project,
+It extends its own Lua sandbox on demand to fit your project
 ships as a single binary under 2 MB, and runs in under 100 MB of RAM.
 
 ![demo](docs/assets/demo.gif)
@@ -27,6 +27,7 @@ The default config comes with some useful commands for quick testing.
 - `/team <?prompt>`: Multiagent orchestrator mode
 - `/show <?prompt>`: explain something with mermaid diagrams
 - `/ssh-<myconfig>..`: autocomplete your ssh config entries for quick connection.
+- `/improve <?prompt>`: Evaluate the current session and start molding to the requirements of the project.
 
 Connect remote without ssh config entries `/ssh user@host:/path/to/cwd`
 
