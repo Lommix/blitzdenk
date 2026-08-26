@@ -91,11 +91,15 @@ fn scanDirMaxMtime(io: std.Io, path: []const u8) i128 {
     var it = dir.iterate();
     while (it.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".lua")) continue;
+        if (!isReloadableConfigLua(entry.name)) continue;
         const stat = dir.statFile(io, entry.name, .{}) catch continue;
         if (stat.mtime.nanoseconds > max_mtime) max_mtime = stat.mtime.nanoseconds;
     }
     return max_mtime;
+}
+
+fn isReloadableConfigLua(name: []const u8) bool {
+    return std.mem.endsWith(u8, name, ".lua") and !std.mem.eql(u8, name, "meta.lua");
 }
 
 fn cwdBlitzLuaExists(io: std.Io) bool {
@@ -863,6 +867,13 @@ pub fn run(
 
         try app.cmd_queue.apply(io, &app);
     }
+}
+
+test "generated Lua metadata is not reloadable config" {
+    try std.testing.expect(isReloadableConfigLua("blitz.lua"));
+    try std.testing.expect(isReloadableConfigLua("tools.lua"));
+    try std.testing.expect(!isReloadableConfigLua("meta.lua"));
+    try std.testing.expect(!isReloadableConfigLua(".luarc.json"));
 }
 
 /// Headless mode: send the prompt, drain the agent loop, print the final

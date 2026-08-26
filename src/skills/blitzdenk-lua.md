@@ -38,11 +38,8 @@ The config dir is prepended to `package.path`, so `require("tools")` and
 `require("prompts")` resolve files from `~/.config/blitzdenk/`. Put reusable
 tools and prompts in `tools.lua` and `prompts.lua`, returning a table `M`.
 
-Hot reload polls the mtime of `./blitz.lua` and every `~/.config/blitzdenk/*.lua`
-about once per second. On change it resets the Lua VM, re-runs the config, and
-re-registers tools, MCP servers, and keybinds. If a tool worker holds the Lua VM
-lock, that tick is skipped and retried later. A syntax error makes the reload
-fail and the previous config stays active. No restart is needed to test a change.
+All Lua files are hot reloaded into your context. You can directly
+call tools you edited and confirm behavior.
 
 ## Providers and models
 
