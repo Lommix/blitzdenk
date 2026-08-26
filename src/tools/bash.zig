@@ -42,14 +42,14 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     if (args.command.len == 0) return r.errResult(call, "empty command");
 
     // Replace full cwd paths with "." for cleaner output (stack buffer)
-    var buf: [512]u8 = undefined;
+    var buf: [r.STATUS_BUF]u8 = undefined;
     const cleaned_command_str = if (ctx.base.cwd.len > 0)
         r.replaceAll(args.command, ctx.base.cwd, ".", &buf)
     else
         args.command;
 
     const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    var sgr_buf: [255]u8 = undefined;
+    var sgr_buf: [r.STATUS_BUF]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&sgr_buf);
 
     w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "bash ");

@@ -53,7 +53,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     }).value;
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    var tool_buf: [128]u8 = undefined;
+    var tool_buf: [r.STATUS_BUF]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&tool_buf);
 
     w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "edit ");

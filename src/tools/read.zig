@@ -57,7 +57,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
 
-    var buf: [512]u8 = undefined;
+    var buf: [r.STATUS_BUF]u8 = undefined;
     const rel_path = if (ctx.base.cwd.len > 0)
         r.replaceAll(args.file_path, ctx.base.cwd, ".", &buf)
     else
@@ -121,7 +121,7 @@ fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const is_url = std.mem.startsWith(u8, args.file_path, "http://") or
         std.mem.startsWith(u8, args.file_path, "https://");
 
-    var display_buf: [512]u8 = undefined;
+    var display_buf: [r.STATUS_BUF]u8 = undefined;
     const display_path = if (!is_url and ctx.base.cwd.len > 0)
         r.replaceAll(args.file_path, ctx.base.cwd, ".", &display_buf)
     else

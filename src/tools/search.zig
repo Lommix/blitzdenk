@@ -80,7 +80,7 @@ const GrepArgs = struct {
 
 fn statusSearch(ctx: r.ToolContext, call: r.r.sdk.ToolCall, label: []const u8, pattern: []const u8, path: []const u8) void {
     const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    var sgr_buf: [255]u8 = undefined;
+    var sgr_buf: [r.STATUS_BUF]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&sgr_buf);
 
     w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, label);

@@ -59,6 +59,7 @@ pub const TOOL_RESULT_MAX_CHARS: usize = COMPACT_HEAD_CHARS + COMPACT_TAIL_CHARS
 pub const COMPACT_HEAD_CHARS: usize = 4096;
 pub const COMPACT_TAIL_CHARS: usize = 1024;
 pub const RESERVE_TOKENS: u64 = 1024 * 8;
+pub const IMAGE_ESTIMATE_TOKENS: u64 = 4096;
 pub const TIMEOUT_MS: u64 = 5 * 60_000;
 
 pub const Request = enum(u8) {
@@ -309,7 +310,7 @@ fn partBytes(part: sdk.Part) u64 {
     return switch (part) {
         .text => |text| text.len,
         .reasoning => |reasoning| reasoning.text.len + reasoning.signature.len,
-        .image => |image| image.url.len + image.media_type.len + image.detail.len,
+        .image => IMAGE_ESTIMATE_TOKENS * 3,
         .tool_call => |call| call.id.len + call.name.len + call.input.len,
         .tool_result => |result| result.id.len + result.name.len + result.output.len + 16,
         .file => |file| file.url.len + file.media_type.len + file.filename.len,
@@ -479,6 +480,20 @@ test "SDK compaction estimates messages and tools" {
         .input_schema = "{\"type\":\"object\"}",
     }}, &.{sdk.UserMessage("hello")});
     try std.testing.expect(estimate > 1);
+}
+
+test "SDK compaction image estimate ignores encoded size" {
+    const empty = sdk.UserMessage("");
+    const small = sdk.Message{ .role = .user, .single = sdk.Part.imagePart("data:image/png;base64,eA==", "image/png") };
+    const large = sdk.Message{ .role = .user, .single = sdk.Part.imagePart("data:image/png;base64," ++ ("eA" ** 100_000), "image/png") };
+    try std.testing.expectEqual(
+        IMAGE_ESTIMATE_TOKENS,
+        estimateNextRequestTokens("model", &.{}, &.{small}) - estimateNextRequestTokens("model", &.{}, &.{empty}),
+    );
+    try std.testing.expectEqual(
+        estimateNextRequestTokens("model", &.{}, &.{small}),
+        estimateNextRequestTokens("model", &.{}, &.{large}),
+    );
 }
 
 test "SDK compaction never cuts at a tool result" {
