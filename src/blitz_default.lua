@@ -131,6 +131,29 @@ Task: ]] .. rem
 	blitz.cmd.prompt(prompt)
 end, "draw diagram")
 
+blitz.add_command("improve", function(rem)
+	local prompt = [[
+You are in retrospective mode. Reflect on the current session, then improve the local tool sandbox.
+
+Process:
+1. Load the blitzdenk-lua before you do anything else.
+2. Reconstruct the session history from the chat log. List every tool that was used and rate it: did it help, was it redundant, did it fail or force a workaround?
+3. Find friction: shell one-liners typed more than once, lookups done by hand, any pattern that needed two or more calls of the same kind. Each repeated pattern is a candidate for a custom tool.
+4. Decide where a custom tool would have benefited the task. Only accept candidates seen at least twice in this session. Reject vague or one-off ideas.
+5. Open ./blitz.lua in the cwd. This is the project sandbox, loaded after the user config, and it holds the project tools registered with blitz.register_tool. Create the file if it does not exist.
+6. Apply the improvements: add or fix custom tools there, keep each tool minimal, and register the new tool names in the tool set of the main agent with blitz.add_tool(blitz.AGENT_GENERAL, name).
+7. Syntax check the file with `luac -p blitz.lua`. A file with a syntax error keeps the old config active after the hot reload.
+
+Rules:
+- Edit only ./blitz.lua in the cwd. Never touch the user config in ~/.config/blitzdenk.
+- Saving the file triggers a hot reload; the new tools become available without a restart.
+- Finish with a report: tool ratings, friction found, tools added or changed.
+
+]] .. rem
+
+	blitz.cmd.prompt(prompt)
+end, "session retrospective, improve local tools")
+
 blitz.add_command("team", function(rem)
 	local prompt = [[
 Congratulations! You were just promoted to the team lead agent. You no longer read or write code. Your new job is to
