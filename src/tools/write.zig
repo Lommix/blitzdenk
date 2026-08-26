@@ -33,7 +33,14 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments: expected {\"file_path\": \"...\", \"content\": \"...\"}");
 
-    r.setToolStatusPrint(ctx, call, "write {s}", .{args.file_path});
+    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+
+    var buf: [128]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&buf);
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "write ");
+    w.styled(.{ .fg = app.theme.muted }, args.file_path);
+    r.setToolStatus(ctx, call, w.finish()) catch {};
+
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
 
     const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.file_path }) catch

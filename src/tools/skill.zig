@@ -38,9 +38,9 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, "failed to load skill");
     defer ctx.alloc.free(loaded.raw);
 
-    var buf: [255]u8 = undefined;
+    var buf: [128]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&buf);
-    w.writeAll("skill ");
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "skill ");
     w.styled(.{ .fg = app.theme.warn, .modifier = .{ .bold = true } }, entry.meta.name);
 
     r.setToolStatus(ctx, call, w.finish()) catch {};

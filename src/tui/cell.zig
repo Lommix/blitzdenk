@@ -1,6 +1,8 @@
 const std = @import("std");
 
 pub const Color = union(enum) {
+    const Rgb = @FieldType(Color, "rgb");
+
     reset,
     black,
     red,
@@ -97,9 +99,8 @@ pub const Color = union(enum) {
         };
     }
 
-    pub fn toHexStr(self: Color) [7]u8 {
-        const Rgb = @FieldType(Color, "rgb");
-        const rgb: Rgb = switch (self) {
+    pub fn toRgb(self: Color) Rgb {
+        return switch (self) {
             .rgb => |c| c,
             .reset => Rgb{ .r = 0, .g = 0, .b = 0 },
             .black => Rgb{ .r = 0, .g = 0, .b = 0 },
@@ -120,6 +121,10 @@ pub const Color = union(enum) {
             .bright_white => Rgb{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
             .indexed => |i| Rgb{ .r = i, .g = i, .b = i },
         };
+    }
+
+    pub fn toHexStr(self: Color) [7]u8 {
+        const rgb = self.toRgb();
         return .{
             '#',
             hexDigit(rgb.r >> 4),

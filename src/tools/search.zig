@@ -78,6 +78,18 @@ const GrepArgs = struct {
     context: u32 = 0,
 };
 
+fn statusSearch(ctx: r.ToolContext, call: r.r.sdk.ToolCall, label: []const u8, pattern: []const u8, path: []const u8) void {
+    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    var sgr_buf: [255]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&sgr_buf);
+
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, label);
+    w.styled(.{ .fg = app.theme.muted }, pattern);
+    w.styled(.{ .fg = app.theme.muted, .modifier = .{ .bold = true } }, path);
+
+    r.setToolStatus(ctx, call, w.finish()) catch {};
+}
+
 fn runGlob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const args = std.json.parseFromSliceLeaky(GlobArgs, ctx.alloc, call.input, .{
         .ignore_unknown_fields = true,
@@ -85,7 +97,7 @@ fn runGlob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (validateCommon(args.pattern, args.file_path)) |msg| return r.errResult(call, msg);
 
-    r.setToolStatusPrint(ctx, call, "glob  {s}  {s}", .{ args.pattern, args.file_path });
+    statusSearch(ctx, call, "glob ", args.pattern, args.file_path);
 
     var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(ctx.alloc, &.{ "rg", "--files", "--sort=path" }) catch
@@ -115,7 +127,7 @@ fn runGrep(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, "context must be between 0 and 100");
     }
 
-    r.setToolStatusPrint(ctx, call, "grep  {s}  {s}", .{ args.pattern, args.file_path });
+    statusSearch(ctx, call, "grep ", args.pattern, args.file_path);
 
     var argv: std.ArrayList([]const u8) = .empty;
     argv.appendSlice(ctx.alloc, &.{ "rg", "--color=never", "--no-heading", "--line-number", "--with-filename" }) catch

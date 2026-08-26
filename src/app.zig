@@ -37,6 +37,7 @@ pub const Theme = struct {
     overlay: r.tui.Color,
     muted: r.tui.Color,
     text: r.tui.Color,
+    text_hl: r.tui.Color,
     ok: r.tui.Color,
     info: r.tui.Color,
     warn: r.tui.Color,
@@ -55,6 +56,7 @@ pub const Theme = struct {
         .overlay = .reset,
         .muted = .{ .rgb = .{ .r = 86, .g = 95, .b = 137 } },
         .text = .{ .rgb = .{ .r = 192, .g = 202, .b = 245 } },
+        .text_hl = .white,
         .ok = .{ .rgb = .{ .r = 158, .g = 206, .b = 106 } },
         .info = .{ .rgb = .{ .r = 122, .g = 162, .b = 247 } },
         .warn = .{ .rgb = .{ .r = 224, .g = 175, .b = 104 } },
@@ -2129,7 +2131,8 @@ fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf
     const display = app.displayInput(arena);
     const text = display.text;
     const cursor: usize = display.cursor;
-    const cursor_style: r.tui.Style = .{ .fg = app.theme.text, .bg = border_color };
+    const input_text_style: r.tui.Style = .{ .fg = app.theme.text_hl };
+    const cursor_style: r.tui.Style = .{ .fg = app.theme.text_hl, .bg = border_color };
 
     var cursor_visual_row: usize = 0;
     var accumulated_rows: usize = 0;
@@ -2145,18 +2148,18 @@ fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf
             var line = r.tui.Line{};
             const off = cursor - line_start;
             const before = raw_line[0..off];
-            try line.pushText(arena, before, .{});
+            try line.pushText(arena, before, input_text_style);
             if (off < raw_line.len) {
                 const len = std.unicode.utf8ByteSequenceLength(raw_line[off]) catch 1;
                 const end = @min(off + len, raw_line.len);
                 try line.pushText(arena, raw_line[off..end], cursor_style);
-                try line.pushText(arena, raw_line[end..], .{});
+                try line.pushText(arena, raw_line[end..], input_text_style);
             } else {
                 try line.pushText(arena, " ", cursor_style);
             }
             try r.tui.wrapLine(arena, &line, inner.width, &wrapped);
         } else {
-            try pushPlainWrappedLine(arena, raw_line, inner.width, &wrapped);
+            try pushPlainWrappedLine(app, arena, raw_line, inner.width, &wrapped);
         }
 
         if (cursor >= line_start and cursor <= line_end) {
@@ -2190,9 +2193,9 @@ fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf
     }
 }
 
-fn pushPlainWrappedLine(arena: std.mem.Allocator, raw_line: []const u8, inner_w: u16, out: *std.ArrayList(r.tui.Line)) !void {
+fn pushPlainWrappedLine(app: *App, arena: std.mem.Allocator, raw_line: []const u8, inner_w: u16, out: *std.ArrayList(r.tui.Line)) !void {
     var line = r.tui.Line{};
-    try line.pushText(arena, raw_line, .{});
+    try line.pushText(arena, raw_line, .{ .fg = app.theme.text_hl });
     try r.tui.wrapLine(arena, &line, inner_w, out);
 }
 
@@ -2204,7 +2207,7 @@ fn inputWrappedRows(app: *App, arena: std.mem.Allocator, inner_w: u16) u16 {
     while (it.next()) |raw_line| {
         var wrapped: std.ArrayList(r.tui.Line) = .empty;
         defer wrapped.deinit(arena);
-        pushPlainWrappedLine(arena, raw_line, inner_w, &wrapped) catch break;
+        pushPlainWrappedLine(app, arena, raw_line, inner_w, &wrapped) catch break;
         rows +|= @intCast(wrapped.items.len);
     }
     return @max(rows, 1);
@@ -2640,18 +2643,17 @@ fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: ChatPart.DiffEntry
         .style = .{ .bg = theme.diff_surface },
     };
 
-    // File path header
     var header_line = r.tui.Line{};
     header_line.pushSpan(arena, .{ .content = "file: ", .style = .{ .fg = theme.muted, .modifier = .{ .bold = true } } }) catch {};
     header_line.pushSpan(arena, .{ .content = d.path, .style = .{ .fg = theme.info } }) catch {};
     p.lines.append(arena, header_line) catch {};
 
     for (d.diff_lines) |dl| {
-        const dl_info: struct { prefix: []const u8, fg: r.tui.Color, bg: r.tui.Color } = switch (dl.kind) {
-            .deletion => .{ .prefix = "- ", .fg = theme.diff_remove, .bg = theme.diff_surface },
-            .addition => .{ .prefix = "+ ", .fg = theme.diff_add, .bg = theme.diff_surface },
-            .context => .{ .prefix = "  ", .fg = theme.text, .bg = theme.diff_surface },
-            .header => .{ .prefix = "@ ", .fg = theme.info, .bg = .reset },
+        const dl_info: struct { prefix: []const u8, style: r.tui.Style, bg: r.tui.Color } = switch (dl.kind) {
+            .deletion => .{ .prefix = "- ", .style = .{ .fg = theme.diff_remove }, .bg = theme.diff_surface },
+            .addition => .{ .prefix = "+ ", .style = .{ .fg = theme.diff_add }, .bg = theme.diff_surface },
+            .context => .{ .prefix = "  ", .style = .{ .fg = theme.text }, .bg = theme.diff_surface },
+            .header => .{ .prefix = "@ ", .style = .{ .fg = theme.info, .modifier = .{ .bold = true } }, .bg = .reset },
         };
         const num_str = if (dl.line_number) |n|
             std.fmt.allocPrint(arena, "{d:>4} ", .{n}) catch "     "
@@ -2660,8 +2662,8 @@ fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: ChatPart.DiffEntry
 
         var src: r.tui.Line = .{ .style = .{ .bg = dl_info.bg } };
         src.pushText(arena, num_str, .{ .fg = theme.muted, .bg = dl_info.bg }) catch {};
-        src.pushText(arena, dl_info.prefix, .{ .fg = dl_info.fg, .bg = dl_info.bg }) catch {};
-        src.pushText(arena, dl.content, .{ .fg = dl_info.fg, .bg = dl_info.bg }) catch {};
+        src.pushSpan(arena, .{ .content = dl_info.prefix, .style = dl_info.style }) catch {};
+        src.pushSpan(arena, .{ .content = dl.content, .style = dl_info.style }) catch {};
         p.lines.append(arena, src) catch break;
     }
     return p;
@@ -2673,7 +2675,7 @@ fn markdownTheme(theme: Theme) r.tui.HighlightTheme {
         .bold = .{ .fg = theme.text, .modifier = .{ .bold = true } },
         .italic = .{ .fg = theme.text, .modifier = .{ .italic = true } },
         .inline_code = .{ .fg = theme.warn },
-        .code_default = .{ .fg = theme.text },
+        .code_default = .{ .fg = theme.text_hl },
         .code_keyword = .{ .fg = theme.warn, .modifier = .{ .bold = true } },
         .code_expression = .{ .fg = theme.info },
         .code_string = .{ .fg = theme.ok },
@@ -2685,10 +2687,10 @@ fn markdownTheme(theme: Theme) r.tui.HighlightTheme {
         .plain = .{ .fg = theme.text },
         .mermaid = .{
             .text = .{ .fg = theme.text },
-            .strong = .{ .fg = theme.text, .modifier = .{ .bold = true } },
+            .strong = .{ .fg = theme.text_hl, .modifier = .{ .bold = true } },
             .muted = .{ .fg = theme.muted },
-            .border = .{ .fg = theme.muted },
-            .edge = .{ .fg = theme.muted },
+            .border = .{ .fg = theme.text_hl },
+            .edge = .{ .fg = theme.text_hl },
             .accent = .{ .fg = theme.info },
         },
     };

@@ -144,7 +144,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     var w = r.tui.AnsiWriter.init(&status_buf);
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    w.styled(.{ .modifier = .{ .bold = true } }, "patch ");
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "patch ");
 
     for (patch.commands, 0..) |cmd, ci| {
         if (ctx.isCanceled()) return r.errResult(call, "canceled");

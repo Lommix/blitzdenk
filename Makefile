@@ -2,8 +2,7 @@ run:
 	zig build run
 
 install:
-	# with debug!
-	zig build
+	zig build --release=small
 	cp zig-out/bin/blitz ~/.local/bin/blitz
 
 test:

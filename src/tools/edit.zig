@@ -52,7 +52,13 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         );
     }).value;
 
-    r.setToolStatusPrint(ctx, call, "edit {s}", .{args.file_path});
+    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    var tool_buf: [128]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&tool_buf);
+
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "edit ");
+    w.styledPrint(.{ .fg = app.theme.muted }, "{s}", .{args.file_path});
+    r.setToolStatus(ctx, call, w.finish()) catch {};
 
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
     if (args.old_string.len == 0) return r.errResult(call, "oldText is empty");

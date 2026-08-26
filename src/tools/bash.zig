@@ -52,7 +52,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     var sgr_buf: [255]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&sgr_buf);
 
-    w.styled(.{ .modifier = .{ .bold = true } }, "bash ");
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "bash ");
     w.styled(.{ .fg = app.theme.info }, args.description);
     w.writeAll(" ");
     w.styled(.{ .fg = app.theme.muted }, cleaned_command_str);

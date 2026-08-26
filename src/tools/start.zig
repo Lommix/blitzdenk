@@ -22,8 +22,13 @@ fn startMcp(ctx: r.r.tools.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutp
         .ignore_unknown_fields = true,
     }) catch return r.errResult(call, "invalid JSON arguments");
 
-    r.setToolStatusPrint(ctx, call, "start MCP {s}", .{args.name});
-    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    var buf: [128]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&buf);
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "starting mcp ");
+    w.styled(.{ .fg = app.theme.info, .modifier = .{ .bold = true } }, args.name);
+    r.setToolStatus(ctx, call, w.finish()) catch {};
+
     app.lua_vm.vm_mu.lockUncancelable(ctx.io);
     defer app.lua_vm.vm_mu.unlock(ctx.io);
     if (!app.lua_vm.hasMcp(args.name)) {
@@ -36,4 +41,3 @@ fn startMcp(ctx: r.r.tools.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutp
     };
     return r.okResult(call, "MCP start requested; tools will be available on the next turn");
 }
-

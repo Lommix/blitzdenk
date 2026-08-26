@@ -32,6 +32,34 @@ blitz.set_model_agent(blitz.AGENT_GENERAL, default_model, "max")
 --- Default Agent tool set overwrites
 ---------------------------------------------------------------------------------------------------
 
+--- let the agent change it's sandbox
+local lua_repl = blitz.register_tool({
+	name = "lua_repl",
+	description = "Execute arbitrary Lua code and return the result. Runs inside the blitzdenk Lua VM",
+	args = {
+		code = { type = "string", description = "Lua code to execute", required = true },
+	},
+	func = function(ctx, call)
+		local orange = "\27[38;5;208m"
+		local bold = "\27[1m"
+		local reset = "\27[0m"
+
+		ctx:set_status(orange .. bold .. "(Lua)" .. reset .. " `" .. call.arguments.code .. "`")
+
+		local fn, err = load(call.arguments.code)
+		if not fn then
+			error(err)
+		end
+
+		local ok, result = pcall(fn)
+		if not ok then
+			error(tostring(result))
+		end
+
+		return { msg = tostring(result or "nil") }
+	end,
+})
+
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.BASH,
 	blitz.tools.READ,
@@ -42,6 +70,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.SKILL,
 	blitz.tools.START_MCP,
 	blitz.tools.VIEW_IMAGE,
+	lua_repl,
 	-- blitz.tools.PATCH, -- EDIT/WRITE alternative
 })
 

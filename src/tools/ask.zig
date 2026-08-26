@@ -41,7 +41,14 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     if (args.options.len == 0) return r.errResult(call, "options must contain at least one entry");
     if (args.options.len > MAX_OPTIONS) return r.errResult(call, "too many options (max 8)");
 
-    r.setToolStatusPrint(ctx, call, "question {s}", .{args.question});
+    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    var sgr_buf: [255]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&sgr_buf);
+
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "question ");
+    w.styled(.{ .fg = app.theme.muted }, args.question);
+
+    r.setToolStatus(ctx, call, w.finish()) catch {};
 
     const decision = ctx.requestPermission(call.id, .{ .ask = .{
         .header = args.header,

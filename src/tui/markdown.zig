@@ -79,7 +79,7 @@ pub const HighlightTheme = struct {
     bold: r.Style = .{ .modifier = .{ .bold = true } },
     italic: r.Style = .{ .modifier = .{ .italic = true } },
     inline_code: r.Style = .{ .fg = .bright_yellow },
-    code_default: r.Style = .{ .fg = .bright_white },
+    code_default: r.Style = .{},
     code_keyword: r.Style = .{ .fg = .yellow, .modifier = .{ .bold = true } },
     code_expression: r.Style = .{ .fg = .blue },
     code_string: r.Style = .{ .fg = .green },

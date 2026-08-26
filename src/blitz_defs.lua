@@ -215,6 +215,7 @@
 ---@field overlay? string
 ---@field muted? string
 ---@field text? string
+---@field text_hl? string
 ---@field ok? string
 ---@field info? string
 ---@field warn? string

@@ -246,6 +246,7 @@ const ThemeDef = LuaType{ .table_def = .{ .name = "BlitzTheme", .fields = &.{
     .{ .name = "overlay", .ty = LuaType.string, .optional = true },
     .{ .name = "muted", .ty = LuaType.string, .optional = true },
     .{ .name = "text", .ty = LuaType.string, .optional = true },
+    .{ .name = "text_hl", .ty = LuaType.string, .optional = true },
     .{ .name = "ok", .ty = LuaType.string, .optional = true },
     .{ .name = "info", .ty = LuaType.string, .optional = true },
     .{ .name = "warn", .ty = LuaType.string, .optional = true },
@@ -265,6 +266,7 @@ const ThemeArg = struct {
     overlay: ?[]const u8 = null,
     muted: ?[]const u8 = null,
     text: ?[]const u8 = null,
+    text_hl: ?[]const u8 = null,
     ok: ?[]const u8 = null,
     info: ?[]const u8 = null,
     warn: ?[]const u8 = null,
@@ -286,6 +288,7 @@ fn applyTheme(a: *r.app.App, theme: ThemeArg) !void {
     if (theme.overlay) |v| t.overlay = try C.parseStrHex(v);
     if (theme.muted) |v| t.muted = try C.parseStrHex(v);
     if (theme.text) |v| t.text = try C.parseStrHex(v);
+    if (theme.text_hl) |v| t.text_hl = try C.parseStrHex(v);
     if (theme.ok) |v| t.ok = try C.parseStrHex(v);
     if (theme.info) |v| t.info = try C.parseStrHex(v);
     if (theme.warn) |v| t.warn = try C.parseStrHex(v);
@@ -838,6 +841,7 @@ pub const Blitz = LuaType{
                             overlay: [7]u8,
                             muted: [7]u8,
                             text: [7]u8,
+                            text_hl: [7]u8,
                             ok: [7]u8,
                             info: [7]u8,
                             warn: [7]u8,
@@ -860,6 +864,7 @@ pub const Blitz = LuaType{
                                 .overlay = t.overlay.toHexStr(),
                                 .muted = t.muted.toHexStr(),
                                 .text = t.text.toHexStr(),
+                                .text_hl = t.text_hl.toHexStr(),
                                 .ok = t.ok.toHexStr(),
                                 .info = t.info.toHexStr(),
                                 .warn = t.warn.toHexStr(),

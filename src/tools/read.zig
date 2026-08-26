@@ -69,7 +69,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var status_buf: [r.STATUS_BUF]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&status_buf);
-    w.styled(.{ .modifier = .{ .bold = true } }, "read ");
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "read ");
     if (args.limit) |l| {
         if (args.offset) |o|
             w.styledPrint(.{ .fg = app.theme.muted }, "{s} offset: {d} limit: {d}", .{ rel_path, o, l })

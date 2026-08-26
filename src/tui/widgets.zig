@@ -861,7 +861,6 @@ pub const Diff = struct {
     lines: []const DiffLine,
     scroll_offset: usize = 0,
     gutter_width: u16 = 5,
-
     pub fn render(self: *const Diff, area: Rect, buf: *Buffer) void {
         if (area.height == 0 or area.width == 0) return;
 

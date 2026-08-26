@@ -18,7 +18,8 @@ const keybinds = .{
     .{ "c+d", "scroll down" },
 };
 
-pub fn build_header(frame: usize, alloc: std.mem.Allocator, out: *std.ArrayList(r.tui.Line)) !void {
+pub fn build_header(frame: usize, base_color: r.tui.Color, alloc: std.mem.Allocator, out: *std.ArrayList(r.tui.Line)) !void {
+    const base = base_color.toRgb();
     var line_iter = std.mem.splitAny(u8, HEADER_ART, "\n");
     while (line_iter.next()) |line_text| {
         var l = r.tui.Line{};
@@ -36,9 +37,9 @@ pub fn build_header(frame: usize, alloc: std.mem.Allocator, out: *std.ArrayList(
             const t: u16 = @intCast(@min(dx, 10));
             const blend: u8 = if (t >= 10) 0 else @intCast((10 - t) * 25);
             const fg = r.tui.Color{ .rgb = .{
-                .r = blend,
-                .g = 200 +| blend / 5,
-                .b = 200 +| blend / 5,
+                .r = lightenChannel(base.r, blend),
+                .g = lightenChannel(base.g, blend),
+                .b = lightenChannel(base.b, blend),
             } };
 
             try l.pushSpan(alloc, .{
@@ -53,7 +54,7 @@ pub fn build_header(frame: usize, alloc: std.mem.Allocator, out: *std.ArrayList(
 }
 
 pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
-    try build_header(app.frame_count, app.arena_frame.allocator(), out);
+    try build_header(app.frame_count, app.theme.info, app.arena_frame.allocator(), out);
     const alloc = app.arena_frame.allocator();
 
     try out.append(
@@ -162,6 +163,12 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
         try l.pushSpanPrint(alloc, "@{s} ", .{@tagName(model.effort)}, .{ .fg = app.theme.text });
         try out.append(alloc, l);
     }
+}
+
+fn lightenChannel(channel: u8, blend: u8) u8 {
+    const c: u16 = channel;
+    const b: u16 = blend;
+    return @intCast(c + b * (255 - c) / 255);
 }
 
 fn formatSize(dest: []u8, count: usize) []const u8 {

@@ -7,11 +7,11 @@ const Line = widgets.Line;
 const Style = cell.Style;
 
 pub const Theme = struct {
-    text: Style = .{ .fg = .bright_white },
-    strong: Style = .{ .fg = .bright_white, .modifier = .{ .bold = true } },
+    text: Style = .{},
+    strong: Style = .{ .modifier = .{ .bold = true } },
     muted: Style = .{ .fg = .bright_black },
-    border: Style = .{ .fg = .bright_white },
-    edge: Style = .{ .fg = .bright_white },
+    border: Style = .{},
+    edge: Style = .{},
     accent: Style = .{ .fg = .yellow },
 };
 
