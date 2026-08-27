@@ -172,6 +172,11 @@ const JsonDecodeRet = LuaType{ .raw = "any, boolean" };
 const Base64Ret = LuaType{ .raw = "string|nil, boolean" };
 
 const StringListDef = LuaType{ .raw = "string[]" };
+const CapabilityRuleListDef = LuaType{ .raw_refs = .{ .text = "BlitzCapabilityRule[]", .refs = &.{CapabilityRuleDef} } };
+const CapabilityRuleDef = LuaType{ .table_def = .{ .name = "BlitzCapabilityRule", .fields = &.{
+    .{ .name = "binary", .ty = LuaType.string, .desc = "binary resolved on PATH" },
+    .{ .name = "rule", .ty = LuaType.string, .desc = "prompt line added when the binary exists" },
+} } };
 const ToolResultDef = LuaType{ .table_def = .{ .name = "BlitzToolResult", .fields = &.{
     .{ .name = "msg", .ty = LuaType.string, .optional = true },
     .{ .name = "img", .ty = LuaType.table, .optional = true, .desc = "{ media_type = string, data = string }" },
@@ -785,6 +790,23 @@ pub const Blitz = LuaType{
                             try a.context_factory.setAgentTools(agent_type, tool_names);
                         }
                     }).lua_fn, "set_agent_tools"),
+                } },
+            },
+            .{
+                .name = "set_capabilities",
+                .desc =
+                \\Register environment capability rules. Each rule names a binary; when it
+                \\resolves on PATH, its rule line is added to the system prompt of agents
+                \\that own the bash tool. Rules resolve on registration and on Lua reload.
+                ,
+                .ty = LuaType{ .function = .{
+                    .args = &.{.{ .name = "rules", .ty = CapabilityRuleListDef }},
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(state: *c.lua_State, a: *r.app.App, rules: []r.ContextFactory.CapabilityRule) !void {
+                            if (try isToolVm(state)) return;
+                            try a.context_factory.setCapabilityRules(rules);
+                        }
+                    }).lua_fn, "set_capabilities"),
                 } },
             },
             .{

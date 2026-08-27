@@ -18,8 +18,7 @@ agents: std.EnumArray(AgentType, ?AgentDef) = .initFill(null),
 // ---
 available_mcp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
 available_mcp_count: usize = 0,
-cli_checked: bool = false,
-cli_installed: [cli_capabilities.len]bool = .{false} ** cli_capabilities.len,
+capability_lines: []const []const u8 = &.{},
 // Arena holds definitions set from Lua. Reset on hot-reload so the
 // factory keeps using the embedded defaults until lua re-installs them.
 prompt_arena: std.heap.ArenaAllocator,
@@ -35,15 +34,9 @@ flags: Flags = .{},
 general_prompt_size: usize = 0,
 // -------------------------------------------------------------------------------
 
-const CliCapability = struct {
+pub const CapabilityRule = struct {
     binary: []const u8,
-    guideline: []const u8,
-};
-
-const cli_capabilities = [_]CliCapability{
-    .{ .binary = "rg", .guideline = "Use rg for fast recursive grep searches. Prefer rg over grep." },
-    .{ .binary = "fd", .guideline = "Use fd for fast file discovery. Prefer fd over find." },
-    .{ .binary = "jq", .guideline = "Use jq to parse and filter JSON data." },
+    rule: []const u8,
 };
 
 pub const general_default_tool_set = .{
@@ -191,19 +184,22 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8, cwd: []const
     };
 
     self.resetDefs();
-    self.checkCliCapabilities();
     return self;
 }
 
-/// Startup check for useful cli tools. Runs once, then caches the result
-/// until the factory is relaunched.
-pub fn checkCliCapabilities(self: *Self) void {
-    if (self.cli_checked) return;
-    self.cli_checked = true;
-
-    for (0..cli_capabilities.len) |i| {
-        self.cli_installed[i] = binaryExists(self.io, cli_capabilities[i].binary);
+/// Register env rules from Lua. Binaries resolve once here; installed rules
+/// render to prompt lines immediately. Results live in the prompt arena; the
+/// arena resets on hot-reload, so a reload must reinstall them.
+pub fn setCapabilityRules(self: *Self, rules: []const CapabilityRule) !void {
+    const alloc = self.prompt_arena.allocator();
+    var lines = try alloc.alloc([]const u8, rules.len);
+    var count: usize = 0;
+    for (rules) |rule| {
+        if (!binaryExists(self.io, rule.binary)) continue;
+        lines[count] = try std.fmt.allocPrint(alloc, "- {s}: {s}\n", .{ rule.binary, rule.rule });
+        count += 1;
     }
+    self.capability_lines = lines[0..count];
 }
 
 pub fn buildAgentApiConfig(
@@ -488,6 +484,7 @@ fn rebuildSkillNames(self: *Self) void {
 /// Restore embedded defaults and free any Lua-installed definitions.
 pub fn resetDefs(self: *Self) void {
     _ = self.prompt_arena.reset(.retain_capacity);
+    self.capability_lines = &.{};
     self.agent_counter = 3;
     self.available_mcp_count = 0;
     self.agents = .initFill(null);
@@ -812,19 +809,14 @@ pub fn build_system_prompt(
         }
     }
 
-    if (self.agentHasTool(agent_type, r.tools.bash.BashTool.def.name)) {
-        var wrote_cli_header = false;
-        for (0..cli_capabilities.len) |i| {
-            if (!self.cli_installed[i]) continue;
-            if (!wrote_cli_header) {
-                _ = try w.write(
-                    \\
-                    \\# Envirement:
-                    \\
-                );
-                wrote_cli_header = true;
-            }
-            try w.print("- {s}: {s}\n", .{ cli_capabilities[i].binary, cli_capabilities[i].guideline });
+    if (self.agentHasTool(agent_type, r.tools.bash.BashTool.def.name) and self.capability_lines.len > 0) {
+        try w.writeAll(
+            \\
+            \\# Envirement:
+            \\
+        );
+        for (self.capability_lines) |line| {
+            try w.writeAll(line);
         }
     }
 
@@ -1102,6 +1094,58 @@ test "agent config permits keyless providers" {
         },
         .diagnostic => return error.TestExpectedAgentConfig,
     }
+}
+
+test "capability rules gate on binary and bash ownership" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const io = std.testing.io_instance;
+    const home_dir = io.environ.process_environ.getPosix("HOME") orelse "/root";
+
+    var factory = try Self.init(alloc, std.testing.io, home_dir, "/");
+    defer factory.prompt_arena.deinit();
+
+    try factory.setCapabilityRules(&.{
+        .{ .binary = "sh", .rule = "RULE_PRESENT" },
+        .{ .binary = "definitely_missing_binary_xyz", .rule = "RULE_MISSING" },
+    });
+
+    const prompt = try factory.build_system_prompt(alloc, .general);
+    const env_idx = std.mem.indexOf(u8, prompt, "# Envirement:") orelse return error.TestExpectedEnvSection;
+    const section = prompt[env_idx..];
+
+    try std.testing.expect(std.mem.indexOf(u8, section, "sh: RULE_PRESENT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, section, "RULE_MISSING") == null);
+
+    var no_bash_factory = try Self.init(alloc, std.testing.io, home_dir, "/");
+    defer no_bash_factory.prompt_arena.deinit();
+    try no_bash_factory.setCapabilityRules(&.{
+        .{ .binary = "sh", .rule = "RULE_SHOULD_HIDE" },
+    });
+    try no_bash_factory.setAgentTools(.general, &.{});
+
+    const prompt_no_bash = try no_bash_factory.build_system_prompt(alloc, .general);
+    try std.testing.expect(std.mem.indexOf(u8, prompt_no_bash, "RULE_SHOULD_HIDE") == null);
+}
+
+test "resetDefs clears capability rules before the next install" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const io = std.testing.io_instance;
+    const home_dir = io.environ.process_environ.getPosix("HOME") orelse "/root";
+
+    var factory = try Self.init(alloc, std.testing.io, home_dir, "/");
+    defer factory.prompt_arena.deinit();
+
+    try factory.setCapabilityRules(&.{.{ .binary = "sh", .rule = "RULE_BEFORE_RESET" }});
+    factory.resetDefs();
+
+    const prompt = try factory.build_system_prompt(alloc, .general);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "# Envirement:") == null);
 }
 
 test "system_prompt" {

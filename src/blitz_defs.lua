@@ -204,6 +204,12 @@
 ---total lifetime cost in USD
 ---@field cost number
 
+---@class BlitzCapabilityRule
+---binary resolved on PATH
+---@field binary string
+---prompt line added when the binary exists
+---@field rule string
+
 ---@class BlitzAppFlags
 ---@field show_thinking? boolean
 ---@field debug_log? boolean
@@ -288,6 +294,10 @@
 ---Override the tool set for a given agent type. Replaces defaults entirely.
 ---Names must match built-in tool names or names of tools registered via blitz.register_tool.
 ---@field set_agent_tools fun(agent_type: integer, tool_names: string[])
+---Register environment capability rules. Each rule names a binary; when it
+---resolves on PATH, its rule line is added to the system prompt of agents
+---that own the bash tool. Rules resolve on registration and on Lua reload.
+---@field set_capabilities fun(rules: BlitzCapabilityRule[])
 ---Override the system prompt for a given agent type.
 ---@field set_prompt fun(agent_type: integer, prompt: string)
 ---Return the current app flags.

@@ -85,6 +85,7 @@ Built-in names: `BASH`, `READ`, `VIEW_IMAGE`,
 - `blitz.set_agent_tools(agent_type, {names})` replaces the whole tool set.
 - `blitz.add_tool(agent_type, tool_name)` adds one tool to the current set.
 - `blitz.set_prompt(agent_type, prompt)` replaces the system prompt.
+- `blitz.set_capabilities({rules})` registers environment rules; see below.
 - `blitz.AGENT_GENERAL` is the main agent type.
 
 ```lua
@@ -99,6 +100,18 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
     tools.web_fetch,          -- custom tool from require("tools")
 })
 ```
+
+## Env capabilities
+
+```lua
+blitz.set_capabilities({
+    { binary = "rg", rule = "Use rg for fast recursive grep searches." },
+})
+```
+
+Each rule is added under `# Envirement:` in the system prompt when its
+`binary` resolves on PATH. Only agents owning the bash tool get them.
+Calling again replaces all rules.
 
 ## Custom tools
 

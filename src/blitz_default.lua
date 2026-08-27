@@ -29,6 +29,16 @@ blitz.set_compact_edge(250000)
 blitz.set_model_agent(blitz.AGENT_GENERAL, default_model, "max")
 
 ---------------------------------------------------------------------------------------------------
+--- Env capability rules
+--- Each rule is added to the system prompt when its binary exists on PATH.
+---------------------------------------------------------------------------------------------------
+blitz.set_capabilities({
+	{ binary = "rg", rule = "Use rg for fast recursive grep searches. Prefer rg over grep." },
+	{ binary = "fd", rule = "Use fd for fast file discovery. Prefer fd over find." },
+	{ binary = "jq", rule = "Use jq to parse and filter JSON data." },
+})
+
+---------------------------------------------------------------------------------------------------
 --- Default Agent tool set overwrites
 ---------------------------------------------------------------------------------------------------
 
