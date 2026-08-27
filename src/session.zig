@@ -121,9 +121,9 @@ fn encodeMessage(alloc: std.mem.Allocator, message: sdk.Message) !WireMessage {
     const source = message.parts();
     var i: usize = 0;
     while (i < source.len) : (i += 1) switch (source[i]) {
-        .text => |text| try parts.append(alloc, .{ .text = text }),
+        .text => |text| try parts.append(alloc, .{ .text = try util.sanitizeUtf8(alloc, text) }),
         .reasoning => |reasoning| try parts.append(alloc, .{ .thinking = .{
-            .text = reasoning.text,
+            .text = try util.sanitizeUtf8(alloc, reasoning.text),
             .signature = if (reasoning.signature.len > 0) reasoning.signature else null,
         } }),
         .image => |image| try parts.append(alloc, .{ .image = try encodeImage(image) }),
@@ -141,7 +141,7 @@ fn encodeMessage(alloc: std.mem.Allocator, message: sdk.Message) !WireMessage {
             try parts.append(alloc, .{ .tool_result = .{
                 .call_id = result.id,
                 .name = result.name,
-                .content = result.output,
+                .content = try util.sanitizeUtf8(alloc, result.output),
                 .image = image,
                 .is_error = result.is_error,
                 .exit_loop = result.exit_loop,
@@ -175,6 +175,22 @@ pub const SaveState = struct {
     chat: []const WireMessage,
     chat_render: []const app.ChatEntry,
 };
+
+test "encodeMessage replaces invalid UTF-8 so saved sessions stay loadable" {
+    const messages = [_]sdk.Message{
+        .{ .role = .tool, .content = &.{
+            .{ .tool_result = .{ .id = "c1", .name = "search", .output = "\xe5\x8f\xe5..." } },
+        } },
+    };
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try encodeMessages(std.testing.allocator, &messages, &output.writer);
+    const parsed = try std.json.parseFromSlice([]const WireMessage, std.testing.allocator, output.written(), .{});
+    defer parsed.deinit();
+    const content = parsed.value[0].parts[0].tool_result.content;
+    try std.testing.expectStringEndsWith(content, "...");
+    try std.testing.expect(std.unicode.utf8ValidateSlice(content));
+}
 
 pub fn saveSession(a: *const app.App, w: *std.Io.Writer) !void {
     const agent = a.mainAgent() orelse return error.NoActiveSessionToSave;

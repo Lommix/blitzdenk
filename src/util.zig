@@ -9,6 +9,12 @@ pub fn ensureBlitzDir(dir: std.Io.Dir, io: std.Io) !void {
     try dir.createDirPath(io, BLITZ_DIR);
 }
 
+/// Owned copy of `text`, ill-formed UTF-8 replaced with U+FFFD.
+pub fn sanitizeUtf8(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    if (std.unicode.utf8ValidateSlice(text)) return alloc.dupe(u8, text);
+    return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf8(text)});
+}
+
 ///Mostly clones `T`. passthrough for function ptr and anything opaque.
 pub fn deepClone(comptime T: type, value: T, alloc: std.mem.Allocator) !T {
     return switch (@typeInfo(T)) {

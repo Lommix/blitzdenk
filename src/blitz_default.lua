@@ -133,21 +133,25 @@ end, "draw diagram")
 
 blitz.add_command("improve", function(rem)
 	local prompt = [[
-You are in retrospective mode. Reflect on the current session, then improve the local tool sandbox.
+You are in retrospective mode. Your scope is the project-local tool sandbox in ./blitz.lua. Everything else is out of scope.
 
 Process:
-1. Load the blitzdenk-lua before you do anything else.
+1. Load the blitzdenk-lua skill and read the local blitz.lua. Do nothing else until it is loaded.
 2. Reconstruct the session history from the chat log. List every tool that was used and rate it: did it help, was it redundant, did it fail or force a workaround?
 3. Find friction: shell one-liners typed more than once, lookups done by hand, any pattern that needed two or more calls of the same kind. Each repeated pattern is a candidate for a custom tool.
-4. Decide where a custom tool would have benefited the task. Only accept candidates seen at least twice in this session. Reject vague or one-off ideas.
-5. Open ./blitz.lua in the cwd. This is the project sandbox, loaded after the user config, and it holds the project tools registered with blitz.register_tool. Create the file if it does not exist.
-6. Apply the improvements: add or fix custom tools there, keep each tool minimal, and register the new tool names in the tool set of the main agent with blitz.add_tool(blitz.AGENT_GENERAL, name).
-7. Syntax check the file with `luac -p blitz.lua`. A file with a syntax error keeps the old config active after the hot reload.
+4. Rate every tool already defined in ./blitz.lua: helped, redundant, failed, or forced a workaround. Skip this step silently when there are none.
+5. Improve ./blitz.lua only: fix broken tools, implement accepted candidates, one concern per tool, minimal bodies. Expose each new tool with blitz.add_tool(blitz.AGENT_GENERAL, name).
+6. Run `luac -p blitz.lua`. Fix errors before continuing; a broken file keeps the old config active after the hot reload.
+7. Wait for the hot reload to register the changed tools, then test each new or fixed tool directly with one real call and realistic arguments. Record pass/fail per tool. If the reload lags, fall back: load the file with dofile in lua_repl, use a stub ctx (ctx.cwd real, ctx:set_status no-op), call the tool functions by hand.
 
 Rules:
-- Edit only ./blitz.lua in the cwd. Never touch the user config in ~/.config/blitzdenk.
-- Saving the file triggers a hot reload; the new tools become available without a restart.
-- Finish with a report: tool ratings, friction found, tools added or changed.
+- Edit only ./blitz.lua in the cwd.
+- An edited tool with no recorded direct test count as unfinished work. Test tools by calling them directly!
+- Finish with a report: tool ratings, bash friction found, edits made, direct test results.
+
+Reports:
+1. List friction found
+2. Changelog
 
 ]] .. rem
 

@@ -2745,7 +2745,7 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
 
     loadToolConfig(&vm, app_ptr) catch {
         const msg = vm.getLastError();
-        const owned = ctx.alloc.dupe(u8, if (msg.len > 0) msg else "failed to load lua tool config") catch "failed to load lua tool config";
+        const owned = r.util.sanitizeUtf8(ctx.alloc, if (msg.len > 0) msg else "failed to load lua tool config") catch "failed to load lua tool config";
         return failedResult(call, owned);
     };
 
@@ -2777,7 +2777,7 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
         var err_len: usize = 0;
         const err_ptr = c.lua_tolstring(L, -1, &err_len);
         const err_view = if (err_ptr != null) err_ptr[0..err_len] else "lua error";
-        const owned = ctx.alloc.dupe(u8, err_view) catch "lua error";
+        const owned = r.util.sanitizeUtf8(ctx.alloc, err_view) catch "lua error";
         c.lua_pop(L, 1);
         return failedResult(call, owned);
     }
@@ -2817,7 +2817,8 @@ fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) T
     const content_ptr = c.lua_tolstring(L, -1, &len);
     const content_view = if (content_ptr != null) content_ptr[0..len] else "";
     // Dupe out of Lua memory before pop frees the string.
-    const owned = alloc.dupe(u8, content_view) catch "oom";
+    // Lua strings are byte strings; sanitize so invalid UTF-8 from user tools never enters history.
+    const owned = r.util.sanitizeUtf8(alloc, content_view) catch "oom";
     c.lua_pop(L, 1);
 
     _ = c.lua_getfield(L, -1, "img");
@@ -2827,7 +2828,7 @@ fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) T
         var mt_len: usize = 0;
         const mt_ptr = c.lua_tolstring(L, -1, &mt_len);
         const media_type: []const u8 = if (mt_ptr) |p|
-            alloc.dupe(u8, p[0..mt_len]) catch "image/png"
+            r.util.sanitizeUtf8(alloc, p[0..mt_len]) catch "image/png"
         else
             "image/png";
         c.lua_pop(L, 1);
@@ -2835,7 +2836,7 @@ fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) T
         _ = c.lua_getfield(L, -1, "data");
         var d_len: usize = 0;
         const d_ptr = c.lua_tolstring(L, -1, &d_len);
-        const data: ?[]const u8 = if (d_ptr) |p| alloc.dupe(u8, p[0..d_len]) catch null else null;
+        const data: ?[]const u8 = if (d_ptr) |p| r.util.sanitizeUtf8(alloc, p[0..d_len]) catch null else null;
         c.lua_pop(L, 1);
 
         if (data) |bytes| {
