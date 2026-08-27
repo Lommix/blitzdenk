@@ -2899,7 +2899,7 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
 
         if (active_agent_count > 1) {
             l.pushSpanPrint(alloc, "(", .{}, info) catch {};
-            l.pushSpanPrint(alloc, "{d} ", .{active_agent_count}, hl) catch {};
+            l.pushSpanPrint(alloc, "{d} ", .{active_agent_count -| 1}, hl) catch {};
             l.pushSpanPrint(alloc, "background agents)", .{}, info) catch {};
         }
     } else if (waiting and state == .complete) {
