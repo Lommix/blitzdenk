@@ -268,6 +268,8 @@ pub const App = struct {
     main_agent_id: ?r.AgentId = null,
     running: bool = false,
     frame_count: usize = 0,
+    session_run_ns: i128 = 0,
+    session_run_started_ns: i128 = 0,
     scroll_offset: usize = 0,
     auto_scroll: bool = true,
     input_mode: InputMode = .{ .text = .{} },
@@ -476,6 +478,8 @@ pub const App = struct {
         self.main_agent_id = null;
         self.running = false;
         self.frame_count = 0;
+        self.session_run_ns = 0;
+        self.session_run_started_ns = 0;
         self.scroll_offset = 0;
         self.input_mode = .{ .text = .{} };
         self.input_cursor = 0;
@@ -520,12 +524,29 @@ pub const App = struct {
         }
         self.registry.retryDue();
         self.running = self.registry.countActive() > 0;
+        self.updateSessionTime();
 
         // --------------------------------------------------
         // pop permission
         {}
 
         self.syncCompactionIndicator();
+    }
+
+    fn updateSessionTime(self: *App) void {
+        const now: i128 = @intCast(std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds);
+        if (self.running) {
+            if (self.session_run_started_ns == 0) self.session_run_started_ns = now;
+        } else if (self.session_run_started_ns != 0) {
+            self.session_run_ns += now - self.session_run_started_ns;
+            self.session_run_started_ns = 0;
+        }
+    }
+
+    fn sessionRunSecs(self: *const App) u32 {
+        const now: i128 = @intCast(std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds);
+        const live: i128 = if (self.session_run_started_ns != 0) @max(0, now - self.session_run_started_ns) else 0;
+        return @intCast(@divTrunc(self.session_run_ns + live, std.time.ns_per_s));
     }
 
     fn handleReapedAgent(self: *App, agent_id: r.AgentId) !void {
@@ -2842,14 +2863,9 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
     if (state != .active and state != .complete and state != .failed) return null;
 
     const agent = if (slot.agent) |*value| value else return null;
-    const now: i128 = @intCast(std.Io.Timestamp.now(app.io, .real).nanoseconds);
     const active_agent_count = app.registry.countActive();
     const waiting = active_agent_count > 0;
-    const live = if (agent.run_started_ns != 0 and agent.run_ended_ns == 0 and (state == .active or waiting))
-        @max(0, now - agent.run_started_ns)
-    else
-        0;
-    const secs: u32 = @intCast(@divTrunc(agent.session_run_ns + live, std.time.ns_per_s));
+    const secs = app.sessionRunSecs();
 
     const hl: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .bold = true } };
     const info: r.tui.Style = .{ .fg = app.theme.info };

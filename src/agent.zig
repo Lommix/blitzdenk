@@ -91,9 +91,6 @@ pub const Agent = struct {
     max_retries: u32 = 10,
     retry_delay_ms: u64 = 10_000,
     retry_at_ns: i128 = 0,
-    run_started_ns: i128 = 0,
-    run_ended_ns: i128 = 0,
-    session_run_ns: i128 = 0,
     stream_started_ns: i128 = 0,
     stream_output_bytes: u64 = 0,
     tokens_per_second: f32 = 0,
@@ -273,8 +270,6 @@ pub const Agent = struct {
         self.stop_requested.store(false, .release);
         self.flags.cancel = false;
         self.retry_at_ns = 0;
-        self.run_started_ns = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
-        self.run_ended_ns = 0;
         self.endStream();
         self.tokens_per_second = 0;
         self.activity = .thinking;
