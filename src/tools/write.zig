@@ -46,6 +46,17 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
 
+    var before: ?[]const u8 = null;
+    var has_before = false;
+    if (ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } })) |probe| {
+        if (probe.ty == .success and probe.stdout.len > 0) {
+            before = ctx.alloc.dupe(u8, probe.stdout) catch null;
+            has_before = before != null;
+        }
+        ctx.base.exec_pool.alloc.free(probe.stdout);
+        ctx.base.exec_pool.alloc.free(probe.stderr);
+    } else |_| {}
+
     const decision = ctx.requestPermission(call.id, .{ .diff = .{
         .before = null,
         .after = args.content,
@@ -79,6 +90,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
             "write failed";
         return r.errResult(call, msg);
     }
+
+    r.writeToolChangedStatus(ctx, call, "write", if (has_before) before else null, args.content, args.file_path);
 
     const msg = std.fmt.allocPrint(ctx.alloc, "Successfully wrote {d} bytes to {s}", .{ args.content.len, args.file_path }) catch
         "write failed";

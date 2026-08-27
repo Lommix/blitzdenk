@@ -37,6 +37,76 @@ pub fn setToolStatus(ctx: ToolContext, call: ToolCall, text: []const u8) !void {
     try app.setToolStatus(ctx.base.self_id, call.id, text);
 }
 
+pub const DiffStat = struct {
+    insertions: usize = 0,
+    deletions: usize = 0,
+
+    pub fn total(self: DiffStat) usize {
+        return self.insertions + self.deletions;
+    }
+};
+
+pub fn diffStat(before: ?[]const u8, after: []const u8, alloc: std.mem.Allocator) ?DiffStat {
+    var stat: DiffStat = .{};
+    if (before) |old_text| {
+        const old_lines = r.app.splitLinesAlloc(old_text, alloc) orelse return null;
+        const new_lines = r.app.splitLinesAlloc(after, alloc) orelse return null;
+        const ops = r.app.myersDiff(old_lines, new_lines, alloc) orelse return null;
+        for (ops) |op| switch (op) {
+            .keep => {},
+            .delete => stat.deletions += 1,
+            .insert => stat.insertions += 1,
+        };
+    } else {
+        stat.insertions = countLines(after);
+    }
+    return stat;
+}
+
+pub fn appendDiffStat(w: *tui.AnsiWriter, theme: r.app.Theme, stat: DiffStat) void {
+    if (stat.total() == 0) {
+        w.styledPrint(.{ .fg = theme.muted }, "0 lines", .{});
+        return;
+    }
+    if (stat.insertions > 0)
+        w.styledPrint(.{ .modifier = .{ .bold = true }, .fg = theme.diff_add }, "+{d}", .{stat.insertions});
+    if (stat.deletions > 0) {
+        if (stat.insertions > 0) w.print(" ", .{});
+        w.styledPrint(.{ .modifier = .{ .bold = true }, .fg = theme.diff_remove }, "-{d}", .{stat.deletions});
+    }
+    w.styledPrint(.{ .modifier = .{ .bold = true }, .fg = theme.text_hl }, " lines", .{});
+}
+
+pub fn writeToolChangedStatus(
+    ctx: ToolContext,
+    call: ToolCall,
+    tool_name: []const u8,
+    before: ?[]const u8,
+    after: []const u8,
+    path: []const u8,
+) void {
+    const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    const stat = diffStat(before, after, ctx.alloc) orelse DiffStat{};
+
+    var buf: [STATUS_BUF]u8 = undefined;
+    var w = tui.AnsiWriter.init(&buf);
+
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, tool_name);
+    w.print(" ", .{});
+
+    appendDiffStat(&w, app.theme, stat);
+
+    var rel_buf: [STATUS_BUF]u8 = undefined;
+    const rel_path = if (ctx.base.cwd.len > 0)
+        replaceAll(path, ctx.base.cwd, ".", &rel_buf)
+    else
+        path;
+    w.print(" ", .{});
+    w.styled(.{ .fg = app.theme.muted }, rel_path);
+
+    setToolStatus(ctx, call, w.finish()) catch {};
+}
+
 pub fn setToolChild(ctx: ToolContext, call: ToolCall, child_id: r.AgentId) void {
     const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     app.setToolChild(ctx.base.self_id, call.id, child_id) catch {};

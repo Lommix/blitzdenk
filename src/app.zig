@@ -1550,6 +1550,10 @@ pub const App = struct {
         self: *App,
         perm: *const r.permissions.Request,
     ) !void {
+
+        // skip sub agent diffs
+        if (perm.agent_id != self.main_agent_id) return;
+
         switch (perm.payload) {
             .diff => |diff| {
                 try self.flushSdkPreview();
@@ -1801,7 +1805,7 @@ fn renderSdkParts(
     return out.toOwnedSlice(alloc) catch null;
 }
 
-fn splitLinesAlloc(text: []const u8, alloc: std.mem.Allocator) ?[]const []const u8 {
+pub fn splitLinesAlloc(text: []const u8, alloc: std.mem.Allocator) ?[]const []const u8 {
     // Count lines first
     var count: usize = 0;
     var iter = std.mem.splitScalar(u8, text, '\n');
@@ -1819,14 +1823,14 @@ fn splitLinesAlloc(text: []const u8, alloc: std.mem.Allocator) ?[]const []const 
 
 // ── Myers Diff ──
 
-const DiffOp = union(enum) {
+pub const DiffOp = union(enum) {
     keep: []const u8,
     delete: []const u8,
     insert: []const u8,
 };
 
 /// Myers O(ND) diff. Returns null on allocation failure.
-fn myersDiff(old: []const []const u8, new: []const []const u8, alloc: std.mem.Allocator) ?[]const DiffOp {
+pub fn myersDiff(old: []const []const u8, new: []const []const u8, alloc: std.mem.Allocator) ?[]const DiffOp {
     const n = old.len;
     const m = new.len;
     const max_d = n + m;
@@ -3173,7 +3177,7 @@ test "persisted diff owns path" {
     app.chat_entries = .empty;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
-    app.main_agent_id = null;
+    app.main_agent_id = .{ .index = 0, .generation = 0 };
     app.event_bus = .{};
     app.dirty = false;
 

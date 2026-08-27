@@ -140,12 +140,6 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     var applied: usize = 0;
 
-    var status_buf: [r.STATUS_BUF]u8 = undefined;
-    var w = r.tui.AnsiWriter.init(&status_buf);
-
-    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "patch ");
-
     for (patch.commands, 0..) |cmd, ci| {
         if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
@@ -207,8 +201,6 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         const abs_cmd = withResolvedPath(alloc, ctx.base.cwd, cmd, resolved) catch
             return r.errResult(call, "failed to resolve path");
 
-        w.styled(.{ .fg = app.theme.muted }, commandPath(cmd));
-
         var diag: ApplyDiagnostics = .{};
         executeCommand(ctx, abs_cmd, &diag) catch |err| {
             const detail = applyErrorDescription(alloc, err, &diag) catch "patch apply failed";
@@ -222,6 +214,32 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
         r.markConfigTouched(ctx, resolved);
         applied += 1;
+    }
+
+    var stat: r.DiffStat = .{};
+    for (previews.items) |p| {
+        if (r.diffStat(p.before, p.after orelse "", ctx.alloc)) |s| {
+            stat.insertions += s.insertions;
+            stat.deletions += s.deletions;
+        }
+    }
+
+    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    var status_buf: [r.STATUS_BUF]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&status_buf);
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "patch ");
+    w.print(" ", .{});
+    r.appendDiffStat(&w, app.theme, stat);
+
+    if (previews.items.len == 1) {
+        var rel_buf: [r.STATUS_BUF]u8 = undefined;
+        const cmd_path = commandPath(patch.commands[0]);
+        const rel_path = if (ctx.base.cwd.len > 0)
+            r.replaceAll(cmd_path, ctx.base.cwd, ".", &rel_buf)
+        else
+            cmd_path;
+        w.print(" ", .{});
+        w.styled(.{ .fg = app.theme.muted }, rel_path);
     }
 
     r.setToolStatus(ctx, call, w.finish()) catch {};
@@ -238,7 +256,6 @@ fn commandPath(cmd: PatchCommand) []const u8 {
         .file_update => |u| u.path,
     };
 }
-
 /// Return a copy of `cmd` with paths resolved to absolute paths.
 fn withResolvedPath(alloc: std.mem.Allocator, cwd: []const u8, cmd: PatchCommand, resolved: []const u8) !PatchCommand {
     return switch (cmd) {

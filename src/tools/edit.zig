@@ -141,6 +141,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     r.markConfigTouched(ctx, resolved);
 
+    r.writeToolChangedStatus(ctx, call, "edit", file_content, new_content, args.file_path);
+
     return r.okResult(call, std.fmt.allocPrint(alloc, "edit applied to {s}", .{args.file_path}) catch "edit applied successfully");
 }
 
