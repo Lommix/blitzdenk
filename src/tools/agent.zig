@@ -6,11 +6,11 @@ pub const AgentTool = r.Tool{
         .name = "agent",
         .description =
         \\Launch a new background agent to handle a task autonomously. The tool returns immediately.
-        \\When the agent finishes, you receive a result file path.
-        \\You can idle while waiting by ending your turn. Subagents will wake you up; do not poll or use sleep.
+        \\When the agent finishes, you receive a result file path. Subagents will wake you up; do not poll or use sleep.
         \\
         ,
         .prompt_snippet = "Launch a subagent",
+        .prompt_guidelines = "Wait for agents by ending your turn",
         .parameters_schema =
         \\{
         \\  "type": "object",

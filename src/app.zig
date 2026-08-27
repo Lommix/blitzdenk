@@ -2843,7 +2843,12 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
 
     const agent = if (slot.agent) |*value| value else return null;
     const now: i128 = @intCast(std.Io.Timestamp.now(app.io, .real).nanoseconds);
-    const live = if (state == .active and agent.run_started_ns != 0) @max(0, now - agent.run_started_ns) else 0;
+    const active_agent_count = app.registry.countActive();
+    const waiting = active_agent_count > 0;
+    const live = if (agent.run_started_ns != 0 and (state == .active or waiting))
+        @max(0, now - agent.run_started_ns)
+    else
+        0;
     const secs: u32 = @intCast(@divTrunc(agent.session_run_ns + live, std.time.ns_per_s));
 
     const hl: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .bold = true } };
@@ -2891,6 +2896,18 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
         }
 
         l.pushSpanPrint(alloc, "{s} {s}", .{ ssh_suffix, queued_suffix }, info) catch {};
+
+        if (active_agent_count > 1) {
+            l.pushSpanPrint(alloc, "(", .{}, info) catch {};
+            l.pushSpanPrint(alloc, "{d} ", .{active_agent_count}, hl) catch {};
+            l.pushSpanPrint(alloc, "background agents)", .{}, info) catch {};
+        }
+    } else if (waiting and state == .complete) {
+        l.pushSpanPrint(alloc, "Waiting for ", .{}, info) catch {};
+        l.pushSpanPrint(alloc, "{d}", .{active_agent_count}, hl) catch {};
+        l.pushSpanPrint(alloc, " agents (", .{}, info) catch {};
+        l.pushSpanPrint(alloc, "{s}", .{dur}, hl) catch {};
+        l.pushSpanPrint(alloc, ") {s}", .{ssh_suffix}, info) catch {};
     } else {
         const label = if (state == .complete) "Done" else "Failed";
         l.pushSpanPrint(alloc, "{s} ({s}){s}", .{ label, dur, ssh_suffix }, info) catch {};
