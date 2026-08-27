@@ -6,18 +6,15 @@ description: >
 
 # Blitzdenk Lua configuration
 
-Blitzdenk is a Zig binary with vendored Lua. Workflow customization lives in
-Lua through the global `blitz` table. `~/.config/blitzdenk/blitz.lua` is a
-working config; `src/blitz_default.lua` in the repo is its template. Match the
-style of whichever exists.
+Short alias is 'blitz (you)'
+
+Workflow customization lives in Lua through the global `blitz` table. `~/.config/blitzdenk/blitz.lua`.
+Project local customisations live in `./blitz.lua`
 
 ## Find the answer fast
 
-Two files settle most questions:
-
-- `~/.config/blitzdenk/meta.lua` is the source of truth for every `blitz.*`
-  signature, field, and constant. Read it before writing code.
-- `~/.config/blitzdenk/blitz.lua` is a working example of the config.
+`~/.config/blitzdenk/meta.lua` is the source of truth for every `blitz.*`
+signature, field, and constant. Read it before writing code.
 
 For a question about any `blitz.*` call, open `meta.lua` and read the class
 for that call. Each section below hides a buried list (event names, provider
@@ -29,22 +26,15 @@ class and use it, do not enumerate.
 - `~/.config/blitzdenk/blitz.lua`, global user config, loaded at startup.
 - `./blitz.lua`, optional project-local config, loaded after it.
 - `~/.config/blitzdenk/meta.lua`, generated type hints, signature truth.
-- `~/.config/blitzdenk/.luarc.json`, points the Lua server at `meta.lua`.
-- `src/blitz_defs.lua` in the repo is the generated meta; `src/blitz_default.lua` the default config. `meta.lua` is the source of truth for both.
 
 ## Loading and hot reload
 
-The config dir is prepended to `package.path`, so `require("tools")` and
-`require("prompts")` resolve files from `~/.config/blitzdenk/`. Put reusable
-tools and prompts in `tools.lua` and `prompts.lua`, returning a table `M`.
-
 All Lua files are hot reloaded into your context. You can directly
-call tools you edited and confirm behavior.
+call tools you edited and confirm behavior. You are encouraged to do so.
 
 ## Providers and models
 
-A provider is already configured. Reuse its handle; do not add a new provider
-unless the user asks. The handle comes from `blitz.add_provider` in the config:
+Example on configuring any schema compatible endpoint and model
 
 ```lua
 local novita = blitz.add_provider({
@@ -111,7 +101,7 @@ blitz.set_capabilities({
 
 Each rule is added under `# Envirement:` in the system prompt when its
 `binary` resolves on PATH. Only agents owning the bash tool get them.
-Calling again replaces all rules.
+This is how you track useful commands for projects.
 
 ## Custom tools
 
@@ -127,7 +117,7 @@ local my_tool = blitz.register_tool({
         n   = { type = "number", description = "optional count" },
     },
     func = function(ctx, call)
-        ctx:set_status("running my_tool")
+        ctx:set_status("running my_tool") -- supports ansi color tags!
         if call.arguments.text == "" then
             error("text is required")   -- only the message reaches the chat
         end
@@ -340,6 +330,8 @@ blitz.status_bar_render = function()
         .. " | Ctx:" .. math.floor(blitz.context_percent()) .. "%"
 end
 ```
+
+The status bar can display ansi color tags
 
 Other `blitz.*` calls: flags, theme, notifications, logging, compact edge, and
 the `cost` field on `token_usage` are all in `meta.lua` under `BlitzAppFlags`,
