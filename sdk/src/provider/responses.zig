@@ -630,6 +630,7 @@ fn parseStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.StreamCo
                         .name = try a.dupe(u8, name),
                         .input = try a.dupe(u8, input),
                     });
+                    sctx.send(.{ .type = .tool_call_streaming_start, .tool_call_id = calls.items[calls.items.len - 1].id, .tool_name = calls.items[calls.items.len - 1].name });
                 }
             }
         } else if (std.mem.eql(u8, etype.string, "response.completed")) {

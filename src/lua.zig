@@ -165,7 +165,7 @@ const LuaInteger: LuaType = .integer;
 const LuaNumber: LuaType = .number;
 const LuaString: LuaType = .string;
 const LuaAny: LuaType = .any;
-const AgentIdOrNilDef = LuaType{ .raw = "BlitzAgentId|nil" };
+const AgentIdOrNilDef = LuaType{ .raw = "integer|nil" };
 const StringOrNilDef = LuaType{ .raw = "string|nil" };
 const JsonEncodeRet = LuaType{ .raw = "string|nil, boolean" };
 const JsonDecodeRet = LuaType{ .raw = "any, boolean" };
@@ -182,16 +182,13 @@ const ToolResultDef = LuaType{ .table_def = .{ .name = "BlitzToolResult", .field
     .{ .name = "img", .ty = LuaType.table, .optional = true, .desc = "{ media_type = string, data = string }" },
     .{ .name = "exit_loop", .ty = LuaType.boolean, .optional = true },
 } } };
-const AgentIdDef = LuaType{ .table_def = .{ .name = "BlitzAgentId", .fields = &.{
-    .{ .name = "index", .ty = LuaType.integer },
-    .{ .name = "generation", .ty = LuaType.integer },
-} } };
+const AgentIdDef: LuaType = .integer;
 const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "cwd", .ty = LuaType.string },
     .{ .name = "agent_id", .ty = AgentIdDef },
     .{ .name = "state", .ty = LuaType.table },
     .{ .name = "set_status", .ty = LuaType{ .raw = "fun(self: BlitzCtx, msg: string)" }, .desc = "Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines." },
-    .{ .name = "set_child_id", .ty = LuaType{ .raw = "fun(self: BlitzCtx, agent_id: BlitzAgentId)" } },
+    .{ .name = "set_child_id", .ty = LuaType{ .raw = "fun(self: BlitzCtx, agent_id: integer)" } },
     .{ .name = "approve", .ty = LuaType{ .raw = "fun(self: BlitzCtx, description: string): integer, string|nil" } },
     .{ .name = "plan", .ty = LuaType{ .raw = "fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil" } },
     .{ .name = "ask", .ty = LuaType{ .raw = "fun(self: BlitzCtx, header: string, question: string, options: string[]): integer, string|nil" } },
@@ -1405,6 +1402,22 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
+        .name = "cancel_agent",
+        .desc = "Cancel the given agent. Returns 'Success' or 'Not Found'.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &LuaString,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
+                    if (try isToolVm(state)) return "Not Found";
+                    if (a.registry.get(agent_id) == null) return "Not Found";
+                    try a.cmd_queue.append(a.io, .{ .cancel_agent = agent_id });
+                    return "Success";
+                }
+            }).lua_fn, "cmd.cancel_agent"),
+        } },
+    },
+    .{
         .name = "retry",
         .desc = "Retry the main agent's last turn.",
         .ty = LuaType{ .function = .{
@@ -1830,6 +1843,13 @@ fn pushAny(L: *c.lua_State, value: anytype) void {
             }
         },
         .@"struct" => |str| {
+            if (T == r.AgentId) {
+                c.lua_pushinteger(L, @intCast(id_pack: {
+                    const Backing = str.backing_integer.?;
+                    break :id_pack @as(Backing, @bitCast(value));
+                }));
+                return;
+            }
             c.lua_createtable(L, 0, @intCast(str.fields.len));
             inline for (str.fields) |field| {
                 pushAny(L, @field(value, field.name));
@@ -2038,6 +2058,13 @@ fn readAnyValueAlloc(
             return .Ok(result);
         },
         .@"struct" => |str| {
+            if (T == r.AgentId) {
+                if (c.lua_type(state, idx) != c.LUA_TNUMBER) return .Err(name ++ " not a number");
+                const Backing = str.backing_integer.?;
+                const n = c.lua_tointegerx(state, idx, null);
+                if (n < std.math.minInt(Backing) or n > std.math.maxInt(Backing)) return .Err(name ++ " integer overflow");
+                return .Ok(@as(T, @bitCast(@as(Backing, @intCast(n)))));
+            }
             if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " is not a table");
             var result: T = undefined;
             inline for (str.fields) |field| {
@@ -3072,41 +3099,26 @@ fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
     return awaitPermAndPush(state, bridge.tool_ctx.io, &req, &.{});
 }
 
-/// Push AgentId as `{index, generation}` table.
+/// Push AgentId as the packed integer.
 fn pushAgentId(L: *c.lua_State, id: r.AgentId) void {
-    c.lua_createtable(L, 0, 2);
-    setFieldAny(L, -2, "index", id.index);
-    setFieldAny(L, -2, "generation", id.generation);
+    c.lua_pushinteger(L, @intCast(id.pack()));
 }
 
-/// Read AgentId from table at `idx`. Reports a Lua error on shape mismatch.
+/// Read AgentId from integer at `idx`. Reports a Lua error on shape mismatch.
 /// TODO: crash!
 fn readAgentIdArg(state: *c.lua_State, comptime fname: []const u8, idx: c_int) r.AgentId {
-    if (c.lua_type(state, idx) != c.LUA_TTABLE) {
-        _ = c.luaL_error(state, fname ++ ": agent_id must be a table {index, generation}");
+    if (c.lua_type(state, idx) != c.LUA_TNUMBER) {
+        _ = c.luaL_error(state, fname ++ ": agent_id must be an integer");
         return .{ .index = 0, .generation = 0 };
     }
 
-    const index = switch (readAnyFieldAlloc(u16, state, "index", idx, null)) {
-        .ok => |v| v,
-        .err => {
-            _ = c.luaL_error(state, fname ++ ": agent_id.index must be a number");
-            return .{ .index = 0, .generation = 0 };
-        },
-    };
+    const packed_value = c.lua_tointegerx(state, idx, null);
+    if (packed_value < 0 or packed_value > std.math.maxInt(u32)) {
+        _ = c.luaL_error(state, fname ++ ": agent_id out of range");
+        return .{ .index = 0, .generation = 0 };
+    }
 
-    const generation = switch (readAnyFieldAlloc(u16, state, "generation", idx, null)) {
-        .ok => |v| v,
-        .err => {
-            _ = c.luaL_error(state, fname ++ ": agent_id.generation must be a number");
-            return .{ .index = 0, .generation = 0 };
-        },
-    };
-
-    return .{
-        .index = index,
-        .generation = generation,
-    };
+    return r.AgentId.unpack(@intCast(packed_value));
 }
 
 // ── JSON ↔ Lua conversion ──────────────────────────────────────────

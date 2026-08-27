@@ -131,5 +131,9 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     w.styledPrint(.{ .modifier = .{ .bold = true } }, "{s}", .{args.description});
     r.setToolStatus(ctx, call, w.finish()) catch {};
 
-    return r.okResult(call, "Agent started in background.");
+    const result = std.fmt.allocPrint(ctx.alloc, "Agent started in background. agent_id: {d}", .{
+        child_id.pack(),
+    }) catch return r.errResult(call, "oom");
+
+    return r.okResult(call, result);
 }

@@ -7,10 +7,9 @@ Zig version: 0.16
 Important modules:
 
 - `src/root.zig` import hub; everything is reached via the `r.*` namespace
-- `sdk/` the blitz-sdk ai provider library
-- `vendor/lua` vendored Lua 5.4 C sources, fused into module `c` via translate-c in `build.zig`
+- `src/agent_id.zig` `AgentId` packed struct `{index: u16, generation: u16}`; `pack()`/`unpack()` bitcast to u32
 - `src/main.zig` control flow, owns the hot-reload loop
-- `src/app.zig` main tui state and render, plus live-agent refresh helpers
+- `src/app.zig` main tui state and render; `applyRunEvent` turns stream events into chat preview
 - `src/tui` tui lib and common widgets
 - `src/tools` agent tool definitions
 - `src/lua.zig` the lua bindings, big file; the whole `blitz.*` api is one declarative `Blitz` table_def
@@ -19,15 +18,25 @@ Important modules:
 - `src/skills.zig` skill loading and management
 - `src/exec.zig` shell wrapper
 - `src/keys.zig` key bindings
-- `src/models.zig` model config
-- `src/agent.zig` the agent state
-- `src/agent_registry.zig` state management for many agents
+- `src/models.zig` model config; `Model` union over provider kinds ollama/openai/response/anthropic
+- `src/agent.zig` the agent state; `Activity` enum and `observe()` derive status/stream state
+- `src/agent_run.zig` run task + event queue bridging sdk streams to observers
+- `src/agent_registry.zig` state management for many agents; `drain()` fans events out
 - `src/commands.zig` async command queue.
 - `src/inject.zig` agent status injections
 - `src/session.zig` save/load session state
 - `src/compact.zig` chat compaction logic
 - `src/events.zig` exposed hooks
 - `src/defaults.zig` installs default config files into `~/.config/blitzdenk`
+- `sdk/` the blitz-sdk ai provider library
+- `sdk/src/provider/` one file per provider: `openai.zig` chat completions, `responses.zig` Responses API, `anthropic.zig`, `compat.zig`; `jsonx.zig` http + SSE plumbing
+
+## Run event flow
+
+- sdk `streamText` → `RunTask` queues `Event`s (text/reasoning/tool/tool_done/step/provider_error/complete/failed) → `registry.drain` → both `Agent.observe` (activity/usage/status) and app `applyRunEvent` (chat render)
+- `Agent.activity` is event-derived only; `startModel` and `.step` reset it to `thinking`, so silent steps fall back to `thinking` not the previous state
+- chat-completions providers emit `tool_call_streaming_start`/`tool_call_delta` live; the responses provider aggregates tool calls and emits `.tool_call` only after the SSE stream ends
+- app preview renders only `chunk.type == .tool_call`; activity updates consume all tool chunk types
 
 ## Config and lua data flow
 
@@ -35,18 +44,24 @@ Important modules:
 - `~/.config/blitzdenk/meta.lua` is force-overwritten from embedded `blitz_defs.lua` at launch, so it lags until the next binary run
 - `~/.config/blitzdenk/blitz.lua` is write-once (`force = false`); upgrades never add new api calls to existing user configs
 - Lua-set definitions (prompts, tools, capability rules) are duped into the factory `prompt_arena`; `resetDefs()` clears them on hot reload and the reloaded config reinstalls them
-- Binaries for env capability rules resolve once per reload via `sh -c command -v`, cached on the factory; unset fields degrade to embedded defaults
-- A repo-root `./blitz.lua` (untracked) registers repo automation tools (`build`, `gen`, `fmt`, `test`, `check`, `zig_run`) used by agents here
+- In Lua an agent id is one packed integer (`AgentId.pack()`), used by `spawn_agent` returns, `cancel_agent`, `queue_agent_message`, `await_agent`, event payloads, and the `agent` tool result string `agent_id: <int>`
+- `pushAny`/`readAnyValueAlloc` marshal Zig↔Lua; the packed-struct branch is gated to `T == r.AgentId` — widening it to all packed structs breaks the `get_flags`/`set_flags` `AppFlags` table roundtrip
+- `pushAgentId`/`readAgentIdArg` convert ids at the trust boundary; `readAgentIdArg` range-checks before `@intCast` since Lua integers are 64-bit
+- `isToolVm(state)` guard blocks `cmd.*` calls from tool VMs
 
 ## Commands
 
 - `zig build` compile the binary
 - `zig build gen` generate the lua meta file `src/blitz_defs.lua`
-- `make test` run the full test suit
+- `make test` run the repo suite (`zig build test --summary all --error-style minimal`)
+- `cd sdk && zig build test` run the sdk suite separately
+- tests are in-file `test` blocks at the bottom of each module
 - `zig fmt src/` required after edits
+- command pattern: Lua binding validates and `cmd_queue.append`s (deep-clones into the queue arena), `Command.execute` runs on the app thread; handlers silently no-op on dead agent ids
+- spawn only reserves a registry slot (`.reserved`); activation happens when the queue drains, so a fresh id is not yet `registry.get`-able
+- `cmd.cancel_agent(id)` returns `"Success"`/`"Not Found"` from call-time validity, not final cancel outcome
 
 ## RULES
 
 - Do not write comments!
-- Keep the user space blitzdenk skill up to date! (`src/skills/blitzdenk-lua.md`)
-- run `zig fmt` after editing files.
+- Keep the user space blitzdenk skill up to date! (`src/skills/blitzdenk-lua.md`, copy to `~/.config/blitzdenk/skills/blitzdenk-lua.md`)

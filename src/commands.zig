@@ -57,6 +57,7 @@ pub const Command = union(enum) {
     // -------------------------------------------
     reset_session,
     cancel,
+    cancel_agent: r.AgentId,
     retry,
     push_notification: []const u8,
     push_chat_entry: ChatEntry,
@@ -140,6 +141,11 @@ pub const Command = union(enum) {
 
                 app.running = false;
                 app.auto_scroll = true;
+            },
+            .cancel_agent => |id| {
+                if (app.registry.get(id) == null) return;
+                app.registry.cancel(id);
+                app.event_bus.emit(app, .{ .agent_cancelled = .{ .id = id } }) catch {};
             },
             .retry => {
                 if (app.main_agent_id) |id| {

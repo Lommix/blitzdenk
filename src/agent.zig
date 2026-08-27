@@ -264,7 +264,7 @@ pub const Agent = struct {
         return true;
     }
 
-    fn startModel(self: *Agent, model: sdk.LanguageModel, options: sdk.GenerateOptions) !void {
+    pub fn startModel(self: *Agent, model: sdk.LanguageModel, options: sdk.GenerateOptions) !void {
         if (self.task != null) return error.RunInProgress;
         self.run_model = model;
         _ = self.error_arena.reset(.free_all);
@@ -276,6 +276,8 @@ pub const Agent = struct {
         self.run_started_ns = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
         self.run_ended_ns = 0;
         self.endStream();
+        self.tokens_per_second = 0;
+        self.activity = .thinking;
         var run_options = options;
         if (run_options.system.len == 0) run_options.system = self.system_prompt;
         if (run_options.prompt.len > 0) {
@@ -330,6 +332,7 @@ pub const Agent = struct {
                 self.usage.add(step.usage);
                 self.context_tokens = step.usage.input_tokens + step.usage.cache_read_tokens + step.usage.cache_write_tokens;
                 self.endStream();
+                self.activity = .thinking;
             },
             .provider_error => |provider_error| {
                 self.endStream();
@@ -451,6 +454,7 @@ pub const Agent = struct {
 
     pub fn cancel(self: *Agent) void {
         self.flags.cancel = true;
+        self.activity = .idle;
         if (self.compact_task) |*task| task.cancel();
         if (self.task) |*task| task.cancel();
         self.status = .canceled;

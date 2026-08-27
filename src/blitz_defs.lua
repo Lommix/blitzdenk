@@ -27,12 +27,8 @@
 ---Decode standard padded Base64 into a binary-safe Lua string.
 ---@field decode fun(base64: string): string|nil, boolean
 
----@class BlitzAgentId
----@field index integer
----@field generation integer
-
 ---@class BlitzSpawnArgs
----@field parent_id? BlitzAgentId
+---@field parent_id? integer
 ---@field prompt string
 ---@field agent_type? integer
 ---@field fork? boolean
@@ -44,6 +40,8 @@
 ---@field cd fun(path: string)
 ---Cancel all in-flight agent work and drop streaming preview.
 ---@field cancel fun()
+---Cancel the given agent. Returns 'Success' or 'Not Found'.
+---@field cancel_agent fun(agent_id: integer): string
 ---Retry the main agent's last turn.
 ---@field retry fun()
 ---Compact the main agent now when idle, or before its next turn while running.
@@ -51,15 +49,15 @@
 ---Push a chat entry into the chat log.
 ---@field push_chat_entry fun(role: string, text: string)
 ---Queue a user message for the given agent.
----@field queue_agent_message fun(agent_id: BlitzAgentId, text: string)
+---@field queue_agent_message fun(agent_id: integer, text: string)
 ---Send a user message to the main agent (queued if running, restarted if idle), or start a general agent if none exists.
 ---@field prompt fun(text: string)
 ---Reserve a free slot and enqueue a spawn or fork into it.
----@field spawn_agent fun(args: BlitzSpawnArgs): BlitzAgentId|nil
+---@field spawn_agent fun(args: BlitzSpawnArgs): integer|nil
 ---Block until the referenced agent reaches a terminal state.
----@field await_agent fun(agent_id: BlitzAgentId): integer
+---@field await_agent fun(agent_id: integer): integer
 ---Return the awaited agent's last assistant text.
----@field await_agent_result fun(agent_id: BlitzAgentId): string|nil
+---@field await_agent_result fun(agent_id: integer): string|nil
 ---Save current session to disk.
 ---@field save_session fun(path: string)
 ---Load a session from disk.
@@ -115,11 +113,11 @@
 
 ---@class BlitzCtx
 ---@field cwd string
----@field agent_id BlitzAgentId
+---@field agent_id integer
 ---@field state table
 ---Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines.
 ---@field set_status fun(self: BlitzCtx, msg: string)
----@field set_child_id fun(self: BlitzCtx, agent_id: BlitzAgentId)
+---@field set_child_id fun(self: BlitzCtx, agent_id: integer)
 ---@field approve fun(self: BlitzCtx, description: string): integer, string|nil
 ---@field plan fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil
 ---@field ask fun(self: BlitzCtx, header: string, question: string, options: string[]): integer, string|nil
@@ -265,7 +263,7 @@
 ---Add a single tool from the tool pool to an agent type's tool set.
 ---@field add_tool fun(agent_type: integer, tool_name: string)
 ---Return the main agent, if a session is running.
----@field get_main_agent fun(): BlitzAgentId|nil
+---@field get_main_agent fun(): integer|nil
 ---Exit the agent loop with a message.
 ---@field exit_loop fun(content?: string): BlitzToolResult
 ---Register a provider.

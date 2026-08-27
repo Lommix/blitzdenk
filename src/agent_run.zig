@@ -554,6 +554,54 @@ test "run task queues owned SDK events with a drain limit" {
     try std.testing.expectEqual(@as(usize, 2), count);
 }
 
+test "silent tool-only step emits no stale activity" {
+    const AgentMod = @import("agent.zig");
+    const Fixture = struct {
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generate(_: *anyopaque, a: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            const result = try a.create(sdk.model.GenerateResult);
+            result.* = .{ .text = try a.dupe(u8, "done"), .finish_reason = .stop };
+            return result;
+        }
+
+        fn stream(ctx: *anyopaque, a: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, stream_ctx: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            _ = stream_ctx;
+            return generate(ctx, a, io, params, client, retries);
+        }
+
+        fn collect(ctx: ?*anyopaque, event: Event) void {
+            const agent: *AgentMod.Agent = @ptrCast(@alignCast(ctx.?));
+            agent.observe(event) catch unreachable;
+        }
+    };
+
+    var fixture: u8 = 0;
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try AgentMod.Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .name = "worker", .cwd = "/tmp", .type_idx = 0 } });
+    defer agent.deinit();
+    try agent.setTools(&.{.{ .name = "test", .execute = null }});
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = "hi" });
+    try std.testing.expectEqual(AgentMod.Activity.thinking, agent.activity);
+    agent.task.?.wait();
+    while (agent.drain(16, &agent, Fixture.collect) != 0) {}
+    try std.testing.expect(agent.reap());
+    try std.testing.expectEqual(AgentMod.Activity.idle, agent.activity);
+
+    try agent.observe(.{ .text = "hi" });
+    try std.testing.expectEqual(AgentMod.Activity.writing, agent.activity);
+    try agent.observe(.{ .step = .{ .number = 1, .usage = .{} } });
+    try std.testing.expectEqual(AgentMod.Activity.thinking, agent.activity);
+}
+
 test "run task does not duplicate provider failures" {
     const Fixture = struct {
         fn modelId(_: *anyopaque) []const u8 {
