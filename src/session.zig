@@ -174,6 +174,23 @@ fn encodeImage(image: anytype) !WireImage {
 pub const SaveState = struct {
     chat: []const WireMessage,
     chat_render: []const app.ChatEntry,
+    /// Packed id of the main agent at save time. `tool_status.agent == null`
+    /// entries belong to it; on apply both those entries and the chat_render
+    /// tool_call stamps carrying this id are re-keyed to the fresh id.
+    main_agent: ?u32 = null,
+    /// Rich per-call status lines (styled label + result flag + child link)
+    /// so restored call blocks don't degrade to the plain tool name.
+    /// `agent == null` entries belong to the main agent; child agents keep
+    /// their packed id.
+    tool_status: []const WireToolStatus = &.{},
+};
+
+pub const WireToolStatus = struct {
+    agent: ?u32 = null,
+    call_id: []const u8,
+    ansi: []const u8 = "",
+    is_error: ?bool = null,
+    child: ?u32 = null,
 };
 
 test "encodeMessage replaces invalid UTF-8 so saved sessions stay loadable" {
@@ -192,25 +209,80 @@ test "encodeMessage replaces invalid UTF-8 so saved sessions stay loadable" {
     try std.testing.expect(std.unicode.utf8ValidateSlice(content));
 }
 
-pub fn saveSession(a: *const app.App, w: *std.Io.Writer) !void {
+pub fn saveSession(a: *app.App, w: *std.Io.Writer) !void {
     const agent = a.mainAgent() orelse return error.NoActiveSessionToSave;
 
     var arena = std.heap.ArenaAllocator.init(a.gpa);
     defer arena.deinit();
     const alloc = arena.allocator();
+    const save = try buildSaveState(a, agent, alloc);
+
+    try std.json.Stringify.value(save, .{}, w);
+    try w.flush();
+}
+
+/// Encodes the current session into a `SaveState`; `alloc` must outlive the
+/// returned value (callers typically use an arena). Reminders are skipped.
+pub fn buildSaveState(a: *app.App, agent: *const r.agent.Agent, alloc: std.mem.Allocator) !SaveState {
     var out: std.ArrayList(WireMessage) = .empty;
     for (agent.history()) |message| {
         if (isReminder(message)) continue;
         try out.append(alloc, try encodeMessage(alloc, message));
     }
-
-    const save = SaveState{
+    return .{
         .chat = out.items,
         .chat_render = a.chat_entries.items,
+        .main_agent = if (a.main_agent_id) |main| main.pack() else null,
+        .tool_status = try encodeToolStatus(a, alloc),
     };
+}
 
-    try std.json.Stringify.value(save, .{}, w);
-    try w.flush();
+/// Serializes the tool status table. The main agent's entries are stored with
+/// `agent == null` (its id changes across apply); child agents keep their
+/// packed id. Entries whose ANSI text is empty and that carry no flags are
+/// skipped — the plain tool_name fallback is equivalent for those.
+fn encodeToolStatus(a: *app.App, alloc: std.mem.Allocator) ![]const WireToolStatus {
+    const main_pack = a.main_agent_id orelse return &.{};
+    var out: std.ArrayList(WireToolStatus) = .empty;
+    const g = a.tool_status_entries.lock(a.io);
+    defer g.unlock();
+    for (&g.ptr.agents, 0..) |*status_agent, index| {
+        if (status_agent.entries.count() == 0) continue;
+        const id = r.AgentId{ .index = @intCast(index), .generation = status_agent.generation };
+        const agent_key: ?u32 = if (id.pack() == main_pack.pack()) null else id.pack();
+        var it = status_agent.entries.iterator();
+        while (it.next()) |slot| {
+            const entry = slot.value_ptr.*;
+            if (entry.lines.items.len == 0 and entry.is_error == null and entry.child_id == null) continue;
+            try out.append(alloc, .{
+                .agent = agent_key,
+                .call_id = slot.key_ptr.*,
+                .ansi = try linesToAnsi(entry.lines.items, alloc),
+                .is_error = entry.is_error,
+                .child = if (entry.child_id) |child| child.pack() else null,
+            });
+        }
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// Renders styled lines back to an ANSI string — the same representation
+/// `App.setToolStatus` consumes via `Text.fromAnsi`.
+fn linesToAnsi(lines: []const r.tui.Line, alloc: std.mem.Allocator) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    var prev_style: ?r.tui.Style = null;
+    for (lines, 0..) |line, line_idx| {
+        if (line_idx > 0) try out.writer.writeByte('\n');
+        for (line.spans.items) |span| {
+            if (prev_style == null or !prev_style.?.eql(span.style)) {
+                try span.style.writeAnsi(&out.writer);
+                prev_style = span.style;
+            }
+            try out.writer.writeAll(span.content);
+        }
+    }
+    return out.toOwnedSlice();
 }
 
 fn isReminder(message: sdk.Message) bool {
@@ -219,7 +291,6 @@ fn isReminder(message: sdk.Message) bool {
 
 pub fn loadSession(a: *app.App, w: *std.Io.Reader) !void {
     const alloc = a.appAlloc();
-    const session_alloc = a.sessionAlloc();
 
     a.reset();
 
@@ -231,7 +302,13 @@ pub fn loadSession(a: *app.App, w: *std.Io.Reader) !void {
     });
     defer parsed.deinit();
 
-    const save = parsed.value;
+    try applySaveState(a, &parsed.value);
+}
+
+/// Applies an already-parsed snapshot onto the app: rebuilds the main agent
+/// from `save.chat` and replays the rendered chat entries.
+pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
+    const session_alloc = a.sessionAlloc();
 
     const id = a.registry.reserve() orelse return error.RegistryFull;
     errdefer a.registry.releaseReservation(id);
@@ -251,9 +328,30 @@ pub fn loadSession(a: *app.App, w: *std.Io.Reader) !void {
     for (save.chat, messages) |wire, *message| message.* = try decodeMessage(session_alloc, wire);
     try agent.setMessages(messages);
 
-    for (save.chat_render) |entry| {
-        const cloned = try util.deepClone(app.ChatEntry, entry, session_alloc);
-        try a.appendChatEntry(session_alloc, cloned);
+    // Re-key restored tool_call stamps: the main agent's id changed across
+    // the save/load boundary, and the renderer looks statuses up by the id
+    // embedded in the chat entry. Child ids are kept as-is — the per-slot
+    // generation reset in setToolStatus/setToolChild makes their old-gen
+    // lookups match again.
+    for (save.chat_render) |*entry| {
+        for (entry.parts) |*part| switch (part.*) {
+            .tool_call => |*call| {
+                if (save.main_agent) |main| {
+                    if (call.agent_id.pack() == main) call.agent_id = id;
+                }
+            },
+            else => {},
+        };
+        try a.appendChatEntry(session_alloc, entry.*);
+    }
+
+    // Restore rich call-block status, keyed to the fresh agent ids.
+    for (save.tool_status) |status| {
+        const agent_id: r.AgentId = if (status.agent) |packed_id| .unpack(packed_id) else id;
+        if (agent_id.index >= r.agent_registry.max_agents) continue;
+        if (status.ansi.len > 0) a.setToolStatus(agent_id, status.call_id, status.ansi) catch {};
+        if (status.is_error) |is_error| a.setToolResult(agent_id, status.call_id, is_error) catch {};
+        if (status.child) |child| a.setToolChild(agent_id, status.call_id, .unpack(child)) catch {};
     }
 
     a.main_agent_id = id;
@@ -306,4 +404,52 @@ test "SDK history encodes with the old session message layout" {
     try std.testing.expectEqualStrings("opaque", parsed.value[1].provider_items[0]);
     try std.testing.expectEqual(WireRole.user, parsed.value[2].role);
     try std.testing.expectEqualStrings("aW1n", parsed.value[2].parts[0].tool_result.image.?.data);
+}
+
+test "tool status roundtrips through WireToolStatus with re-keyed main agent" {
+    const testing = std.testing;
+
+    // linesToAnsi -> fromAnsi preserves styled multi-line content.
+    var line = r.tui.Line{};
+    defer line.deinit(testing.allocator);
+    try line.pushSpan(testing.allocator, .{ .content = "MCP fetch", .style = .{ .fg = .blue, .modifier = .{ .bold = true } } });
+    try line.pushSpan(testing.allocator, .{ .content = " 2 T/s", .style = .{ .fg = .cyan } });
+    var second = r.tui.Line{};
+    defer second.deinit(testing.allocator);
+    try second.pushSpan(testing.allocator, .{ .content = "running", .style = .{ .fg = .green } });
+    const lines = [_]r.tui.Line{ line, second };
+
+    const ansi = try linesToAnsi(&lines, testing.allocator);
+    defer testing.allocator.free(ansi);
+    var reparsed = try r.tui.Text.fromAnsi(testing.allocator, ansi);
+    defer reparsed.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), reparsed.lines.items.len);
+    try testing.expectEqualStrings("MCP fetch", reparsed.lines.items[0].spans.items[0].content);
+    try testing.expect(reparsed.lines.items[0].spans.items[0].style.modifier.bold);
+    try testing.expectEqualStrings("running", reparsed.lines.items[1].spans.items[0].content);
+
+    // SaveState JSON roundtrip keeps all fields.
+    const save = SaveState{
+        .chat = &.{},
+        .chat_render = &.{},
+        .tool_status = &.{
+            .{ .call_id = "call_1", .ansi = ansi, .is_error = false },
+            blk: {
+                const agent: r.AgentId = .{ .index = 3, .generation = 7 };
+                const child: r.AgentId = .{ .index = 4, .generation = 1 };
+                break :blk WireToolStatus{ .agent = agent.pack(), .call_id = "call_2", .child = child.pack() };
+            },
+        },
+    };
+    var output: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer output.deinit();
+    try std.json.Stringify.value(save, .{}, &output.writer);
+    const parsed = try std.json.parseFromSlice(SaveState, testing.allocator, output.written(), .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 2), parsed.value.tool_status.len);
+    try testing.expect(parsed.value.tool_status[0].agent == null);
+    try testing.expectEqual(false, parsed.value.tool_status[0].is_error.?);
+    try testing.expectEqualStrings("call_2", parsed.value.tool_status[1].call_id);
+    try testing.expectEqual((r.AgentId{ .index = 3, .generation = 7 }).pack(), parsed.value.tool_status[1].agent.?);
+    try testing.expectEqual((r.AgentId{ .index = 4, .generation = 1 }).pack(), parsed.value.tool_status[1].child.?);
 }

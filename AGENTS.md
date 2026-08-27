@@ -24,7 +24,8 @@ Important modules:
 - `src/agent_registry.zig` state management for many agents; `drain()` fans events out
 - `src/commands.zig` async command queue.
 - `src/inject.zig` agent status injections
-- `src/session.zig` save/load session state
+- `src/session.zig` save/load session state; `SaveState`/`WireToolStatus` shared by Lua path and store
+- `src/session_store.zig` JSONL session journals in `<project>/.blitz/sessions/<id>.jsonl` (header + full-snapshot checkpoints, cap 4, tmp+rename compaction, GC >16d); `blitz continue [ID]` and exit hint in `main.zig` use it
 - `src/compact.zig` chat compaction logic
 - `src/events.zig` exposed hooks
 - `src/defaults.zig` installs default config files into `~/.config/blitzdenk`
@@ -56,10 +57,26 @@ Important modules:
 - `make test` run the repo suite (`zig build test --summary all --error-style minimal`)
 - `cd sdk && zig build test` run the sdk suite separately
 - tests are in-file `test` blocks at the bottom of each module
+- ALWAYS run tests with `timeout -s KILL <s>`; a looping test once filled memory until OOM
 - `zig fmt src/` required after edits
 - command pattern: Lua binding validates and `cmd_queue.append`s (deep-clones into the queue arena), `Command.execute` runs on the app thread; handlers silently no-op on dead agent ids
 - spawn only reserves a registry slot (`.reserved`); activation happens when the queue drains, so a fresh id is not yet `registry.get`-able
 - `cmd.cancel_agent(id)` returns `"Success"`/`"Not Found"` from call-time validity, not final cancel outcome
+
+## Agent ids across save/restore
+
+- `registry.reserve()` bumps a slot's generation; restored chat entries stamped with an old id fail the renderer's generation gate, so anything persisted with an `AgentId` must be re-keyed after load (see `session.zig` `applySaveState` `main_agent` remap)
+- renderer tool-status lookup is keyed on `call.agent_id` pack + generation (`app.zig` render path); `App.setToolStatus`/`setToolChild` reset per-slot generation, which re-arms stale child ids
+
+## Zig 0.16 traps (all hit this codebase)
+
+- `std.json.parseFromSliceLeaky` default `.alloc_if_needed` returns string slices INTO the input slice; if the input is a reused buffer the parsed values alias freed/recycled memory — either give each line a fresh arena-allocated buffer (never free it; arena drop frees) or deep-clone
+- arena `free` of the last allocation rewinds; freeing a per-iteration buffer lets the next iteration reuse memory under live parsed slices — leak it into the arena instead
+- `Writer.Allocating.written()` is not freeable; return `toOwnedSlice()` if the caller frees
+- `Io.Reader.discardDelimiterExclusive` can toss 0 bytes (delimiter at position 0) → zero loop progress → infinite loop; use `discardDelimiterInclusive` (consumes delimiter, ≥1 byte) and `catch break` on EOF
+- `std.posix.chdir` doesn't exist → `std.c.chdir` (needs `-lc`); `Dir.cwd().realPath` fails FileNotFound on Linux → use `realPathFile(io, ".")`
+- tests can't `zig test` a file with module imports; use `zig build test` (build.zig wires `blitz-sdk`, `agent-id`, etc.)
+- `File.mtime.nanoseconds` is i96 Unix ns → `.toMilliseconds()`; `statFile` on a not-yet-created dir errors FileNotFound (create path first)
 
 ## RULES
 

@@ -18,6 +18,7 @@ const skills = r.skills;
 const keys = r.keys;
 const util = r.util;
 const session = r.session;
+const session_store = r.session_store;
 const tui = r.tui;
 const tools = r.tools;
 
@@ -26,7 +27,7 @@ pub const DEFAULT_CONFIG_PATH = r.defaults.CONFIG_DIR;
 pub const DEFAULT_CACHE_PATH = "cache.zon";
 pub const DEFAULT_LUA_CONFIG = "blitz.lua";
 const IO_THREAD_STACK_SIZE = 2 * 1024 * 1024;
-const IO_THREAD_LIMIT = 64;
+const IO_THREAD_LIMIT = 32;
 
 test {
     std.testing.refAllDecls(@This());
@@ -113,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
     var io_state = std.Io.Threaded.init(init.gpa, .{
         .stack_size = IO_THREAD_STACK_SIZE,
         .async_limit = .limited(IO_THREAD_LIMIT),
-        .concurrent_limit = .limited(IO_THREAD_LIMIT),
+        .concurrent_limit = .unlimited,
         .argv0 = .init(init.minimal.args),
         .environ = init.minimal.environ,
     });
@@ -155,6 +156,7 @@ pub fn main(init: std.process.Init) !void {
                 init.environ_map,
                 cli_flags,
                 null,
+                null,
                 false,
             );
         },
@@ -171,7 +173,52 @@ pub fn main(init: std.process.Init) !void {
                 init.environ_map,
                 cli_flags,
                 prompt,
+                null,
                 cli_flags.headless,
+            );
+        },
+        .cont => |prefix| {
+            var cwd_buffer: [std.posix.PATH_MAX]u8 = undefined;
+            const len = try std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buffer);
+            const cwd = cwd_buffer[0..len];
+            const cwd_dir = try std.Io.Dir.cwd().openDir(io, cwd, .{});
+            defer cwd_dir.close(io);
+            const resolved: ?[]const u8 = if (prefix) |p|
+                session_store.resolve(init.arena.allocator(), io, cwd_dir, p) catch |err| switch (err) {
+                    error.AmbiguousSessionId => {
+                        std.debug.print("Error: '{s}' matches multiple sessions\n", .{p});
+                        return;
+                    },
+                    else => {
+                        std.debug.print("Error: resolving '{s}' failed: {s}\n", .{ p, @errorName(err) });
+                        return;
+                    },
+                }
+            else blk: {
+                const entries = session_store.list(init.arena.allocator(), io, cwd_dir) catch |err| {
+                    std.debug.print("Error: listing sessions failed: {s}\n", .{@errorName(err)});
+                    return;
+                };
+                break :blk if (entries.len > 0) entries[0].id else null;
+            };
+            const id = resolved orelse {
+                if (prefix != null) {
+                    std.debug.print("Error: no session matching '{s}'\n", .{prefix.?});
+                } else {
+                    std.debug.print("Error: no sessions found in {s}\n", .{cwd});
+                }
+                return;
+            };
+            try run(
+                cwd,
+                init.gpa,
+                init.arena.allocator(),
+                io,
+                init.environ_map,
+                cli_flags,
+                null,
+                id,
+                false,
             );
         },
         .update => {
@@ -186,6 +233,7 @@ pub fn main(init: std.process.Init) !void {
                 \\/any/path            start tui in rel path to current cwd (optional)
                 \\help                 display this
                 \\prompt "STRING"      run in current cwd with initial input
+                \\continue [ID]        resume a session in cwd (default: most recent)
                 \\update               download and replace the running binary
                 \\
                 \\Flags:
@@ -232,6 +280,7 @@ pub fn run(
     env: *const std.process.Environ.Map,
     flags: CliFlags,
     prompt: ?[]const u8,
+    resume_session: ?[]const u8,
     headless: bool,
 ) !void {
     // Ensure config blitz.lua exists, get paths
@@ -240,6 +289,13 @@ pub fn run(
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
     const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
     context_factory.flags.skip_local_context_file = flags.no_context;
+
+    // Sessions always live under the project cwd, never the process cwd, so
+    // `blitz /path/to/proj` journals where `blitz continue` will find them.
+    var cwd_dir = try std.Io.Dir.cwd().openDir(io, cwd, .{});
+    defer cwd_dir.close(io);
+
+    session_store.collectGarbage(arena, io, cwd_dir, session_store.GC_AGE_MS);
 
     var app = try App.init(io, gpa, context_factory, cwd);
     var registry = r.agent_registry.Registry.init(gpa, io);
@@ -309,11 +365,57 @@ pub fn run(
     app.flags.skip_ssh_permissions = flags.yolo;
     app.warnUnboundAgentModels();
 
+    var store = session_store.Store{ .io = io, .gpa = gpa, .base = cwd_dir };
+    defer store.deinit();
+    var session_id_buf: [session_store.ID_LEN]u8 = undefined;
+    if (resume_session) |prefix| {
+        const resolved_opt = session_store.resolve(arena, io, cwd_dir, prefix) catch |err| blk: {
+            if (err == error.AmbiguousSessionId) {
+                std.debug.print("Error: '{s}' matches multiple sessions\n", .{prefix});
+            } else {
+                std.debug.print("Error: resolving session '{s}' failed: {s}\n", .{ prefix, @errorName(err) });
+            }
+            break :blk null;
+        };
+        const resolved = resolved_opt orelse return error.SessionNotFound;
+        const file_name = try session_store.fileName(arena, resolved);
+        const loaded_opt = session_store.load(arena, io, cwd_dir, file_name) catch |err| {
+            std.debug.print("Error: reading session '{s}' failed: {s}\n", .{ resolved, @errorName(err) });
+            return error.SessionNotFound;
+        };
+        const loaded = loaded_opt orelse {
+            std.debug.print("Error: session '{s}' has no usable checkpoint\n", .{resolved});
+            return error.SessionNotFound;
+        };
+        var resumed = false;
+        if (session.applySaveState(&app, &loaded.save)) |_| {
+            resumed = true;
+        } else |err| {
+            // Fall back to a fresh journal: binding the resumed one would let
+            // a later compaction destroy the session's original checkpoints.
+            std.log.scoped(.session).warn("resume of {s} failed: {s}", .{ resolved, @errorName(err) });
+        }
+        if (resumed) {
+            try store.open(file_name);
+        } else {
+            store.create(cwd) catch |create_err| {
+                std.log.scoped(.session).warn("session journal unavailable: {s}", .{@errorName(create_err)});
+            };
+        }
+    } else {
+        store.create(cwd) catch |err| {
+            std.log.scoped(.session).warn("session journal unavailable: {s}", .{@errorName(err)});
+        };
+    }
+    checkpoint(&app, &store);
+
     if (config_lua) |info| app.loadHistory(info.dir_path);
     try app.cmd_queue.apply(io, &app);
 
     if (headless) {
         try runHeadless(&app, io, prompt.?);
+        checkpoint(&app, &store);
+        printSessionHint(&store, &session_id_buf);
         return;
     }
 
@@ -324,549 +426,561 @@ pub fn run(
         app.input_cursor = @intCast(app.input_buffer.items.len);
     }
 
-    var term = try tui.Terminal.init(arena, io);
-    errdefer term.deinit();
-    defer term.deinit();
+    // Terminal is scoped so its restore happens before the session hint is
+    // printed — on the normal screen, where the user can actually read it.
+    var exit_hint: bool = false;
+    {
+        var term = try tui.Terminal.init(arena, io);
+        defer term.deinit();
 
-    main_loop: while (true) {
-        // tick notifications
-        const had_visible_notifications = app.notifications.hasVisible();
-        app.notifications.tick(1.0 / 60.0);
-        if (had_visible_notifications or app.notifications.hasVisible()) app.dirty = true;
+        var was_running = app.running;
+        main_loop: while (true) {
+            // tick notifications
+            const had_visible_notifications = app.notifications.hasVisible();
+            app.notifications.tick(1.0 / 60.0);
+            if (had_visible_notifications or app.notifications.hasVisible()) app.dirty = true;
 
-        if (app.dirty or app.main_agent_id == null) {
-            try term.drawWith(&app, App.render);
-            app.frame_count +%= 1;
-            app.dirty = false;
-        }
+            if (app.dirty or app.main_agent_id == null) {
+                try term.drawWith(&app, App.render);
+                app.frame_count +%= 1;
+                app.dirty = false;
+            }
 
-        // TODO: cleanup state
-        if (app.running) app.dirty = true;
+            // TODO: cleanup state
+            if (app.running) app.dirty = true;
 
-        // Drain new agent messages from broadcast into chat_entries
-        // app.drainBroadcast();
-        // Mirror in-progress streaming message so TUI shows tokens as they arrive.
-        perm: {
-            if (app.active_permission != null) break :perm;
+            // Drain new agent messages from broadcast into chat_entries
+            // app.drainBroadcast();
+            // Mirror in-progress streaming message so TUI shows tokens as they arrive.
+            perm: {
+                if (app.active_permission != null) break :perm;
 
-            const g = app.permission_queue.lock(io);
-            defer g.unlock();
+                const g = app.permission_queue.lock(io);
+                defer g.unlock();
 
-            if (g.ptr.items.len == 0) break :perm;
+                if (g.ptr.items.len == 0) break :perm;
 
-            for (0..g.ptr.items.len) |_| {
-                const next = g.ptr.swapRemove(0);
-                const is_ask = next.payload == .ask or next.payload == .plan;
+                for (0..g.ptr.items.len) |_| {
+                    const next = g.ptr.swapRemove(0);
+                    const is_ask = next.payload == .ask or next.payload == .plan;
 
-                // check permission level against flags
-                app.mu.lockUncancelable(app.io);
-                const skip_permissions = app.flags.skip_permissions;
-                const skip_ssh_permissions = app.flags.skip_ssh_permissions;
-                app.mu.unlock(app.io);
-                if (skip_permissions and !app.exec_pool.ssh_active and !is_ask) {
-                    try app.persist_permission_to_history(next);
-                    next.state = .approved;
-                    next.event.set(app.io);
-                    continue;
-                }
+                    // check permission level against flags
+                    app.mu.lockUncancelable(app.io);
+                    const skip_permissions = app.flags.skip_permissions;
+                    const skip_ssh_permissions = app.flags.skip_ssh_permissions;
+                    app.mu.unlock(app.io);
+                    if (skip_permissions and !app.exec_pool.ssh_active and !is_ask) {
+                        try app.persist_permission_to_history(next);
+                        next.state = .approved;
+                        next.event.set(app.io);
+                        continue;
+                    }
 
-                if (skip_ssh_permissions and !is_ask) {
-                    try app.persist_permission_to_history(next);
-                    next.state = .approved;
-                    next.event.set(app.io);
-                    continue;
-                }
+                    if (skip_ssh_permissions and !is_ask) {
+                        try app.persist_permission_to_history(next);
+                        next.state = .approved;
+                        next.event.set(app.io);
+                        continue;
+                    }
 
-                if (app.registry.state(next.agent_id) == .active) {
-                    app.active_permission = next;
-                    break :perm;
+                    if (app.registry.state(next.agent_id) == .active) {
+                        app.active_permission = next;
+                        break :perm;
+                    }
                 }
             }
-        }
 
-        // Drive input_mode from perm presence — single source of truth.
-        switch (app.input_mode) {
-            .text => if (app.active_permission != null) app.enterPermSelect(),
-            .perm_select, .perm_message => if (app.active_permission == null) app.returnToText(),
-            .passphrase => {},
-        }
-
-        // Lua hot-reload: poll mtime every ~1s (cwd blitz.lua + config dir)
-        reload_tick +%= 1;
-        const reload_requested = app.lua_reload_requested.load(.acquire);
-        if (reload_tick >= 60 or reload_requested) {
-            reload_tick = 0;
-            const new_cwd_mtime: i128 = blk: {
-                const stat = std.Io.Dir.cwd().statFile(io, "blitz.lua", .{}) catch break :blk 0;
-                break :blk stat.mtime.nanoseconds;
-            };
-            const new_config_mtime: i128 = if (config_lua) |info| scanDirMaxMtime(io, info.dir_path) else 0;
-
-            if (reload_requested or new_cwd_mtime != cwd_lua_mtime or new_config_mtime != config_lua_mtime) blk: {
-                // Tool worker may currently hold
-                // vm_mu. Skip this tick if busy — mtime stays unchanged so we retry.
-                if (!app.lua_vm.vm_mu.tryLock()) break :blk;
-                defer app.lua_vm.vm_mu.unlock(io);
-                try app.waitForMcpTools();
-
-                cwd_lua_mtime = new_cwd_mtime;
-                config_lua_mtime = new_config_mtime;
-
-                app.lua_vm.clearLastError();
-                app.event_bus.clear(app.gpa, app.io);
-                app.lua_inject_hooks_enabled.store(false, .release);
-                var lua_reload_failed = false;
-
-                app.lua_vm.reset() catch |err| {
-                    lua_reload_failed = true;
-                    std.log.scoped(.lua).err("hot-reload: failed to reset lua vm ({any})", .{err});
-                };
-                context_factory.resetDefs();
-                try context_factory.resetLoadedTools();
-                if (config_lua) |info| {
-                    const inject = std.fmt.allocPrint(arena, "package.path = \"{s}?.lua;\" .. package.path", .{info.dir_path}) catch null;
-                    if (inject) |code| app.lua_vm.exec(code) catch |err| {
-                        lua_reload_failed = true;
-                        std.log.scoped(.lua).err("hot-reload: failed to configure lua package.path: {s} ({any})", .{ app.lua_vm.getLastError(), err });
-                    };
-                    app.lua_vm.load(info.abs_path) catch |err| {
-                        lua_reload_failed = true;
-                        std.log.scoped(.lua).err("hot-reload: failed to load {s}: {s} ({any})", .{ info.abs_path, app.lua_vm.getLastError(), err });
-                    };
-                }
-                if (cwdBlitzLuaExists(io)) {
-                    app.lua_vm.load("blitz.lua") catch |err| {
-                        lua_reload_failed = true;
-                        std.log.scoped(.lua).err("hot-reload: failed to load blitz.lua: {s} ({any})", .{ app.lua_vm.getLastError(), err });
-                    };
-                }
-                if (!lua_reload_failed) app.lua_vm.clearLastError();
-                app.lua_vm.readConfigFields();
-                app.warnUnboundAgentModels();
-                try app.lua_vm.publishAvailableSystems(context_factory);
-                app.dirty = true;
-
-                lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
-                    std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
-                    if (reload_requested) {
-                        app.lua_reload_failed.store(true, .release);
-                        app.markLuaReloadDone();
-                    }
-                    break :blk;
-                };
-                for (lua_tools) |tool| try context_factory.add(tool, .all);
-                context_factory.precalcGeneralPromptSize();
-
-                const reloaded_mcp_servers = app.lua_vm.getEnabledMcpServers(arena) catch |err| {
-                    std.log.scoped(.mcp).err("failed to load MCP server defs {any}", .{err});
-                    if (reload_requested) {
-                        app.lua_reload_failed.store(true, .release);
-                        app.markLuaReloadDone();
-                    }
-                    break :blk;
-                };
-                app.loadMcpTools(reloaded_mcp_servers);
-
-                lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
-                app.keymap.custom.clearRetainingCapacity();
-                for (lua_binds) |bind| {
-                    try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn } });
-                }
-
-                if (reload_requested) app.lua_reload_failed.store(false, .release);
-                try app.refreshLiveAgentTools();
-                if (reload_requested) app.markLuaReloadDone();
+            // Drive input_mode from perm presence — single source of truth.
+            switch (app.input_mode) {
+                .text => if (app.active_permission != null) app.enterPermSelect(),
+                .perm_select, .perm_message => if (app.active_permission == null) app.returnToText(),
+                .passphrase => {},
             }
-        }
 
-        term.pollAndEnqueue(16);
-        try app.tick();
+            // Lua hot-reload: poll mtime every ~1s (cwd blitz.lua + config dir)
+            reload_tick +%= 1;
+            const reload_requested = app.lua_reload_requested.load(.acquire);
+            if (reload_tick >= 60 or reload_requested) {
+                reload_tick = 0;
+                const new_cwd_mtime: i128 = blk: {
+                    const stat = std.Io.Dir.cwd().statFile(io, "blitz.lua", .{}) catch break :blk 0;
+                    break :blk stat.mtime.nanoseconds;
+                };
+                const new_config_mtime: i128 = if (config_lua) |info| scanDirMaxMtime(io, info.dir_path) else 0;
 
-        while (true) {
-            const next_event = term.nextEvent();
-            if (next_event != .none) app.dirty = true;
-            switch (next_event) {
-                .key => |k| {
-                    if (app.keymap.parse(k)) |action| {
-                        switch (action) {
-                            .exit => {
-                                if (app.active_permission == null and app.running) {
-                                    try app.cmd_queue.append(io, .cancel);
-                                } else {
-                                    break :main_loop;
-                                }
-                                continue;
-                            },
-                            .cancel => {
-                                if (app.closeCompletion()) continue;
-                                if (app.running) {
-                                    try app.cmd_queue.append(io, .cancel);
-                                } else {
-                                    app.screenshot_buf = null;
-                                }
-                            },
-                            .scroll_down => {
-                                try app.cmd_queue.append(io, .{ .scroll_down = 1 });
-                                continue;
-                            },
-                            .scroll_up => {
-                                try app.cmd_queue.append(io, .{ .scroll_up = 1 });
-                                continue;
-                            },
-                            .clear_session => {
-                                try app.cmd_queue.append(io, .reset_session);
-                                continue;
-                            },
-                            .retry => {
-                                try app.cmd_queue.append(io, .retry);
-                                continue;
-                            },
-                            .lua => |lua_fn| {
-                                if (app.lua_vm.vm_mu.tryLock()) {
-                                    defer app.lua_vm.vm_mu.unlock(io);
-                                    app.lua_vm.invokeBind(lua_fn);
-                                }
-                                continue;
-                            },
-                            .cursor_left => app.input_cursor -|= 1,
-                            .cursor_right => {
-                                app.input_cursor = @min(app.input_cursor + 1, app.input_buffer.items.len);
-                            },
-                            .cursor_up => {
-                                if (app.completionIsOpen()) {
-                                    app.handleCompletion(.prev);
+                if (reload_requested or new_cwd_mtime != cwd_lua_mtime or new_config_mtime != config_lua_mtime) blk: {
+                    // Tool worker may currently hold
+                    // vm_mu. Skip this tick if busy — mtime stays unchanged so we retry.
+                    if (!app.lua_vm.vm_mu.tryLock()) break :blk;
+                    defer app.lua_vm.vm_mu.unlock(io);
+                    try app.waitForMcpTools();
+
+                    cwd_lua_mtime = new_cwd_mtime;
+                    config_lua_mtime = new_config_mtime;
+
+                    app.lua_vm.clearLastError();
+                    app.event_bus.clear(app.gpa, app.io);
+                    app.lua_inject_hooks_enabled.store(false, .release);
+                    var lua_reload_failed = false;
+
+                    app.lua_vm.reset() catch |err| {
+                        lua_reload_failed = true;
+                        std.log.scoped(.lua).err("hot-reload: failed to reset lua vm ({any})", .{err});
+                    };
+                    context_factory.resetDefs();
+                    try context_factory.resetLoadedTools();
+                    if (config_lua) |info| {
+                        const inject = std.fmt.allocPrint(arena, "package.path = \"{s}?.lua;\" .. package.path", .{info.dir_path}) catch null;
+                        if (inject) |code| app.lua_vm.exec(code) catch |err| {
+                            lua_reload_failed = true;
+                            std.log.scoped(.lua).err("hot-reload: failed to configure lua package.path: {s} ({any})", .{ app.lua_vm.getLastError(), err });
+                        };
+                        app.lua_vm.load(info.abs_path) catch |err| {
+                            lua_reload_failed = true;
+                            std.log.scoped(.lua).err("hot-reload: failed to load {s}: {s} ({any})", .{ info.abs_path, app.lua_vm.getLastError(), err });
+                        };
+                    }
+                    if (cwdBlitzLuaExists(io)) {
+                        app.lua_vm.load("blitz.lua") catch |err| {
+                            lua_reload_failed = true;
+                            std.log.scoped(.lua).err("hot-reload: failed to load blitz.lua: {s} ({any})", .{ app.lua_vm.getLastError(), err });
+                        };
+                    }
+                    if (!lua_reload_failed) app.lua_vm.clearLastError();
+                    app.lua_vm.readConfigFields();
+                    app.warnUnboundAgentModels();
+                    try app.lua_vm.publishAvailableSystems(context_factory);
+                    app.dirty = true;
+
+                    lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
+                        std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
+                        if (reload_requested) {
+                            app.lua_reload_failed.store(true, .release);
+                            app.markLuaReloadDone();
+                        }
+                        break :blk;
+                    };
+                    for (lua_tools) |tool| try context_factory.add(tool, .all);
+                    context_factory.precalcGeneralPromptSize();
+
+                    const reloaded_mcp_servers = app.lua_vm.getEnabledMcpServers(arena) catch |err| {
+                        std.log.scoped(.mcp).err("failed to load MCP server defs {any}", .{err});
+                        if (reload_requested) {
+                            app.lua_reload_failed.store(true, .release);
+                            app.markLuaReloadDone();
+                        }
+                        break :blk;
+                    };
+                    app.loadMcpTools(reloaded_mcp_servers);
+
+                    lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
+                    app.keymap.custom.clearRetainingCapacity();
+                    for (lua_binds) |bind| {
+                        try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn } });
+                    }
+
+                    if (reload_requested) app.lua_reload_failed.store(false, .release);
+                    try app.refreshLiveAgentTools();
+                    if (reload_requested) app.markLuaReloadDone();
+                }
+            }
+
+            term.pollAndEnqueue(16);
+            try app.tick();
+
+            while (true) {
+                const next_event = term.nextEvent();
+                if (next_event != .none) app.dirty = true;
+                switch (next_event) {
+                    .key => |k| {
+                        if (app.keymap.parse(k)) |action| {
+                            switch (action) {
+                                .exit => {
+                                    if (app.active_permission == null and app.running) {
+                                        try app.cmd_queue.append(io, .cancel);
+                                    } else {
+                                        break :main_loop;
+                                    }
                                     continue;
-                                }
-                            },
-                            .cursor_down => {
-                                if (app.completionIsOpen()) {
+                                },
+                                .cancel => {
+                                    if (app.closeCompletion()) continue;
+                                    if (app.running) {
+                                        try app.cmd_queue.append(io, .cancel);
+                                    } else {
+                                        app.screenshot_buf = null;
+                                    }
+                                },
+                                .scroll_down => {
+                                    try app.cmd_queue.append(io, .{ .scroll_down = 1 });
+                                    continue;
+                                },
+                                .scroll_up => {
+                                    try app.cmd_queue.append(io, .{ .scroll_up = 1 });
+                                    continue;
+                                },
+                                .clear_session => {
+                                    try app.cmd_queue.append(io, .reset_session);
+                                    continue;
+                                },
+                                .retry => {
+                                    try app.cmd_queue.append(io, .retry);
+                                    continue;
+                                },
+                                .lua => |lua_fn| {
+                                    if (app.lua_vm.vm_mu.tryLock()) {
+                                        defer app.lua_vm.vm_mu.unlock(io);
+                                        app.lua_vm.invokeBind(lua_fn);
+                                    }
+                                    continue;
+                                },
+                                .cursor_left => app.input_cursor -|= 1,
+                                .cursor_right => {
+                                    app.input_cursor = @min(app.input_cursor + 1, app.input_buffer.items.len);
+                                },
+                                .cursor_up => {
+                                    if (app.completionIsOpen()) {
+                                        app.handleCompletion(.prev);
+                                        continue;
+                                    }
+                                },
+                                .cursor_down => {
+                                    if (app.completionIsOpen()) {
+                                        app.handleCompletion(.next);
+                                        continue;
+                                    }
+                                },
+                                .noop => {},
+                                .completion_next => {
                                     app.handleCompletion(.next);
                                     continue;
+                                },
+                                .completion_prev => {
+                                    app.handleCompletion(.prev);
+                                    continue;
+                                },
+                                .completion_accept => {
+                                    app.handleCompletion(.accept);
+                                    continue;
+                                },
+                                .undo => {
+                                    app.undoLastUserMessage();
+                                    continue;
+                                },
+                                .paste_image => {
+                                    if (app.input_mode == .text) app.pasteImage();
+                                    continue;
+                                },
+                            }
+                        }
+                        switch (k.code) {
+                            .char => |c| {
+                                switch (app.input_mode) {
+                                    .text => {
+                                        app.appendBytes(k.textSlice());
+                                    },
+                                    .perm_select => |*ps| {
+                                        const entry = app.active_permission orelse break;
+
+                                        const max_sel: u8 = switch (entry.payload) {
+                                            .ask => |a| @intCast(@min(a.options.len, tools.ask.MAX_OPTIONS)),
+                                            .plan => 3,
+                                            else => 2,
+                                        };
+                                        if (c == 'j' and ps.selected < max_sel) ps.selected += 1;
+                                        if (c == 'k' and ps.selected > 0) ps.selected -= 1;
+                                    },
+                                    .perm_message => |*pm| {
+                                        const ts = k.textSlice();
+                                        if (pm.len + ts.len <= pm.buf.len) {
+                                            @memcpy(pm.buf[pm.len..][0..ts.len], ts);
+                                            pm.len += ts.len;
+                                        }
+                                    },
+                                    .passphrase => |*pp| {
+                                        const ts = k.textSlice();
+                                        if (pp.len + ts.len <= pp.buf.len) {
+                                            @memcpy(pp.buf[pp.len..][0..ts.len], ts);
+                                            pp.len += ts.len;
+                                        }
+                                    },
                                 }
                             },
-                            .noop => {},
-                            .completion_next => {
-                                app.handleCompletion(.next);
-                                continue;
-                            },
-                            .completion_prev => {
-                                app.handleCompletion(.prev);
-                                continue;
-                            },
-                            .completion_accept => {
-                                app.handleCompletion(.accept);
-                                continue;
-                            },
-                            .undo => {
-                                app.undoLastUserMessage();
-                                continue;
-                            },
-                            .paste_image => {
-                                if (app.input_mode == .text) app.pasteImage();
-                                continue;
-                            },
-                        }
-                    }
-                    switch (k.code) {
-                        .char => |c| {
-                            switch (app.input_mode) {
-                                .text => {
-                                    app.appendBytes(k.textSlice());
+                            .arrow_up => switch (app.input_mode) {
+                                .text => if (!app.running) app.historyUp(),
+                                .perm_select => |*ps| {
+                                    if (ps.selected > 0) ps.selected -= 1;
                                 },
+                                .perm_message => {},
+                                .passphrase => {},
+                            },
+                            .arrow_down => switch (app.input_mode) {
+                                .text => if (!app.running) app.historyDown(),
                                 .perm_select => |*ps| {
                                     const entry = app.active_permission orelse break;
-
                                     const max_sel: u8 = switch (entry.payload) {
                                         .ask => |a| @intCast(@min(a.options.len, tools.ask.MAX_OPTIONS)),
                                         .plan => 3,
                                         else => 2,
                                     };
-                                    if (c == 'j' and ps.selected < max_sel) ps.selected += 1;
-                                    if (c == 'k' and ps.selected > 0) ps.selected -= 1;
+                                    if (ps.selected < max_sel) ps.selected += 1;
                                 },
+                                .perm_message => {},
+                                .passphrase => {},
+                            },
+                            .backspace => switch (app.input_mode) {
+                                .text => app.deleteChar(),
+                                .perm_select => {},
                                 .perm_message => |*pm| {
-                                    const ts = k.textSlice();
-                                    if (pm.len + ts.len <= pm.buf.len) {
-                                        @memcpy(pm.buf[pm.len..][0..ts.len], ts);
-                                        pm.len += ts.len;
+                                    while (pm.len > 0) {
+                                        pm.len -= 1;
+                                        if ((pm.buf[pm.len] & 0xC0) != 0x80) break;
                                     }
                                 },
                                 .passphrase => |*pp| {
-                                    const ts = k.textSlice();
-                                    if (pp.len + ts.len <= pp.buf.len) {
-                                        @memcpy(pp.buf[pp.len..][0..ts.len], ts);
-                                        pp.len += ts.len;
+                                    while (pp.len > 0) {
+                                        pp.len -= 1;
+                                        if ((pp.buf[pp.len] & 0xC0) != 0x80) break;
                                     }
                                 },
-                            }
-                        },
-                        .arrow_up => switch (app.input_mode) {
-                            .text => if (!app.running) app.historyUp(),
-                            .perm_select => |*ps| {
-                                if (ps.selected > 0) ps.selected -= 1;
                             },
-                            .perm_message => {},
-                            .passphrase => {},
-                        },
-                        .arrow_down => switch (app.input_mode) {
-                            .text => if (!app.running) app.historyDown(),
-                            .perm_select => |*ps| {
-                                const entry = app.active_permission orelse break;
-                                const max_sel: u8 = switch (entry.payload) {
-                                    .ask => |a| @intCast(@min(a.options.len, tools.ask.MAX_OPTIONS)),
-                                    .plan => 3,
-                                    else => 2,
-                                };
-                                if (ps.selected < max_sel) ps.selected += 1;
-                            },
-                            .perm_message => {},
-                            .passphrase => {},
-                        },
-                        .backspace => switch (app.input_mode) {
-                            .text => app.deleteChar(),
-                            .perm_select => {},
-                            .perm_message => |*pm| {
-                                while (pm.len > 0) {
-                                    pm.len -= 1;
-                                    if ((pm.buf[pm.len] & 0xC0) != 0x80) break;
-                                }
-                            },
-                            .passphrase => |*pp| {
-                                while (pp.len > 0) {
-                                    pp.len -= 1;
-                                    if ((pp.buf[pp.len] & 0xC0) != 0x80) break;
-                                }
-                            },
-                        },
-                        .enter => switch (app.input_mode) {
-                            .perm_message => |*pm| {
-                                const entry = app.active_permission orelse break;
+                            .enter => switch (app.input_mode) {
+                                .perm_message => |*pm| {
+                                    const entry = app.active_permission orelse break;
 
-                                const is_ask = entry.payload == .ask;
+                                    const is_ask = entry.payload == .ask;
 
-                                if (pm.len == 0) {
-                                    app.enterPermSelect();
-                                    break;
-                                }
-                                const msg = pm.buf[0..pm.len];
-                                if (is_ask) {
-                                    app.resolveActivePermission(.{ .message = msg });
-                                } else {
-                                    app.resolveActivePermission(.denied);
-                                }
-                                app.auto_scroll = true;
-                                app.scroll_offset = 0;
-                            },
-                            .perm_select => |*ps| {
-                                const entry = app.active_permission orelse break;
-                                if (entry.payload == .ask) {
-                                    const args = entry.payload.ask;
-                                    const opts_len: u8 = @intCast(@min(args.options.len, tools.ask.MAX_OPTIONS));
-
-                                    if (ps.selected >= opts_len) {
-                                        app.enterPermMessage();
+                                    if (pm.len == 0) {
+                                        app.enterPermSelect();
                                         break;
                                     }
-
-                                    app.resolveActivePermission(.{ .choice = ps.selected });
+                                    const msg = pm.buf[0..pm.len];
+                                    if (is_ask) {
+                                        app.resolveActivePermission(.{ .message = msg });
+                                    } else {
+                                        app.resolveActivePermission(.denied);
+                                    }
                                     app.auto_scroll = true;
                                     app.scroll_offset = 0;
-                                    break;
-                                }
+                                },
+                                .perm_select => |*ps| {
+                                    const entry = app.active_permission orelse break;
+                                    if (entry.payload == .ask) {
+                                        const args = entry.payload.ask;
+                                        const opts_len: u8 = @intCast(@min(args.options.len, tools.ask.MAX_OPTIONS));
 
-                                // Generic 3-option (yes / no / enter message)
-                                switch (ps.selected) {
-                                    0 => {
-                                        try app.persist_permission_to_history(entry);
-                                        app.resolveActivePermission(.approved);
-                                    },
-                                    1 => app.resolveActivePermission(.denied),
-                                    2 => {
-                                        app.enterPermMessage();
-                                        break;
-                                    },
-                                    else => {},
-                                }
-                                app.auto_scroll = true;
-                                app.scroll_offset = 0;
-                            },
-                            .text => {
-                                if (app.input_buffer.items.len == 0) break;
-                                const input = std.fmt.allocPrint(app.sessionAlloc(), "{f}", .{std.unicode.fmtUtf8(app.inputSlice())}) catch break;
-                                var send_text: []const u8 = input;
-                                var chat_text: []const u8 = input;
-
-                                // -- user commands (processed even while a session is running)
-                                if (input[0] == '/') {
-                                    if (app.lua_vm.vm_mu.tryLock()) {
-                                        defer app.lua_vm.vm_mu.unlock(io);
-                                        if (app.lua_vm.invokeCommand(input)) {
-                                            app.pushHistory(input);
-                                            if (config_lua) |info| app.saveHistory(info.dir_path);
-                                            app.input_buffer.clearRetainingCapacity();
+                                        if (ps.selected >= opts_len) {
+                                            app.enterPermMessage();
                                             break;
                                         }
-                                    } else {
+
+                                        app.resolveActivePermission(.{ .choice = ps.selected });
+                                        app.auto_scroll = true;
+                                        app.scroll_offset = 0;
                                         break;
                                     }
 
-                                    const cmd = AppCommand.parse(input);
-
-                                    if (cmd) |c| {
-                                        switch (c) {
-                                            .ssh => |args| {
-                                                handleSshCommand(&app, app.exec_pool, gpa, args);
-                                                app.input_buffer.clearRetainingCapacity();
-                                            },
-                                            .ssh_off => {
-                                                app.exec_pool.clearSsh();
-                                                app.notifications.append(gpa, "SSH mode disabled", .{}) catch {};
-                                                app.input_buffer.clearRetainingCapacity();
-                                            },
-                                        }
-                                        break;
+                                    // Generic 3-option (yes / no / enter message)
+                                    switch (ps.selected) {
+                                        0 => {
+                                            try app.persist_permission_to_history(entry);
+                                            app.resolveActivePermission(.approved);
+                                        },
+                                        1 => app.resolveActivePermission(.denied),
+                                        2 => {
+                                            app.enterPermMessage();
+                                            break;
+                                        },
+                                        else => {},
                                     }
+                                    app.auto_scroll = true;
+                                    app.scroll_offset = 0;
+                                },
+                                .text => {
+                                    if (app.input_buffer.items.len == 0) break;
+                                    const input = std.fmt.allocPrint(app.sessionAlloc(), "{f}", .{std.unicode.fmtUtf8(app.inputSlice())}) catch break;
+                                    var send_text: []const u8 = input;
+                                    var chat_text: []const u8 = input;
 
-                                    if (reg.parseSshAliasCommand(input)) |alias| {
-                                        if (app.context_factory.findSshAlias(alias)) |target| {
-                                            handleSshCommand(&app, app.exec_pool, gpa, .{
-                                                .user = target.user,
-                                                .host = target.host,
-                                                .cwd = target.cwd,
-                                            });
+                                    // -- user commands (processed even while a session is running)
+                                    if (input[0] == '/') {
+                                        if (app.lua_vm.vm_mu.tryLock()) {
+                                            defer app.lua_vm.vm_mu.unlock(io);
+                                            if (app.lua_vm.invokeCommand(input)) {
+                                                app.pushHistory(input);
+                                                if (config_lua) |info| app.saveHistory(info.dir_path);
+                                                app.input_buffer.clearRetainingCapacity();
+                                                break;
+                                            }
                                         } else {
-                                            app.pushSystemMessage("unknown ssh alias: {s}", .{alias});
+                                            break;
                                         }
+
+                                        const cmd = AppCommand.parse(input);
+
+                                        if (cmd) |c| {
+                                            switch (c) {
+                                                .ssh => |args| {
+                                                    handleSshCommand(&app, app.exec_pool, gpa, args);
+                                                    app.input_buffer.clearRetainingCapacity();
+                                                },
+                                                .ssh_off => {
+                                                    app.exec_pool.clearSsh();
+                                                    app.notifications.append(gpa, "SSH mode disabled", .{}) catch {};
+                                                    app.input_buffer.clearRetainingCapacity();
+                                                },
+                                            }
+                                            break;
+                                        }
+
+                                        if (reg.parseSshAliasCommand(input)) |alias| {
+                                            if (app.context_factory.findSshAlias(alias)) |target| {
+                                                handleSshCommand(&app, app.exec_pool, gpa, .{
+                                                    .user = target.user,
+                                                    .host = target.host,
+                                                    .cwd = target.cwd,
+                                                });
+                                            } else {
+                                                app.pushSystemMessage("unknown ssh alias: {s}", .{alias});
+                                            }
+                                            app.input_buffer.clearRetainingCapacity();
+                                            break;
+                                        }
+
+                                        if (skills.parseSkillCommand(input)) |sc| {
+                                            const entry = app.context_factory.skills.find(sc.name) orelse {
+                                                app.pushSystemMessage("unknown skill: {s}", .{sc.name});
+                                                app.input_buffer.clearRetainingCapacity();
+                                                break;
+                                            };
+                                            if (!entry.meta.user_invocable) {
+                                                app.pushSystemMessage("skill '{s}' is not user-invocable", .{entry.meta.name});
+                                                app.input_buffer.clearRetainingCapacity();
+                                                break;
+                                            }
+                                            const loaded = skills.loadSkill(app.io, app.sessionAlloc(), entry) orelse {
+                                                app.pushSystemMessage("unknown skill: {s}", .{sc.name});
+                                                app.input_buffer.clearRetainingCapacity();
+                                                break;
+                                            };
+                                            send_text = skills.skillSendText(app.sessionAlloc(), loaded.body, sc.prompt) catch break;
+                                            chat_text = skills.skillChatText(app.sessionAlloc(), entry.meta.name, sc.prompt) catch break;
+                                        } else {
+                                            break;
+                                        }
+                                    }
+
+                                    if (app.running) {
+                                        app.pushHistory(input);
+                                        if (config_lua) |info| app.saveHistory(info.dir_path);
+                                        try app.event_bus.emit(&app, .{ .user_message_sent = chat_text });
+                                        if (app.main_agent_id) |agent_id| {
+                                            const alloc = app.sessionAlloc();
+                                            const len: usize = if (app.screenshot_buf != null) 2 else 1;
+
+                                            const parts = try alloc.alloc(r.sdk.Part, len);
+                                            parts[0] = .{ .text = send_text };
+
+                                            if (app.screenshot_buf) |buf| {
+                                                parts[1] = .{ .image = .{
+                                                    .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{buf}),
+                                                    .media_type = "image/png",
+                                                } };
+                                            }
+
+                                            const chat_msg = try ChatEntry.userMessageSimple(alloc, .user, chat_text);
+                                            try app.cmd_queue.append(io, .{ .queue_agent_message = .{
+                                                .agent_id = agent_id,
+                                                .parts = parts,
+                                                .chat_entry = chat_msg,
+                                            } });
+                                        }
+
+                                        try app.cmd_queue.append(io, .{ .scroll_down = 999999 });
+                                        app.screenshot_buf = null;
                                         app.input_buffer.clearRetainingCapacity();
-                                        break;
+                                        continue;
                                     }
 
-                                    if (skills.parseSkillCommand(input)) |sc| {
-                                        const entry = app.context_factory.skills.find(sc.name) orelse {
-                                            app.pushSystemMessage("unknown skill: {s}", .{sc.name});
-                                            app.input_buffer.clearRetainingCapacity();
-                                            break;
-                                        };
-                                        if (!entry.meta.user_invocable) {
-                                            app.pushSystemMessage("skill '{s}' is not user-invocable", .{entry.meta.name});
-                                            app.input_buffer.clearRetainingCapacity();
-                                            break;
-                                        }
-                                        const loaded = skills.loadSkill(app.io, app.sessionAlloc(), entry) orelse {
-                                            app.pushSystemMessage("unknown skill: {s}", .{sc.name});
-                                            app.input_buffer.clearRetainingCapacity();
-                                            break;
-                                        };
-                                        send_text = skills.skillSendText(app.sessionAlloc(), loaded.body, sc.prompt) catch break;
-                                        chat_text = skills.skillChatText(app.sessionAlloc(), entry.meta.name, sc.prompt) catch break;
-                                    } else {
-                                        break;
-                                    }
-                                }
-
-                                if (app.running) {
                                     app.pushHistory(input);
                                     if (config_lua) |info| app.saveHistory(info.dir_path);
-                                    try app.event_bus.emit(&app, .{ .user_message_sent = chat_text });
-                                    if (app.main_agent_id) |agent_id| {
-                                        const alloc = app.sessionAlloc();
-                                        const len: usize = if (app.screenshot_buf != null) 2 else 1;
 
-                                        const parts = try alloc.alloc(r.sdk.Part, len);
-                                        parts[0] = .{ .text = send_text };
+                                    const alloc = app.sessionAlloc();
+                                    const parts: []const r.sdk.Part = if (app.screenshot_buf) |img_data|
+                                        alloc.dupe(r.sdk.Part, &.{
+                                            .{ .text = send_text },
+                                            .{ .image = .{ .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{img_data}), .media_type = "image/png" } },
+                                        }) catch break
+                                    else
+                                        alloc.dupe(r.sdk.Part, &.{
+                                            .{ .text = send_text },
+                                        }) catch break;
 
-                                        if (app.screenshot_buf) |buf| {
-                                            parts[1] = .{ .image = .{
-                                                .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{buf}),
-                                                .media_type = "image/png",
-                                            } };
-                                        }
-
-                                        const chat_msg = try ChatEntry.userMessageSimple(alloc, .user, chat_text);
-                                        try app.cmd_queue.append(io, .{ .queue_agent_message = .{
-                                            .agent_id = agent_id,
-                                            .parts = parts,
-                                            .chat_entry = chat_msg,
-                                        } });
-                                    }
-
-                                    try app.cmd_queue.append(io, .{ .scroll_down = 999999 });
                                     app.screenshot_buf = null;
+
+                                    try app.sendPrompt(io, parts, chat_text);
                                     app.input_buffer.clearRetainingCapacity();
-                                    continue;
-                                }
-
-                                app.pushHistory(input);
-                                if (config_lua) |info| app.saveHistory(info.dir_path);
-
-                                const alloc = app.sessionAlloc();
-                                const parts: []const r.sdk.Part = if (app.screenshot_buf) |img_data|
-                                    alloc.dupe(r.sdk.Part, &.{
-                                        .{ .text = send_text },
-                                        .{ .image = .{ .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{img_data}), .media_type = "image/png" } },
-                                    }) catch break
-                                else
-                                    alloc.dupe(r.sdk.Part, &.{
-                                        .{ .text = send_text },
-                                    }) catch break;
-
-                                app.screenshot_buf = null;
-
-                                try app.sendPrompt(io, parts, chat_text);
-                                app.input_buffer.clearRetainingCapacity();
+                                },
+                                .passphrase => {
+                                    handleSshUnlock(&app, app.exec_pool, gpa);
+                                },
                             },
-                            .passphrase => {
-                                handleSshUnlock(&app, app.exec_pool, gpa);
-                            },
-                        },
-                        .esc => switch (app.input_mode) {
-                            .text => {
-                                const input = app.inputSlice();
-                                if (input.len > 0 and input[0] == '/') {
-                                    app.input_buffer.clearRetainingCapacity();
-                                    app.input_cursor = 0;
-                                }
-                            },
-                            .passphrase => {
-                                app.pushSystemMessage("ssh: passphrase entry canceled", .{});
-                                app.returnToText();
+                            .esc => switch (app.input_mode) {
+                                .text => {
+                                    const input = app.inputSlice();
+                                    if (input.len > 0 and input[0] == '/') {
+                                        app.input_buffer.clearRetainingCapacity();
+                                        app.input_cursor = 0;
+                                    }
+                                },
+                                .passphrase => {
+                                    app.pushSystemMessage("ssh: passphrase entry canceled", .{});
+                                    app.returnToText();
+                                },
+                                else => {},
                             },
                             else => {},
+                        }
+                    },
+                    .paste => |text| switch (app.input_mode) {
+                        .text => app.pasteImageOrText(text),
+                        .perm_message => |*pm| {
+                            if (pm.len + text.len <= pm.buf.len) {
+                                @memcpy(pm.buf[pm.len..][0..text.len], text);
+                                pm.len += text.len;
+                            }
                         },
-                        else => {},
-                    }
-                },
-                .paste => |text| switch (app.input_mode) {
-                    .text => app.pasteImageOrText(text),
-                    .perm_message => |*pm| {
-                        if (pm.len + text.len <= pm.buf.len) {
-                            @memcpy(pm.buf[pm.len..][0..text.len], text);
-                            pm.len += text.len;
+                        .perm_select => {},
+                        .passphrase => |*pp| {
+                            if (pp.len + text.len <= pp.buf.len) {
+                                @memcpy(pp.buf[pp.len..][0..text.len], text);
+                                pp.len += text.len;
+                            }
+                        },
+                    },
+                    .mouse => |m| {
+                        const wheel = term.handleMouse(m);
+                        if (wheel < 0) {
+                            try app.cmd_queue.append(io, .{ .scroll_up = @intCast(-wheel) });
+                        } else if (wheel > 0) {
+                            try app.cmd_queue.append(io, .{ .scroll_down = @intCast(wheel) });
                         }
                     },
-                    .perm_select => {},
-                    .passphrase => |*pp| {
-                        if (pp.len + text.len <= pp.buf.len) {
-                            @memcpy(pp.buf[pp.len..][0..text.len], text);
-                            pp.len += text.len;
-                        }
-                    },
-                },
-                .mouse => |m| {
-                    const wheel = term.handleMouse(m);
-                    if (wheel < 0) {
-                        try app.cmd_queue.append(io, .{ .scroll_up = @intCast(-wheel) });
-                    } else if (wheel > 0) {
-                        try app.cmd_queue.append(io, .{ .scroll_down = @intCast(wheel) });
-                    }
-                },
-                .resize => {},
-                .none => break,
+                    .resize => {},
+                    .none => break,
+                }
             }
-        }
 
-        try app.cmd_queue.apply(io, &app);
-    }
+            try app.cmd_queue.apply(io, &app);
+
+            if (was_running and !app.running) checkpoint(&app, &store);
+            was_running = app.running;
+        }
+        exit_hint = true;
+    } // tui_phase
+
+    checkpoint(&app, &store);
+    if (exit_hint) printSessionHint(&store, &session_id_buf);
 }
 
 test "generated Lua metadata is not reloadable config" {
@@ -874,6 +988,34 @@ test "generated Lua metadata is not reloadable config" {
     try std.testing.expect(isReloadableConfigLua("tools.lua"));
     try std.testing.expect(!isReloadableConfigLua("meta.lua"));
     try std.testing.expect(!isReloadableConfigLua(".luarc.json"));
+}
+
+/// Persists a full snapshot if a session exists and there is anything to save.
+fn checkpoint(app: *App, store: *session_store.Store) void {
+    if (store.file_name == null) return;
+    const agent = app.mainAgent() orelse return;
+
+    var arena = std.heap.ArenaAllocator.init(app.gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const save = session.buildSaveState(app, agent, alloc) catch |err| {
+        std.log.scoped(.session).warn("checkpoint encode failed: {s}", .{@errorName(err)});
+        return;
+    };
+    if (save.chat.len == 0) return;
+
+    store.appendCheckpoint(save) catch |err| {
+        std.log.scoped(.session).warn("checkpoint write failed: {s}", .{@errorName(err)});
+    };
+}
+
+/// Prints the resume hint once the terminal is back on the normal screen.
+/// Suppressed when the journal has no checkpoints, so a `blitz continue <id>`
+/// built from the hint can never hit "no usable checkpoint".
+fn printSessionHint(store: *session_store.Store, id_buf: *[session_store.ID_LEN]u8) void {
+    if (store.checkpoint_count == 0) return;
+    const id = store.currentId(id_buf) orelse return;
+    std.debug.print("session saved: {s} - blitz continue {s}\n", .{ id, id });
 }
 
 /// Headless mode: send the prompt, drain the agent loop, print the final
@@ -1238,6 +1380,7 @@ pub const CliArgs = struct {
 pub const CliCommand = union(enum) {
     run: []const u8, // '.', './', /full/path/to/dir
     prompt: []const u8, // prefill input in CWD
+    cont: ?[]const u8, // resume a session (null = most recent)
     help,
     update,
 
@@ -1256,6 +1399,10 @@ pub const CliCommand = union(enum) {
         if (std.mem.eql(u8, head, "prompt")) {
             const sub = rest[0];
             return .{ .cmd = .{ .prompt = sub } };
+        }
+
+        if (std.mem.eql(u8, head, "continue")) {
+            return .{ .cmd = .{ .cont = if (rest.len > 0) rest[0] else null } };
         }
 
         if (std.mem.eql(u8, head, "update")) return .{ .cmd = .update };
