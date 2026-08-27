@@ -2845,7 +2845,7 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
     const now: i128 = @intCast(std.Io.Timestamp.now(app.io, .real).nanoseconds);
     const active_agent_count = app.registry.countActive();
     const waiting = active_agent_count > 0;
-    const live = if (agent.run_started_ns != 0 and (state == .active or waiting))
+    const live = if (agent.run_started_ns != 0 and agent.run_ended_ns == 0 and (state == .active or waiting))
         @max(0, now - agent.run_started_ns)
     else
         0;
