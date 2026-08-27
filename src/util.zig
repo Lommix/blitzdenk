@@ -1,12 +1,15 @@
 const std = @import("std");
 
-pub const BLITZ_DIR = ".blitz";
-/// Low-value cache; wiped automatically when the system reboots.
+/// Low-value scratch; wiped automatically when the system reboots.
 pub const TMP_DIR = "/tmp/blitz";
 
-/// Ensure Blitzdenk's runtime-data directory exists below `dir`.
-pub fn ensureBlitzDir(dir: std.Io.Dir, io: std.Io) !void {
-    try dir.createDirPath(io, BLITZ_DIR);
+pub fn cacheDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) ![]u8 {
+    const xdg = env.get("XDG_CACHE_HOME") orelse "";
+    const root = if (xdg.len > 0) xdg else blk: {
+        const home = env.get("HOME") orelse return error.NoHomeFound;
+        break :blk try std.fmt.allocPrint(alloc, "{s}/.cache", .{home});
+    };
+    return std.fmt.allocPrint(alloc, "{s}/blitzdenk", .{root});
 }
 
 /// Owned copy of `text`, ill-formed UTF-8 replaced with U+FFFD.
@@ -62,15 +65,20 @@ pub fn deepClone(comptime T: type, value: T, alloc: std.mem.Allocator) !T {
     };
 }
 
-test "ensureBlitzDir creates the runtime-data directory idempotently" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
+test "cacheDir resolves XDG, empty XDG, and HOME fallback" {
+    const testing = std.testing;
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
 
-    try ensureBlitzDir(tmp.dir, std.testing.io);
-    try ensureBlitzDir(tmp.dir, std.testing.io);
+    try env.put("XDG_CACHE_HOME", "/xdg/cache");
+    try testing.expectEqualStrings("/xdg/cache/blitzdenk", try cacheDir(alloc, &env));
 
-    var blitz_dir = try tmp.dir.openDir(std.testing.io, BLITZ_DIR, .{});
-    blitz_dir.close(std.testing.io);
+    try env.put("XDG_CACHE_HOME", "");
+    try env.put("HOME", "/home/user");
+    try testing.expectEqualStrings("/home/user/.cache/blitzdenk", try cacheDir(alloc, &env));
 }
 
 test "deepClone primitives" {

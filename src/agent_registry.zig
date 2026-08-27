@@ -46,6 +46,7 @@ pub const Registry = struct {
     total_usage: sdk.Usage = .{},
     model_usage: std.StringArrayHashMapUnmanaged(sdk.Usage) = .{},
     report_enabled: bool = false,
+    cache_dir: []const u8 = "",
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io) Registry {
         return .{ .alloc = alloc, .io = io };
@@ -339,7 +340,7 @@ pub const Registry = struct {
         const agent = if (slot.agent) |*value| value else return;
         if (agent.name.len == 0 or agent.history().len == 0) return;
         const slot_index = (@intFromPtr(slot) - @intFromPtr(&self.slots[0])) / @sizeOf(Slot);
-        report.writeReleasedReport(self.io, self.alloc, agent.name, agent.model.languageModel().modelId(), slot_index, agent.history()) catch {};
+        report.writeReleasedReport(self.io, self.alloc, self.cache_dir, agent.name, agent.model.languageModel().modelId(), slot_index, agent.history()) catch {};
     }
 
     const DrainContext = struct {

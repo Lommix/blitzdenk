@@ -33,12 +33,16 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-// TUI owns stderr; Route std.log to debug.log in cwd instead. Using a raw POSIX fd with O_APPEND.
+// TUI owns stderr; Route std.log to debug.log in the cache dir instead. Using a raw POSIX fd with O_APPEND.
 var debug_log_fd: std.posix.fd_t = -1;
-fn openDebugLog(io: std.Io) void {
-    util.ensureBlitzDir(std.Io.Dir.cwd(), io) catch return;
+fn openDebugLog(io: std.Io, env: *const std.process.Environ.Map) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const cache_dir = util.cacheDir(arena.allocator(), env) catch return;
+    std.Io.Dir.cwd().createDirPath(io, cache_dir) catch return;
+    const path = std.fmt.allocPrint(arena.allocator(), "{s}/debug.log", .{cache_dir}) catch return;
     const flags: std.posix.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true };
-    debug_log_fd = std.posix.openat(std.posix.AT.FDCWD, util.BLITZ_DIR ++ "/debug.log", flags, 0o644) catch -1;
+    debug_log_fd = std.posix.openat(std.posix.AT.FDCWD, path, flags, 0o644) catch -1;
 }
 
 fn fileLogFn(
@@ -125,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
     const split = CliArgs.split(init.minimal.args, &pos_buf);
     const cli_flags = split.flags;
     const command_result = CliCommand.parse(split.positional);
-    if (cli_flags.debug_log or builtin.mode == .Debug) openDebugLog(io);
+    if (cli_flags.debug_log or builtin.mode == .Debug) openDebugLog(io, init.environ_map);
 
     const cmd: CliCommand = if (split.prompt) |p|
         CliCommand{ .prompt = p }
@@ -181,7 +185,16 @@ pub fn main(init: std.process.Init) !void {
             var cwd_buffer: [std.posix.PATH_MAX]u8 = undefined;
             const len = try std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buffer);
             const cwd = cwd_buffer[0..len];
-            const cwd_dir = try std.Io.Dir.cwd().openDir(io, cwd, .{});
+            const cache_dir = util.cacheDir(init.arena.allocator(), init.environ_map) catch |err| {
+                std.debug.print("Error: resolving cache dir failed: {s}\n", .{@errorName(err)});
+                return;
+            };
+            const project_dir = sessionProjectDir(init.arena.allocator(), cache_dir, cwd) catch |err| {
+                std.debug.print("Error: resolving session dir failed: {s}\n", .{@errorName(err)});
+                return;
+            };
+            std.Io.Dir.cwd().createDirPath(io, project_dir) catch {};
+            const cwd_dir = try std.Io.Dir.cwd().openDir(io, project_dir, .{});
             defer cwd_dir.close(io);
             const resolved: ?[]const u8 = if (prefix) |p|
                 session_store.resolve(init.arena.allocator(), io, cwd_dir, p) catch |err| switch (err) {
@@ -205,7 +218,7 @@ pub fn main(init: std.process.Init) !void {
                 if (prefix != null) {
                     std.debug.print("Error: no session matching '{s}'\n", .{prefix.?});
                 } else {
-                    std.debug.print("Error: no sessions found in {s}\n", .{cwd});
+                    std.debug.print("Error: no sessions found in {s}\n", .{project_dir});
                 }
                 return;
             };
@@ -272,6 +285,10 @@ fn updateCli(io: std.Io, gpa: std.mem.Allocator, env: *const std.process.Environ
     std.debug.print("blitz updated to {s} - restart to apply\n", .{update.latest});
 }
 
+fn sessionProjectDir(alloc: std.mem.Allocator, cache_dir: []const u8, project_cwd: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc, "{s}/{x:0>16}", .{ cache_dir, std.hash.Fnv1a_64.hash(project_cwd) });
+}
+
 pub fn run(
     cwd: []const u8,
     gpa: std.mem.Allocator,
@@ -290,9 +307,10 @@ pub fn run(
     const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
     context_factory.flags.skip_local_context_file = flags.no_context;
 
-    // Sessions always live under the project cwd, never the process cwd, so
-    // `blitz /path/to/proj` journals where `blitz continue` will find them.
-    var cwd_dir = try std.Io.Dir.cwd().openDir(io, cwd, .{});
+    const cache_dir = try util.cacheDir(arena, env);
+    const project_cache = try sessionProjectDir(arena, cache_dir, cwd);
+    std.Io.Dir.cwd().createDirPath(io, project_cache) catch {};
+    var cwd_dir = try std.Io.Dir.cwd().openDir(io, project_cache, .{});
     defer cwd_dir.close(io);
 
     session_store.collectGarbage(arena, io, cwd_dir, session_store.GC_AGE_MS);
@@ -316,6 +334,7 @@ pub fn run(
         exec_pool.deinit();
     }
     registry.report_enabled = flags.report;
+    registry.cache_dir = cache_dir;
 
     app.lua_vm.setApp(&app);
     app.lua_vm.clearLastError();

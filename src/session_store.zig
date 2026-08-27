@@ -1,7 +1,7 @@
 const std = @import("std");
 const session = @import("session.zig");
 
-pub const DIR_RELATIVE = ".blitz/sessions";
+const DIR_NAME = "sessions";
 pub const GC_AGE_MS: i64 = 16 * 24 * 60 * 60 * std.time.ms_per_s;
 const FORMAT_VERSION = 1;
 const MAX_CHECKPOINTS = 4;
@@ -29,8 +29,8 @@ pub const Loaded = struct {
 };
 
 /// Append-only JSONL journal: header line, then full-snapshot checkpoint
-/// lines. All paths are resolved against `base` — always pass the *project*
-/// directory, not the process cwd, so a session started via
+/// lines. `base` is the per-project cache directory; every call in `main.zig`
+/// opens it through `sessionProjectDir`, so a session started via
 /// `blitz /path/to/proj` is discoverable by `blitz continue` inside that
 /// project. Loads tolerate torn or corrupt tail lines by falling back to the
 /// last parseable checkpoint; a file without a usable checkpoint counts as
@@ -208,7 +208,7 @@ fn formatId(buf: []u8, millis: i64, io: std.Io) void {
 }
 
 pub fn list(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir) ![]Entry {
-    var sessions_dir = base.openDir(io, DIR_RELATIVE, .{ .iterate = true }) catch |err| switch (err) {
+    var sessions_dir = base.openDir(io, DIR_NAME, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return &.{},
         else => return err,
     };
@@ -268,7 +268,7 @@ pub fn fileName(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 /// no usable checkpoint. A corrupt or missing header line does not disable
 /// checkpoint scanning; the id then falls back to the file name.
 pub fn load(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, name: []const u8) !?Loaded {
-    var sessions_dir = base.openDir(io, DIR_RELATIVE, .{}) catch |err| switch (err) {
+    var sessions_dir = base.openDir(io, DIR_NAME, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -324,7 +324,7 @@ fn parseHeader(alloc: std.mem.Allocator, line: []const u8) ?Header {
 pub fn collectGarbage(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, max_age_ms: i64) void {
     const entries = list(alloc, io, base) catch return;
     defer freeList(alloc, entries);
-    var sessions_dir = base.openDir(io, DIR_RELATIVE, .{}) catch return;
+    var sessions_dir = base.openDir(io, DIR_NAME, .{}) catch return;
     defer sessions_dir.close(io);
     const now = wallMillis(io);
     for (entries) |entry| {
@@ -345,8 +345,8 @@ fn parseCheckpoint(alloc: std.mem.Allocator, line: []const u8) ?session.SaveStat
 }
 
 fn openSessionsDir(base: std.Io.Dir, io: std.Io) !std.Io.Dir {
-    try base.createDirPath(io, DIR_RELATIVE);
-    return base.openDir(io, DIR_RELATIVE, .{ .iterate = true });
+    try base.createDirPath(io, DIR_NAME);
+    return base.openDir(io, DIR_NAME, .{ .iterate = true });
 }
 
 test "formatId layout and randomness" {
@@ -426,7 +426,7 @@ test "torn tail and corrupt header fall back to last checkpoint" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const base = std.Io.Dir{ .handle = tmp.dir.handle };
-    try base.createDirPath(io, DIR_RELATIVE);
+    try base.createDirPath(io, DIR_NAME);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -436,7 +436,7 @@ test "torn tail and corrupt header fall back to last checkpoint" {
     const good_checkpoint = "{\"kind\":\"checkpoint\",\"ms\":1,\"save\":{\"chat\":[],\"chat_render\":[]}}";
     {
         const body = try std.fmt.allocPrint(alloc, "{{\"kind\":\"header\",\"v\":1,\"id\":\"aaa\",\"created_ms\":0,\"cwd\":\"/x\"}}\n{s}\n{{\"kind\":\"chec", .{good_checkpoint});
-        var sessions_dir = try base.openDir(io, DIR_RELATIVE, .{ .iterate = true });
+        var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
         defer sessions_dir.close(io);
         const file = try sessions_dir.createFile(io, "20250101-000000-aaaa.jsonl", .{});
         defer file.close(io);
@@ -452,7 +452,7 @@ test "torn tail and corrupt header fall back to last checkpoint" {
 
     // Corrupt header: checkpoints must still be found; id from file name.
     {
-        var sessions_dir = try base.openDir(io, DIR_RELATIVE, .{ .iterate = true });
+        var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
         defer sessions_dir.close(io);
         const file = try sessions_dir.createFile(io, "20250101-000000-bbbb.jsonl", .{ .truncate = true });
         defer file.close(io);
@@ -478,7 +478,7 @@ test "torn tail and corrupt header fall back to last checkpoint" {
     for (0..MAX_CHECKPOINTS + 1) |_| try store.appendCheckpoint(empty);
     try testing.expectEqual(@as(u32, 1), store.checkpoint_count);
     const stat = blk: {
-        var sessions_dir = try base.openDir(io, DIR_RELATIVE, .{ .iterate = true });
+        var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
         defer sessions_dir.close(io);
         break :blk try sessions_dir.statFile(io, store.file_name.?, .{});
     };
@@ -486,7 +486,7 @@ test "torn tail and corrupt header fall back to last checkpoint" {
 
     // Torn-tail healing: the next append must not fuse onto a missing '\n'.
     {
-        var sessions_dir = try base.openDir(io, DIR_RELATIVE, .{ .iterate = true });
+        var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
         defer sessions_dir.close(io);
         const f = try sessions_dir.openFile(io, store.file_name.?, .{ .mode = .read_write });
         defer f.close(io);

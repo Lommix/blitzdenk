@@ -1,23 +1,21 @@
 const std = @import("std");
 const sdk = @import("blitz-sdk");
 
-pub const REPORT_DIR = "reports";
-const BLITZ_DIR = ".blitz";
 const MAX_NAME_CHARS = 64;
 
 pub fn writeReleasedReport(
     io: std.Io,
     alloc: std.mem.Allocator,
+    cache_dir: []const u8,
     name: []const u8,
     model: []const u8,
     slot_index: usize,
     messages: []const sdk.Message,
 ) !void {
-    try std.Io.Dir.cwd().createDirPath(io, BLITZ_DIR);
-    var blitz_dir = try std.Io.Dir.cwd().openDir(io, BLITZ_DIR, .{});
-    defer blitz_dir.close(io);
-    try blitz_dir.createDirPath(io, REPORT_DIR);
-    var reports_dir = try blitz_dir.openDir(io, REPORT_DIR, .{});
+    const cache_path = try std.fmt.allocPrint(alloc, "{s}/reports", .{cache_dir});
+    defer alloc.free(cache_path);
+    try std.Io.Dir.cwd().createDirPath(io, cache_path);
+    var reports_dir = try std.Io.Dir.openDirAbsolute(io, cache_path, .{});
     defer reports_dir.close(io);
     var name_buffer: [MAX_NAME_CHARS]u8 = undefined;
     const safe_name = sanitize(name, &name_buffer);
