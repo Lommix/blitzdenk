@@ -24,8 +24,8 @@ Important modules:
 - `src/agent_registry.zig` state management for many agents; `drain()` fans events out
 - `src/commands.zig` async command queue.
 - `src/inject.zig` agent status injections
-- `src/session.zig` save/load session state; `SaveState`/`WireToolStatus` shared by Lua path and store
-- `src/session_store.zig` JSONL session journals in `~/.cache/blitzdenk/<fnv1a64-of-cwd>/sessions/<id>.jsonl` (header + full-snapshot checkpoints, cap 4, tmp+rename compaction, GC >16d); `blitz continue [ID]` and exit hint in `main.zig` use it; reports and debug.log also live in `~/.cache/blitzdenk`
+- `src/session.zig` save/load session state; `SaveState`/`WireToolStatus` shared by store checkpoint and `blitz continue`
+- `src/session_store.zig` JSONL session journals in `~/.cache/blitzdenk/<fnv1a64-of-cwd>/sessions/<id>.jsonl` (header + full-snapshot checkpoints, cap 4, tmp+rename compaction, GC >16d); `blitz continue [ID]` and exit hint in `main.zig` use it; debug.log also lives in `~/.cache/blitzdenk`
 - `src/compact.zig` chat compaction logic
 - `src/events.zig` exposed hooks
 - `src/defaults.zig` installs default config files into `~/.config/blitzdenk`

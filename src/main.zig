@@ -253,7 +253,6 @@ pub fn main(init: std.process.Init) !void {
                 \\  --log              write debug.log in path
                 \\  --strict           request permissions
                 \\  --clean            skip local user context
-                \\  --report           write per-agent markdown reports on exit
                 \\  --yolo             auto-approve all requests in ssh sessions
                 \\  --prompt "STRING"  prefill input in current cwd
                 \\  --headless         with --prompt: run headless, print final message
@@ -333,9 +332,6 @@ pub fn run(
         registry.deinit();
         exec_pool.deinit();
     }
-    registry.report_enabled = flags.report;
-    registry.cache_dir = cache_dir;
-
     app.lua_vm.setApp(&app);
     app.lua_vm.clearLastError();
 
@@ -1308,8 +1304,6 @@ pub const CliFlags = packed struct {
     strict_mode: bool = false,
     /// don't load AGENTS.md
     no_context: bool = false,
-    /// write per-agent markdown reports on exit
-    report: bool = false,
     /// run --prompt headless, print final message instead of tui
     headless: bool = false,
     /// auto-approve every request during ssh sessions
@@ -1328,11 +1322,6 @@ pub const CliFlags = packed struct {
 
         if (std.mem.eql(u8, tok, "--clean")) {
             self.no_context = true;
-            return true;
-        }
-
-        if (std.mem.eql(u8, tok, "--report")) {
-            self.report = true;
             return true;
         }
 

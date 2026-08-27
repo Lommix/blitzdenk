@@ -5,7 +5,6 @@ const agent_id = @import("agent-id");
 const agent_run = @import("agent_run.zig");
 const compact = @import("compact.zig");
 const models = @import("models");
-const report = @import("report.zig");
 const log = std.log.scoped(.agent_registry);
 
 pub const max_agents = agent_id.max_agents;
@@ -45,8 +44,6 @@ pub const Registry = struct {
     slots: [max_agents]Slot = [_]Slot{.{}} ** max_agents,
     total_usage: sdk.Usage = .{},
     model_usage: std.StringArrayHashMapUnmanaged(sdk.Usage) = .{},
-    report_enabled: bool = false,
-    cache_dir: []const u8 = "",
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io) Registry {
         return .{ .alloc = alloc, .io = io };
@@ -55,7 +52,6 @@ pub const Registry = struct {
     pub fn deinit(self: *Registry) void {
         for (&self.slots) |*slot| {
             self.accountUsage(slot);
-            self.writeReport(slot);
             if (slot.agent) |*agent| {
                 agent.deinit();
             }
@@ -129,7 +125,6 @@ pub const Registry = struct {
         if (slot.state.load(.acquire) == .free) return;
         slot.event.set(self.io);
         self.accountUsage(slot);
-        self.writeReport(slot);
         if (slot.agent) |*agent| {
             agent.deinit();
         }
@@ -333,14 +328,6 @@ pub const Registry = struct {
             self.accountUsage(slot);
             slot.event.set(self.io);
         }
-    }
-
-    fn writeReport(self: *Registry, slot: *Slot) void {
-        if (!self.report_enabled) return;
-        const agent = if (slot.agent) |*value| value else return;
-        if (agent.name.len == 0 or agent.history().len == 0) return;
-        const slot_index = (@intFromPtr(slot) - @intFromPtr(&self.slots[0])) / @sizeOf(Slot);
-        report.writeReleasedReport(self.io, self.alloc, self.cache_dir, agent.name, agent.model.languageModel().modelId(), slot_index, agent.history()) catch {};
     }
 
     const DrainContext = struct {

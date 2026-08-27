@@ -71,8 +71,6 @@ pub const Command = union(enum) {
     reload_mcp,
     start_mcp: StartArgs,
     custom: CustomCmd,
-    load_session: []const u8,
-    save_session: []const u8,
     attach_screenshot: ScreenshotArgs,
     add_tool: AddToolArgs,
     // -------------------------------------------
@@ -315,27 +313,6 @@ pub const Command = union(enum) {
             },
             .custom => |arg| {
                 try arg.func(arg.ptr, app);
-            },
-            .load_session => |path| {
-                const file = try std.Io.Dir.cwd().openFile(app.context_factory.io, path, .{ .mode = .read_only });
-                var buf: [64]u8 = undefined;
-                var reader = file.reader(app.context_factory.io, &buf);
-
-                r.session.loadSession(app, &reader.interface) catch {
-                    // --
-                };
-            },
-            .save_session => |path| {
-                // Ensure parent directory exists
-                const parent = std.fs.path.dirname(path) orelse ".";
-                std.Io.Dir.cwd().createDirPath(app.context_factory.io, parent) catch {};
-                const file = try std.Io.Dir.cwd().createFile(app.context_factory.io, path, .{});
-                var buf: [64]u8 = undefined;
-                var writer = file.writer(app.context_factory.io, &buf);
-
-                r.session.saveSession(app, &writer.interface) catch {
-                    // ---
-                };
             },
             .attach_screenshot => |arg| {
                 _ = arg.media_type;

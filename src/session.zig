@@ -46,7 +46,7 @@ pub const WireMessage = struct {
     time_ms: i64 = 0,
 };
 
-pub fn decodeMessages(alloc: std.mem.Allocator, json: []const u8) !agent_run.OwnedMessages {
+fn decodeMessages(alloc: std.mem.Allocator, json: []const u8) !agent_run.OwnedMessages {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -56,7 +56,7 @@ pub fn decodeMessages(alloc: std.mem.Allocator, json: []const u8) !agent_run.Own
     return agent_run.OwnedMessages.clone(alloc, messages);
 }
 
-pub fn encodeMessages(alloc: std.mem.Allocator, messages: []const sdk.Message, writer: *std.Io.Writer) !void {
+fn encodeMessages(alloc: std.mem.Allocator, messages: []const sdk.Message, writer: *std.Io.Writer) !void {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -209,18 +209,6 @@ test "encodeMessage replaces invalid UTF-8 so saved sessions stay loadable" {
     try std.testing.expect(std.unicode.utf8ValidateSlice(content));
 }
 
-pub fn saveSession(a: *app.App, w: *std.Io.Writer) !void {
-    const agent = a.mainAgent() orelse return error.NoActiveSessionToSave;
-
-    var arena = std.heap.ArenaAllocator.init(a.gpa);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const save = try buildSaveState(a, agent, alloc);
-
-    try std.json.Stringify.value(save, .{}, w);
-    try w.flush();
-}
-
 /// Encodes the current session into a `SaveState`; `alloc` must outlive the
 /// returned value (callers typically use an arena). Reminders are skipped.
 pub fn buildSaveState(a: *app.App, agent: *const r.agent.Agent, alloc: std.mem.Allocator) !SaveState {
@@ -287,22 +275,6 @@ fn linesToAnsi(lines: []const r.tui.Line, alloc: std.mem.Allocator) ![]const u8 
 
 fn isReminder(message: sdk.Message) bool {
     return message.role == .user and std.mem.startsWith(u8, message.text(), "<system-reminder>");
-}
-
-pub fn loadSession(a: *app.App, w: *std.Io.Reader) !void {
-    const alloc = a.appAlloc();
-
-    a.reset();
-
-    var json_reader = std.json.Reader.init(alloc, w);
-    defer json_reader.deinit();
-
-    const parsed = try std.json.parseFromTokenSource(SaveState, alloc, &json_reader, .{
-        .ignore_unknown_fields = true,
-    });
-    defer parsed.deinit();
-
-    try applySaveState(a, &parsed.value);
 }
 
 /// Applies an already-parsed snapshot onto the app: rebuilds the main agent

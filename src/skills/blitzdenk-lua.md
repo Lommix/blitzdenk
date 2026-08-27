@@ -229,7 +229,6 @@ Queue API: `reset_session`, `cancel`, `cancel_agent(agent_id)`, `retry`,
 `cancel_agent(agent_id)` cancels one agent; returns `"Success"` or `"Not Found"`.
 `await_agent(agent_id)` blocks and returns an `AWAIT_*` status
 (`AWAIT_COMPLETE`, `AWAIT_FAILED`, `AWAIT_CANCELED`, `AWAIT_INVALID`).
-`save_session(path)`, `load_session(path)`,
 `attach_screenshot(data, media_type)`. `spawn_agent` args: `parent_id`,
 `prompt`, `agent_type`, `fork` (`BlitzSpawnArgs` in `meta.lua`).
 

@@ -58,10 +58,6 @@
 ---@field await_agent fun(agent_id: integer): integer
 ---Return the awaited agent's last assistant text.
 ---@field await_agent_result fun(agent_id: integer): string|nil
----Save current session to disk.
----@field save_session fun(path: string)
----Load a session from disk.
----@field load_session fun(path: string)
 ---Attach a screenshot/image to the current input.
 ---@field attach_screenshot fun(data: string, media_type?: string)
 

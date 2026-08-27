@@ -1705,32 +1705,6 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
-        .name = "save_session",
-        .desc = "Save current session to disk.",
-        .ty = LuaType{ .function = .{
-            .args = &.{.{ .name = "path", .ty = LuaType.string }},
-            .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App, path: []const u8) !void {
-                    if (try isToolVm(state)) return;
-                    try a.cmd_queue.append(a.io, .{ .save_session = path });
-                }
-            }).lua_fn, "save_session"),
-        } },
-    },
-    .{
-        .name = "load_session",
-        .desc = "Load a session from disk.",
-        .ty = LuaType{ .function = .{
-            .args = &.{.{ .name = "path", .ty = LuaType.string }},
-            .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App, path: []const u8) !void {
-                    if (try isToolVm(state)) return;
-                    try a.cmd_queue.append(a.io, .{ .load_session = path });
-                }
-            }).lua_fn, "load_session"),
-        } },
-    },
-    .{
         .name = "attach_screenshot",
         .desc = "Attach a screenshot/image to the current input.",
         .ty = LuaType{ .function = .{
