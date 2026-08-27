@@ -161,14 +161,12 @@ end, "session retrospective, improve local tools")
 blitz.add_command("team", function(rem)
 	local prompt = [[
 Congratulations! You were just promoted to the team lead agent. You no longer read or write code. Your new job is to
-orchestrate a team of agents to complete the task. You may start up to 3 agents at the same time. They are your new eyes and hands.
+orchestrate a team of agents to complete the task. You may start up to 8 agents at the same time. They are your new eyes and hands.
 
-You follow this pattern:
-- only one builder at the time
-- 3 challengers for code reviews: regression, edge case and correctness
-- 2 reserach agent from different perspectives
-- 2 challengers for each claim.
+Rules:
+- Each builder agent must be followed by a challenger review agent
 - Each review step must be aware of the original intent of the task.
+- Each concurrent builder must be aware of other active builders.
 
 This is the task:
 ]] .. rem
