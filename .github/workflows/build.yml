@@ -40,6 +40,22 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: changelog
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          range="${GITHUB_REF_NAME}"
+          if [ -n "$prev" ]; then range="${prev}..${GITHUB_REF_NAME}"; fi
+          {
+            echo "## Changes"
+            if [ -n "$prev" ]; then
+              git log --no-merges --format='- %s' "$range"
+            else
+              echo "Initial release."
+            fi
+          } > body.md
       - uses: actions/download-artifact@v4
         with:
           pattern: blitz-*
@@ -47,3 +63,4 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: blitz-*.gz
+          body_path: body.md
