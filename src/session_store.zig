@@ -32,22 +32,35 @@ pub const Loaded = struct {
 /// lines. `base` is the per-project cache directory; every call in `main.zig`
 /// opens it through `sessionProjectDir`, so a session started via
 /// `blitz /path/to/proj` is discoverable by `blitz continue` inside that
-/// project. Loads tolerate torn or corrupt tail lines by falling back to the
-/// last parseable checkpoint; a file without a usable checkpoint counts as
-/// absent.
+/// project. `create` only arms the store; the journal file materializes with
+/// the first `appendCheckpoint`, so launches without a first message leave no
+/// journal behind. Loads tolerate torn or corrupt tail lines by falling back
+/// to the last parseable checkpoint; a file without a usable checkpoint counts
+/// as absent.
 pub const Store = struct {
     io: std.Io,
     gpa: std.mem.Allocator,
     base: std.Io.Dir,
     file_name: ?[]const u8 = null,
     checkpoint_count: u32 = 0,
+    cwd: []const u8 = "",
 
     pub fn deinit(self: *Store) void {
         if (self.file_name) |name| self.gpa.free(name);
         self.file_name = null;
+        if (self.cwd.len > 0) self.gpa.free(self.cwd);
+        self.cwd = "";
     }
 
+    /// Arms the store so the first `appendCheckpoint` materializes the journal file.
     pub fn create(self: *Store, cwd: []const u8) !void {
+        if (self.cwd.len > 0) self.gpa.free(self.cwd);
+        self.cwd = try self.gpa.dupe(u8, cwd);
+        self.checkpoint_count = 0;
+    }
+
+    fn createJournal(self: *Store) !void {
+        const cwd = if (self.cwd.len > 0) self.cwd else ".";
         var sessions_dir = try openSessionsDir(self.base, self.io);
         defer sessions_dir.close(self.io);
 
@@ -95,7 +108,8 @@ pub const Store = struct {
     /// The 512-byte writer buffer streams fine even for multi-MB checkpoint
     /// lines — do not "optimize" it to line size.
     pub fn appendCheckpoint(self: *Store, save: session.SaveState) !void {
-        const name = self.file_name orelse return error.NoSessionOpen;
+        if (self.file_name == null) try self.createJournal();
+        const name = self.file_name.?;
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const alloc = arena.allocator();
@@ -376,10 +390,15 @@ test "create, checkpoint, load, resolve, gc roundtrip" {
     var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
     defer store.deinit();
     try store.create("/tmp/project");
-    try testing.expect(store.file_name != null);
+    try testing.expect(store.file_name == null);
+
+    const entries_before = try list(testing.allocator, io, base);
+    defer freeList(testing.allocator, entries_before);
+    try testing.expectEqual(@as(usize, 0), entries_before.len);
 
     const save = session.SaveState{ .chat = &.{}, .chat_render = &.{} };
     try store.appendCheckpoint(save);
+    try testing.expect(store.file_name != null);
     try store.appendCheckpoint(save);
 
     var id_buf: [64]u8 = undefined;
@@ -500,6 +519,30 @@ test "torn tail and corrupt header fall back to last checkpoint" {
     const healed = (try load(arena3.allocator(), io, base, store.file_name.?)) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(u32, 1), store.checkpoint_count);
     try testing.expectEqual(@as(usize, 0), healed.save.chat.len);
+}
+
+test "create without checkpoint leaves no journal file" {
+    const testing = std.testing;
+    var io_state = std.Io.Threaded.init(testing.allocator, .{});
+    defer io_state.deinit();
+    const io = io_state.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = std.Io.Dir{ .handle = tmp.dir.handle };
+
+    var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
+    defer store.deinit();
+    try store.create("/tmp/project");
+    store.deinit();
+    store = Store{ .io = io, .gpa = testing.allocator, .base = base };
+    try store.create("/tmp/project");
+
+    const entries = try list(testing.allocator, io, base);
+    defer freeList(testing.allocator, entries);
+    try testing.expectEqual(@as(usize, 0), entries.len);
+    try testing.expect(store.currentId(&.{}) == null);
+    try testing.expectEqual(@as(u32, 0), store.checkpoint_count);
 }
 
 test "pre-tool_status save file loads with empty tool_status" {
