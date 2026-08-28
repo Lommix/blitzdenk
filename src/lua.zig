@@ -1467,7 +1467,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
-        .name = "push_chat_entry",
+        .name = "message_chat",
         .desc = "Push a chat entry into the chat log.",
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "role", .ty = LuaType.string }, .{ .name = "text", .ty = LuaType.string } },
@@ -1489,11 +1489,11 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                         .parts = parts,
                     } });
                 }
-            }).lua_fn, "cmd.push_chat_entry"),
+            }).lua_fn, "cmd.message_chat"),
         } },
     },
     .{
-        .name = "queue_agent_message",
+        .name = "message_agent",
         .desc = "Queue a user message for the given agent.",
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "text", .ty = LuaType.string } },
@@ -1505,7 +1505,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                         .parts = &parts,
                     } });
                 }
-            }).lua_fn, "cmd.queue_agent_message"),
+            }).lua_fn, "cmd.message_agent"),
         } },
     },
     .{

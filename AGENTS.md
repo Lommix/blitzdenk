@@ -45,7 +45,7 @@ Important modules:
 - `~/.config/blitzdenk/meta.lua` is force-overwritten from embedded `src/meta.lua` at launch, so it lags until the next binary run
 - `~/.config/blitzdenk/blitz.lua` is write-once (`force = false`); upgrades never add new api calls to existing user configs
 - Lua-set definitions (prompts, tools, capability rules) are duped into the factory `prompt_arena`; `resetDefs()` clears them on hot reload and the reloaded config reinstalls them
-- In Lua an agent id is one packed integer (`AgentId.pack()`), used by `spawn_agent` returns, `cancel_agent`, `queue_agent_message`, `await_agent`, event payloads, and the `agent` tool result string `agent_id: <int>`
+- In Lua an agent id is one packed integer (`AgentId.pack()`), used by `spawn_agent` returns, `cancel_agent`, `message_agent`, `await_agent`, event payloads, and the `agent` tool result string `agent_id: <int>`
 - `pushAny`/`readAnyValueAlloc` marshal Zig↔Lua; the packed-struct branch is gated to `T == r.AgentId` — widening it to all packed structs breaks the `get_flags`/`set_flags` `AppFlags` table roundtrip
 - `pushAgentId`/`readAgentIdArg` convert ids at the trust boundary; `readAgentIdArg` range-checks before `@intCast` since Lua integers are 64-bit
 - `isToolVm(state)` guard blocks `cmd.*` calls from tool VMs
