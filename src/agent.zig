@@ -77,6 +77,8 @@ pub const Agent = struct {
     parent: ?u32,
     depth: u16,
     background: bool = false,
+    /// reap() report consumed; survives until the next run restarts the agent
+    reported_task_done: bool = false,
     cwd: []const u8,
     system_prompt: []const u8 = "",
     skill_catalog_digest: ?u64 = null,

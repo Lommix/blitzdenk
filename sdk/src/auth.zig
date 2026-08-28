@@ -24,14 +24,14 @@ pub fn resolveKey(env: Env, env_var: []const u8) ?[]const u8 {
 
 pub fn bearerHeader(alloc: std.mem.Allocator, key: []const u8) !std.http.Header {
     return .{
-        .name = "Authorization",
+        .name = try alloc.dupe(u8, "Authorization"),
         .value = try std.fmt.allocPrint(alloc, "Bearer {s}", .{key}),
     };
 }
 
 pub fn apiKeyHeader(alloc: std.mem.Allocator, key: []const u8) !std.http.Header {
     return .{
-        .name = "x-api-key",
+        .name = try alloc.dupe(u8, "x-api-key"),
         .value = try alloc.dupe(u8, key),
     };
 }

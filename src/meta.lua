@@ -42,6 +42,8 @@
 ---@field cancel fun()
 ---Cancel the given agent. Returns 'Success' or 'Not Found'.
 ---@field cancel_agent fun(agent_id: integer): string
+---Cancel a finished or running agent and free its slot. History stays rendered. Returns 'Success' or 'Not Found'.
+---@field close_agent fun(agent_id: integer): string
 ---Retry the main agent's last turn.
 ---@field retry fun()
 ---Compact the main agent now when idle, or before its next turn while running.

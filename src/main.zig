@@ -369,6 +369,12 @@ fn openSessionProject(
     return .{ .dir = try std.Io.Dir.cwd().openDir(io, path, .{}), .path = path };
 }
 
+fn openHistoryStoreDir(io: std.Io, alloc: std.mem.Allocator, env: *const std.process.Environ.Map, cwd: []const u8) !std.Io.Dir {
+    const path = try std.fmt.allocPrint(alloc, "{s}/history/{x:0>16}", .{ try util.cacheDir(alloc, env), std.hash.Fnv1a_64.hash(cwd) });
+    std.Io.Dir.cwd().createDirPath(io, path) catch {};
+    return std.Io.Dir.cwd().openDir(io, path, .{});
+}
+
 fn localTime(buf: []u8, millis: i64) []const u8 {
     const seconds: std.c.time_t = @intCast(@divTrunc(millis, std.time.ms_per_s));
     var tm: ct.struct_tm = undefined;
@@ -527,6 +533,9 @@ pub fn run(
     const cwd_dir = project.dir;
     defer cwd_dir.close(io);
 
+    var history_store_dir = try openHistoryStoreDir(io, arena, env, cwd);
+    defer history_store_dir.close(io);
+
     session_store.collectGarbage(arena, io, cwd_dir, session_store.GC_AGE_MS);
 
     var app = try App.init(io, gpa, context_factory, cwd);
@@ -640,7 +649,7 @@ pub fn run(
     }
     checkpoint(&app, &store);
 
-    if (config_lua) |info| app.loadHistory(info.dir_path);
+    app.loadHistory(history_store_dir);
     try app.cmd_queue.apply(io, &app);
 
     if (headless) {
@@ -1075,8 +1084,7 @@ pub fn run(
                                         if (app.lua_vm.vm_mu.tryLock()) {
                                             defer app.lua_vm.vm_mu.unlock(io);
                                             if (app.lua_vm.invokeCommand(input)) {
-                                                app.pushHistory(input);
-                                                if (config_lua) |info| app.saveHistory(info.dir_path);
+                                                app.pushHistory(history_store_dir, input);
                                                 app.input_buffer.clearRetainingCapacity();
                                                 break;
                                             }
@@ -1139,8 +1147,7 @@ pub fn run(
                                     }
 
                                     if (app.running) {
-                                        app.pushHistory(input);
-                                        if (config_lua) |info| app.saveHistory(info.dir_path);
+                                        app.pushHistory(history_store_dir, input);
                                         try app.event_bus.emit(&app, .{ .user_message_sent = chat_text });
                                         if (app.main_agent_id) |agent_id| {
                                             const alloc = app.sessionAlloc();
@@ -1170,8 +1177,7 @@ pub fn run(
                                         continue;
                                     }
 
-                                    app.pushHistory(input);
-                                    if (config_lua) |info| app.saveHistory(info.dir_path);
+                                    app.pushHistory(history_store_dir, input);
 
                                     const alloc = app.sessionAlloc();
                                     const parts: []const r.sdk.Part = if (app.screenshot_buf) |img_data|

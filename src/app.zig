@@ -3,8 +3,6 @@ const r = @import("root.zig");
 const text_utils = r.tui.text_utils;
 const log = std.log.scoped(.app);
 
-pub const PROMPT_HISTORY_FILENAME = "prompt_history.json";
-pub const MAX_HISTORY = 100;
 pub const CONTEXT_LIMIT = 124 * 1024;
 const COMMAND_COMPLETION_ROWS = 64;
 
@@ -555,17 +553,36 @@ pub const App = struct {
     fn handleReapedAgent(self: *App, agent_id: r.AgentId) !void {
         const agent = self.registry.get(agent_id) orelse return;
         const state = self.registry.state(agent_id) orelse return;
-        if (agent.background and state != .active and agent.queued_messages.items.len == 0) {
+        if (state == .active) return;
+        if (agent.queued_messages.items.len > 0) {
+            try self.registry.run(agent_id, .{ .max_steps = std.math.maxInt(usize) });
+            try self.event_bus.emit(self, .{ .agent_started = agent_id });
+            return;
+        }
+        if (agent.reported_task_done) return;
+        agent.reported_task_done = true;
+        if (agent.background) {
             try self.finishBackgroundAgent(agent_id, agent);
             return;
         }
-        if (state == .active or agent.queued_messages.items.len == 0) return;
-        try self.registry.run(agent_id, .{ .max_steps = std.math.maxInt(usize) });
-        try self.event_bus.emit(self, .{ .agent_started = agent_id });
+        const is_main = if (self.main_agent_id) |id| id.pack() == agent_id.pack() else false;
+        if (!is_main and (agent.status == .failed or agent.status == .canceled)) {
+            const err = agent.last_error orelse error.ApiError;
+            self.pushSystemMessage("agent {s} failed: {s}", .{ agent.name, @errorName(err) });
+        }
+    }
+
+    /// Stop and free the agent in `id` without touching its chat entries.
+    /// Used when a spawn replaces the main agent: the old conversation stays
+    /// rendered, only the slot goes back to the pool.
+    pub fn detachMainAgent(self: *App, id: r.AgentId) void {
+        if (self.registry.get(id) == null) return;
+        self.registry.cancel(id);
+        if (self.registry.get(id)) |agent| agent.cancelAndWait();
+        self.registry.release(id);
     }
 
     fn finishBackgroundAgent(self: *App, agent_id: r.AgentId, agent: *r.agent.Agent) !void {
-        defer self.registry.release(agent_id);
         var notice_buf: [160]u8 = undefined;
         const notice = if (self.writeBackgroundResult(agent_id, agent)) |path| blk: {
             defer self.gpa.free(path);
@@ -1283,11 +1300,14 @@ pub const App = struct {
         return self.input_buffer.items;
     }
 
-    pub fn pushHistory(self: *App, text: []const u8) void {
+    pub fn pushHistory(self: *App, store_dir: std.Io.Dir, text: []const u8) void {
         if (text.len == 0) return;
+        r.prompt_history.append(self.gpa, self.io, store_dir, text) catch |err| {
+            log.warn("prompt history append failed: {s}", .{@errorName(err)});
+        };
         const allocator = self.gpa;
         const dupe = allocator.dupe(u8, text) catch return;
-        if (self.history.items.len >= MAX_HISTORY) {
+        if (self.history.items.len >= r.prompt_history.MAX_ENTRIES) {
             const old = self.history.orderedRemove(0);
             allocator.free(old.text);
         }
@@ -1358,62 +1378,21 @@ pub const App = struct {
         timestamp: i128,
     };
 
-    pub fn loadHistory(self: *App, config_dir_path: []const u8) void {
-        const SaveFormat = struct { prompts: []const PromptEntry };
-        const allocator = self.gpa;
-
-        const io = self.io;
-        const abs_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ config_dir_path, PROMPT_HISTORY_FILENAME }) catch return;
-        defer allocator.free(abs_path);
-
-        const file = std.Io.Dir.openFileAbsolute(io, abs_path, .{}) catch return;
-        defer file.close(io);
-
-        var read_buf: [4096]u8 = undefined;
-        var file_reader = file.reader(io, &read_buf);
-        var json_reader = std.json.Reader.init(allocator, &file_reader.interface);
-        defer json_reader.deinit();
-
-        const parsed = std.json.parseFromTokenSource(SaveFormat, allocator, &json_reader, .{
-            .ignore_unknown_fields = true,
-        }) catch return;
-        defer parsed.deinit();
-
-        const src = parsed.value.prompts;
-        const start = if (src.len > MAX_HISTORY) src.len - MAX_HISTORY else 0;
-        for (src[start..]) |entry| {
-            const dupe = allocator.dupe(u8, entry.text) catch return;
-            self.history.append(allocator, .{
+    pub fn loadHistory(self: *App, store_dir: std.Io.Dir) void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const loaded = r.prompt_history.load(arena.allocator(), self.io, store_dir) catch return;
+        for (loaded) |entry| {
+            const dupe = self.gpa.dupe(u8, entry.text) catch return;
+            self.history.append(self.gpa, .{
                 .text = dupe,
                 .timestamp = entry.timestamp,
             }) catch {
-                allocator.free(dupe);
+                self.gpa.free(dupe);
                 return;
             };
         }
         self.history_cursor = self.history.items.len;
-    }
-
-    pub fn saveHistory(self: *const App, config_dir_path: []const u8) void {
-        const SaveFormat = struct { prompts: []const PromptEntry };
-
-        const io = self.io;
-        var buf: [512]u8 = undefined;
-        const abs_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ config_dir_path, PROMPT_HISTORY_FILENAME }) catch return;
-
-        const file = std.Io.Dir.createFileAbsolute(io, abs_path, .{}) catch return;
-        defer file.close(io);
-
-        const items = self.history.items;
-        const start = if (items.len > MAX_HISTORY) items.len - MAX_HISTORY else 0;
-        const save_data = SaveFormat{
-            .prompts = items[start..],
-        };
-
-        var write_buf: [4096]u8 = undefined;
-        var file_writer = file.writer(io, &write_buf);
-        std.json.Stringify.value(save_data, .{ .whitespace = .indent_2 }, &file_writer.interface) catch return;
-        file_writer.interface.flush() catch return;
     }
 
     pub fn popQueuedMessage(self: *App, agent_id: r.AgentId, alloc: std.mem.Allocator) ?[]const r.sdk.Part {
@@ -3812,6 +3791,68 @@ test "subagent events preserve the main tool call preview" {
     try std.testing.expectEqual(@as(usize, 1), app.streaming_entry.?.parts.len);
     try std.testing.expectEqualStrings("agent_1", app.streaming_entry.?.parts[0].tool_call.call_id);
     try std.testing.expectEqual(@as(usize, 4), app.tool_status_entries.value.agents[child_id.index].entries.count());
+}
+
+test "finished retained agents survive reaping and take queued messages" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.gpa = std.testing.allocator;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.arena_streaming_preview = .init(std.testing.allocator);
+    defer app.arena_streaming_preview.deinit();
+    app.arena_streaming_snapshot = .init(std.testing.allocator);
+    defer app.arena_streaming_snapshot.deinit();
+    app.chat_entries = .empty;
+    app.streaming_entry = null;
+    app.sdk_preview_parts = .empty;
+    app.sdk_preview_flushed = false;
+    app.sdk_usage = .{};
+    app.tool_status_entries = .{};
+    app.main_agent_id = null;
+    app.event_bus = .{};
+    app.dirty = false;
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app.registry = &registry;
+
+    const Fixture = struct {
+        fn discard(_: ?*anyopaque, _: r.agent_run.Event) void {}
+    };
+    const child_id = registry.reserve().?;
+    const child = try registry.activate(child_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .type_idx = 1, .name = "child", .cwd = "/tmp" } });
+    try registry.run(child_id, .{ .max_steps = 0 });
+    while (registry.state(child_id) == .active) {
+        _ = registry.drain(child_id, 64, null, Fixture.discard);
+        _ = registry.reap(child_id);
+        if (registry.state(child_id) == .active) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try app.handleReapedAgent(child_id);
+
+    try std.testing.expectEqual(r.agent_registry.SlotState.complete, registry.state(child_id).?);
+    try std.testing.expect(registry.get(child_id) != null);
+    try std.testing.expect(child.reported_task_done);
+    try app.handleReapedAgent(child_id);
+    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
+
+    try child.queueMessages(&.{r.sdk.UserMessage("next question")});
+    try app.handleReapedAgent(child_id);
+    try std.testing.expectEqual(r.agent_registry.SlotState.active, registry.state(child_id).?);
+    try std.testing.expect(!child.reported_task_done);
+    while (registry.state(child_id) == .active) {
+        _ = registry.drain(child_id, 64, null, Fixture.discard);
+        _ = registry.reap(child_id);
+        if (registry.state(child_id) == .active) try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+
+    app.detachMainAgent(child_id);
+    try std.testing.expect(registry.state(child_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
 }
 
 test "background agent result is written for read" {

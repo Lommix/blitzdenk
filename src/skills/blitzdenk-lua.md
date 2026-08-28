@@ -180,6 +180,9 @@ inputs in the function.
 Tool function rules:
 
 - `call.name`, `call.id`, `call.arguments` (table of parsed args).
+- Model-emitted numbers can arrive as strings (`{"id":"65537"}`). Coerce with
+  `tonumber()` before any `cmd.*` call that takes an `agent_id` or an integer;
+  those bindings reject a non-number with `not a number`.
 - `ctx` fields/methods: `ctx.cwd`, `ctx.vision` (calling model supports images), `ctx.agent_id`, `ctx.state`, `ctx:set_status(msg)`,
   `ctx:set_child_id(id)`, `ctx:approve(description)`, `ctx:plan(path, text)`,
   `ctx:ask(header, question, options)`. `approve`/`plan`/`ask` return a status
@@ -220,6 +223,13 @@ general agent's sub-agent tool.
 or `"Not Found"`. An agent id is one integer (the packed `{index, generation}`
 pair); the agent tool result carries it as an `agent_id: <int>` string.
 
+Finished agents keep their slot. Their history stays readable through
+`registry.get`, and `queue_agent_message` on a finished agent starts a new
+turn that continues the same conversation to the next final message. Slots
+are finite (128); free one with `blitz.cmd.close_agent(agent_id)` (cancel +
+free, history stays rendered). `spawn_agent` without `parent_id` detaches the
+previous main agent instead of clearing the chat.
+
 ## Commands and cmd
 
 `blitz.add_command(name, func, description?)`. The description is optional and
@@ -236,12 +246,15 @@ blitz.add_command("plan", function(rem)
 end, "plan a task without editing")
 ```
 
-Queue API: `reset_session`, `cancel`, `cancel_agent(agent_id)`, `retry`,
+Queue API: `reset_session`, `cancel`, `cancel_agent(agent_id)`,
+`close_agent(agent_id)`, `retry`,
 `compact`, `cd(path)`,
 `prompt(text)`,
 `push_chat_entry(role, text)`, `queue_agent_message(agent_id, text)`, `spawn_agent(args)`, `await_agent(agent_id)`,
 `await_agent_result(agent_id)` returns the agent's last assistant text string.
 `cancel_agent(agent_id)` cancels one agent; returns `"Success"` or `"Not Found"`.
+`close_agent(agent_id)` cancels one agent and frees its slot; returns
+`"Success"` or `"Not Found"`.
 `await_agent(agent_id)` blocks and returns an `AWAIT_*` status
 (`AWAIT_COMPLETE`, `AWAIT_FAILED`, `AWAIT_CANCELED`, `AWAIT_INVALID`).
 `attach_screenshot(data, media_type)`. `spawn_agent` args: `parent_id`,
@@ -252,7 +265,8 @@ the chat log and sends it to the main agent (queued while it runs, restarted whe
 idle), or starts a fresh general agent if none exists. Use it instead of
 `push_chat_entry("user", ...)` (display-only) or hand-rolling
 `get_main_agent()` + `queue_agent_message` (which queues silently, no chat echo).
-Note `spawn_agent` without `parent_id` replaces the running main session.
+Note `spawn_agent` without `parent_id` replaces the running main agent; the
+old conversation stays rendered and the old slot is freed.
 
 `blitz.get_main_agent()` returns the main agent id (an integer) or nil.
 

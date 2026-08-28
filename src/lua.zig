@@ -1430,6 +1430,21 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
+        .name = "close_agent",
+        .desc = "Cancel a finished or running agent and free its slot. History stays rendered. Returns 'Success' or 'Not Found'.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &LuaString,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
+                    if (a.registry.get(agent_id) == null) return "Not Found";
+                    try a.cmd_queue.append(a.io, .{ .close_agent = agent_id });
+                    return "Success";
+                }
+            }).lua_fn, "cmd.close_agent"),
+        } },
+    },
+    .{
         .name = "retry",
         .desc = "Retry the main agent's last turn.",
         .ty = LuaType{ .function = .{

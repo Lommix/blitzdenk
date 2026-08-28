@@ -18,6 +18,7 @@ pub const ContextFactory = @import("context_factory.zig");
 pub const skills = @import("skills.zig");
 pub const session = @import("session.zig");
 pub const session_store = @import("session_store.zig");
+pub const prompt_history = @import("prompt_history.zig");
 pub const session_picker = @import("session_picker.zig");
 pub const util = @import("util.zig");
 pub const clipboard = @import("clipboard.zig");

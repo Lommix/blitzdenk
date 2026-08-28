@@ -57,15 +57,34 @@ pub const Chat = struct {
     }
 
     fn authHeaders(self: *Chat, a: std.mem.Allocator, request_headers: []const std.http.Header) ![]std.http.Header {
-        var headers: std.ArrayList(std.http.Header) = .empty;
-        defer headers.deinit(a);
+        const extra_count: usize = @intFromBool(self.api_key.len > 0);
+        const headers = try a.alloc(std.http.Header, extra_count + self.extra_headers.len + request_headers.len);
+        var filled: usize = 0;
+        errdefer auth.freeHeaders(a, headers[0..filled]);
         if (self.api_key.len > 0) {
-            try headers.append(a, try auth.apiKeyHeader(a, self.api_key));
+            headers[filled] = try auth.apiKeyHeader(a, self.api_key);
+            filled += 1;
         }
-        try headers.append(a, .{ .name = "anthropic-version", .value = api_version });
-        try auth.appendHeaders(a, &headers, self.extra_headers);
-        try auth.appendHeaders(a, &headers, request_headers);
-        return auth.ownHeaders(a, headers.items);
+        headers[filled] = .{
+            .name = try a.dupe(u8, "anthropic-version"),
+            .value = try a.dupe(u8, api_version),
+        };
+        filled += 1;
+        for (self.extra_headers) |header| {
+            headers[filled] = .{
+                .name = try a.dupe(u8, header.name),
+                .value = try a.dupe(u8, header.value),
+            };
+            filled += 1;
+        }
+        for (request_headers) |header| {
+            headers[filled] = .{
+                .name = try a.dupe(u8, header.name),
+                .value = try a.dupe(u8, header.value),
+            };
+            filled += 1;
+        }
+        return headers;
     }
 
     fn generate(

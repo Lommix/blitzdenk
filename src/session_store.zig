@@ -194,7 +194,7 @@ fn headerLine(alloc: std.mem.Allocator, id: []const u8, created_ms: i64, cwd: []
     return out.toOwnedSlice();
 }
 
-fn wallMillis(io: std.Io) i64 {
+pub fn wallMillis(io: std.Io) i64 {
     return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
 }
 

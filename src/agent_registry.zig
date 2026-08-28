@@ -176,6 +176,7 @@ pub const Registry = struct {
         const slot = self.slotFor(id) orelse return error.AgentNotFound;
         const agent = if (slot.agent) |*value| value else return error.AgentNotFound;
         if (slot.state.load(.acquire) != .active) slot.event.reset();
+        agent.reported_task_done = false;
         try agent.start(options);
         slot.state.store(.active, .release);
     }
@@ -356,6 +357,45 @@ fn usageDifference(value: sdk.Usage, previous: sdk.Usage) sdk.Usage {
         .cache_read_tokens = value.cache_read_tokens -| previous.cache_read_tokens,
         .cache_write_tokens = value.cache_write_tokens -| previous.cache_write_tokens,
     };
+}
+
+test "reap fires once per run for a finished retained agent" {
+    const Fixture = struct {
+        fn discard(_: ?*anyopaque, _: agent_run.Event) void {}
+    };
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    var registry = Registry.init(std.testing.allocator, io);
+    defer registry.deinit();
+    const id = registry.reserve().?;
+    _ = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    try registry.run(id, .{ .max_steps = 0 });
+    while (registry.state(id) == .active) {
+        _ = registry.drain(id, 64, null, Fixture.discard);
+        _ = registry.reap(id);
+        if (registry.state(id) == .active) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(SlotState.complete, registry.state(id).?);
+    try std.testing.expect(registry.get(id) != null);
+    try std.testing.expect(!registry.get(id).?.reported_task_done);
+    try std.testing.expect(!registry.reap(id));
+
+    const agent = registry.get(id).?;
+    agent.status = .canceled;
+    try std.testing.expect(registry.reap(id));
+    try std.testing.expect(registry.reap(id));
+
+    try registry.run(id, .{ .max_steps = 0 });
+    try std.testing.expect(!registry.get(id).?.reported_task_done);
+    try std.testing.expectEqual(SlotState.active, registry.state(id).?);
+
+    registry.release(id);
+    try std.testing.expect(registry.state(id) == null);
 }
 
 test "registry keeps fixed generation-safe slots" {

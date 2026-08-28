@@ -58,6 +58,7 @@ pub const Command = union(enum) {
     reset_session,
     cancel,
     cancel_agent: r.AgentId,
+    close_agent: r.AgentId,
     retry,
     push_notification: []const u8,
     push_chat_entry: ChatEntry,
@@ -144,6 +145,10 @@ pub const Command = union(enum) {
                 if (app.registry.get(id) == null) return;
                 app.registry.cancel(id);
                 app.event_bus.emit(app, .{ .agent_cancelled = .{ .id = id } }) catch {};
+            },
+            .close_agent => |id| {
+                app.detachMainAgent(id);
+                app.running = app.registry.countActive() > 0;
             },
             .retry => {
                 if (app.main_agent_id) |id| {
@@ -285,11 +290,7 @@ pub const Command = union(enum) {
                 });
 
                 if (arg.parent_id == null) {
-                    if (app.main_agent_id) |ag_id| {
-                        std.log.warn("Dropping active agent without reset!", .{});
-                        app.chat_entries.clearRetainingCapacity();
-                        app.registry.release(ag_id);
-                    }
+                    if (app.main_agent_id) |ag_id| app.detachMainAgent(ag_id);
                     app.main_agent_id = arg.agent_id;
                 }
 
