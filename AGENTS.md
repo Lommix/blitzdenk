@@ -25,7 +25,7 @@ Important modules:
 - `src/commands.zig` async command queue.
 - `src/inject.zig` agent status injections
 - `src/session.zig` save/load session state; `SaveState`/`WireToolStatus` shared by store checkpoint and `blitz continue`
-- `src/session_store.zig` JSONL session journals in `~/.cache/blitzdenk/<fnv1a64-of-cwd>/sessions/<id>.jsonl` (header + full-snapshot checkpoints, cap 4, tmp+rename compaction, GC >16d); `blitz continue [ID]`, `blitz sessions` (TUI session picker over `summaries()` rows; widget state in `src/session_picker.zig`, rendered like the wizard) and the exit hint in `main.zig` use it; debug.log also lives in `~/.cache/blitzdenk`
+- `src/session_store.zig` JSONL session journals in `~/.cache/blitzdenk/<fnv1a64-of-cwd>/sessions/<id>.jsonl` (header + full-snapshot checkpoints, cap 4, tmp+rename compaction, GC >16d); `blitz continue [ID]`, `blitz sessions` (TUI session picker over `summaries()` rows; widget state in `src/session_picker.zig`, rendered like the wizard) and the exit hint in `main.zig` use it; debug.log also lives in `~/.cache/blitzdenk`; `cacheDir()` honors `XDG_CACHE_HOME` over `~/.cache`
 - `src/compact.zig` chat compaction logic
 - `src/events.zig` exposed hooks
 - `src/defaults.zig` installs default config files into `~/.config/blitzdenk`
@@ -61,7 +61,6 @@ Important modules:
 - `zig fmt src/` required after edits
 - command pattern: Lua binding validates and `cmd_queue.append`s (deep-clones into the queue arena), `Command.execute` runs on the app thread; handlers silently no-op on dead agent ids
 - spawn only reserves a registry slot (`.reserved`); activation happens when the queue drains, so a fresh id is not yet `registry.get`-able
-- `cmd.cancel_agent(id)` returns `"Success"`/`"Not Found"` from call-time validity, not final cancel outcome
 
 ## Agent ids across save/restore
 
@@ -80,6 +79,4 @@ Important modules:
 
 ## RULES
 
-- Tautological tests considered harmful.
-- Do not write comments!
-- Keep the user space blitzdenk skill up to date! (`src/skills/blitzdenk-lua.md`, copy to `~/.config/blitzdenk/skills/blitzdenk-lua.md`)
+- Keep the user space blitzdenk skill up to date! `src/skills/blitzdenk-lua.md`
