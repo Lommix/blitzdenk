@@ -4,7 +4,7 @@ pub const CONFIG_DIR = ".config/blitzdenk/";
 pub const SKILL_DIR = CONFIG_DIR ++ "skills/";
 
 const LUA_DEFAULT_FILE = @embedFile("blitz_default.lua");
-const LUA_META_FILE = @embedFile("blitz_defs.lua");
+const LUA_META_FILE = @embedFile("meta.lua");
 const LUA_SKILL_FILE = @embedFile("skills/blitzdenk-lua.md");
 const LUARC_CONTENT =
     \\{

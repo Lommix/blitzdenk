@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     try writeTableDef(w, lua.Blitz, &emitted_table_defs);
     try w.print("---@type {s}\nblitz = {{}}\n", .{className(lua.Blitz)});
 
-    const file = try std.Io.Dir.cwd().createFile(init.io, "src/blitz_defs.lua", .{ .truncate = true });
+    const file = try std.Io.Dir.cwd().createFile(init.io, "src/meta.lua", .{ .truncate = true });
     try file.writeStreamingAll(init.io, w.toArrayList().items);
 }
 

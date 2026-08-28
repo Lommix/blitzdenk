@@ -41,8 +41,8 @@ Important modules:
 
 ## Config and lua data flow
 
-- `zig build gen` regenerates `src/blitz_defs.lua` (type hints + signatures); edit bindings only in `src/lua.zig`
-- `~/.config/blitzdenk/meta.lua` is force-overwritten from embedded `blitz_defs.lua` at launch, so it lags until the next binary run
+- `zig build gen` regenerates `src/meta.lua` (type hints + signatures); edit bindings only in `src/lua.zig`
+- `~/.config/blitzdenk/meta.lua` is force-overwritten from embedded `src/meta.lua` at launch, so it lags until the next binary run
 - `~/.config/blitzdenk/blitz.lua` is write-once (`force = false`); upgrades never add new api calls to existing user configs
 - Lua-set definitions (prompts, tools, capability rules) are duped into the factory `prompt_arena`; `resetDefs()` clears them on hot reload and the reloaded config reinstalls them
 - In Lua an agent id is one packed integer (`AgentId.pack()`), used by `spawn_agent` returns, `cancel_agent`, `queue_agent_message`, `await_agent`, event payloads, and the `agent` tool result string `agent_id: <int>`
@@ -53,7 +53,7 @@ Important modules:
 ## Commands
 
 - `zig build` compile the binary
-- `zig build gen` generate the lua meta file `src/blitz_defs.lua`
+- `zig build gen` generate the lua meta file `src/meta.lua`
 - `make test` run the repo suite (`zig build test --summary all --error-style minimal`)
 - `cd sdk && zig build test` run the sdk suite separately
 - tests are in-file `test` blocks at the bottom of each module
