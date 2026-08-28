@@ -10,6 +10,7 @@ pub fn buildChatRequest(
     model_id: []const u8,
     params: model.GenerateParams,
     stream: bool,
+    replay_reasoning: bool,
 ) ![]const u8 {
     var invalid_calls: std.StringHashMapUnmanaged(void) = .empty;
     defer invalid_calls.deinit(a);
@@ -123,7 +124,7 @@ pub fn buildChatRequest(
                 },
                 else => {},
             };
-            if (std.ascii.indexOfIgnoreCase(model_id, "deepseek") != null) {
+            if (replay_reasoning) {
                 try s.objectField("reasoning_content");
                 try s.write(reasoning_text.items);
             } else if (reasoning_signature.len > 0) {
@@ -886,7 +887,7 @@ test "chat request places system prompt in messages" {
     const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{
         .system = "instructions",
         .messages = &messages,
-    }, true);
+    }, true, false);
     defer std.testing.allocator.free(body);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
     defer parsed.deinit();
@@ -901,7 +902,7 @@ test "chat tool messages use OpenAI fields" {
         .{ .role = .assistant, .content = &.{types.Part.toolCallPart("call_1", "weather", "{\"city\":\"Paris\"}")} },
         types.ToolMessage("call_1", "weather", "sunny"),
     };
-    const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false);
+    const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false, false);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tool_calls\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"tool_call_id\":\"call_1\"") != null);
@@ -917,7 +918,7 @@ test "chat tool messages carry image parts" {
             types.Part.imagePart("data:image/png;base64,aW1n", "image/png"),
         } },
     };
-    const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false);
+    const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false, false);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":[{\"type\":\"text\",\"text\":\"Loaded image\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"image_url\"") != null);
@@ -928,7 +929,7 @@ test "chat structured output and tool choice" {
     const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{
         .tool_choice = .{ .tool = "weather" },
         .response_format = .{ .name = "answer", .schema = "{\"type\":\"object\"}" },
-    }, false);
+    }, false, false);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"response_format\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"name\":\"weather\"") != null);
@@ -945,7 +946,7 @@ test "chat skips malformed tool calls and paired results" {
             types.Part.toolResultPart("call_ok", "read", "contents"),
         } },
     };
-    const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false);
+    const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false, false);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "call_ok") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "call_bad") == null);
@@ -956,13 +957,14 @@ test "chat replays provider reasoning fields" {
         types.Part.reasoningPart("inspect the file", "[{\"type\":\"reasoning.text\",\"text\":\"inspect\"}]"),
         types.Part.textPart("done"),
     } }};
-    const deepseek = try buildChatRequest(std.testing.allocator, "Vendor/DeepSeek-V4-Pro", .{ .messages = &messages }, false);
-    defer std.testing.allocator.free(deepseek);
-    try std.testing.expect(std.mem.indexOf(u8, deepseek, "\"reasoning_content\":\"inspect the file\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, deepseek, "reasoning_details") == null);
 
-    const other = try buildChatRequest(std.testing.allocator, "qwen3-thinking", .{ .messages = &messages }, false);
-    defer std.testing.allocator.free(other);
-    try std.testing.expect(std.mem.indexOf(u8, other, "\"reasoning_details\":[{\"type\":\"reasoning.text\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, other, "reasoning_content") == null);
+    const replayed = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false, true);
+    defer std.testing.allocator.free(replayed);
+    try std.testing.expect(std.mem.indexOf(u8, replayed, "\"reasoning_content\":\"inspect the file\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, replayed, "reasoning_details") == null);
+
+    const signed = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false, false);
+    defer std.testing.allocator.free(signed);
+    try std.testing.expect(std.mem.indexOf(u8, signed, "\"reasoning_details\":[{\"type\":\"reasoning.text\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, signed, "reasoning_content") == null);
 }

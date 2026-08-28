@@ -52,6 +52,7 @@ local deepseek = blitz.add_model({
     name = "deepseek/deepseek-v4-flash-0731",
     provider = novita,
     vision = false,
+    replay_reasoning = true,
     cost = { input = 0.14, output = 0.28, cache = 0.028 },  -- USD per 1M tokens
 })
 
@@ -63,11 +64,15 @@ shape and `blitz.lua` imports it: `local ok, model = pcall(require, "provider")`
 Edit or delete that file to change provider and model. For a typed model id on
 a catalogued provider the wizard asks whether the model has vision; catalogued
 models and empty catalogs (OpenRouter, Ollama, Custom endpoint) skip that
-question.
+question. Catalogued DeepSeek, GLM, and Qwen thinking models get
+`replay_reasoning = true` written for you.
 
 `add_provider` and `add_model` return integer handles. `vision` (default
 false) gates the `view_image` tool and image pasting; `cost` is optional and
-absent means free. Bind a model per agent with `blitz.set_agent_model(agent_type,
+absent means free. `replay_reasoning` (default false) marks chat models that
+need earlier reasoning replayed as `reasoning_content` (DeepSeek, GLM). Set it
+on models that return reasoning but reject replayed history without that
+field. Bind a model per agent with `blitz.set_agent_model(agent_type,
 handle, effort?)` (effort defaults to `"medium"`) or `model = handle` in
 `blitz.add_agent`. Change only the effort with
 `blitz.set_agent_effort(agent_type, effort)`; the agent must already have a

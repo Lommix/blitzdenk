@@ -13,6 +13,7 @@ pub const Options = struct {
     headers: []const std.http.Header = &.{},
     env: auth.Env = .{},
     rate_limit: u32 = 0,
+    replay_reasoning: bool = false,
 };
 
 pub const Chat = struct {
@@ -21,6 +22,7 @@ pub const Chat = struct {
     base_url: []const u8,
     extra_headers: []const std.http.Header,
     rate_limit: u32,
+    replay_reasoning: bool,
 
     pub fn init(alloc: std.mem.Allocator, model_id: []const u8, opts: Options) !Chat {
         const base = opts.base_url orelse auth.resolveKey(opts.env, base_url_env) orelse "";
@@ -31,6 +33,7 @@ pub const Chat = struct {
             .base_url = try alloc.dupe(u8, base),
             .extra_headers = try auth.cloneHeaders(alloc, opts.headers),
             .rate_limit = opts.rate_limit,
+            .replay_reasoning = opts.replay_reasoning,
         };
     }
 
@@ -93,7 +96,7 @@ pub const Chat = struct {
     ) anyerror!*model.GenerateResult {
         const self: *Chat = @ptrCast(@alignCast(ctx));
 
-        const body = try jsonx.buildChatRequest(alloc, self.model_id, params, false);
+        const body = try jsonx.buildChatRequest(alloc, self.model_id, params, false, self.replay_reasoning);
         defer alloc.free(body);
         const headers = try self.authHeaders(alloc, params.headers);
         defer auth.freeHeaders(alloc, headers);
@@ -114,7 +117,7 @@ pub const Chat = struct {
         sctx: *model.StreamContext,
     ) anyerror!*model.GenerateResult {
         const self: *Chat = @ptrCast(@alignCast(ctx));
-        const body = try jsonx.buildChatRequest(alloc, self.model_id, params, true);
+        const body = try jsonx.buildChatRequest(alloc, self.model_id, params, true, self.replay_reasoning);
         defer alloc.free(body);
         const headers = try self.authHeaders(alloc, params.headers);
         defer auth.freeHeaders(alloc, headers);

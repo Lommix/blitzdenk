@@ -36,6 +36,7 @@ pub const CatalogEntry = struct {
 pub const CatalogModel = struct {
     name: []const u8,
     vision: bool = false,
+    replay_reasoning: bool = false,
 };
 
 pub const catalog = [_]CatalogEntry{
@@ -74,7 +75,7 @@ pub const catalog = [_]CatalogEntry{
         .default_url = "https://api.novita.ai/openai/v1",
         .key_envar = "NOVITA_API_KEY",
         .models = &.{
-            .{ .name = "zai-org/glm-5.3-flash", .vision = true },
+            .{ .name = "zai-org/glm-5.3-flash", .vision = true, .replay_reasoning = true },
         },
     },
 
@@ -84,8 +85,8 @@ pub const catalog = [_]CatalogEntry{
         .default_url = "https://api.z.ai/api/coding/paas/v4",
         .key_envar = "Z_AI_KEY",
         .models = &.{
-            .{ .name = "glm-5.3-flash", .vision = true },
-            .{ .name = "glm-5.3", .vision = true },
+            .{ .name = "glm-5.3-flash", .vision = true, .replay_reasoning = true },
+            .{ .name = "glm-5.3", .vision = true, .replay_reasoning = true },
         },
     },
     .{
@@ -94,9 +95,9 @@ pub const catalog = [_]CatalogEntry{
         .default_url = "https://opencode.ai/zen/go/v1",
         .key_envar = "OPENCODE_API_KEY",
         .models = &.{
-            .{ .name = "glm-5.3-flash", .vision = true },
-            .{ .name = "deepseek-v4-flash-vision-exp", .vision = true },
-            .{ .name = "qwen3.8-flash", .vision = true },
+            .{ .name = "glm-5.3-flash", .vision = true, .replay_reasoning = true },
+            .{ .name = "deepseek-v4-flash-vision-exp", .vision = true, .replay_reasoning = true },
+            .{ .name = "qwen3.8-flash", .vision = true, .replay_reasoning = true },
         },
     },
     .{
@@ -276,13 +277,15 @@ pub const Wizard = struct {
 
     pub fn selection(w: *const Wizard) ?Selection {
         const entry = catalogEntry(w.provider_index) orelse return null;
+        const model = selectModel(entry, w.model_buf[0..w.model_len]);
         return .{
             .entry = entry,
             .provider_type = w.provider_type_buf[0..w.provider_type_len],
             .url = w.url_buf[0..w.url_len],
             .key = w.key_buf[0..w.key_len],
             .model = w.model_buf[0..w.model_len],
-            .vision = if (w.vision_override) |v| v else selectModel(entry, w.model_buf[0..w.model_len]).vision,
+            .vision = if (w.vision_override) |v| v else model.vision,
+            .replay_reasoning = model.replay_reasoning,
         };
     }
 };
@@ -294,6 +297,7 @@ pub const Selection = struct {
     key: []const u8,
     model: []const u8,
     vision: bool,
+    replay_reasoning: bool = false,
 };
 
 pub fn nextStep(current: Step, entry: CatalogEntry, model: []const u8) Step {
@@ -358,7 +362,11 @@ pub fn renderProviderLua(allocator: std.mem.Allocator, selection: Selection) ![]
     try w.writeAll(selection.model);
     try w.writeAll("\",\n\tprovider = provider,\n\tvision = ");
     try w.writeAll(if (selection.vision) "true" else "false");
-    try w.writeAll(",\n})\n\nreturn model\n");
+    try w.writeAll(",\n");
+    if (selection.replay_reasoning) {
+        try w.writeAll("\treplay_reasoning = true,\n");
+    }
+    try w.writeAll("})\n\nreturn model\n");
 
     return out.toOwnedSlice();
 }
@@ -371,6 +379,7 @@ pub fn skipProviderLua(allocator: std.mem.Allocator) ![]u8 {
         .key = "",
         .model = SKIP_MODEL,
         .vision = true,
+        .replay_reasoning = true,
     });
 }
 
@@ -581,6 +590,21 @@ test "renderProviderLua ollama omits key lines and keeps url" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\tvision = true,\n") != null);
 }
 
+test "renderProviderLua omits replay_reasoning for flagless models" {
+    const openai_entry = catalog[catalogIndex("OpenAI")];
+    const gpt = openai_entry.models[0];
+    const plain = try renderProviderLua(std.testing.allocator, .{
+        .entry = openai_entry,
+        .provider_type = openai_entry.provider_type,
+        .url = openai_entry.default_url,
+        .key = "",
+        .model = gpt.name,
+        .vision = gpt.vision,
+    });
+    defer std.testing.allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "replay_reasoning") == null);
+}
+
 test "renderProviderLua custom includes key only when given" {
     const entry = catalog[catalogIndex("Custom endpoint")];
     const selection = Selection{
@@ -629,6 +653,7 @@ test "skip writer creates the default combo" {
     try std.testing.expect(std.mem.indexOf(u8, contents, "\tkey = ") == null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\tname = \"deepseek-v4-flash-vision-exp\",\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\tvision = true,\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\treplay_reasoning = true,\n") != null);
 }
 
 test "skip writer no-ops when provider.lua exists" {
@@ -774,6 +799,11 @@ test "selectModel matches curated entries and falls back to free text" {
     const free = selectModel(anthropic, "claude-whatever");
     try std.testing.expectEqualStrings("claude-whatever", free.name);
     try std.testing.expect(!free.vision);
+
+    const opencode = catalog[catalogIndex("opencode go")];
+    try std.testing.expect(selectModel(opencode, "glm-5.3-flash").replay_reasoning);
+    try std.testing.expect(selectModel(opencode, "qwen3.8-flash").replay_reasoning);
+    try std.testing.expect(!selectModel(opencode, "unlisted-model").replay_reasoning);
 }
 
 test "writer rejects quote in model and leaves provider.lua untouched" {

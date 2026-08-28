@@ -74,6 +74,7 @@ pub const Config = struct {
     base_url: []const u8,
     reasoning_effort: ?ReasoningEffort = null,
     rate_limit: u32 = 0,
+    replay_reasoning: bool = false,
     provider: ProviderOptions,
 };
 
@@ -89,11 +90,13 @@ pub const Model = union(Kind) {
                 .api_key = config.api_key,
                 .base_url = config.base_url,
                 .rate_limit = config.rate_limit,
+                .replay_reasoning = config.replay_reasoning,
             }) },
             .openai => .{ .openai = try sdk.openai.Chat.init(alloc, config.model, .{
                 .api_key = config.api_key,
                 .base_url = config.base_url,
                 .rate_limit = config.rate_limit,
+                .replay_reasoning = config.replay_reasoning,
             }) },
             .response => .{ .response = try sdk.responses.Chat.init(alloc, config.model, .{
                 .api_key = config.api_key,
@@ -121,12 +124,14 @@ pub const Model = union(Kind) {
                 .base_url = chat.base_url,
                 .headers = chat.extra_headers,
                 .rate_limit = chat.rate_limit,
+                .replay_reasoning = chat.replay_reasoning,
             }) },
             .openai => |chat| .{ .openai = try sdk.openai.Chat.init(alloc, chat.model_id, .{
                 .api_key = chat.api_key,
                 .base_url = chat.base_url,
                 .headers = chat.extra_headers,
                 .rate_limit = chat.rate_limit,
+                .replay_reasoning = chat.replay_reasoning,
             }) },
             .response => |chat| .{ .response = try sdk.responses.Chat.init(alloc, chat.model_id, .{
                 .api_key = chat.api_key,
@@ -159,7 +164,31 @@ test "models own sdk provider chats" {
     });
     defer model.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("model", model.languageModel().modelId());
+    try std.testing.expect(!model.openai.replay_reasoning);
     var cloned = try model.clone(std.testing.allocator);
     defer cloned.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("model", cloned.languageModel().modelId());
+}
+
+test "replay_reasoning reaches the sdk chat and survives clone" {
+    for ([_]ProviderOptions{ .{ .openai = .{} }, .{ .ollama = .{} } }) |provider| {
+        var model = try Model.init(std.testing.allocator, .{
+            .api_key = "key",
+            .model = "model",
+            .base_url = "https://example.com/v1",
+            .replay_reasoning = true,
+            .provider = provider,
+        });
+        defer model.deinit(std.testing.allocator);
+        const chat_replays = switch (model) {
+            inline else => |*chat| chat.replay_reasoning,
+        };
+        try std.testing.expect(chat_replays);
+        var cloned = try model.clone(std.testing.allocator);
+        defer cloned.deinit(std.testing.allocator);
+        const clone_replays = switch (cloned) {
+            inline else => |*chat| chat.replay_reasoning,
+        };
+        try std.testing.expect(clone_replays);
+    }
 }

@@ -181,6 +181,8 @@
 ---@field provider integer
 ---model supports images
 ---@field vision? boolean
+---replay reasoning text as reasoning_content (deepseek/glm style)
+---@field replay_reasoning? boolean
 ---price per 1M tokens; absent = free
 ---@field cost? BlitzModelCost
 

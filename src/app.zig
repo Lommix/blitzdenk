@@ -2416,11 +2416,13 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
             const selection = app.wizardSelection(w);
             const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
             const vision_text = if (selection) |sel| (if (sel.vision) "true" else "false") else "unknown";
+            const replay_text = if (selection) |sel| (if (sel.replay_reasoning) "true" else "false") else "unknown";
             wizardAppendKeyValue(app, arena, &para, "schema", w.provider_type_buf[0..w.provider_type_len]);
             wizardAppendKeyValue(app, arena, &para, "provider", entry.name);
             wizardAppendKeyValue(app, arena, &para, "url", w.url_buf[0..w.url_len]);
             wizardAppendKeyValue(app, arena, &para, "key", if (w.key_len > 0) "<set>" else "");
             wizardAppendKeyValue(app, arena, &para, "vision", vision_text);
+            wizardAppendKeyValue(app, arena, &para, "replay_reasoning", replay_text);
             wizardAppendKeyValue(app, arena, &para, "model", w.model_buf[0..w.model_len]);
             wizardAppendHeading(arena, &para, "");
             wizardAppendOption(arena, &para, "Write provider.lua", w.accept_selected);

@@ -230,6 +230,7 @@ pub fn buildAgentApiConfig(
             .provider = provider.provider_config,
             .reasoning_effort = ag_cfg.effort,
             .rate_limit = provider.rate_limit,
+            .replay_reasoning = model.replay_reasoning,
         } };
     }
 
@@ -1070,7 +1071,7 @@ test "agent config reports the missing API key environment variable" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "").?;
     const provider = cfg.commitProvider();
-    const model = try cfg.addModel("example-model", provider, false, null);
+    const model = try cfg.addModel("example-model", provider, false, false, null);
     try factory.setAgentModel(&cfg, .general, model, .medium);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
@@ -1091,7 +1092,7 @@ test "agent config permits keyless providers" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("http://localhost:8080/v1", "", "").?;
     const provider = cfg.commitProvider();
-    const model = try cfg.addModel("local-model", provider, false, null);
+    const model = try cfg.addModel("local-model", provider, false, false, null);
     try factory.setAgentModel(&cfg, .general, model, .medium);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
@@ -1105,6 +1106,24 @@ test "agent config permits keyless providers" {
     }
 }
 
+test "agent config carries the replay_reasoning model capability" {
+    var factory = initTestFactory();
+    defer factory.prompt_arena.deinit();
+
+    var cfg: r.config.BlitzdenkCfg = .{};
+    _ = cfg.reserveProvider("http://localhost:8080/v1", "", "").?;
+    const provider = cfg.commitProvider();
+    const deepseek = try cfg.addModel("deepseek-model", provider, false, true, null);
+    try factory.setAgentModel(&cfg, .general, deepseek, .medium);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    switch (factory.buildAgentApiConfig(.general, &cfg, &env)) {
+        .config => |config| try std.testing.expect(config.replay_reasoning),
+        .diagnostic => return error.TestExpectedAgentConfig,
+    }
+}
+
 test "agent config uses the stored key when the envar is absent" {
     var factory = initTestFactory();
     defer factory.prompt_arena.deinit();
@@ -1112,7 +1131,7 @@ test "agent config uses the stored key when the envar is absent" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "stored-key").?;
     const provider = cfg.commitProvider();
-    const model = try cfg.addModel("example-model", provider, false, null);
+    const model = try cfg.addModel("example-model", provider, false, false, null);
     try factory.setAgentModel(&cfg, .general, model, .medium);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
@@ -1130,7 +1149,7 @@ test "agent config prefers the envar value over the stored key" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "stored-key").?;
     const provider = cfg.commitProvider();
-    const model = try cfg.addModel("example-model", provider, false, null);
+    const model = try cfg.addModel("example-model", provider, false, false, null);
     try factory.setAgentModel(&cfg, .general, model, .medium);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();

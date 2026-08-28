@@ -66,6 +66,7 @@ pub const ModelEntry = struct {
     name_len: usize = 0,
     provider: ProviderHandle = @enumFromInt(0),
     vision: bool = false,
+    replay_reasoning: bool = false,
     cost: ?ModelCost = null,
 
     pub fn getName(self: *const ModelEntry) []const u8 {
@@ -106,7 +107,7 @@ pub const BlitzdenkCfg = struct {
         return &self.providers[index];
     }
 
-    pub fn addModel(self: *BlitzdenkCfg, name: []const u8, provider: ProviderHandle, vision: bool, cost: ?ModelCost) !ModelHandle {
+    pub fn addModel(self: *BlitzdenkCfg, name: []const u8, provider: ProviderHandle, vision: bool, replay_reasoning: bool, cost: ?ModelCost) !ModelHandle {
         if (self.model_count >= MAX_MODELS) return error.MaxModelsReached;
         const provider_idx = @intFromEnum(provider);
         if (provider_idx >= self.provider_count or !self.providers[provider_idx].active) return error.UnknownProvider;
@@ -117,6 +118,7 @@ pub const BlitzdenkCfg = struct {
         slot.name_len = name.len;
         slot.provider = provider;
         slot.vision = vision;
+        slot.replay_reasoning = replay_reasoning;
         slot.cost = cost;
         self.model_count += 1;
         return @enumFromInt(self.model_count - 1);

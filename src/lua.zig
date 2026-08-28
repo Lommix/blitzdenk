@@ -223,6 +223,7 @@ const ModelDef = LuaType{ .table_def = .{ .name = "BlitzModelDef", .fields = &.{
     .{ .name = "name", .ty = LuaType.string, .desc = "the API model id" },
     .{ .name = "provider", .ty = LuaType.integer, .desc = "provider handle from add_provider" },
     .{ .name = "vision", .ty = LuaType.boolean, .optional = true, .desc = "model supports images" },
+    .{ .name = "replay_reasoning", .ty = LuaType.boolean, .optional = true, .desc = "replay reasoning text as reasoning_content (deepseek/glm style)" },
     .{ .name = "cost", .ty = ModelCostDef, .optional = true, .desc = "price per 1M tokens; absent = free" },
 } } };
 const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields = &.{
@@ -546,12 +547,13 @@ pub const Blitz = LuaType{
                                 name: []const u8,
                                 provider: u32,
                                 vision: ?bool = null,
+                                replay_reasoning: ?bool = null,
                                 cost: ?r.config.ModelCost = null,
                             };
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, args: Arg) !r.config.ModelHandle {
                                 if (try isToolVm(state)) return @enumFromInt(0);
-                                return a.config.addModel(args.name, @enumFromInt(args.provider), args.vision orelse false, args.cost);
+                                return a.config.addModel(args.name, @enumFromInt(args.provider), args.vision orelse false, args.replay_reasoning orelse false, args.cost);
                             }
                         }).lua_fn, "add_model"),
                     },
