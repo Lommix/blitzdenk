@@ -84,6 +84,7 @@ pub const Agent = struct {
     skill_catalog_digest: ?u64 = null,
     usage: sdk.Usage = .{},
     context_tokens: u64 = 0,
+    context_from_provider: bool = false,
     context_limit: u64,
     status: Status = .idle,
     activity: Activity = .idle,
@@ -248,8 +249,7 @@ pub const Agent = struct {
 
     pub fn startCompaction(self: *Agent) !bool {
         if (self.task != null or self.compact_task != null) return error.RunInProgress;
-        const estimate = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, self.history());
-        self.context_tokens = estimate;
+        const estimate = self.currentContextEstimate();
         if (!self.compaction.shouldStart(self.history().len, estimate, self.context_limit, self.failureNow())) return false;
         const request = self.compaction.requested.swap(.none, .acq_rel);
         const force = request == .external;
@@ -327,7 +327,11 @@ pub const Agent = struct {
             .tool_done => {},
             .step => |step| {
                 self.usage.add(step.usage);
-                self.context_tokens = step.usage.input_tokens + step.usage.cache_read_tokens + step.usage.cache_write_tokens;
+                const step_context_tokens = step.usage.input_tokens + step.usage.cache_read_tokens + step.usage.cache_write_tokens;
+                if (step_context_tokens > 0) {
+                    self.context_tokens = step_context_tokens;
+                    self.context_from_provider = true;
+                }
                 self.endStream();
                 self.activity = .thinking;
             },
@@ -399,6 +403,7 @@ pub const Agent = struct {
             const blocked_retry = failure != null and failure.? != error.Canceled and self.contextNearLimit();
             if ((is_overflow or blocked_retry) and !self.flags.overflow_recovery and has_checkpoint) {
                 self.flags.overflow_recovery = true;
+                self.context_from_provider = false;
                 self.requestCompaction(.auto, true);
                 if (!(self.startCompaction() catch false)) {
                     self.last_error = if (is_overflow) error.ContextOverflow else failure.?;
@@ -530,9 +535,13 @@ pub const Agent = struct {
         return .{ .messages = combined, .replace = replace, .tools = refreshed_tools };
     }
 
+    fn currentContextEstimate(self: *Agent) u64 {
+        if (self.context_from_provider) return self.context_tokens;
+        return @max(self.context_tokens, compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, self.history()));
+    }
+
     fn maybeCompactForStep(self: *Agent, messages: []const sdk.Message) ?[]const sdk.Message {
-        const estimate = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, messages);
-        self.context_tokens = estimate;
+        const estimate = self.currentContextEstimate();
         if (!self.compaction.shouldStart(messages.len, estimate, self.context_limit, self.failureNow())) return null;
         const request = self.compaction.requested.swap(.none, .acq_rel);
         const force = request == .external;
@@ -564,6 +573,7 @@ pub const Agent = struct {
         self.compaction.noteSuccess();
         self.usage.add(outcome.usage);
         self.context_tokens = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, cloned);
+        self.context_from_provider = false;
         self.compaction.last_compacted_message_count = cloned.len;
         self.compaction.last_compacted_estimate = self.context_tokens;
         self.compaction.must_progress_past_message_count = cloned.len;
@@ -602,6 +612,7 @@ pub const Agent = struct {
             self.messages = value.messages;
             self.usage.add(value.usage);
             self.context_tokens = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, self.history());
+            self.context_from_provider = false;
             self.compaction.last_compacted_message_count = self.history().len;
             self.compaction.last_compacted_estimate = self.context_tokens;
             self.compaction.must_progress_past_message_count = self.history().len;
@@ -1181,4 +1192,174 @@ test "retry guard blocks auto retry near context limit" {
     try std.testing.expect(!agent.willAutoRetry(error.NetworkError));
     try std.testing.expect(!agent.willAutoRetry(error.RateLimited));
     try std.testing.expect(agent.willAutoRetry(error.Canceled));
+}
+
+fn hugeInflatedHistory() [4]sdk.Message {
+    const payload = [_]u8{'x'} ** 900_000;
+    const part = [_]sdk.Part{.{ .text = &payload }};
+    return .{
+        sdk.SystemMessage("system"),
+        sdk.UserMessage("recent"),
+        .{ .role = .user, .content = &part },
+        sdk.AssistantMessage("answer"),
+    };
+}
+
+test "compaction trigger uses provider usage and ignores inflated history bytes" {
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .context_limit = 300_000 });
+    defer agent.deinit();
+
+    var history = hugeInflatedHistory();
+    try agent.setMessages(&history);
+    try std.testing.expectEqual(@as(u64, 0), agent.context_tokens);
+
+    try agent.observe(.{ .step = .{ .number = 1, .usage = .{ .input_tokens = 75_000 } } });
+    try std.testing.expect(agent.context_from_provider);
+    try std.testing.expectEqual(@as(u64, 75_000), agent.context_tokens);
+    const basis = agent.currentContextEstimate();
+    try std.testing.expectEqual(@as(u64, 75_000), basis);
+    try std.testing.expectEqual(@as(u8, 25), agent.contextPercent());
+    try std.testing.expect(!agent.compaction.shouldStart(agent.history().len, basis, agent.context_limit, agent.failureNow()));
+    try std.testing.expect(!agent.contextNearLimit());
+}
+
+test "estimate path still drives the trigger before first step and after compaction" {
+    var agent = try Agent.init(std.testing.allocator, std.testing.io, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .context_limit = 100_000 });
+    defer agent.deinit();
+
+    var history = hugeInflatedHistory();
+    try agent.setMessages(&history);
+    try std.testing.expect(!agent.context_from_provider);
+    const pre_step_basis = agent.currentContextEstimate();
+    try std.testing.expect(pre_step_basis >= 200_000);
+    try std.testing.expect(agent.compaction.shouldStart(agent.history().len, pre_step_basis, agent.context_limit, agent.failureNow()));
+
+    try agent.setMessages(&.{ sdk.SystemMessage("system"), sdk.UserMessage("summary of old work"), sdk.AssistantMessage("kept tail") });
+    agent.context_tokens = 2_000;
+    agent.context_from_provider = false;
+    const post_compact_basis = agent.currentContextEstimate();
+    try std.testing.expectEqual(@as(u64, 2_000), post_compact_basis);
+    try std.testing.expect(!agent.compaction.shouldStart(agent.history().len, post_compact_basis, agent.context_limit, agent.failureNow()));
+}
+
+test "display and trigger share the same basis after a step" {
+    var agent = try Agent.init(std.testing.allocator, std.testing.io, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .context_limit = 300_000 });
+    defer agent.deinit();
+
+    try agent.observe(.{ .step = .{ .number = 1, .usage = .{ .input_tokens = 150_000 } } });
+    try std.testing.expect(agent.context_from_provider);
+    const trigger_basis = agent.currentContextEstimate();
+    try std.testing.expectEqual(@as(u64, 150_000), trigger_basis);
+    try std.testing.expectEqual(agent.contextPercent(), @as(u8, @intCast(trigger_basis * 100 / agent.context_limit)));
+    try std.testing.expect(!agent.compaction.shouldStart(6, trigger_basis, agent.context_limit, agent.failureNow()));
+
+    try agent.observe(.{ .step = .{ .number = 2, .usage = .{ .input_tokens = 300_000 } } });
+    try std.testing.expect(agent.contextNearLimit());
+}
+
+test "overflow recovery falls back to the history estimate when the provider basis is stale" {
+    const Fixture = struct {
+        calls: usize = 0,
+
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generate(ctx: *anyopaque, alloc: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            if (self.calls == 2) return error.ContextOverflow;
+            const calls = try alloc.alloc(sdk.ToolCall, 1);
+            calls[0] = .{
+                .id = try alloc.dupe(u8, "call_1"),
+                .name = try alloc.dupe(u8, "test"),
+                .input = try alloc.dupe(u8, "{}"),
+            };
+            const result = try alloc.create(sdk.model.GenerateResult);
+            result.* = .{ .tool_calls = calls, .finish_reason = .tool_calls };
+            return result;
+        }
+
+        fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            return generate(ctx, alloc, io, params, client, retries);
+        }
+
+        var tool_result_payload: [1_000]u8 = @splat('t');
+
+        fn toolExecute(_: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: sdk.ToolCall) anyerror!sdk.ToolOutput {
+            return .{ .content = &tool_result_payload };
+        }
+
+        fn collect(_: ?*anyopaque, _: agent_run.Event) void {}
+    };
+
+    var fixture = Fixture{};
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.invalid/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .context_limit = 300_000 });
+    defer agent.deinit();
+
+    var history = hugeInflatedHistory();
+    try agent.setMessages(&history);
+    try agent.setTools(&.{.{ .name = "test", .execute = Fixture.toolExecute }});
+
+    try agent.observe(.{ .step = .{ .number = 1, .usage = .{ .input_tokens = 50_000 } } });
+    try std.testing.expect(agent.context_from_provider);
+    try std.testing.expectEqual(@as(u64, 50_000), agent.context_tokens);
+
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .max_steps = 2 });
+    agent.task.?.wait();
+    while (agent.drain(4, null, Fixture.collect) != 0) {}
+    try std.testing.expect(agent.reap());
+
+    try std.testing.expectEqual(Status.compacting, agent.status);
+    try std.testing.expect(!agent.context_from_provider);
+    try std.testing.expect(agent.compact_task != null);
+    try std.testing.expectEqual(true, agent.compaction.continue_after);
+}
+
+test "zero usage step keeps the previous context basis instead of latching zero" {
+    var agent = try Agent.init(std.testing.allocator, std.testing.io, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .context_limit = 300_000 });
+    defer agent.deinit();
+
+    var history = hugeInflatedHistory();
+    try agent.setMessages(&history);
+    agent.context_tokens = 60_000;
+    agent.context_from_provider = true;
+
+    try agent.observe(.{ .step = .{ .number = 1, .usage = .{ .input_tokens = 80_000 } } });
+    try std.testing.expect(agent.context_from_provider);
+    try std.testing.expectEqual(@as(u64, 80_000), agent.currentContextEstimate());
+
+    try agent.observe(.{ .step = .{ .number = 2, .usage = .{} } });
+    try std.testing.expect(agent.context_from_provider);
+    try std.testing.expectEqual(@as(u64, 80_000), agent.context_tokens);
+    try std.testing.expectEqual(@as(u64, 80_000), agent.currentContextEstimate());
+    try std.testing.expect(!agent.contextNearLimit());
 }
