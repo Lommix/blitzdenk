@@ -9,6 +9,7 @@ const ID_RANDOM_LEN = 4;
 const NAME_EXTENSION = ".jsonl";
 const HEX = "0123456789abcdef";
 pub const ID_LEN = "20250827-184000-".len + ID_RANDOM_LEN;
+pub const PROMPT_CLIP: usize = 80;
 
 pub const Header = struct {
     id: []const u8,
@@ -334,6 +335,70 @@ fn parseHeader(alloc: std.mem.Allocator, line: []const u8) ?Header {
     return std.json.parseFromSliceLeaky(Header, alloc, line, .{ .ignore_unknown_fields = true }) catch null;
 }
 
+fn firstUserText(chat: []const session.WireMessage) ?[]const u8 {
+    for (chat) |message| {
+        if (message.role != .user) continue;
+        for (message.parts) |part| {
+            const text = switch (part) {
+                .text => |payload| payload,
+                else => continue,
+            };
+            const trimmed = std.mem.trim(u8, text, " \t\r\n");
+            if (trimmed.len == 0) continue;
+            if (session.isReminderText(trimmed)) continue;
+            return trimmed;
+        }
+    }
+    return null;
+}
+
+/// Initial user prompt of a session, whitespace collapsed and cut to
+/// PROMPT_CLIP bytes with a trailing "...". Empty when the journal has no
+/// readable checkpoint or no text prompt.
+pub fn firstPrompt(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) []const u8 {
+    const name = fileName(alloc, id) catch return "";
+    const loaded = load(alloc, io, base, name) catch return "";
+    const text = firstUserText((loaded orelse return "").save.chat) orelse return "";
+    return clipPrompt(alloc, text);
+}
+
+fn clipPrompt(alloc: std.mem.Allocator, text: []const u8) []const u8 {
+    var words: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
+    while (it.next()) |word| words.append(alloc, word) catch return text;
+    const one = std.mem.join(alloc, " ", words.items) catch return text;
+    if (one.len <= PROMPT_CLIP) return one;
+    var cut = PROMPT_CLIP;
+    while (cut > 0 and (one[cut] & 0b1100_0000) == 0b1000_0000) cut -= 1;
+    return std.fmt.allocPrint(alloc, "{s}...", .{one[0..cut]}) catch one[0..cut];
+}
+
+/// All sessions as (id, modified_ms, firstPrompt) rows, all allocated in the
+/// caller's arena; freed by dropping that arena. Each journal is parsed in a
+/// short-lived sub-arena so hundreds of entries do not accumulate prompt text.
+pub fn summaries(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir) ![]SummaryRow {
+    const entries = try list(alloc, io, base);
+    const rows = try alloc.alloc(SummaryRow, entries.len);
+    var prompt_arena = std.heap.ArenaAllocator.init(alloc);
+    defer prompt_arena.deinit();
+    for (entries, rows) |entry, *row| {
+        _ = prompt_arena.reset(.retain_capacity);
+        const prompt = firstPrompt(prompt_arena.allocator(), io, base, entry.id);
+        row.* = .{
+            .id = entry.id,
+            .modified_ms = entry.modified_ms,
+            .prompt = try alloc.dupe(u8, prompt),
+        };
+    }
+    return rows;
+}
+
+pub const SummaryRow = struct {
+    id: []const u8,
+    modified_ms: i64,
+    prompt: []const u8,
+};
+
 /// Deletes session files untouched for longer than `max_age_ms`.
 pub fn collectGarbage(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, max_age_ms: i64) void {
     const entries = list(alloc, io, base) catch return;
@@ -554,4 +619,55 @@ test "pre-tool_status save file loads with empty tool_status" {
     defer parsed.deinit();
     try testing.expectEqual(@as(usize, 0), parsed.value.tool_status.len);
     try testing.expect(parsed.value.main_agent == null);
+}
+
+test "clipPrompt collapses whitespace and clips at the limit" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    try testing.expectEqualStrings("first line second line", clipPrompt(alloc, "  first\tline\n\n second   line  "));
+    try testing.expectEqualStrings("exactly short", clipPrompt(alloc, "exactly short"));
+
+    const body = "x" ** PROMPT_CLIP;
+    try testing.expectEqualStrings(body ++ "...", clipPrompt(alloc, body ++ "trailing"));
+
+    const wide = "\u{2713}" ** 40;
+    const clipped = clipPrompt(alloc, wide ++ "trailing");
+    try testing.expect(clipped.len <= PROMPT_CLIP + "...".len);
+    try testing.expect(std.mem.endsWith(u8, clipped, "..."));
+}
+
+test "firstPrompt skips reminders and reports an empty prompt when no text exists" {
+    const testing = std.testing;
+    var io_state = std.Io.Threaded.init(testing.allocator, .{});
+    defer io_state.deinit();
+    const io = io_state.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = std.Io.Dir{ .handle = tmp.dir.handle };
+
+    var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
+    defer store.deinit();
+    try store.create("/tmp/project");
+    const chat = [_]session.WireMessage{
+        .{ .role = .user, .parts = &.{.{ .text = "<system-reminder>\nbe quiet\n</system-reminder>" }} },
+        .{ .role = .user, .parts = &.{.{ .text = "the   real\nprompt" }} },
+        .{ .role = .agent, .parts = &.{.{ .text = "answer" }} },
+    };
+    try store.appendCheckpoint(.{ .chat = &chat, .chat_render = &.{} });
+    const id = store.file_name.?[0 .. store.file_name.?.len - NAME_EXTENSION.len];
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("the real prompt", firstPrompt(arena.allocator(), io, base, id));
+
+    const only_tools = [_]session.WireMessage{
+        .{ .role = .user, .parts = &.{.{ .tool_result = .{ .call_id = "c1", .name = "read", .content = "ok" } }} },
+    };
+    try store.appendCheckpoint(.{ .chat = &only_tools, .chat_render = &.{} });
+    const silent = store.file_name.?[0 .. store.file_name.?.len - NAME_EXTENSION.len];
+    try testing.expectEqualStrings("", firstPrompt(arena.allocator(), io, base, silent));
 }

@@ -77,6 +77,7 @@ pub const InputMode = union(enum) {
     perm_message: PermMessage,
     passphrase: Passphrase,
     wizard: Wizard,
+    session_picker: r.session_picker.Picker,
 
     pub const Text = struct {
         completion_open: bool = false,
@@ -639,6 +640,10 @@ pub const App = struct {
         self.input_mode = .{ .wizard = .{} };
     }
 
+    pub fn enterSessionPicker(self: *App, rows: []const r.session_picker.Row) void {
+        self.input_mode = .{ .session_picker = .{ .rows = rows } };
+    }
+
     pub fn wizardState(self: *App) ?*InputMode.Wizard {
         return switch (self.input_mode) {
             .wizard => |*w| w,
@@ -1014,6 +1019,7 @@ pub const App = struct {
                 },
                 .perm_message => break :blk 8, // 5-row input box + status + 2 padding
                 .wizard => break :blk 18,
+                .session_picker => |*picker| break :blk @intCast(@min(6 + @max(picker.rows.len, 1), area.height -| 1)),
                 .perm_select => {
                     const entry = app.active_permission orelse break :blk 9;
                     if (entry.payload == .ask) {
@@ -2217,6 +2223,7 @@ fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, prog
         .perm_message => |*pm| renderPermMessageContent(app, pm, input_area, buf),
         .perm_select => renderPermissionContent(app, input_area, buf),
         .wizard => renderWizardContent(app, arena, input_area, buf),
+        .session_picker => renderSessionPickerContent(app, arena, input_area, buf),
     }
 
     renderStatusBar(app, status_area, buf);
@@ -2459,6 +2466,74 @@ fn wizardAppendHeading(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: [
     var line = r.tui.Line{};
     line.pushText(arena, text, .{}) catch return;
     para.lines.append(arena, line) catch {};
+}
+
+pub fn renderSessionPickerContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+    buf.fill(area, .{ .style = .{ .bg = app.theme.overlay_dark } });
+    const picker = &app.input_mode.session_picker;
+    var para: r.tui.Paragraph = .{ .border = .none, .padding = .{ .left = 2, .right = 2 } };
+
+    var title = r.tui.Line{};
+    title.pushText(arena, "Sessions — continue a recorded session", .{ .fg = app.theme.info, .modifier = .{ .bold = true } }) catch {};
+    para.lines.append(arena, title) catch {};
+
+    var help = r.tui.Line{};
+    help.pushText(arena, "↑/↓ or j/k select · enter continue · esc quit", .{ .fg = app.theme.muted }) catch {};
+    para.lines.append(arena, help) catch {};
+    para.lines.append(arena, .{}) catch {};
+
+    const visible_rows: usize = @max(area.height, 3) - 3;
+    if (visible_rows == 0) {
+        para.renderSimple(arena, area, buf);
+        return;
+    }
+    picker.syncScroll(visible_rows);
+    const start = @min(picker.scroll, picker.rows.len -| visible_rows);
+    const end = @min(start + visible_rows, picker.rows.len);
+    var index: usize = start;
+    while (index < end) : (index += 1) {
+        const row = picker.rows[index];
+        const selected = index == picker.selected;
+        var line = r.tui.Line{};
+        if (r.session_picker.isNewSession(row)) {
+            line.pushText(arena, if (selected) "❯ " else "  ", .{ .modifier = .{ .bold = true } }) catch return;
+            line.pushText(arena, row.prompt, .{ .fg = app.theme.ok, .modifier = .{ .bold = selected } }) catch return;
+            para.lines.append(arena, line) catch {};
+            continue;
+        }
+        line.pushText(arena, if (selected) "❯ " else "  ", .{ .modifier = .{ .bold = true } }) catch return;
+        line.pushText(arena, row.date, .{ .fg = app.theme.role_agent }) catch return;
+        line.pushText(arena, "  ", .{}) catch return;
+        line.pushText(arena, row.id, .{ .fg = app.theme.muted }) catch return;
+        line.pushText(arena, "  ", .{}) catch return;
+        const prompt = if (row.prompt.len > 0) row.prompt else r.session_picker.EMPTY_PROMPT_LABEL;
+        line.pushText(arena, clipPromptToWidth(arena, prompt, pickerMaxPromptWidth(area.width)), if (selected) .{ .fg = app.theme.text_hl, .modifier = .{ .bold = true } } else .{ .fg = app.theme.info }) catch return;
+        para.lines.append(arena, line) catch {};
+    }
+
+    para.renderSimple(arena, area, buf);
+}
+
+fn pickerMaxPromptWidth(area_width: u16) usize {
+    const widget_padding = 4;
+    const para_padding = 4;
+    const prefix = 2 + 16 + 2 + r.session_store.ID_LEN + 2;
+    return @as(usize, area_width) -| (widget_padding + para_padding + prefix);
+}
+
+fn clipPromptToWidth(arena: std.mem.Allocator, text: []const u8, max: usize) []const u8 {
+    const width = textWidthCols(text);
+    if (width <= max) return text;
+    var cut: usize = 0;
+    var cols: usize = 0;
+    const limit = max -| 1;
+    while (cut < text.len and cols < limit) {
+        const seq_len = std.unicode.utf8ByteSequenceLength(text[cut]) catch 1;
+        const end = @min(cut + seq_len, text.len);
+        cols += 1;
+        cut = end;
+    }
+    return std.fmt.allocPrint(arena, "{s}…", .{text[0..cut]}) catch text;
 }
 
 fn wizardAppendOption(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8, selected: bool) void {
@@ -2822,22 +2897,30 @@ fn buildToolGroupParagraph(
             const child_status = &statuses.ptr.agents[child_id.index];
             if (child_status.generation != child_id.generation) continue;
 
+            var child_lines: std.ArrayList(r.tui.Line) = .empty;
+            var entry_starts: std.ArrayList(usize) = .empty;
             var it = child_status.entries.iterator();
-            const total = child_status.entries.count();
-            const skip = if (total > 3) total - 3 else 0;
+            const skip = if (child_status.entries.count() > 3) child_status.entries.count() - 3 else 0;
             var i: usize = 0;
-
             while (it.next()) |child_entry| {
                 i += 1;
                 if (i <= skip) continue;
-                for (child_entry.value_ptr.lines.items) |child_line| {
-                    var nested = r.tui.Line{ .style = child_line.style };
+                try entry_starts.append(arena, child_lines.items.len);
+                for (child_entry.value_ptr.lines.items) |child_line| try child_lines.append(arena, child_line);
+            }
 
-                    const glyph = if (i == total) r.tui.icon.box_bl else r.tui.icon.box_t_right;
-                    try nested.pushSpan(arena, .{ .content = " " ++ glyph ++ " " });
-                    for (child_line.spans.items) |span| try nested.pushSpan(arena, span);
-                    try p.lines.append(arena, nested);
-                }
+            const total_child_lines = child_lines.items.len;
+            var start_cursor: usize = 0;
+            for (child_lines.items, 0..) |child_line, n| {
+                var nested = r.tui.Line{ .style = child_line.style };
+
+                const is_last = n + 1 == total_child_lines;
+                const starts_entry = start_cursor < entry_starts.items.len and n == entry_starts.items[start_cursor];
+                if (starts_entry) start_cursor += 1;
+                const glyph: []const u8 = if (is_last) r.tui.icon.box_bl else if (starts_entry) r.tui.icon.box_t_right else r.tui.icon.box_v;
+                try nested.pushSpanPrint(arena, " {s} ", .{glyph}, .{});
+                for (child_line.spans.items) |span| try nested.pushSpan(arena, span);
+                try p.lines.append(arena, nested);
             }
         }
     }
@@ -3815,6 +3898,74 @@ test "ToolStatusStore retains terminal tool result" {
     const agent = &store.agents[agent_id.index];
     try std.testing.expectEqual(agent_id.generation, agent.generation);
     try std.testing.expect(agent.entries.get("call_1").?.is_error.?);
+}
+
+test "tool group rail: nested list ends with exactly one corner" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.chat_entries = .empty;
+    app.tool_status_entries = .{};
+    app.dirty = false;
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app.registry = &registry;
+
+    const parent_id = registry.reserve().?;
+    const child_id = registry.reserve().?;
+    _ = try registry.activate(parent_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .name = "main", .cwd = "/tmp" } });
+    _ = try registry.activate(child_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .name = "child", .cwd = "/tmp" } });
+
+    try app.setToolChild(parent_id, "call_1", child_id);
+    try app.setToolStatus(parent_id, "call_1", "challenger -> task");
+    try app.setToolStatus(child_id, "child_1", "bash cmd\nconst std = @import\npub fn main() !void");
+    try app.setToolStatus(child_id, "child_2", "bash list files");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const rendered = try buildToolGroupParagraph(&app, arena.allocator(), &.{
+        .{ .agent_id = parent_id, .call_id = "call_1", .tool_name = "agent" },
+    }, 80);
+    var glyphs = try collectRailGlyphs(std.testing.allocator, rendered.p);
+    defer glyphs.deinit(std.testing.allocator);
+
+    const corner = decodeCp("└");
+    var corner_count: usize = 0;
+    for (glyphs.items) |g| {
+        if (g == corner) corner_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), corner_count);
+    try std.testing.expectEqual(corner, glyphs.items[glyphs.items.len - 1]);
+}
+
+fn collectRailGlyphs(alloc: std.mem.Allocator, p: r.tui.Paragraph) !std.ArrayList(u21) {
+    var glyphs: std.ArrayList(u21) = .empty;
+    errdefer glyphs.deinit(alloc);
+    for (p.lines.items) |line| {
+        if (line.spans.items.len == 0) continue;
+        const first = line.spans.items[0].content;
+        if (first.len < 3 or first[0] != ' ') continue;
+        const len = std.unicode.utf8ByteSequenceLength(first[1]) catch continue;
+        const decoded = std.unicode.utf8Decode(first[1..][0..len]) catch continue;
+        try glyphs.append(alloc, decoded);
+    }
+    return glyphs;
+}
+
+fn decodeCp(text: *const [3:0]u8) u21 {
+    return std.unicode.utf8Decode(text[0..3]) catch 0;
 }
 
 test "appendMarkdownText fills headline to width" {

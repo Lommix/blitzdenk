@@ -27,6 +27,9 @@ class and use it, do not enumerate.
 - `./blitz.lua`, optional project-local config, loaded after it.
 - `~/.config/blitzdenk/meta.lua`, generated type hints, signature truth.
 
+CLI: `blitz sessions` opens a TUI session picker for the current project;
+pick a row to resume that session, esc quits.
+
 ## Loading and hot reload
 
 All Lua files are hot reloaded into your context. You can directly

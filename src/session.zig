@@ -273,8 +273,12 @@ fn linesToAnsi(lines: []const r.tui.Line, alloc: std.mem.Allocator) ![]const u8 
     return out.toOwnedSlice();
 }
 
+pub fn isReminderText(text: []const u8) bool {
+    return std.mem.startsWith(u8, text, "<system-reminder>");
+}
+
 fn isReminder(message: sdk.Message) bool {
-    return message.role == .user and std.mem.startsWith(u8, message.text(), "<system-reminder>");
+    return message.role == .user and isReminderText(message.text());
 }
 
 /// Applies an already-parsed snapshot onto the app: rebuilds the main agent

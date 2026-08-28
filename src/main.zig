@@ -252,16 +252,11 @@ pub fn main(init: std.process.Init) !void {
             var cwd_buffer: [std.posix.PATH_MAX]u8 = undefined;
             const len = try std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buffer);
             const cwd = cwd_buffer[0..len];
-            const cache_dir = util.cacheDir(init.arena.allocator(), init.environ_map) catch |err| {
-                std.debug.print("Error: resolving cache dir failed: {s}\n", .{@errorName(err)});
-                return;
-            };
-            const project_dir = sessionProjectDir(init.arena.allocator(), cache_dir, cwd) catch |err| {
+            const project = openSessionProject(io, init.arena.allocator(), init.environ_map, cwd) catch |err| {
                 std.debug.print("Error: resolving session dir failed: {s}\n", .{@errorName(err)});
                 return;
             };
-            std.Io.Dir.cwd().createDirPath(io, project_dir) catch {};
-            const cwd_dir = try std.Io.Dir.cwd().openDir(io, project_dir, .{});
+            const cwd_dir = project.dir;
             defer cwd_dir.close(io);
             const resolved: ?[]const u8 = if (prefix) |p|
                 session_store.resolve(init.arena.allocator(), io, cwd_dir, p) catch |err| switch (err) {
@@ -285,7 +280,7 @@ pub fn main(init: std.process.Init) !void {
                 if (prefix != null) {
                     std.debug.print("Error: no session matching '{s}'\n", .{prefix.?});
                 } else {
-                    std.debug.print("Error: no sessions found in {s}\n", .{project_dir});
+                    std.debug.print("Error: no sessions found in {s}\n", .{project.path});
                 }
                 return;
             };
@@ -304,6 +299,11 @@ pub fn main(init: std.process.Init) !void {
         .update => {
             try updateCli(io, init.gpa, init.environ_map);
         },
+        .sessions => {
+            sessionsTui(io, init.gpa, init.arena.allocator(), init.environ_map) catch |err| {
+                std.debug.print("Error: session picker failed: {s}\n", .{@errorName(err)});
+            };
+        },
         .help => {
             std.debug.print(
                 \\Blitzdenk tui v{s}
@@ -314,6 +314,7 @@ pub fn main(init: std.process.Init) !void {
                 \\help                 display this
                 \\prompt "STRING"      run in current cwd with initial input
                 \\continue [ID]        resume a session in cwd (default: most recent)
+                \\sessions             pick a recorded session in cwd to continue
                 \\update               download and replace the running binary
                 \\
                 \\Flags:
@@ -355,6 +356,135 @@ fn sessionProjectDir(alloc: std.mem.Allocator, cache_dir: []const u8, project_cw
     return std.fmt.allocPrint(alloc, "{s}/{x:0>16}", .{ cache_dir, std.hash.Fnv1a_64.hash(project_cwd) });
 }
 
+const SessionProject = struct { dir: std.Io.Dir, path: []const u8 };
+
+fn openSessionProject(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    cwd: []const u8,
+) !SessionProject {
+    const path = try sessionProjectDir(alloc, try util.cacheDir(alloc, env), cwd);
+    std.Io.Dir.cwd().createDirPath(io, path) catch {};
+    return .{ .dir = try std.Io.Dir.cwd().openDir(io, path, .{}), .path = path };
+}
+
+fn localTime(buf: []u8, millis: i64) []const u8 {
+    const seconds: std.c.time_t = @intCast(@divTrunc(millis, std.time.ms_per_s));
+    var tm: ct.struct_tm = undefined;
+    if (ct.localtime_r(&seconds, &tm) == null) return "unknown time";
+    // Zero padding needs unsigned ints: `{d:0>2}` on an i32 prints "+8".
+    const year: u32 = @intCast(@as(i32, tm.tm_year) + 1900);
+    const month: u32 = @intCast(@as(i32, tm.tm_mon) + 1);
+    const day: u32 = @intCast(tm.tm_mday);
+    const hour: u32 = @intCast(tm.tm_hour);
+    const minute: u32 = @intCast(tm.tm_min);
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}", .{
+        year,
+        month,
+        day,
+        hour,
+        minute,
+    }) catch "unknown time";
+}
+
+fn renderPickerScreen(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+    _ = app.arena_frame.reset(.free_all);
+    r.app.renderSessionPickerContent(app, app.arena_frame.allocator(), area, buf);
+}
+
+fn sessionsTui(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env: *const std.process.Environ.Map) !void {
+    var cwd_buffer: [std.posix.PATH_MAX]u8 = undefined;
+    const cwd_len = try std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buffer);
+    const cwd = cwd_buffer[0..cwd_len];
+
+    const project = try openSessionProject(io, arena, env, cwd);
+    defer project.dir.close(io);
+
+    const rows = blk: {
+        const summaries = session_store.summaries(arena, io, project.dir) catch |err| {
+            std.debug.print("Error: listing sessions failed: {s}\n", .{@errorName(err)});
+            return;
+        };
+        const picker_rows = try arena.alloc(r.session_picker.Row, summaries.len + 1);
+        picker_rows[0] = r.session_picker.new_session;
+        for (summaries, 0..) |summary, i| {
+            var when_buf: [16]u8 = undefined;
+            picker_rows[i + 1] = .{
+                .id = summary.id,
+                .date = try arena.dupe(u8, localTime(&when_buf, summary.modified_ms)),
+                .prompt = summary.prompt,
+            };
+        }
+        break :blk picker_rows;
+    };
+
+    const HOME = env.get("HOME") orelse return error.NoHomeFound;
+    const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
+    var app = try App.init(io, gpa, context_factory, cwd);
+    defer app.deinit();
+    app.enterSessionPicker(rows);
+
+    var term = try tui.Terminal.init(arena, io);
+    defer term.deinit();
+
+    var picked: ?r.session_picker.Row = null;
+    draw: while (true) {
+        try term.drawWith(&app, renderPickerScreen);
+        app.dirty = false;
+
+        term.pollAndEnqueue(16);
+        while (true) {
+            const event = term.nextEvent();
+            switch (event) {
+                .key => |k| {
+                    if (k.code == .char) {
+                        if (k.code.char == 'q') break :draw;
+                        if (app.input_mode == .session_picker and (k.code.char == 'j' or k.code.char == 'k')) {
+                            app.input_mode.session_picker.move(if (k.code.char == 'j') 1 else -1);
+                            continue :draw;
+                        }
+                    }
+                    switch (k.code) {
+                        .esc => break :draw,
+                        .arrow_up => {
+                            if (app.input_mode == .session_picker) app.input_mode.session_picker.move(-1);
+                            continue :draw;
+                        },
+                        .arrow_down => {
+                            if (app.input_mode == .session_picker) app.input_mode.session_picker.move(1);
+                            continue :draw;
+                        },
+                        .enter => {
+                            if (app.input_mode == .session_picker) picked = app.input_mode.session_picker.pick();
+                            break :draw;
+                        },
+                        else => {},
+                    }
+                },
+                .resize => continue :draw,
+                .none => break,
+                else => {},
+            }
+        }
+    }
+
+    const chosen_full = picked orelse return;
+    if (r.session_picker.isNewSession(chosen_full)) {
+        try run(cwd, gpa, arena, io, env, .{}, null, null, false);
+        return;
+    }
+    const resolved = session_store.resolve(arena, io, project.dir, chosen_full.id) catch |err| {
+        std.debug.print("Error: resolving session '{s}' failed: {s}\n", .{ chosen_full.id, @errorName(err) });
+        return;
+    };
+    const id = resolved orelse {
+        std.debug.print("Error: session '{s}' no longer exists\n", .{chosen_full.id});
+        return;
+    };
+    try run(cwd, gpa, arena, io, env, .{}, null, id, false);
+}
+
 pub fn run(
     cwd: []const u8,
     gpa: std.mem.Allocator,
@@ -393,10 +523,8 @@ pub fn run(
     const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
     context_factory.flags.skip_local_context_file = flags.no_context;
 
-    const cache_dir = try util.cacheDir(arena, env);
-    const project_cache = try sessionProjectDir(arena, cache_dir, cwd);
-    std.Io.Dir.cwd().createDirPath(io, project_cache) catch {};
-    var cwd_dir = try std.Io.Dir.cwd().openDir(io, project_cache, .{});
+    const project = try openSessionProject(io, arena, env, cwd);
+    const cwd_dir = project.dir;
     defer cwd_dir.close(io);
 
     session_store.collectGarbage(arena, io, cwd_dir, session_store.GC_AGE_MS);
@@ -597,7 +725,7 @@ pub fn run(
             switch (app.input_mode) {
                 .text => if (app.active_permission != null) app.enterPermSelect(),
                 .perm_select, .perm_message => if (app.active_permission == null) app.returnToText(),
-                .passphrase, .wizard => {},
+                .passphrase, .wizard, .session_picker => {},
             }
 
             // Lua hot-reload: poll mtime every ~1s (cwd blitz.lua + config dir)
@@ -823,6 +951,7 @@ pub fn run(
                                             w.storeText(k.textSlice());
                                         }
                                     },
+                                    .session_picker => {},
                                 }
                             },
                             .arrow_up => switch (app.input_mode) {
@@ -835,6 +964,7 @@ pub fn run(
                                 .wizard => |*w| {
                                     w.moveCursor(-1);
                                 },
+                                .session_picker => {},
                             },
                             .arrow_down => switch (app.input_mode) {
                                 .text => if (!app.running) app.historyDown(),
@@ -852,6 +982,7 @@ pub fn run(
                                 .wizard => |*w| {
                                     w.moveCursor(1);
                                 },
+                                .session_picker => {},
                             },
                             .backspace => switch (app.input_mode) {
                                 .text => app.deleteChar(),
@@ -879,6 +1010,7 @@ pub fn run(
                                         }
                                     }
                                 },
+                                .session_picker => {},
                             },
                             .enter => switch (app.input_mode) {
                                 .perm_message => |*pm| {
@@ -1063,6 +1195,7 @@ pub fn run(
                                 .wizard => {
                                     handleWizardEnter(&app);
                                 },
+                                .session_picker => {},
                             },
                             .esc => switch (app.input_mode) {
                                 .text => {
@@ -1099,6 +1232,7 @@ pub fn run(
                         .wizard => |*w| {
                             w.storeText(text);
                         },
+                        .session_picker => {},
                     },
                     .mouse => |m| {
                         const wheel = term.handleMouse(m);
@@ -1621,6 +1755,8 @@ pub const CliCommand = union(enum) {
     run: []const u8, // '.', './', /full/path/to/dir
     prompt: []const u8, // prefill input in CWD
     cont: ?[]const u8, // resume a session (null = most recent)
+    /// list the last sessions recorded for the current directory
+    sessions,
     help,
     update,
 
@@ -1643,6 +1779,10 @@ pub const CliCommand = union(enum) {
 
         if (std.mem.eql(u8, head, "continue")) {
             return .{ .cmd = .{ .cont = if (rest.len > 0) rest[0] else null } };
+        }
+
+        if (std.mem.eql(u8, head, "sessions")) {
+            return .{ .cmd = .sessions };
         }
 
         if (std.mem.eql(u8, head, "update")) return .{ .cmd = .update };

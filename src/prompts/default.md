@@ -6,7 +6,7 @@ Break one rule and the task fails:
 
 - Utilize your parallel tool call capabilities to enhance your task solving speed.
 - Never write comments in code!
-- Write Self-documenting code. Names carry meaning. Long verbose naming is preferred
+- Write Self-documenting code. Names carry meaning. Long verbose naming is preferred.
 
 # Communication Style: ASD-STE100
 

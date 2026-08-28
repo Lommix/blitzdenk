@@ -1,6 +1,6 @@
 # Blitzdenk
 
-A coding harness for POSIX. No dependencies, vendored Lua.
+A self improving coding harness for POSIX. No dependencies, vendored Lua.
 It extends its own Lua sandbox on demand to fit your project
 ships as a single binary under 2 MB, and runs in under 100 MB of RAM.
 
@@ -17,6 +17,7 @@ ships as a single binary under 2 MB, and runs in under 100 MB of RAM.
     - Agents can code tools and debug them at the same time.
     - Supports global and project local configs.
 - Version management: run `blitz update` on new releases.
+- Sessions are journaled per project: `blitz continue [ID]` resumes, `blitz sessions` lists the last 10.
 
 ## Defaults
 
@@ -27,7 +28,7 @@ The default config comes with some useful commands for quick testing.
 - `/team <?prompt>`: Multiagent orchestrator mode
 - `/show <?prompt>`: explain something with mermaid diagrams
 - `/ssh-<myconfig>..`: autocomplete your ssh config entries for quick connection.
-- `/improve <?prompt>`: Evaluate the current session and start molding to the requirements of the project.
+- `/improve <?prompt>`: After a task, let the agent improve the harness.
 
 Connect remote without ssh config entries `/ssh user@host:/path/to/cwd`
 
@@ -67,7 +68,7 @@ local opencode_ds_flash = blitz.add_model({
 	cost = { input = 0.14, output = 0.28, cache = 0.028 },
 })
 
-blitz.set_model_agent(blitz.AGENT_GENERAL, opencode_ds_flash, "max")
+blitz.set_model_agent(blitz.AGENT_GENERAL, opencode_ds_flash, "high")
 ```
 
 ## Documentation

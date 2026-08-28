@@ -25,7 +25,7 @@ Important modules:
 - `src/commands.zig` async command queue.
 - `src/inject.zig` agent status injections
 - `src/session.zig` save/load session state; `SaveState`/`WireToolStatus` shared by store checkpoint and `blitz continue`
-- `src/session_store.zig` JSONL session journals in `~/.cache/blitzdenk/<fnv1a64-of-cwd>/sessions/<id>.jsonl` (header + full-snapshot checkpoints, cap 4, tmp+rename compaction, GC >16d); `blitz continue [ID]` and exit hint in `main.zig` use it; debug.log also lives in `~/.cache/blitzdenk`
+- `src/session_store.zig` JSONL session journals in `~/.cache/blitzdenk/<fnv1a64-of-cwd>/sessions/<id>.jsonl` (header + full-snapshot checkpoints, cap 4, tmp+rename compaction, GC >16d); `blitz continue [ID]`, `blitz sessions` (TUI session picker over `summaries()` rows; widget state in `src/session_picker.zig`, rendered like the wizard) and the exit hint in `main.zig` use it; debug.log also lives in `~/.cache/blitzdenk`
 - `src/compact.zig` chat compaction logic
 - `src/events.zig` exposed hooks
 - `src/defaults.zig` installs default config files into `~/.config/blitzdenk`
@@ -80,5 +80,6 @@ Important modules:
 
 ## RULES
 
+- Tautological tests considered harmful.
 - Do not write comments!
 - Keep the user space blitzdenk skill up to date! (`src/skills/blitzdenk-lua.md`, copy to `~/.config/blitzdenk/skills/blitzdenk-lua.md`)
