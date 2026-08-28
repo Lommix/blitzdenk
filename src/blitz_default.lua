@@ -8,7 +8,7 @@ local default_model = nil
 local ok, provider = pcall(require, "provider")
 if ok and type(provider) == "number" then
 	default_model = provider
-	blitz.set_model_agent(blitz.AGENT_GENERAL, default_model, "max")
+	blitz.set_agent_model(blitz.AGENT_GENERAL, default_model, "max")
 end
 
 blitz.set_compact_edge(250000)
@@ -201,7 +201,7 @@ blitz.status_bar_render = function()
 	local red = "\27[31m"
 	local reset = "\27[0m"
 	local ok_name, model_name = pcall(blitz.get_model_name, blitz.AGENT_GENERAL)
-	local ok_eff, model_effort = pcall(blitz.get_model_effort, blitz.AGENT_GENERAL)
+	local ok_eff, model_effort = pcall(blitz.get_agent_effort, blitz.AGENT_GENERAL)
 	if not ok_name or not ok_eff then
 		return red .. "no model bound — run blitz wizard or set one in provider.lua" .. reset
 	end

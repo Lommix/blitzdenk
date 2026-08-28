@@ -273,11 +273,13 @@
 ---Register a complete agent configuration.
 ---@field add_agent fun(def: BlitzAgentDef): integer
 ---Set the model config for a specific agent.
----@field set_model_agent fun(agent_type: integer, model: integer, effort?: string)
+---@field set_agent_model fun(agent_type: integer, model: integer, effort?: string)
+---Set the reasoning effort for an agent type without touching its model.
+---@field set_agent_effort fun(agent_type: integer, effort: string)
 ---Return the model name bound to an agent type.
 ---@field get_model_name fun(agent_type: integer): string
 ---Return the reasoning effort string bound to an agent type.
----@field get_model_effort fun(agent_type: integer): string
+---@field get_agent_effort fun(agent_type: integer): string
 ---Return token usage currently shown by the statusbar.
 ---@field token_usage fun(): BlitzTokenUsage
 ---Return main-agent context fill percentage currently shown by the statusbar.

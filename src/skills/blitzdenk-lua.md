@@ -55,7 +55,7 @@ local deepseek = blitz.add_model({
     cost = { input = 0.14, output = 0.28, cache = 0.028 },  -- USD per 1M tokens
 })
 
-blitz.set_model_agent(blitz.AGENT_GENERAL, deepseek, "max")
+blitz.set_agent_model(blitz.AGENT_GENERAL, deepseek, "max")
 ```
 
 The first-run wizard writes `~/.config/blitzdenk/provider.lua` with this
@@ -67,15 +67,17 @@ question.
 
 `add_provider` and `add_model` return integer handles. `vision` (default
 false) gates the `view_image` tool and image pasting; `cost` is optional and
-absent means free. Bind a model per agent with `blitz.set_model_agent(agent_type,
+absent means free. Bind a model per agent with `blitz.set_agent_model(agent_type,
 handle, effort?)` (effort defaults to `"medium"`) or `model = handle` in
-`blitz.add_agent`. Every agent needs a bound model; unbound agents fail to
+`blitz.add_agent`. Change only the effort with
+`blitz.set_agent_effort(agent_type, effort)`; the agent must already have a
+bound model. Every agent needs a bound model; unbound agents fail to
 spawn. Effort: `"none"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`.
 
 The typed fields for provider, model, and cost live in `BlitzProviderDef`,
 `BlitzModelDef`, and `BlitzModelCost` in `meta.lua`. Read the model name with
 `blitz.get_model_name(agent_type)`. Read the effort with
-`blitz.get_model_effort(agent_type)`.
+`blitz.get_agent_effort(agent_type)`.
 
 ## Tool sets
 

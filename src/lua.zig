@@ -601,7 +601,7 @@ pub const Blitz = LuaType{
                 },
             },
             .{
-                .name = "set_model_agent",
+                .name = "set_agent_model",
                 .desc = "Set the model config for a specific agent.",
                 .ty = LuaType{
                     .function = .{
@@ -621,7 +621,28 @@ pub const Blitz = LuaType{
                                 try a.context_factory.setAgentModel(&a.config, agent_type, @enumFromInt(model), eff);
                                 try a.refreshLiveAgentTools();
                             }
-                        }).lua_fn, "set_model_agent"),
+                        }).lua_fn, "set_agent_model"),
+                    },
+                },
+            },
+            .{
+                .name = "set_agent_effort",
+                .desc = "Set the reasoning effort for an agent type without touching its model.",
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{
+                            .{ .name = "agent_type", .ty = LuaType.integer },
+                            .{ .name = "effort", .ty = LuaType.string, .desc = "none|low|medium|high|xhigh|max" },
+                        },
+                        .fn_ptr = LuaFnBind((struct {
+                            fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, effort: []const u8) !void {
+                                if (try isToolVm(state)) return;
+                                const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
+                                const eff = r.config.parseReasoningEffort(effort) orelse return error.UnknownEffort;
+                                try a.context_factory.setAgentEffort(agent_type, eff);
+                                try a.refreshLiveAgentTools();
+                            }
+                        }).lua_fn, "set_agent_effort"),
                     },
                 },
             },
@@ -643,7 +664,7 @@ pub const Blitz = LuaType{
                 } },
             },
             .{
-                .name = "get_model_effort",
+                .name = "get_agent_effort",
                 .desc = "Return the reasoning effort string bound to an agent type.",
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "agent_type", .ty = LuaType.integer }},
@@ -655,7 +676,7 @@ pub const Blitz = LuaType{
                             const model = def.model orelse return error.NoModel;
                             return @tagName(model.effort);
                         }
-                    }).lua_fn, "get_model_effort"),
+                    }).lua_fn, "get_agent_effort"),
                 } },
             },
             .{

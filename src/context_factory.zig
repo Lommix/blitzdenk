@@ -251,6 +251,12 @@ pub fn setAgentModel(self: *Self, cfg: *const r.config.BlitzdenkCfg, agent_type:
     };
 }
 
+pub fn setAgentEffort(self: *Self, agent_type: AgentType, effort: r.config.ReasoningEffort) !void {
+    const def = self.getAgentMut(agent_type) orelse return error.UnknownAgent;
+    if (def.model == null) return error.NoModel;
+    def.model.?.effort = effort;
+}
+
 pub fn collectUnboundAgents(self: *const Self, alloc: std.mem.Allocator, out: *std.ArrayList([]const u8)) !void {
     for (0..self.agent_counter) |i| {
         const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));

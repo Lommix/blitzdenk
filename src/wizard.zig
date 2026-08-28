@@ -828,7 +828,7 @@ test "default config loads without provider.lua and binds on require success" {
     _ = c.lua_getglobal(L, "blitz");
     registerStub(L, &tracker, "add_provider", &addProviderStub);
     registerStub(L, &tracker, "add_model", &addModelStub);
-    registerStub(L, &tracker, "set_model_agent", &setModelAgentStub);
+    registerStub(L, &tracker, "set_agent_model", &setModelAgentStub);
     c.lua_pop(L, 1);
 
     try execTestLua(L, stubBlitzPrelude);
