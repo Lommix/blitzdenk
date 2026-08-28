@@ -708,9 +708,8 @@ fn executeTool(
     const Selection = union(enum) { output: anyerror!types.ToolOutput, canceled: void };
     var buffer: [2]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
-    var done = std.atomic.Value(bool).init(false);
-    try select.concurrent(.output, runToolCallback, .{ exec, ctx, alloc, io, call, &done });
-    select.async(.canceled, options.CancellationToken.waitUntilDone, .{ token, &done, io });
+    try select.concurrent(.output, runToolCallback, .{ exec, ctx, alloc, io, call });
+    select.async(.canceled, options.CancellationToken.waitUntilCanceled, .{ token, io });
     switch (try select.await()) {
         .output => |output| {
             select.cancelDiscard();
@@ -723,8 +722,7 @@ fn executeTool(
     }
 }
 
-fn runToolCallback(exec: types.ToolExecuteFn, ctx: ?*anyopaque, alloc: std.mem.Allocator, io: std.Io, call: types.ToolCall, done: *std.atomic.Value(bool)) !types.ToolOutput {
-    defer done.store(true, .release);
+fn runToolCallback(exec: types.ToolExecuteFn, ctx: ?*anyopaque, alloc: std.mem.Allocator, io: std.Io, call: types.ToolCall) !types.ToolOutput {
     return exec(ctx, alloc, io, call);
 }
 

@@ -20,8 +20,8 @@ pub const CancellationToken = struct {
         try self.event.wait(io);
     }
 
-    pub fn waitUntilDone(self: *CancellationToken, done: *const std.atomic.Value(bool), io: std.Io) void {
-        while (!self.isCancelled() and !done.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch return;
+    pub fn waitUntilCanceled(self: *CancellationToken, io: std.Io) void {
+        while (!self.isCancelled()) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch return;
     }
 };
 

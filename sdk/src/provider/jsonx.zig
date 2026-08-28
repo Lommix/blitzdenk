@@ -461,13 +461,11 @@ pub fn reportStreamError(a: std.mem.Allocator, options: RequestOptions, body: []
     return if (std.ascii.indexOfIgnoreCase(body, "rate_limit") != null) error.RateLimited else error.ApiError;
 }
 
-fn timeoutTask(io: std.Io, timeout_ms: u64, done: *std.atomic.Value(bool)) void {
-    defer done.store(true, .release);
+fn timeoutTask(io: std.Io, timeout_ms: u64) void {
     std.Io.sleep(io, .fromMilliseconds(@intCast(timeout_ms)), .awake) catch {};
 }
 
-fn postTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, done: *std.atomic.Value(bool)) !Response {
-    defer done.store(true, .release);
+fn postTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header) !Response {
     return post(a, io, client, url, body, headers);
 }
 
@@ -489,10 +487,9 @@ fn postTimed(
     };
     var buffer: [3]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
-    var done = std.atomic.Value(bool).init(false);
-    select.async(.response, postTask, .{ a, io, client, url, body, headers, &done });
-    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout, &done });
-    if (cancellation) |token| select.async(.canceled, opts_mod.CancellationToken.waitUntilDone, .{ token, &done, io });
+    select.async(.response, postTask, .{ a, io, client, url, body, headers });
+    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout });
+    if (cancellation) |token| select.async(.canceled, opts_mod.CancellationToken.waitUntilCanceled, .{ token, io });
     switch (try select.await()) {
         .response => |response| {
             select.cancelDiscard();
@@ -683,10 +680,9 @@ fn postSseTimed(
     };
     var buffer: [3]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
-    var done = std.atomic.Value(bool).init(false);
-    select.async(.response, postSseTask, .{ a, io, client, url, body, headers, event_ctx, on_event, &done });
-    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout, &done });
-    if (cancellation) |token| select.async(.canceled, opts_mod.CancellationToken.waitUntilDone, .{ token, &done, io });
+    select.async(.response, postSseTask, .{ a, io, client, url, body, headers, event_ctx, on_event });
+    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout });
+    if (cancellation) |token| select.async(.canceled, opts_mod.CancellationToken.waitUntilCanceled, .{ token, io });
     switch (try select.await()) {
         .response => |response| {
             select.cancelDiscard();
@@ -703,8 +699,7 @@ fn postSseTimed(
     }
 }
 
-fn postSseTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, event_ctx: ?*anyopaque, on_event: *const fn (?*anyopaque, []const u8) anyerror!void, done: *std.atomic.Value(bool)) !Response {
-    defer done.store(true, .release);
+fn postSseTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, event_ctx: ?*anyopaque, on_event: *const fn (?*anyopaque, []const u8) anyerror!void) !Response {
     return postSse(a, io, client, url, body, headers, event_ctx, on_event);
 }
 
