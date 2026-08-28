@@ -36,7 +36,7 @@ Connect remote without ssh config entries `/ssh user@host:/path/to/cwd`
 One line, no sudo. Installs to `~/.local/bin/blitz`
 
 ```
-curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh | sh
 ```
 
 You can also download the pre compiled binaries by hand on [the release page](https://github.com/Lommix/blitzdenk/releases)
