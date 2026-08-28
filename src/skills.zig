@@ -96,7 +96,9 @@ fn addEntry(reg: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, dir: std.
     const len = dir.realPathFile(io, sub_path, path_buf) catch return;
     const meta = loadSkillMeta(io, path_buf[0..len], header_buf) orelse return;
     if (!isSkillName(meta.name)) {
-        std.log.warn("ignoring skill with invalid name '{s}' at '{s}'", .{ meta.name, path_buf[0..len] });
+        if (!@import("builtin").is_test) {
+            std.log.warn("ignoring skill with invalid name '{s}' at '{s}'", .{ meta.name, path_buf[0..len] });
+        }
         return;
     }
     if (reg.find(meta.name) != null) return;

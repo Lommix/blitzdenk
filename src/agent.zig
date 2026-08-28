@@ -248,7 +248,7 @@ pub const Agent = struct {
         if (self.task != null or self.compact_task != null) return error.RunInProgress;
         const estimate = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, self.history());
         self.context_tokens = estimate;
-        if (!self.compaction.shouldStart(self.history().len, estimate, self.context_limit)) return false;
+        if (!self.compaction.shouldStart(self.history().len, estimate, self.context_limit, self.failureNow())) return false;
         const request = self.compaction.requested.swap(.none, .acq_rel);
         const force = request == .external;
         const cut_index = if (force) compact.computeForcedCutIndex(self.history()) else compact.computeCutIndex(self.history());
@@ -394,11 +394,12 @@ pub const Agent = struct {
                 if (self.messages) |*previous| previous.deinit();
                 self.messages = owned;
             }
-            if (is_overflow and !self.flags.overflow_recovery and has_checkpoint) {
+            const blocked_retry = failure != null and failure.? != error.Canceled and self.contextNearLimit();
+            if ((is_overflow or blocked_retry) and !self.flags.overflow_recovery and has_checkpoint) {
                 self.flags.overflow_recovery = true;
                 self.requestCompaction(.auto, true);
                 if (!(self.startCompaction() catch false)) {
-                    self.last_error = error.ContextOverflow;
+                    self.last_error = if (is_overflow) error.ContextOverflow else failure.?;
                     self.status = .failed;
                 }
             } else if (failure) |err| {
@@ -419,10 +420,17 @@ pub const Agent = struct {
 
     pub fn willAutoRetry(self: *const Agent, failure: anyerror) bool {
         if (self.retry_count >= self.max_retries) return false;
-        if (failure == error.Canceled or failure == error.NetworkError) return true;
+        if (failure == error.Canceled) return true;
+        if (self.contextNearLimit()) return false;
+        if (failure == error.NetworkError) return true;
         if (failure != error.RateLimited and failure != error.ApiError) return false;
         const provider_error = self.last_provider_error orelse return false;
         return provider_error.is_retryable;
+    }
+
+    pub fn contextNearLimit(self: *const Agent) bool {
+        if (self.context_limit == 0) return false;
+        return self.context_tokens >= compact.autoCompactLimit(self.context_limit);
     }
 
     pub fn retryDue(self: *const Agent) bool {
@@ -523,7 +531,7 @@ pub const Agent = struct {
     fn maybeCompactForStep(self: *Agent, messages: []const sdk.Message) ?[]const sdk.Message {
         const estimate = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, messages);
         self.context_tokens = estimate;
-        if (!self.compaction.shouldStart(messages.len, estimate, self.context_limit)) return null;
+        if (!self.compaction.shouldStart(messages.len, estimate, self.context_limit, self.failureNow())) return null;
         const request = self.compaction.requested.swap(.none, .acq_rel);
         const force = request == .external;
         const cut_index = if (force) compact.computeForcedCutIndex(messages) else compact.computeCutIndex(messages);
@@ -538,10 +546,20 @@ pub const Agent = struct {
         var outcome = switch (self.model) {
             .response => |*model| compact.compactResponses(scratch.allocator(), self.io, model, self.tools, messages, cancellation),
             inline else => |*model| compact.compactOrdinary(scratch.allocator(), self.io, model.languageModel(), messages, cancellation, force),
-        } catch return null;
+        } catch |err| {
+            std.log.scoped(.agent).warn("in-step compaction failed ({s}); backing off before retry", .{@errorName(err)});
+            self.compaction.noteFailure(self.failureNow(), err);
+            self.last_error = error.CompactFailed;
+            return null;
+        };
         defer outcome.deinit();
 
-        const cloned = agent_run.cloneMessages(self.injection_arena.allocator(), outcome.messages.messages) catch return null;
+        const cloned = agent_run.cloneMessages(self.injection_arena.allocator(), outcome.messages.messages) catch |err| {
+            self.compaction.noteFailure(self.failureNow(), err);
+            self.last_error = error.CompactFailed;
+            return null;
+        };
+        self.compaction.noteSuccess();
         self.usage.add(outcome.usage);
         self.context_tokens = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, cloned);
         self.compaction.last_compacted_message_count = cloned.len;
@@ -576,6 +594,7 @@ pub const Agent = struct {
         task.deinit();
         self.compact_task = null;
         if (outcome) |value| {
+            self.compaction.noteSuccess();
             self.compaction.completed_continue_after = self.compaction.continue_after;
             if (self.messages) |*previous| previous.deinit();
             self.messages = value.messages;
@@ -600,11 +619,16 @@ pub const Agent = struct {
                 };
             }
         } else if (failure) |err| {
+            self.compaction.noteFailure(self.failureNow(), err);
             self.compaction.resetInFlight();
             self.last_error = err;
             self.status = if (err == error.Canceled) .canceled else .failed;
         }
         return true;
+    }
+
+    fn failureNow(self: *Agent) i128 {
+        return @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
     }
 
     fn appendHistory(self: *Agent, messages: []const sdk.Message) !void {
@@ -1124,4 +1148,35 @@ test "explicit cancel adopts the latest valid request checkpoint" {
     try std.testing.expectEqualStrings("prompt", agent.history()[0].text());
     try std.testing.expectEqual(sdk.Role.assistant, agent.history()[1].role);
     try std.testing.expectEqualStrings("tool output", agent.history()[2].parts()[0].tool_result.output);
+}
+
+test "retry guard blocks auto retry near context limit" {
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    agent.max_retries = 10;
+    agent.context_limit = 300_000;
+
+    agent.context_tokens = 100_000;
+    try std.testing.expect(agent.willAutoRetry(error.NetworkError));
+    try std.testing.expect(!agent.contextNearLimit());
+
+    agent.last_provider_error = .{
+        .status_code = 429,
+        .response_body = "",
+        .is_retryable = true,
+        .retry_after_ms = null,
+    };
+    try std.testing.expect(agent.willAutoRetry(error.RateLimited));
+
+    agent.context_tokens = 292_000;
+    try std.testing.expect(agent.contextNearLimit());
+    try std.testing.expect(!agent.willAutoRetry(error.NetworkError));
+    try std.testing.expect(!agent.willAutoRetry(error.RateLimited));
+    try std.testing.expect(agent.willAutoRetry(error.Canceled));
 }

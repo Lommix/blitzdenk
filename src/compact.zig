@@ -61,6 +61,9 @@ pub const COMPACT_TAIL_CHARS: usize = 1024;
 pub const RESERVE_TOKENS: u64 = 1024 * 8;
 pub const IMAGE_ESTIMATE_TOKENS: u64 = 4096;
 pub const TIMEOUT_MS: u64 = 5 * 60_000;
+const COMPACT_RETRY_BASE_MS: u64 = 30_000;
+const COMPACT_RETRY_MAX_MS: u64 = 10 * 60_000;
+const COMPACT_MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 pub const Request = enum(u8) {
     none,
@@ -77,6 +80,8 @@ pub const State = struct {
     continue_after: bool = true,
     completed_continue_after: ?bool = null,
     completion_count: std.atomic.Value(usize) = .init(0),
+    failure_count: u32 = 0,
+    retry_after_ns: i128 = 0,
 
     pub fn request(self: *State, reason: Request) void {
         self.requested.store(reason, .release);
@@ -87,8 +92,33 @@ pub const State = struct {
         self.continue_after = true;
     }
 
-    pub fn shouldStart(self: *const State, message_count: usize, estimate: u64, context_limit: u64) bool {
-        if (self.requested.load(.acquire) != .none) return true;
+    pub fn noteFailure(self: *State, now_ns: i128, err: anyerror) void {
+        if (err == error.Canceled) return;
+        self.failure_count = @min(self.failure_count + 1, COMPACT_MAX_CONSECUTIVE_FAILURES);
+        const backoff = @min(
+            COMPACT_RETRY_BASE_MS * (@as(u64, 1) << @intCast(self.failure_count -| 1)),
+            COMPACT_RETRY_MAX_MS,
+        );
+        self.retry_after_ns = now_ns + @as(i128, backoff) * std.time.ns_per_ms;
+    }
+
+    pub fn noteSuccess(self: *State) void {
+        self.failure_count = 0;
+        self.retry_after_ns = 0;
+    }
+
+    fn coolingDown(self: *const State, now_ns: i128) bool {
+        return self.failure_count > 0 and now_ns < self.retry_after_ns;
+    }
+
+    fn exhausted(self: *const State) bool {
+        return self.failure_count >= COMPACT_MAX_CONSECUTIVE_FAILURES;
+    }
+
+    pub fn shouldStart(self: *const State, message_count: usize, estimate: u64, context_limit: u64, now_ns: i128) bool {
+        if (self.requested.load(.acquire) == .external) return true;
+        if (self.coolingDown(now_ns)) return false;
+        if (self.exhausted()) return false;
         if (self.must_progress_past_message_count != 0 and message_count <= self.must_progress_past_message_count) return false;
         if (message_count <= 3) return false;
         if (self.last_compacted_message_count == message_count and self.last_compacted_estimate >= autoCompactLimit(context_limit)) return false;
@@ -604,4 +634,44 @@ test "ordinary SDK compaction generates and installs a summary" {
     defer forced.deinit();
     try std.testing.expectEqual(@as(usize, 2), forced.messages.messages.len);
     try std.testing.expect(std.mem.endsWith(u8, forced.messages.messages[1].text(), "generated summary"));
+}
+
+test "compaction state backs off after failures and recovers on success" {
+    var state = State{};
+    const limit: u64 = 300_000;
+    const over: u64 = limit;
+    const ms: i128 = std.time.ns_per_ms;
+    const t0: i128 = 1_000 * ms;
+
+    try std.testing.expect(state.shouldStart(10, over, limit, t0));
+
+    state.noteFailure(t0, error.ApiError);
+    try std.testing.expect(state.coolingDown(t0 + 1 * ms));
+    try std.testing.expect(!state.shouldStart(10, over, limit, t0 + 1 * ms));
+    try std.testing.expect(state.shouldStart(10, over, limit, t0 + 30_000 * ms));
+
+    state.noteFailure(t0 + 30_000 * ms, error.ApiError);
+    try std.testing.expect(!state.shouldStart(10, over, limit, t0 + 60_000 * ms));
+    try std.testing.expect(state.shouldStart(10, over, limit, t0 + 90_000 * ms));
+
+    state.noteFailure(t0 + 90_000 * ms, error.ApiError);
+    state.noteFailure(t0 + 90_000 * ms, error.ApiError);
+    state.noteFailure(t0 + 90_000 * ms, error.ApiError);
+    state.noteFailure(t0 + 90_000 * ms, error.ApiError);
+    try std.testing.expect(state.exhausted());
+    try std.testing.expect(!state.shouldStart(10, over, limit, t0 + 10 * 60_000 * ms));
+
+    state.request(.external);
+    try std.testing.expect(state.shouldStart(10, over, limit, t0));
+
+    state.noteSuccess();
+    try std.testing.expectEqual(@as(u32, 0), state.failure_count);
+    state.request(.none);
+    try std.testing.expect(state.shouldStart(10, over, limit, t0));
+
+    var fresh = State{};
+    fresh.noteFailure(t0, error.Canceled);
+    try std.testing.expect(!fresh.coolingDown(t0 + 1 * ms));
+    try std.testing.expect(!fresh.exhausted());
+    try std.testing.expect(fresh.shouldStart(10, over, limit, t0 + 1 * ms));
 }
