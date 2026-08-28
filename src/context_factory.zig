@@ -67,6 +67,11 @@ pub const AgentType = enum(u6) {
     pub const Set = std.EnumSet(AgentType);
     general,
     _,
+
+    pub fn fromLuaInt(value: u32) !AgentType {
+        if (value > std.math.maxInt(u6)) return error.UnknownAgent;
+        return @enumFromInt(value);
+    }
 };
 
 pub const ToolFlags = struct {

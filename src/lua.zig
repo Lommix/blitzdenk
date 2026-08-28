@@ -430,7 +430,7 @@ pub const Blitz = LuaType{
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, tool_name: []const u8) !void {
                                 if (try isToolVm(state)) return;
                                 try a.cmd_queue.append(a.io, .{ .add_tool = .{
-                                    .agent_type = @enumFromInt(agent_type_id),
+                                    .agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id),
                                     .tool_name = tool_name,
                                 } });
                             }
@@ -611,7 +611,7 @@ pub const Blitz = LuaType{
                         .fn_ptr = LuaFnBind((struct {
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, model: u32, effort: ?[]const u8) !void {
                                 if (try isToolVm(state)) return;
-                                const agent_type: r.ContextFactory.AgentType = @enumFromInt(agent_type_id);
+                                const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
                                 const eff = if (effort) |eff|
                                     r.config.parseReasoningEffort(eff) orelse return error.UnknownEffort
                                 else
@@ -631,13 +631,29 @@ pub const Blitz = LuaType{
                     .ret = &LuaString,
                     .fn_ptr = LuaFnBind((struct {
                         fn lua_fn(a: *r.app.App, agent_type_id: u32) ![]const u8 {
-                            const agent_type: r.ContextFactory.AgentType = @enumFromInt(agent_type_id);
+                            const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
                             const def = a.context_factory.agents.getPtrConst(agent_type).* orelse return error.UnknownAgent;
                             const model = def.model orelse return error.NoModel;
                             const entry = a.config.getModel(model.model) orelse return error.UnknownModel;
                             return entry.getName();
                         }
                     }).lua_fn, "get_model_name"),
+                } },
+            },
+            .{
+                .name = "get_model_effort",
+                .desc = "Return the reasoning effort string bound to an agent type.",
+                .ty = LuaType{ .function = .{
+                    .args = &.{.{ .name = "agent_type", .ty = LuaType.integer }},
+                    .ret = &LuaString,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, agent_type_id: u32) ![]const u8 {
+                            const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
+                            const def = a.context_factory.agents.getPtrConst(agent_type).* orelse return error.UnknownAgent;
+                            const model = def.model orelse return error.NoModel;
+                            return @tagName(model.effort);
+                        }
+                    }).lua_fn, "get_model_effort"),
                 } },
             },
             .{

@@ -217,6 +217,8 @@ blitz.status_bar_render = function()
 	local reset = "\27[0m"
 	return white
 		.. blitz.get_model_name(blitz.AGENT_GENERAL)
+		.. " • "
+		.. blitz.get_model_effort(blitz.AGENT_GENERAL)
 		.. reset
 		.. " | Cache:"
 		.. green

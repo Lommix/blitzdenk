@@ -135,4 +135,8 @@ test "parse reasoning effort" {
     try std.testing.expectEqual(.xhigh, parseReasoningEffort("xhigh"));
     try std.testing.expectEqual(.medium, parseReasoningEffort("medium"));
     try std.testing.expectEqual(null, parseReasoningEffort("bogus"));
+    inline for (std.meta.fields(ReasoningEffort)) |field| {
+        try std.testing.expectEqualStrings(field.name, @tagName(@field(ReasoningEffort, field.name)));
+        try std.testing.expect(parseReasoningEffort(field.name) != null);
+    }
 }

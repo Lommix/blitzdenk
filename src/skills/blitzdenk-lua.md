@@ -63,7 +63,8 @@ spawn. Effort: `"none"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`.
 
 The typed fields for provider, model, and cost live in `BlitzProviderDef`,
 `BlitzModelDef`, and `BlitzModelCost` in `meta.lua`. Read the model name with
-`blitz.get_model_name(agent_type)`.
+`blitz.get_model_name(agent_type)`. Read the effort with
+`blitz.get_model_effort(agent_type)`.
 
 ## Tool sets
 
