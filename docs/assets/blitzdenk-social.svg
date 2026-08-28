@@ -33,7 +33,6 @@
     <clipPath id="frame"><rect x="18" y="18" width="1164" height="594" rx="20"/></clipPath>
   </defs>
 
-  <rect width="1200" height="630" fill="#020503"/>
   <g clip-path="url(#frame)">
     <rect x="18" y="18" width="1164" height="594" fill="url(#bg)"/>
     <ellipse cx="975" cy="180" rx="300" ry="220" fill="#55ffc4" fill-opacity=".07" filter="url(#blur)"/>
@@ -60,7 +59,7 @@
     <g transform="translate(78 355)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
       <text fill="#dfff50" font-size="21" font-weight="900">1.7 MB</text>
       <text x="103" fill="#63776d" font-size="21">/</text>
-      <text x="126" fill="#dfff50" font-size="21" font-weight="900">&lt;100 MB RAM</text>
+      <text x="126" fill="#dfff50" font-size="21" font-weight="900">&lt; 99 MB RAM</text>
     </g>
 
     <g transform="translate(78 546)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-weight="700">
