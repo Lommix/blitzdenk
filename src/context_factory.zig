@@ -218,12 +218,10 @@ pub fn buildAgentApiConfig(
         const model = cfg.getModel(ag_cfg.model) orelse return .{ .diagnostic = .invalid_provider };
         const provider = cfg.getProvider(model.provider) orelse return .{ .diagnostic = .invalid_provider };
 
-        const key = if (provider.key_len > 0)
-            env.get(provider.getKeyEnvar()) orelse return .{
-                .diagnostic = .{ .missing_api_key = provider.getKeyEnvar() },
-            }
-        else
-            "";
+        const key = provider.resolveKey(env);
+        if (key.len == 0 and provider.getKeyEnvar().len > 0) {
+            return .{ .diagnostic = .{ .missing_api_key = provider.getKeyEnvar() } };
+        }
 
         return .{ .config = .{
             .api_key = key,
@@ -1064,7 +1062,7 @@ test "agent config reports the missing API key environment variable" {
     defer factory.prompt_arena.deinit();
 
     var cfg: r.config.BlitzdenkCfg = .{};
-    _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY").?;
+    _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "").?;
     const provider = cfg.commitProvider();
     const model = try cfg.addModel("example-model", provider, false, null);
     try factory.setAgentModel(&cfg, .general, model, .medium);
@@ -1085,7 +1083,7 @@ test "agent config permits keyless providers" {
     defer factory.prompt_arena.deinit();
 
     var cfg: r.config.BlitzdenkCfg = .{};
-    _ = cfg.reserveProvider("http://localhost:8080/v1", "").?;
+    _ = cfg.reserveProvider("http://localhost:8080/v1", "", "").?;
     const provider = cfg.commitProvider();
     const model = try cfg.addModel("local-model", provider, false, null);
     try factory.setAgentModel(&cfg, .general, model, .medium);
@@ -1097,6 +1095,43 @@ test "agent config permits keyless providers" {
             try std.testing.expectEqualStrings("", config.api_key);
             try std.testing.expectEqualStrings("local-model", config.model);
         },
+        .diagnostic => return error.TestExpectedAgentConfig,
+    }
+}
+
+test "agent config uses the stored key when the envar is absent" {
+    var factory = initTestFactory();
+    defer factory.prompt_arena.deinit();
+
+    var cfg: r.config.BlitzdenkCfg = .{};
+    _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "stored-key").?;
+    const provider = cfg.commitProvider();
+    const model = try cfg.addModel("example-model", provider, false, null);
+    try factory.setAgentModel(&cfg, .general, model, .medium);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    switch (factory.buildAgentApiConfig(.general, &cfg, &env)) {
+        .config => |config| try std.testing.expectEqualStrings("stored-key", config.api_key),
+        .diagnostic => return error.TestExpectedAgentConfig,
+    }
+}
+
+test "agent config prefers the envar value over the stored key" {
+    var factory = initTestFactory();
+    defer factory.prompt_arena.deinit();
+
+    var cfg: r.config.BlitzdenkCfg = .{};
+    _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "stored-key").?;
+    const provider = cfg.commitProvider();
+    const model = try cfg.addModel("example-model", provider, false, null);
+    try factory.setAgentModel(&cfg, .general, model, .medium);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("EXAMPLE_API_KEY", "envar-key");
+
+    switch (factory.buildAgentApiConfig(.general, &cfg, &env)) {
+        .config => |config| try std.testing.expectEqualStrings("envar-key", config.api_key),
         .diagnostic => return error.TestExpectedAgentConfig,
     }
 }

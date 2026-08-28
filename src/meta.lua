@@ -148,7 +148,9 @@
 ---the endpoint url
 ---@field url string
 ---the ENVAR holding the api key (not the key itself!)
----@field key_envar string
+---@field key_envar? string
+---stored api key; the envar wins when both are set
+---@field key? string
 ---@field temperature? number
 ---@field max_tokens? integer
 ---@field max_completion_tokens? integer

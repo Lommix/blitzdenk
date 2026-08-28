@@ -14,6 +14,8 @@ pub const Provider = struct {
     url: [512]u8 = undefined,
     url_len: usize = 0,
     key_envar: [128]u8 = undefined,
+    key_envar_len: usize = 0,
+    key: [256]u8 = undefined,
     key_len: usize = 0,
     provider_config: models.ProviderOptions = .{ .openai = .{} },
     thinking_type_buf: [16]u8 = undefined,
@@ -26,7 +28,19 @@ pub const Provider = struct {
     }
 
     pub fn getKeyEnvar(self: *const Provider) []const u8 {
-        return self.key_envar[0..self.key_len];
+        return self.key_envar[0..self.key_envar_len];
+    }
+
+    pub fn getKey(self: *const Provider) []const u8 {
+        return self.key[0..self.key_len];
+    }
+
+    pub fn resolveKey(self: *const Provider, env: *const std.process.Environ.Map) []const u8 {
+        const envar_name = self.getKeyEnvar();
+        if (envar_name.len > 0) {
+            if (env.get(envar_name)) |from_envar| return from_envar;
+        }
+        return self.getKey();
     }
 
     pub fn setThinkingType(self: *Provider, value: []const u8) bool {
@@ -65,15 +79,17 @@ pub const BlitzdenkCfg = struct {
     models: [MAX_MODELS]ModelEntry = @splat(.{}),
     model_count: u32 = 0,
 
-    pub fn reserveProvider(self: *BlitzdenkCfg, url: []const u8, key_envar: []const u8) ?*Provider {
+    pub fn reserveProvider(self: *BlitzdenkCfg, url: []const u8, key_envar: []const u8, key: []const u8) ?*Provider {
         if (self.provider_count >= MAX_PROVIDERS) return null;
-        if (url.len > 512 or key_envar.len > 128) return null;
+        if (url.len > 512 or key_envar.len > 128 or key.len > 256) return null;
         const slot = &self.providers[self.provider_count];
         slot.* = .{};
         @memcpy(slot.url[0..url.len], url);
         slot.url_len = url.len;
         @memcpy(slot.key_envar[0..key_envar.len], key_envar);
-        slot.key_len = key_envar.len;
+        slot.key_envar_len = key_envar.len;
+        @memcpy(slot.key[0..key.len], key);
+        slot.key_len = key.len;
         return slot;
     }
 
@@ -139,4 +155,35 @@ test "parse reasoning effort" {
         try std.testing.expectEqualStrings(field.name, @tagName(@field(ReasoningEffort, field.name)));
         try std.testing.expect(parseReasoningEffort(field.name) != null);
     }
+}
+
+test "provider uses the stored key when the envar is absent" {
+    var cfg: BlitzdenkCfg = .{};
+    const provider = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "stored-key").?;
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try std.testing.expectEqualStrings("stored-key", provider.resolveKey(&env));
+}
+
+test "provider prefers the envar value over the stored key" {
+    var cfg: BlitzdenkCfg = .{};
+    const provider = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "stored-key").?;
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("EXAMPLE_API_KEY", "envar-key");
+    try std.testing.expectEqualStrings("envar-key", provider.resolveKey(&env));
+}
+
+test "provider resolves to an empty key when both sources are empty" {
+    var cfg: BlitzdenkCfg = .{};
+    const provider = cfg.reserveProvider("http://localhost:8080/v1", "", "").?;
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try std.testing.expectEqualStrings("", provider.resolveKey(&env));
+}
+
+test "reserveProvider rejects an oversize key" {
+    var cfg: BlitzdenkCfg = .{};
+    try std.testing.expect(cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "k" ** 256) != null);
+    try std.testing.expect(cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "k" ** 257) == null);
 }

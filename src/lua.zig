@@ -228,7 +228,8 @@ const ModelDef = LuaType{ .table_def = .{ .name = "BlitzModelDef", .fields = &.{
 const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields = &.{
     .{ .name = "type", .ty = LuaType.string, .desc = "'openai' | 'response' | 'anthropic' | 'ollama'" },
     .{ .name = "url", .ty = LuaType.string, .desc = "the endpoint url" },
-    .{ .name = "key_envar", .ty = LuaType.string, .desc = "the ENVAR holding the api key (not the key itself!)" },
+    .{ .name = "key_envar", .ty = LuaType.string, .optional = true, .desc = "the ENVAR holding the api key (not the key itself!)" },
+    .{ .name = "key", .ty = LuaType.string, .optional = true, .desc = "stored api key; the envar wins when both are set" },
     .{ .name = "temperature", .ty = LuaType.number, .optional = true },
     .{ .name = "max_tokens", .ty = LuaType.integer, .optional = true },
     .{ .name = "max_completion_tokens", .ty = LuaType.integer, .optional = true },
@@ -468,7 +469,8 @@ pub const Blitz = LuaType{
                             const Arg = struct {
                                 type: []const u8,
                                 url: []const u8,
-                                key_envar: []const u8,
+                                key_envar: ?[]const u8 = null,
+                                key: ?[]const u8 = null,
                                 temperature: ?f32 = null,
                                 max_tokens: ?u32 = null,
                                 max_completion_tokens: ?u32 = null,
@@ -484,7 +486,7 @@ pub const Blitz = LuaType{
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, args: Arg) !r.config.ProviderHandle {
                                 if (try isToolVm(state)) return @enumFromInt(0);
-                                const slot = a.config.reserveProvider(args.url, args.key_envar) orelse return error.MaxProviderReached;
+                                const slot = a.config.reserveProvider(args.url, args.key_envar orelse "", args.key orelse "") orelse return error.MaxProviderReached;
                                 slot.rate_limit = args.rate_limit orelse 0;
 
                                 const ptype: r.models.Kind = blk: {
@@ -761,7 +763,7 @@ pub const Blitz = LuaType{
                     .fn_ptr = LuaFnBind((struct {
                         fn lua_fn(a: *r.app.App, state: *c.lua_State, name: []const u8, func: LuaFnRef, description: ?[]const u8) !void {
                             if (try isToolVm(state)) return;
-                            const vm = &a.lua_vm;
+                            const vm = a.lua_vm;
                             if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) return error.TooManyCommands;
                             if (name.len == 0) return error.InvalidCommandName;
                             const stripped = if (name[0] == '/') name[1..] else name;
@@ -1024,8 +1026,7 @@ pub const Blitz = LuaType{
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "message", .ty = LuaType.string }},
                     .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(state: *c.lua_State, a: *r.app.App, message: []const u8) !void {
-                            if (try isToolVm(state)) return;
+                        fn lua_fn(_: *c.lua_State, a: *r.app.App, message: []const u8) !void {
                             try a.cmd_queue.append(a.io, .{ .push_notification = message });
                         }
                     }).lua_fn, "push_notification"),
@@ -1134,9 +1135,8 @@ const BlitzMcp = LuaType{
                     .function = .{
                         .args = &.{.{ .name = "mcp_id", .ty = LuaType.integer }},
                         .fn_ptr = LuaFnBind((struct {
-                            fn lua_fn(state: *c.lua_State, a: *r.app.App, mcp_id: u32) !void {
-                                if (try isToolVm(state)) return;
-                                const vm = &a.lua_vm;
+                            fn lua_fn(_: *c.lua_State, a: *r.app.App, mcp_id: u32) !void {
+                                const vm = a.lua_vm;
                                 if (mcp_id == 0 or mcp_id > vm.mcp_entries.items.len) return error.InvalidMcpId;
                                 vm.mcp_entries.items[mcp_id - 1].enabled = true;
                                 vm.mcp_entries.items[mcp_id - 1].conf_enabled = true;
@@ -1384,8 +1384,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         .ty = LuaType{
             .function = .{
                 .fn_ptr = LuaFnBind((struct {
-                    fn lua_fn(state: *c.lua_State, a: *r.app.App) !void {
-                        if (try isToolVm(state)) return;
+                    fn lua_fn(_: *c.lua_State, a: *r.app.App) !void {
                         try a.cmd_queue.append(a.io, .reset_session);
                     }
                 }).lua_fn, "cmd.reset_session"),
@@ -1398,8 +1397,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "path", .ty = LuaType.string }},
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App, path: []const u8) !void {
-                    if (try isToolVm(state)) return;
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, path: []const u8) !void {
                     try a.cmd_queue.append(a.io, .{ .cd = path });
                 }
             }).lua_fn, "cmd.cd"),
@@ -1410,8 +1408,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         .desc = "Cancel all in-flight agent work and drop streaming preview.",
         .ty = LuaType{ .function = .{
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App) !void {
-                    if (try isToolVm(state)) return;
+                fn lua_fn(_: *c.lua_State, a: *r.app.App) !void {
                     try a.cmd_queue.append(a.io, .cancel);
                 }
             }).lua_fn, "cmd.cancel"),
@@ -1424,8 +1421,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
             .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
             .ret = &LuaString,
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
-                    if (try isToolVm(state)) return "Not Found";
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
                     if (a.registry.get(agent_id) == null) return "Not Found";
                     try a.cmd_queue.append(a.io, .{ .cancel_agent = agent_id });
                     return "Success";
@@ -1438,8 +1434,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         .desc = "Retry the main agent's last turn.",
         .ty = LuaType{ .function = .{
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App) !void {
-                    if (try isToolVm(state)) return;
+                fn lua_fn(_: *c.lua_State, a: *r.app.App) !void {
                     try a.cmd_queue.append(a.io, .retry);
                 }
             }).lua_fn, "cmd.retry"),
@@ -1450,8 +1445,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         .desc = "Compact the main agent now when idle, or before its next turn while running.",
         .ty = LuaType{ .function = .{
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App) !void {
-                    if (try isToolVm(state)) return;
+                fn lua_fn(_: *c.lua_State, a: *r.app.App) !void {
                     try a.cmd_queue.append(a.io, .compact);
                 }
             }).lua_fn, "cmd.compact"),
@@ -1463,8 +1457,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "role", .ty = LuaType.string }, .{ .name = "text", .ty = LuaType.string } },
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App, role_str: []const u8, text: []const u8) !void {
-                    if (try isToolVm(state)) return;
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, role_str: []const u8, text: []const u8) !void {
                     const role: r.app.ChatRole = if (std.mem.eql(u8, role_str, "system"))
                         .system
                     else if (std.mem.eql(u8, role_str, "user"))
@@ -1490,8 +1483,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "text", .ty = LuaType.string } },
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_id: r.AgentId, text: []const u8) !void {
-                    if (try isToolVm(state)) return;
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId, text: []const u8) !void {
                     const parts = [_]r.sdk.Part{.{ .text = text }};
                     try a.cmd_queue.append(a.io, .{ .queue_agent_message = .{
                         .agent_id = agent_id,
@@ -1507,8 +1499,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "text", .ty = LuaType.string }},
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App, text: []const u8) !void {
-                    if (try isToolVm(state)) return;
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, text: []const u8) !void {
                     const parts = [_]r.sdk.Part{.{ .text = text }};
                     const entry = try r.app.ChatEntry.userMessageSimple(a.sessionAlloc(), .user, text);
                     if (a.main_agent_id) |id| {
@@ -2146,7 +2137,11 @@ fn luaArenaAlloc(ud: ?*anyopaque, ptr: ?*anyopaque, osize: usize, nsize: usize) 
 }
 
 fn luaGpaAlloc(ud: ?*anyopaque, ptr: ?*anyopaque, osize: usize, nsize: usize) callconv(.c) ?*anyopaque {
-    const alloc: *const Allocator = @ptrCast(@alignCast(ud orelse return null));
+    const vm: *LuaVm = @ptrCast(@alignCast(ud orelse return null));
+    return luaAllocWith(&vm.parent, ptr, osize, nsize);
+}
+
+fn luaAllocWith(alloc: *const Allocator, ptr: ?*anyopaque, osize: usize, nsize: usize) ?*anyopaque {
     const alignment: std.mem.Alignment = .of(std.c.max_align_t);
 
     if (nsize == 0) {
@@ -2204,30 +2199,27 @@ pub const LuaVm = struct {
     /// thread-safe; native tools run in parallel, Lua tools serialize here.
     vm_mu: std.Io.Mutex = .init,
 
-    pub fn init(parent: Allocator) !LuaVm {
+    pub fn init(parent: Allocator) !*LuaVm {
         return create(parent, false);
     }
 
-    pub fn initTool(parent: Allocator) !LuaVm {
+    pub fn initTool(parent: Allocator) !*LuaVm {
         return create(parent, true);
     }
 
-    fn create(parent: Allocator, is_tool_vm: bool) !LuaVm {
-        var self: LuaVm = .{
+    fn create(parent: Allocator, is_tool_vm: bool) !*LuaVm {
+        const self = try parent.create(LuaVm);
+        errdefer parent.destroy(self);
+        self.* = .{
             .L = undefined,
             .is_tool_vm = is_tool_vm,
             .main_thread_id = if (is_tool_vm) 0 else std.Thread.getCurrentId(),
             .parent = parent,
             .arena_state = std.heap.ArenaAllocator.init(parent),
         };
-        self.prepareArenaLists() catch |err| {
-            self.arena_state.deinit();
-            return err;
-        };
-        self.initLuaState() catch |err| {
-            self.arena_state.deinit();
-            return err;
-        };
+        errdefer self.arena_state.deinit();
+        try self.prepareArenaLists();
+        try self.initLuaState();
         return self;
     }
 
@@ -2249,13 +2241,13 @@ pub const LuaVm = struct {
         if (self.is_tool_vm) {
             c.lua_setallocf(self.L, &luaArenaAlloc, @ptrCast(&self.arena_state));
         } else {
-            c.lua_setallocf(self.L, &luaGpaAlloc, @ptrCast(&self.parent));
+            c.lua_setallocf(self.L, &luaGpaAlloc, @ptrCast(self));
         }
     }
 
     fn initLuaState(self: *LuaVm) !void {
-        const allocf = if (self.is_tool_vm) &luaArenaAlloc else &luaGpaAlloc;
-        const ud: *anyopaque = if (self.is_tool_vm) @ptrCast(&self.arena_state) else @ptrCast(&self.parent);
+        const allocf: c.lua_Alloc = if (self.is_tool_vm) &luaArenaAlloc else &luaGpaAlloc;
+        const ud: *anyopaque = if (self.is_tool_vm) @ptrCast(&self.arena_state) else @ptrCast(self);
         self.L = c.lua_newstate(allocf, ud) orelse return error.LuaInitFailed;
         c.luaL_openlibs(self.L);
         c.lua_pushcfunction(self.L, &luaPrintToBuffer);
@@ -2271,7 +2263,7 @@ pub const LuaVm = struct {
         self.installOwner();
     }
 
-    fn installOwner(self: *LuaVm) void {
+    pub fn installOwner(self: *LuaVm) void {
         c.lua_pushlightuserdata(self.L, @ptrCast(self));
         c.lua_rawsetp(self.L, c.LUA_REGISTRYINDEX, @ptrCast(&owner_registry_key));
     }
@@ -2279,6 +2271,7 @@ pub const LuaVm = struct {
     pub fn deinit(self: *LuaVm) void {
         c.lua_close(self.L);
         self.arena_state.deinit();
+        self.parent.destroy(self);
     }
 
     pub fn load(self: *LuaVm, path: []const u8) !void {
@@ -2782,13 +2775,13 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
     app_ptr.lua_vm.vm_mu.lockUncancelable(ctx.io);
     defer if (!app_lock_released) app_ptr.lua_vm.vm_mu.unlock(ctx.io);
 
-    loadToolConfig(&vm, app_ptr) catch {
+    loadToolConfig(vm, app_ptr) catch {
         const msg = vm.getLastError();
         const owned = r.util.sanitizeUtf8(ctx.alloc, if (msg.len > 0) msg else "failed to load lua tool config") catch "failed to load lua tool config";
         return failedResult(call, owned);
     };
 
-    const entry = findEntry(&vm, call.name) orelse return failedResult(call, "tool not found");
+    const entry = findEntry(vm, call.name) orelse return failedResult(call, "tool not found");
     const L = entry.L orelse return failedResult(call, "tool has no lua state");
 
     _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, entry.func_ref);
@@ -3336,6 +3329,29 @@ fn pushJsonValueRecursive(L: *c.lua_State, val: std.json.Value) void {
     }
 }
 
+test "add_provider binding accepts a stored key and resolves it" {
+    var app_state: r.app.App = undefined;
+    app_state.io = std.testing.io;
+    app_state.gpa = std.testing.allocator;
+    app_state.config = .{};
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec("local handle = blitz.add_provider({ type = 'openai', url = 'https://example.test/v1', key_envar = 'WIZARD_TEST_API_KEY', key = 'stored-secret' })\n" ++
+        "local model = blitz.add_model({ name = 'test-model', provider = handle, vision = false })\n");
+
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    const provider = app_state.config.getProvider(@enumFromInt(0)) orelse return error.ProviderMissing;
+    try std.testing.expectEqualStrings("stored-secret", provider.resolveKey(&env));
+    try std.testing.expectEqualStrings("stored-secret", provider.getKey());
+
+    try env.put("WIZARD_TEST_API_KEY", "envar-secret");
+    try std.testing.expectEqualStrings("envar-secret", provider.resolveKey(&env));
+}
+
 test "pushAny and readAnyValue handle arrays and slices" {
     const state = c.luaL_newstate() orelse return error.LuaInitFailed;
     defer c.lua_close(state);
@@ -3397,8 +3413,8 @@ test "tool VMs resolve their owner and isolate globals" {
     vm2.bindLuaAllocator();
     vm2.installOwner();
 
-    try std.testing.expect(fromState(vm1.L) == &vm1);
-    try std.testing.expect(fromState(vm2.L) == &vm2);
+    try std.testing.expect(fromState(vm1.L) == vm1);
+    try std.testing.expect(fromState(vm2.L) == vm2);
     try std.testing.expectEqual(true, try isToolVm(vm1.L));
     try std.testing.expectEqual(true, try isToolVm(vm2.L));
 

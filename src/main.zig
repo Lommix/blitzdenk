@@ -107,10 +107,77 @@ fn isReloadableConfigLua(name: []const u8) bool {
     return std.mem.endsWith(u8, name, ".lua") and !std.mem.eql(u8, name, "meta.lua");
 }
 
+fn handleWizardEnter(app: *App) void {
+    const w = app.wizardState() orelse return;
+    const dir_path = app.lua_config_dir orelse return;
+    var config_dir = std.Io.Dir.openDirAbsolute(app.io, dir_path, .{}) catch return;
+    defer config_dir.close(app.io);
+    switch (w.step) {
+        .welcome => {
+            if (w.list_selected == 1) {
+                app.wizardSkip(config_dir);
+                return;
+            }
+            w.step = .provider;
+            w.list_selected = 0;
+        },
+        .provider => w.enterProvider(),
+        .provider_type => w.finishProviderType(),
+        .url => w.step = r.wizard.nextStep(.url, r.wizard.catalogEntry(w.provider_index) orelse return, w.model_buf[0..w.model_len]),
+        .key => w.step = r.wizard.nextStep(.key, r.wizard.catalogEntry(w.provider_index) orelse return, w.model_buf[0..w.model_len]),
+        .model => {
+            if (w.model_len == 0) return;
+            w.step = r.wizard.nextStep(.model, r.wizard.catalogEntry(w.provider_index) orelse return, w.model_buf[0..w.model_len]);
+            w.list_selected = 0;
+            if (w.step == .vision) w.vision_override = true;
+            w.accept_selected = true;
+        },
+        .confirm => {
+            if (!w.accept_selected) {
+                w.step = .welcome;
+                w.list_selected = 0;
+                w.resetModel();
+                w.provider_type_len = 0;
+                w.url_len = 0;
+                w.abortClearSecrets();
+                return;
+            }
+            app.wizardConfirm(config_dir);
+            return;
+        },
+        .vision => {
+            w.step = .confirm;
+            w.list_selected = 0;
+        },
+        .done => {},
+    }
+    const fresh = app.wizardState() orelse return;
+    fresh.syncModelStep();
+}
+
 fn cwdBlitzLuaExists(io: std.Io) bool {
     _ = std.Io.Dir.cwd().statFile(io, "blitz.lua", .{}) catch |err| {
         return err != error.FileNotFound;
     };
+    return true;
+}
+
+fn globalBlitzLuaExists(io: std.Io, env: *const std.process.Environ.Map) bool {
+    const HOME = env.get("HOME") orelse return true;
+    var home_dir = std.Io.Dir.openDirAbsolute(io, HOME, .{}) catch return true;
+    defer home_dir.close(io);
+    _ = home_dir.statFile(io, r.defaults.CONFIG_DIR ++ DEFAULT_LUA_CONFIG, .{}) catch return false;
+    return true;
+}
+
+fn stdinIsInteractiveTty(io: std.Io) bool {
+    return std.Io.File.stdin().isTty(io) catch false;
+}
+
+fn setupMarkerExistsAbsolute(alloc: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map, name: []const u8) bool {
+    const HOME = env.get("HOME") orelse return false;
+    const path = std.fmt.allocPrint(alloc, "{s}/{s}{s}", .{ HOME, r.defaults.CONFIG_DIR, name }) catch return false;
+    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
     return true;
 }
 
@@ -299,8 +366,28 @@ pub fn run(
     resume_session: ?[]const u8,
     headless: bool,
 ) !void {
-    // Ensure config blitz.lua exists, get paths
+    const first_install = !globalBlitzLuaExists(io, env);
+    const done_marker_exists = setupMarkerExistsAbsolute(arena, io, env, r.wizard.DONE_MARKER);
+    const pending_marker_exists = setupMarkerExistsAbsolute(arena, io, env, r.wizard.PENDING_MARKER);
+    const wizard_pending = !done_marker_exists and (first_install or pending_marker_exists);
+
+    const interactive = stdinIsInteractiveTty(io);
+    if (wizard_pending and !interactive) {
+        std.debug.print("Error: first-run setup wizard is pending — run blitz interactively once to complete it\n", .{});
+        std.process.exit(1);
+    }
+
     const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;
+
+    if (wizard_pending and first_install) {
+        if (config_lua) |info| {
+            if (std.Io.Dir.openDirAbsolute(io, info.dir_path, .{})) |opened| {
+                var config_dir = opened;
+                r.wizard.writePendingMarker(io, config_dir);
+                config_dir.close(io);
+            } else |_| {}
+        }
+    }
 
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
     const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
@@ -378,7 +465,8 @@ pub fn run(
     app.reset();
     app.flags.skip_permissions = !flags.strict_mode;
     app.flags.skip_ssh_permissions = flags.yolo;
-    app.warnUnboundAgentModels();
+    if (wizard_pending) app.enterWizard();
+    if (app.input_mode != .wizard) app.warnUnboundAgentModels();
 
     var store = session_store.Store{ .io = io, .gpa = gpa, .base = cwd_dir };
     defer store.deinit();
@@ -509,7 +597,7 @@ pub fn run(
             switch (app.input_mode) {
                 .text => if (app.active_permission != null) app.enterPermSelect(),
                 .perm_select, .perm_message => if (app.active_permission == null) app.returnToText(),
-                .passphrase => {},
+                .passphrase, .wizard => {},
             }
 
             // Lua hot-reload: poll mtime every ~1s (cwd blitz.lua + config dir)
@@ -563,7 +651,7 @@ pub fn run(
                     }
                     if (!lua_reload_failed) app.lua_vm.clearLastError();
                     app.lua_vm.readConfigFields();
-                    app.warnUnboundAgentModels();
+                    if (app.input_mode != .wizard) app.warnUnboundAgentModels();
                     try app.lua_vm.publishAvailableSystems(context_factory);
                     app.dirty = true;
 
@@ -611,6 +699,10 @@ pub fn run(
                         if (app.keymap.parse(k)) |action| {
                             switch (action) {
                                 .exit => {
+                                    if (app.input_mode == .wizard) {
+                                        app.wizardAbortClearSecrets();
+                                        break :main_loop;
+                                    }
                                     if (app.active_permission == null and app.running) {
                                         try app.cmd_queue.append(io, .cancel);
                                     } else {
@@ -619,6 +711,10 @@ pub fn run(
                                     continue;
                                 },
                                 .cancel => {
+                                    if (app.input_mode == .wizard) {
+                                        app.wizardAbortClearSecrets();
+                                        break :main_loop;
+                                    }
                                     if (app.closeCompletion()) continue;
                                     if (app.running) {
                                         try app.cmd_queue.append(io, .cancel);
@@ -719,6 +815,14 @@ pub fn run(
                                             pp.len += ts.len;
                                         }
                                     },
+                                    .wizard => |*w| {
+                                        if (w.stepIsList()) {
+                                            if (c == 'j') w.moveCursor(1);
+                                            if (c == 'k') w.moveCursor(-1);
+                                        } else {
+                                            w.storeText(k.textSlice());
+                                        }
+                                    },
                                 }
                             },
                             .arrow_up => switch (app.input_mode) {
@@ -728,6 +832,9 @@ pub fn run(
                                 },
                                 .perm_message => {},
                                 .passphrase => {},
+                                .wizard => |*w| {
+                                    w.moveCursor(-1);
+                                },
                             },
                             .arrow_down => switch (app.input_mode) {
                                 .text => if (!app.running) app.historyDown(),
@@ -742,6 +849,9 @@ pub fn run(
                                 },
                                 .perm_message => {},
                                 .passphrase => {},
+                                .wizard => |*w| {
+                                    w.moveCursor(1);
+                                },
                             },
                             .backspace => switch (app.input_mode) {
                                 .text => app.deleteChar(),
@@ -756,6 +866,17 @@ pub fn run(
                                     while (pp.len > 0) {
                                         pp.len -= 1;
                                         if ((pp.buf[pp.len] & 0xC0) != 0x80) break;
+                                    }
+                                },
+                                .wizard => |*w| {
+                                    if (w.activeText()) |target| {
+                                        if (target.len.* > 0) {
+                                            target.len.* -= 1;
+                                            while (target.len.* > 0 and (target.buf[target.len.*] & 0xC0) == 0x80) {
+                                                target.len.* -= 1;
+                                            }
+                                            @memset(target.buf[target.len.*..], 0);
+                                        }
                                     }
                                 },
                             },
@@ -939,6 +1060,9 @@ pub fn run(
                                 .passphrase => {
                                     handleSshUnlock(&app, app.exec_pool, gpa);
                                 },
+                                .wizard => {
+                                    handleWizardEnter(&app);
+                                },
                             },
                             .esc => switch (app.input_mode) {
                                 .text => {
@@ -972,6 +1096,9 @@ pub fn run(
                                 pp.len += text.len;
                             }
                         },
+                        .wizard => |*w| {
+                            w.storeText(text);
+                        },
                     },
                     .mouse => |m| {
                         const wheel = term.handleMouse(m);
@@ -1003,6 +1130,112 @@ test "generated Lua metadata is not reloadable config" {
     try std.testing.expect(isReloadableConfigLua("tools.lua"));
     try std.testing.expect(!isReloadableConfigLua("meta.lua"));
     try std.testing.expect(!isReloadableConfigLua(".luarc.json"));
+}
+
+fn wizardCatalogIndexOf(name: []const u8) usize {
+    for (r.wizard.catalog, 0..) |entry, i| {
+        if (std.mem.eql(u8, entry.name, name)) return i;
+    }
+    unreachable;
+}
+
+test "provider step enter commits the selected catalog row" {
+    var w: r.app.InputMode.Wizard = .{};
+    w.step = .provider;
+    w.list_selected = wizardCatalogIndexOf("Ollama");
+
+    w.enterProvider();
+
+    const ollama = r.wizard.catalog[wizardCatalogIndexOf("Ollama")];
+    try std.testing.expectEqualStrings(ollama.provider_type, w.provider_type_buf[0..w.provider_type_len]);
+    try std.testing.expectEqualStrings(ollama.default_url, w.url_buf[0..w.url_len]);
+    try std.testing.expectEqual(r.wizard.Step.url, w.step);
+}
+
+test "model selection change preserves typed free text across row moves" {
+    const r_app = r.app;
+    var w: r_app.InputMode.Wizard = .{};
+    w.step = .model;
+    w.provider_index = 0;
+    w.model_free_text = true;
+    w.list_selected = 3;
+    const typed = "my-custom-model";
+    w.model_len = typed.len;
+    @memcpy(w.model_buf[0..typed.len], typed);
+
+    w.moveCursor(0);
+
+    try std.testing.expect(w.model_free_text);
+    try std.testing.expectEqualStrings(typed, w.model_buf[0..w.model_len]);
+
+    w.list_selected = 1;
+    w.moveCursor(0);
+    try std.testing.expect(!w.model_free_text);
+    try std.testing.expectEqualStrings(r.wizard.catalog[0].models[1].name, w.model_buf[0..w.model_len]);
+}
+
+test "entering the model step preselects the first curated row" {
+    var w: r.app.InputMode.Wizard = .{};
+    w.step = .provider;
+    w.list_selected = wizardCatalogIndexOf("Anthropic");
+    w.enterProvider();
+    try std.testing.expectEqual(r.wizard.Step.key, w.step);
+    w.step = .model;
+    w.resetModel();
+
+    if (w.step == .model and !w.model_free_text and w.model_len == 0) {
+        w.moveCursor(0);
+    }
+
+    const anthropic = r.wizard.catalog[wizardCatalogIndexOf("Anthropic")];
+    try std.testing.expectEqualStrings(anthropic.models[0].name, w.model_buf[0..w.model_len]);
+    try std.testing.expect(!w.model_free_text);
+}
+
+test "custom endpoint model step accepts typed input immediately" {
+    var w: r.app.InputMode.Wizard = .{};
+    w.step = .provider;
+    w.list_selected = wizardCatalogIndexOf("Custom endpoint");
+    w.enterProvider();
+
+    try std.testing.expectEqual(r.wizard.Step.provider_type, w.step);
+    w.finishProviderType();
+    try std.testing.expectEqual(r.wizard.Step.url, w.step);
+    w.step = r.wizard.Step.model;
+    w.syncModelStep();
+
+    try std.testing.expect(!w.stepIsList());
+    try std.testing.expect(w.activeText() != null);
+    try std.testing.expectEqualStrings("", w.model_buf[0..w.model_len]);
+
+    w.storeText("my-model-id");
+    try std.testing.expectEqualStrings("my-model-id", w.model_buf[0..w.model_len]);
+    try std.testing.expect(w.model_len > 0);
+
+    w.moveCursor(1);
+    try std.testing.expectEqualStrings("my-model-id", w.model_buf[0..w.model_len]);
+}
+
+test "free text survives curated row detours" {
+    var w: r.app.InputMode.Wizard = .{};
+    w.step = .model;
+    w.provider_index = wizardCatalogIndexOf("Anthropic");
+    w.resetModel();
+    w.list_selected = r.wizard.catalog[wizardCatalogIndexOf("Anthropic")].models.len;
+    w.moveCursor(0);
+    try std.testing.expect(w.model_free_text);
+
+    w.storeText("claude-custom");
+    const free_row = r.wizard.catalog[wizardCatalogIndexOf("Anthropic")].models.len;
+    w.list_selected = free_row - 1;
+    w.moveCursor(0);
+    try std.testing.expect(!w.model_free_text);
+    try std.testing.expectEqualStrings(r.wizard.catalog[wizardCatalogIndexOf("Anthropic")].models[2].name, w.model_buf[0..w.model_len]);
+
+    w.list_selected = free_row;
+    w.moveCursor(0);
+    try std.testing.expect(w.model_free_text);
+    try std.testing.expectEqualStrings("claude-custom", w.model_buf[0..w.model_len]);
 }
 
 /// Journal materializes lazily in appendCheckpoint; do not gate on file_name.

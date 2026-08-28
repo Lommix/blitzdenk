@@ -1,32 +1,17 @@
 -- Blitzdenk Default CFG HOTRELOAD active
 
 ---------------------------------------------------------------------------------------------------
---- Provider configuration
----------------------------------------------------------------------------------------------------
-local opencode = blitz.add_provider({
-	type = "openai",
-	url = "https://opencode.ai/zen/go/v1",
-	key_envar = "OPENCODE_API_KEY",
-})
-
-local router = blitz.add_provider({
-	type = "response",
-	url = "https://openrouter.ai/api/v1",
-	key_envar = "OPENROUTER_API_KEY",
-})
-
----------------------------------------------------------------------------------------------------
 --- Model configuration
 ---------------------------------------------------------------------------------------------------
-local default_model = blitz.add_model({
-	name = "deepseek-v4-flash-vision-exp",
-	provider = opencode,
-	vision = true,
-	-- cost = { input = 0.14, output = 0.28, cache = 0.028 }, -- cost display
-})
+local default_model = nil
+
+local ok, provider = pcall(require, "provider")
+if ok and type(provider) == "number" then
+	default_model = provider
+	blitz.set_model_agent(blitz.AGENT_GENERAL, default_model, "max")
+end
 
 blitz.set_compact_edge(250000)
-blitz.set_model_agent(blitz.AGENT_GENERAL, default_model, "max")
 
 ---------------------------------------------------------------------------------------------------
 --- Env capability rules
@@ -215,10 +200,15 @@ blitz.status_bar_render = function()
 	local orange = "\27[38;5;208m"
 	local red = "\27[31m"
 	local reset = "\27[0m"
+	local ok_name, model_name = pcall(blitz.get_model_name, blitz.AGENT_GENERAL)
+	local ok_eff, model_effort = pcall(blitz.get_model_effort, blitz.AGENT_GENERAL)
+	if not ok_name or not ok_eff then
+		return red .. "no model bound — run blitz wizard or set one in provider.lua" .. reset
+	end
 	return white
-		.. blitz.get_model_name(blitz.AGENT_GENERAL)
+		.. model_name
 		.. " • "
-		.. blitz.get_model_effort(blitz.AGENT_GENERAL)
+		.. model_effort
 		.. reset
 		.. " | Cache:"
 		.. green

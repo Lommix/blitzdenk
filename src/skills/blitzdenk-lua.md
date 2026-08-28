@@ -41,6 +41,7 @@ local novita = blitz.add_provider({
     type = "openai",               -- "openai" | "response" | "anthropic" | "ollama"
     url = "https://api.novita.ai/openai/v1",
     key_envar = "NOVITA_API_KEY",  -- name of the env var, not the key value
+    key = "sk-...",                -- optional stored key; the env var wins when both are set
     max_tokens = 32000,
 })
 
@@ -53,6 +54,13 @@ local deepseek = blitz.add_model({
 
 blitz.set_model_agent(blitz.AGENT_GENERAL, deepseek, "max")
 ```
+
+The first-run wizard writes `~/.config/blitzdenk/provider.lua` with this
+shape and `blitz.lua` imports it: `local ok, model = pcall(require, "provider")`.
+Edit or delete that file to change provider and model. For a typed model id on
+a catalogued provider the wizard asks whether the model has vision; catalogued
+models and empty catalogs (OpenRouter, Ollama, Custom endpoint) skip that
+question.
 
 `add_provider` and `add_model` return integer handles. `vision` (default
 false) gates the `view_image` tool and image pasting; `cost` is optional and
@@ -108,6 +116,9 @@ This is how you track useful commands for projects.
 
 `blitz.register_tool` returns the tool name string to use in tool sets.
 Omit both `args` and `schema` for a tool that takes no arguments.
+
+Tool calls run in a separated VM an cannot mutate Lua State. If a tool requires
+State across calls, use the `blitz.state.set/get` helper.
 
 ```lua
 local my_tool = blitz.register_tool({

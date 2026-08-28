@@ -76,6 +76,7 @@ pub const InputMode = union(enum) {
     perm_select: PermSelect,
     perm_message: PermMessage,
     passphrase: Passphrase,
+    wizard: Wizard,
 
     pub const Text = struct {
         completion_open: bool = false,
@@ -95,6 +96,7 @@ pub const InputMode = union(enum) {
         host: []const u8,
         cwd: []const u8,
     };
+    pub const Wizard = r.wizard.Wizard;
 };
 
 pub const QueuedMessage = struct {
@@ -304,7 +306,7 @@ pub const App = struct {
     ui_state: UiState = .chat,
     keymap: r.keys.KeyMap = .{},
     cmd_queue: r.cmd.CommandQueue,
-    lua_vm: r.lua.LuaVm,
+    lua_vm: *r.lua.LuaVm,
     lua_state: r.lua_state.Store = .{},
     lua_status_bar_enabled: bool = false,
     lua_status_bar_cache: [512]u8 = undefined,
@@ -323,7 +325,7 @@ pub const App = struct {
         agent_factory: *r.ContextFactory,
         cwd: []const u8,
     ) !App {
-        var lua_vm = try r.lua.LuaVm.init(gpa);
+        const lua_vm = try r.lua.LuaVm.init(gpa);
         errdefer lua_vm.deinit();
 
         return App{
@@ -552,7 +554,7 @@ pub const App = struct {
     fn handleReapedAgent(self: *App, agent_id: r.AgentId) !void {
         const agent = self.registry.get(agent_id) orelse return;
         const state = self.registry.state(agent_id) orelse return;
-        if (agent.background and state != .active) {
+        if (agent.background and state != .active and agent.queued_messages.items.len == 0) {
             try self.finishBackgroundAgent(agent_id, agent);
             return;
         }
@@ -633,11 +635,86 @@ pub const App = struct {
         self.input_mode = .{ .passphrase = .{ .user = u, .host = h, .cwd = c } };
     }
 
+    pub fn enterWizard(self: *App) void {
+        self.input_mode = .{ .wizard = .{} };
+    }
+
+    pub fn wizardState(self: *App) ?*InputMode.Wizard {
+        return switch (self.input_mode) {
+            .wizard => |*w| w,
+            else => null,
+        };
+    }
+
+    fn wizardSelection(self: *App, w: *const InputMode.Wizard) ?r.wizard.Selection {
+        _ = self;
+        return w.selection();
+    }
+
+    pub fn wizardConfirm(self: *App, config_dir: std.Io.Dir) void {
+        const w = self.wizardState() orelse return;
+        const selection = self.wizardSelection(w) orelse {
+            w.error_msg = "invalid wizard state";
+            self.dirty = true;
+            return;
+        };
+        r.wizard.writeProviderLua(self.io, config_dir, self.gpa, selection) catch |err| switch (err) {
+            error.OutOfMemory => {
+                w.error_msg = "write failed: out of memory";
+                self.dirty = true;
+                return;
+            },
+            error.WizardTextUnsafe => {
+                w.error_msg = "text contains characters not allowed in lua strings";
+                self.dirty = true;
+                return;
+            },
+            error.ProviderLuaExists => {
+                r.wizard.writeDoneMarker(self.io, config_dir);
+                self.finishWizard();
+                return;
+            },
+            else => {
+                w.error_msg = "write failed: filesystem error";
+                self.dirty = true;
+                return;
+            },
+        };
+        r.wizard.writeDoneMarker(self.io, config_dir);
+        self.finishWizard();
+    }
+
+    pub fn wizardSkip(self: *App, config_dir: std.Io.Dir) void {
+        r.wizard.writeSkipDefaults(self.io, config_dir, self.gpa) catch |err| switch (err) {
+            error.ProviderLuaExists => {},
+            else => {
+                const w = self.wizardState() orelse return;
+                w.error_msg = "writing defaults failed — check that the config dir is writable";
+                self.dirty = true;
+                return;
+            },
+        };
+        r.wizard.writeDoneMarker(self.io, config_dir);
+        self.finishWizard();
+    }
+
+    pub fn wizardAbortClearSecrets(self: *App) void {
+        if (self.input_mode != .wizard) return;
+        self.input_mode.wizard.abortClearSecrets();
+    }
+
+    fn finishWizard(self: *App) void {
+        self.returnToText();
+    }
+
     pub fn returnToText(self: *App) void {
         // Zero passphrase buffer when leaving the modal so it doesn't linger.
         if (self.input_mode == .passphrase) {
             const pp = &self.input_mode.passphrase;
             @memset(pp.buf[0..pp.len], 0);
+        }
+        if (self.input_mode == .wizard) {
+            self.input_mode.wizard.abortClearSecrets();
         }
         self.input_mode = .{ .text = .{} };
     }
@@ -936,6 +1013,7 @@ pub const App = struct {
                     break :blk @min(rows +| 3, 9); // input rows + status + 2 padding
                 },
                 .perm_message => break :blk 8, // 5-row input box + status + 2 padding
+                .wizard => break :blk 18,
                 .perm_select => {
                     const entry = app.active_permission orelse break :blk 9;
                     if (entry.payload == .ask) {
@@ -2138,6 +2216,7 @@ fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, prog
         .passphrase => renderPassphraseInput(app, input_area, buf),
         .perm_message => |*pm| renderPermMessageContent(app, pm, input_area, buf),
         .perm_select => renderPermissionContent(app, input_area, buf),
+        .wizard => renderWizardContent(app, arena, input_area, buf),
     }
 
     renderStatusBar(app, status_area, buf);
@@ -2269,6 +2348,140 @@ fn renderPassphraseInput(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
         x += 1;
     }
     buf.set(x, y, .{ .char = '_', .style = style });
+}
+
+const WIZARD_HELP_TEXT = "↑/↓ select · enter next · esc abort";
+
+fn wizardSelStyle(selected: bool) r.tui.Style {
+    return if (selected) .{ .modifier = .{ .reverse = true } } else .{};
+}
+
+fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+    buf.fill(area, .{ .style = .{ .bg = app.theme.overlay_dark } });
+    const w = &app.input_mode.wizard;
+    var para: r.tui.Paragraph = .{ .border = .none, .padding = .{ .left = 2, .right = 2 } };
+    const title_style: r.tui.Style = .{ .fg = app.theme.info, .modifier = .{ .bold = true } };
+    const muted_style: r.tui.Style = .{ .fg = app.theme.muted };
+    const err_style: r.tui.Style = .{ .fg = app.theme.err };
+
+    var l = r.tui.Line{};
+    l.pushText(arena, "Setup — blitzdenk first-run wizard", title_style) catch {};
+    para.lines.append(arena, l) catch {};
+    var help = r.tui.Line{};
+    help.pushText(arena, WIZARD_HELP_TEXT, muted_style) catch {};
+    para.lines.append(arena, help) catch {};
+    para.lines.append(arena, .{}) catch {};
+
+    switch (w.step) {
+        .welcome => {
+            wizardAppendHeading(arena, &para, "Welcome to blitzdenk");
+            wizardAppendHeading(arena, &para, "Pick a model provider to get started, or skip to use the built-in defaults.");
+            wizardAppendHeading(arena, &para, "");
+            wizardAppendOption(arena, &para, "Continue", w.list_selected == 0);
+            wizardAppendOption(arena, &para, "Skip (use defaults)", w.list_selected == 1);
+        },
+        .provider => {
+            wizardAppendHeading(arena, &para, "Choose a provider:");
+            for (r.wizard.catalog, 0..) |entry, i| {
+                wizardAppendOption(arena, &para, entry.name, i == w.list_selected);
+            }
+        },
+        .provider_type => {
+            wizardAppendHeading(arena, &para, "Custom endpoint — provider type:");
+            for (r.wizard.provider_types, 0..) |name, i| {
+                wizardAppendOption(arena, &para, name, i == w.list_selected);
+            }
+        },
+        .url => {
+            wizardAppendHeading(arena, &para, "Endpoint url (enter keeps the shown value):");
+            wizardAppendInputLine(arena, &para, w.url_buf[0..w.url_len], true);
+        },
+        .key => {
+            wizardAppendHeading(arena, &para, "Paste your api key (stored in provider.lua):");
+            wizardAppendInputLine(arena, &para, w.key_buf[0..w.key_len], true);
+        },
+        .model => {
+            const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
+            if (entry.free_text_model_only) {
+                wizardAppendHeading(arena, &para, "Model id:");
+                wizardAppendInputLine(arena, &para, w.model_buf[0..w.model_len], true);
+            } else {
+                wizardAppendHeading(arena, &para, "Choose a model (pick the last row to type your own):");
+                for (entry.models, 0..) |model, i| {
+                    wizardAppendOption(arena, &para, model.name, !w.model_free_text and w.model_curated_index == i);
+                }
+                wizardAppendOption(arena, &para, "Enter model id…", w.model_free_text);
+                if (w.model_free_text) wizardAppendInputLine(arena, &para, w.model_buf[0..w.model_len], true);
+            }
+        },
+        .vision => {
+            const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
+            const detected = r.wizard.selectModel(entry, w.model_buf[0..w.model_len]).vision;
+            wizardAppendHeading(arena, &para, "Custom model id — should image input be enabled?");
+            wizardAppendHeading(arena, &para, "Catalogued models skip this; vision follows the catalogue.");
+            wizardAppendKeyValue(app, arena, &para, "model", w.model_buf[0..w.model_len]);
+            wizardAppendKeyValue(app, arena, &para, "catalogue", if (detected) "vision" else "no vision");
+            wizardAppendHeading(arena, &para, "");
+            wizardAppendOption(arena, &para, "Enable vision", w.vision_override == true);
+            wizardAppendOption(arena, &para, "Text only", w.vision_override != true);
+        },
+        .confirm => {
+            wizardAppendHeading(arena, &para, "Confirm — write provider.lua with these choices?");
+            const selection = app.wizardSelection(w);
+            const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
+            const vision_text = if (selection) |sel| (if (sel.vision) "true" else "false") else "unknown";
+            wizardAppendKeyValue(app, arena, &para, "schema", w.provider_type_buf[0..w.provider_type_len]);
+            wizardAppendKeyValue(app, arena, &para, "provider", entry.name);
+            wizardAppendKeyValue(app, arena, &para, "url", w.url_buf[0..w.url_len]);
+            wizardAppendKeyValue(app, arena, &para, "key", if (w.key_len > 0) "<set>" else "");
+            wizardAppendKeyValue(app, arena, &para, "vision", vision_text);
+            wizardAppendKeyValue(app, arena, &para, "model", w.model_buf[0..w.model_len]);
+            wizardAppendHeading(arena, &para, "");
+            wizardAppendOption(arena, &para, "Write provider.lua", w.accept_selected);
+            wizardAppendOption(arena, &para, "Back", !w.accept_selected);
+        },
+        .done => {
+            wizardAppendHeading(arena, &para, "Setup complete — happy hacking.");
+            wizardAppendHeading(arena, &para, "provider.lua is live; edit it and it hot-reloads like any config lua.");
+        },
+    }
+
+    if (w.error_msg) |msg| {
+        var err_line = r.tui.Line{};
+        err_line.pushText(arena, msg, err_style) catch {};
+        para.lines.append(arena, err_line) catch {};
+    }
+
+    para.renderSimple(arena, area, buf);
+}
+
+fn wizardAppendHeading(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8) void {
+    var line = r.tui.Line{};
+    line.pushText(arena, text, .{}) catch return;
+    para.lines.append(arena, line) catch {};
+}
+
+fn wizardAppendOption(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8, selected: bool) void {
+    var line = r.tui.Line{};
+    line.pushText(arena, if (selected) "❯ " else "  ", wizardSelStyle(selected)) catch return;
+    line.pushText(arena, text, wizardSelStyle(selected)) catch return;
+    para.lines.append(arena, line) catch {};
+}
+
+fn wizardAppendInputLine(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8, selected: bool) void {
+    var line = r.tui.Line{};
+    line.pushText(arena, "  ", .{}) catch return;
+    line.pushText(arena, text, wizardSelStyle(selected)) catch return;
+    line.pushText(arena, "_", wizardSelStyle(selected)) catch return;
+    para.lines.append(arena, line) catch {};
+}
+
+fn wizardAppendKeyValue(app: *App, arena: std.mem.Allocator, para: *r.tui.Paragraph, key: []const u8, value: []const u8) void {
+    var line = r.tui.Line{};
+    const padded = std.fmt.allocPrint(arena, "  {s:<10}", .{key}) catch return;
+    line.pushText(arena, padded, .{ .fg = app.theme.muted }) catch return;
+    line.pushText(arena, value, .{ .fg = app.theme.text }) catch return;
+    para.lines.append(arena, line) catch {};
 }
 
 fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rect, buf: *r.tui.Buffer) void {
@@ -3660,4 +3873,82 @@ test "completion filter keeps original query after insert" {
     try std.testing.expectEqualStrings("/sk", filterPrefix("/skill-ponytail", 15, 3, true));
     try std.testing.expectEqualStrings("/skill-ponytail", filterPrefix("/skill-ponytail", 15, 3, false));
     try std.testing.expectEqualStrings("/ski", filterPrefix("/ski", 4, 0, true));
+}
+
+test "wizard confirm writes provider.lua and marker then returns to text" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.gpa = std.testing.allocator;
+    const lua_vm = try r.lua.LuaVm.init(std.testing.allocator);
+    defer lua_vm.deinit();
+    app.lua_vm = lua_vm;
+    app.lua_config_dir = null;
+
+    app.enterWizard();
+    const w = app.wizardState().?;
+    const entry = r.wizard.catalog[0];
+    w.provider_index = 0;
+    w.provider_type_len = entry.provider_type.len;
+    @memcpy(w.provider_type_buf[0..w.provider_type_len], entry.provider_type);
+    w.url_len = entry.default_url.len;
+    @memcpy(w.url_buf[0..w.url_len], entry.default_url);
+    w.key_len = "sk-ant-secret".len;
+    @memcpy(w.key_buf[0..w.key_len], "sk-ant-secret");
+    w.model_len = entry.models[0].name.len;
+    @memcpy(w.model_buf[0..w.model_len], entry.models[0].name);
+
+    app.wizardConfirm(tmp.dir);
+
+    try std.testing.expect(app.input_mode == .text);
+    const contents = try tmp.dir.readFileAlloc(std.testing.io, r.wizard.PROVIDER_LUA, std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(contents);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\tkey = \"sk-ant-secret\",\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\tname = \"claude-fable-5\",\n") != null);
+    try tmp.dir.access(std.testing.io, r.wizard.DONE_MARKER, .{});
+}
+
+test "wizard skip writes defaults, honors marker, and existing provider.lua wins" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.gpa = std.testing.allocator;
+    const lua_vm = try r.lua.LuaVm.init(std.testing.allocator);
+    defer lua_vm.deinit();
+    app.lua_vm = lua_vm;
+    app.lua_config_dir = null;
+
+    app.enterWizard();
+    const w = app.wizardState().?;
+    w.key_len = "leftover".len;
+    @memcpy(w.key_buf[0..w.key_len], "leftover");
+    app.wizardSkip(tmp.dir);
+
+    try std.testing.expect(app.input_mode == .text);
+    const contents = try tmp.dir.readFileAlloc(std.testing.io, r.wizard.PROVIDER_LUA, std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(contents);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "https://opencode.ai/zen/go/v1") != null);
+    try tmp.dir.access(std.testing.io, r.wizard.DONE_MARKER, .{});
+    for (w.key_buf[0.."leftover".len]) |ch| try std.testing.expectEqual(@as(u8, 0), ch);
+
+    const existing = "local model = 42\nreturn model\n";
+    {
+        const file = try tmp.dir.createFile(std.testing.io, r.wizard.PROVIDER_LUA, .{ .truncate = true });
+        defer file.close(std.testing.io);
+        var buf: [64]u8 = undefined;
+        var fw = file.writer(std.testing.io, &buf);
+        try fw.interface.writeAll(existing);
+        try fw.interface.flush();
+    }
+
+    app.enterWizard();
+    app.wizardSkip(tmp.dir);
+    try std.testing.expect(app.input_mode == .text);
+    const preserved = try tmp.dir.readFileAlloc(std.testing.io, r.wizard.PROVIDER_LUA, std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(preserved);
+    try std.testing.expectEqualStrings(existing, preserved);
 }
