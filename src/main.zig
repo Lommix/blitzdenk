@@ -1005,9 +1005,8 @@ test "generated Lua metadata is not reloadable config" {
     try std.testing.expect(!isReloadableConfigLua(".luarc.json"));
 }
 
-/// Persists a full snapshot if a session exists and there is anything to save.
+/// Journal materializes lazily in appendCheckpoint; do not gate on file_name.
 fn checkpoint(app: *App, store: *session_store.Store) void {
-    if (store.file_name == null) return;
     const agent = app.mainAgent() orelse return;
 
     var arena = std.heap.ArenaAllocator.init(app.gpa);
