@@ -127,7 +127,7 @@ pub const Command = union(enum) {
                 else
                     null;
                 if (app.main_agent_id) |id| {
-                    app.event_bus.emit(app, .{ .agent_cancelled = .{ .id = id } }) catch {};
+                    app.event_bus.emit(app, .{ .agent_cancelled = id });
                 }
                 app.cancelPermissions();
                 app.exec_pool.cancelAll();
@@ -144,7 +144,7 @@ pub const Command = union(enum) {
             .cancel_agent => |id| {
                 if (app.registry.get(id) == null) return;
                 app.registry.cancel(id);
-                app.event_bus.emit(app, .{ .agent_cancelled = .{ .id = id } }) catch {};
+                app.event_bus.emit(app, .{ .agent_cancelled = id });
             },
             .close_agent => |id| {
                 app.detachMainAgent(id);
@@ -285,8 +285,8 @@ pub const Command = union(enum) {
                 agent.background = arg.background;
                 try app.configureAgent(arg.agent_id, agent);
 
-                try app.event_bus.emit(app, .{
-                    .agent_created = .{ .id = arg.agent_id, .type_idx = agent.type_idx, .depth = agent.depth },
+                app.event_bus.emit(app, .{
+                    .agent_created = .{ .id = arg.agent_id, .name = app.context_factory.agentName(@enumFromInt(arg.agent_type)), .depth = agent.depth },
                 });
 
                 if (arg.parent_id == null) {
@@ -303,7 +303,7 @@ pub const Command = union(enum) {
                 try agent.setMessages(&.{.{ .role = .user, .content = arg.prompt }});
                 if (arg.parent_id == null) app.sdk_run_rendered_steps = 0;
                 try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
-                try app.event_bus.emit(app, .{ .agent_started = arg.agent_id });
+                app.event_bus.emit(app, .{ .agent_started = arg.agent_id });
                 app.running = true;
             },
             .push_notification => |msg| {

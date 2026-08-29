@@ -54,28 +54,30 @@ fn className(comptime ty: lua.LuaType) []const u8 {
 }
 
 fn writeField(w: *std.Io.Writer, comptime field: lua.LuaType.Field) !void {
-    switch (field.ty) {
+    try w.print("---@field {s}{s} ", .{
+        field.name,
+        if (field.optional) "?" else "",
+    });
+    try writeTypeExpr(w, field.ty);
+    try w.writeAll("\n");
+}
+
+fn writeTypeExpr(w: *std.Io.Writer, comptime ty: lua.LuaType) !void {
+    switch (ty) {
         .function => |func| {
-            try w.print("---@field {s}{s} fun(", .{ field.name, if (field.optional) "?" else "" });
+            try w.writeAll("fun(");
             inline for (func.args, 0..) |arg, i| {
                 if (i > 0) try w.writeAll(", ");
-                try w.print("{s}{s}: {s}", .{
-                    arg.name,
-                    if (arg.optional) "?" else "",
-                    luaTypeName(arg.ty),
-                });
+                try w.print("{s}{s}: ", .{ arg.name, if (arg.optional) "?" else "" });
+                try writeTypeExpr(w, arg.ty);
             }
+            try w.writeAll(")");
             if (func.ret) |ret| {
-                try w.print("): {s}\n", .{luaTypeName(ret.*)});
-            } else {
-                try w.writeAll(")\n");
+                try w.writeAll(": ");
+                try writeTypeExpr(w, ret.*);
             }
         },
-        else => try w.print("---@field {s}{s} {s}\n", .{
-            field.name,
-            if (field.optional) "?" else "",
-            luaTypeName(field.ty),
-        }),
+        else => try w.writeAll(luaTypeName(ty)),
     }
 }
 

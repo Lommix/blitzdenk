@@ -361,8 +361,7 @@ pub const Blitz = LuaType{
             .{ .name = "base64", .ty = BlitzBase64 },
             .{ .name = "cmd", .ty = BlitzCmd },
             .{ .name = "tools", .ty = BlitzToolDef },
-            .{ .name = "events", .ty = BlitzEventDef },
-            .{ .name = "permissions", .ty = BlitzPermissions },
+            .{ .name = "hooks", .ty = BlitzHooks },
             .{ .name = "AGENT_GENERAL", .ty = LuaType.integer, .value = .{ .integer = 0 } },
             .{ .name = "REQ_STATUS_PENDING", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_PENDING } },
             .{ .name = "REQ_STATUS_APPROVED", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_APPROVED } },
@@ -1095,47 +1094,93 @@ pub const BlitzToolDef = LuaType{
     },
 };
 
-pub const BlitzEventDef = LuaType{
+const BlitzAgentEvent = LuaType{ .table_def = .{
+    .name = "BlitzAgentEvent",
+    .fields = &.{
+        .{ .name = "id", .desc = "packed AgentId of the agent", .ty = LuaType.integer },
+    },
+} };
+
+const BlitzAgentCreatedEvent = LuaType{ .table_def = .{
+    .name = "BlitzAgentCreatedEvent",
+    .fields = &.{
+        .{ .name = "id", .desc = "packed AgentId of the new agent", .ty = LuaType.integer },
+        .{ .name = "name", .desc = "agent type name", .ty = LuaType.string },
+        .{ .name = "depth", .desc = "nesting depth below the main agent", .ty = LuaType.integer },
+    },
+} };
+
+const BlitzAgentFailedEvent = LuaType{ .table_def = .{
+    .name = "BlitzAgentFailedEvent",
+    .fields = &.{
+        .{ .name = "id", .desc = "packed AgentId of the failed agent", .ty = LuaType.integer },
+        .{ .name = "err", .desc = "error name", .ty = LuaType.string },
+    },
+} };
+
+const BlitzUserMessageEvent = LuaType{ .table_def = .{
+    .name = "BlitzUserMessageEvent",
+    .fields = &.{
+        .{ .name = "text", .desc = "chat text as typed", .ty = LuaType.string },
+    },
+} };
+
+fn EventFn(comptime tag: r.events.AppEventTag, comptime payload: ?LuaType) LuaType {
+    const Bind = struct {
+        fn t(state: *c.lua_State, a: *r.app.App, func: LuaFnRef) !void {
+            if (try isToolVm(state)) return;
+            a.event_bus.addLuaListener(a.gpa, a.io, tag, func.idx) catch
+                c.luaL_unref(state, c.LUA_REGISTRYINDEX, func.idx);
+        }
+    };
+    const ev_args: []const LuaType.Field = if (payload) |p|
+        &.{.{ .name = "ev", .ty = p }}
+    else
+        &.{};
+    return .{ .function = .{
+        .args = &.{.{ .name = "func", .ty = LuaType{ .function = .{ .args = ev_args } } }},
+        .fn_ptr = LuaFnBind(Bind.t, @tagName(tag)),
+    } };
+}
+
+pub const BlitzHooks = LuaType{
     .table_def = .{
-        .name = "BlitzEventDef",
+        .name = "BlitzHooks",
         .fields = &.{
-            .{ .name = "SESSION_RESET", .desc = "Emitted after the active session is reset.", .ty = LuaType.integer, .value = .{ .integer = 0 } },
-            .{ .name = "AGENT_CREATED", .desc = "Emitted after an agent slot is created.", .ty = LuaType.integer, .value = .{ .integer = 1 } },
-            .{ .name = "AGENT_STARTED", .desc = "Emitted when an agent starts running.", .ty = LuaType.integer, .value = .{ .integer = 2 } },
-            .{ .name = "AGENT_COMPLETE", .desc = "Emitted when an agent completes.", .ty = LuaType.integer, .value = .{ .integer = 3 } },
-            .{ .name = "AGENT_FAILED", .desc = "Emitted when an agent fails.", .ty = LuaType.integer, .value = .{ .integer = 4 } },
-            .{ .name = "AGENT_CANCELLED", .desc = "Emitted when an agent is cancelled.", .ty = LuaType.integer, .value = .{ .integer = 5 } },
-            .{ .name = "COMPACTION_STARTED", .desc = "Emitted when compaction starts.", .ty = LuaType.integer, .value = .{ .integer = 6 } },
-            .{ .name = "COMPACTION_COMPLETE", .desc = "Emitted when compaction completes.", .ty = LuaType.integer, .value = .{ .integer = 7 } },
-            .{ .name = "USER_MESSAGE_SENT", .desc = "Emitted after the user sends a message.", .ty = LuaType.integer, .value = .{ .integer = 8 } },
-            .{ .name = "MCP_TOOLS_RELOADED", .desc = "Emitted after MCP tools are reloaded.", .ty = LuaType.integer, .value = .{ .integer = 9 } },
-            .{ .name = "ON_INJECT", .desc = "Emitted when an agent's system reminder is built. Return a string to append it to the injection.", .ty = LuaType.integer, .value = .{ .integer = 10 } },
+            .{ .name = "session_reset", .desc = "Register a listener for after the active session is reset. Takes no payload.", .ty = EventFn(.session_reset, null) },
+            .{ .name = "agent_created", .desc = "Register a listener for after an agent slot is activated.", .ty = EventFn(.agent_created, BlitzAgentCreatedEvent) },
+            .{ .name = "agent_started", .desc = "Register a listener for when an agent starts running.", .ty = EventFn(.agent_started, BlitzAgentEvent) },
+            .{ .name = "agent_complete", .desc = "Register a listener for when an agent completes.", .ty = EventFn(.agent_complete, BlitzAgentEvent) },
+            .{ .name = "agent_failed", .desc = "Register a listener for when an agent run fails.", .ty = EventFn(.agent_failed, BlitzAgentFailedEvent) },
+            .{ .name = "agent_cancelled", .desc = "Register a listener for when an agent is cancelled.", .ty = EventFn(.agent_cancelled, BlitzAgentEvent) },
+            .{ .name = "compaction_started", .desc = "Register a listener for when chat compaction starts.", .ty = EventFn(.compaction_started, BlitzAgentEvent) },
+            .{ .name = "compaction_complete", .desc = "Register a listener for when chat compaction completes.", .ty = EventFn(.compaction_complete, BlitzAgentEvent) },
+            .{ .name = "user_message_sent", .desc = "Register a listener for after the user sends a message.", .ty = EventFn(.user_message_sent, BlitzUserMessageEvent) },
+            .{ .name = "mcp_tools_reloaded", .desc = "Register a listener for after MCP tools are reloaded. Takes no payload.", .ty = EventFn(.mcp_tools_reloaded, null) },
             .{
-                .name = "add_listener",
+                .name = "inject",
                 .desc =
-                \\Bind an event listener.
-                \\Example: blitz.events.add_listener(blitz.events.AGENT_COMPLETE, function(agent_id) end)
+                \\Install the system-reminder injection hook. Runs for every agent step
+                \\before the reminder is built. Return a string to append it to the
+                \\agent's <system-reminder> block, nil for nothing. Last registration
+                \\wins. Never call blitz.cmd.await_agent inside the hook.
                 ,
                 .ty = LuaType{ .function = .{
-                    .args = &.{ .{ .name = "event", .ty = LuaType.integer }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
+                    .args = &.{.{ .name = "hook", .ty = LuaType{ .function = .{
+                        .args = &.{.{ .name = "agent_id", .ty = LuaType.integer }},
+                        .ret = &LuaString,
+                    } } }},
                     .fn_ptr = LuaFnBind((struct {
-                        fn t(state: *c.lua_State, a: *r.app.App, event: u32, func: LuaFnRef) !void {
+                        fn t(state: *c.lua_State, a: *r.app.App, hook: LuaFnRef) !void {
                             if (try isToolVm(state)) return;
-                            const ev = std.enums.fromInt(r.events.AppEventTag, event) orelse return error.UnknownEvent;
-                            a.event_bus.addLuaListener(a.gpa, a.io, ev, func.idx) catch {};
-                            if (ev == .on_inject) a.lua_inject_hooks_enabled.store(true, .release);
+                            const vm = fromState(state) orelse return error.NoLuaVm;
+                            if (vm.inject_fn != c.LUA_NOREF) c.luaL_unref(state, c.LUA_REGISTRYINDEX, vm.inject_fn);
+                            vm.inject_fn = hook.idx;
+                            a.lua_inject_hooks_enabled.store(true, .release);
                         }
-                    }).t, "add_listener"),
+                    }).t, "inject"),
                 } },
             },
-        },
-    },
-};
-
-const BlitzPermissions = LuaType{
-    .table_def = .{
-        .name = "BlitzPermissions",
-        .fields = &.{
             .{
                 .name = "approve",
                 .desc =
@@ -1161,7 +1206,7 @@ const BlitzPermissions = LuaType{
             },
             .{
                 .name = "clear",
-                .desc = "Remove the permission hook.",
+                .desc = "Remove the approve and inject hooks.",
                 .ty = LuaType{ .function = .{
                     .args = &.{},
                     .fn_ptr = LuaFnBind((struct {
@@ -1170,6 +1215,7 @@ const BlitzPermissions = LuaType{
                             if (try isToolVm(state)) return;
                             const vm = fromState(state) orelse return error.NoLuaVm;
                             vm.permission_hook = c.LUA_NOREF;
+                            vm.inject_fn = c.LUA_NOREF;
                         }
                     }).t, "clear"),
                 } },
@@ -2323,8 +2369,9 @@ pub const LuaVm = struct {
     /// Serializes lua_pcall across worker threads. Lua VMs are not
     /// thread-safe; native tools run in parallel, Lua tools serialize here.
     vm_mu: std.Io.Mutex = .init,
-    /// blitz.permissions.approve() slot. One handler, last registration wins.
+    /// blitz.hooks.approve() slot. One handler, last registration wins.
     permission_hook: c_int = c.LUA_NOREF,
+    inject_fn: c_int = c.LUA_NOREF,
 
     pub fn init(parent: Allocator) !*LuaVm {
         return create(parent, false);
@@ -2458,6 +2505,7 @@ pub const LuaVm = struct {
         self.mcp_entries.clearRetainingCapacity();
         self.stdout_buf.clearRetainingCapacity();
         self.permission_hook = c.LUA_NOREF;
+        self.inject_fn = c.LUA_NOREF;
         if (self.app) |a| {
             a.config.reset();
             a.default_context_limit = app.CONTEXT_LIMIT;
@@ -2635,6 +2683,12 @@ pub const LuaVm = struct {
         if (status != 0) self.popError();
     }
 
+    pub fn invokeLuaFunctionNoArgs(self: *LuaVm, func_ref: c_int) void {
+        _ = c.lua_rawgeti(self.L, c.LUA_REGISTRYINDEX, func_ref);
+        const status = c.lua_pcallk(self.L, 0, 0, 0, 0, null);
+        if (status != 0) self.popError();
+    }
+
     pub fn appendCommandCompletions(
         self: *LuaVm,
         prefix: []const u8,
@@ -2740,7 +2794,7 @@ pub const LuaVm = struct {
         return dest[0..capped];
     }
 
-    /// Call blitz.permissions hook for `perm`. Caller must hold vm_mu.
+    /// Call blitz.hooks.approve hook for `perm`. Caller must hold vm_mu.
     /// Returns the decision, or null for fallback: no hook or a nil return.
     /// A malformed decision table denies with a fixed reason.
     fn runPermissionHook(self: *LuaVm, perm: *r.permissions.Request) ?r.permissions.State {
@@ -2823,20 +2877,10 @@ pub const LuaVm = struct {
 
     pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, cancel_token: ?*r.sdk.CancellationToken) void {
         const a = self.app orelse return;
+        if (!a.lua_inject_hooks_enabled.load(.acquire)) return;
         self.vm_mu.lockUncancelable(a.io);
         defer self.vm_mu.unlock(a.io);
-
-        a.event_bus.listner_mu.lockUncancelable(a.io);
-        const listeners = a.event_bus.listner.get(.on_inject) orelse {
-            a.event_bus.listner_mu.unlock(a.io);
-            return;
-        };
-        const snapshot = a.gpa.dupe(r.events.Listner, listeners.items) catch {
-            a.event_bus.listner_mu.unlock(a.io);
-            return;
-        };
-        a.event_bus.listner_mu.unlock(a.io);
-        defer a.gpa.free(snapshot);
+        if (self.inject_fn == c.LUA_NOREF) return;
 
         if (cancel_token) |token| {
             self.cancel_token = token;
@@ -2848,22 +2892,20 @@ pub const LuaVm = struct {
         }
 
         const L = self.L;
-        for (snapshot) |en| blk: {
-            const top = c.lua_gettop(L);
-            defer c.lua_settop(L, top);
+        const top = c.lua_gettop(L);
+        defer c.lua_settop(L, top);
 
-            _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, en.func_ref);
-            pushAgentId(L, agent_id);
-            const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
-            if (status != 0) {
-                self.popError();
-                break :blk;
-            }
-            if (c.lua_type(L, -1) != c.LUA_TSTRING) break :blk;
-            var len: usize = 0;
-            const ptr = c.lua_tolstring(L, -1, &len) orelse break :blk;
-            w.writeAll(ptr[0..len]) catch break :blk;
+        _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, self.inject_fn);
+        pushAgentId(L, agent_id);
+        const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
+        if (status != 0) {
+            self.popError();
+            return;
         }
+        if (c.lua_type(L, -1) != c.LUA_TSTRING) return;
+        var len: usize = 0;
+        const ptr = c.lua_tolstring(L, -1, &len) orelse return;
+        w.writeAll(ptr[0..len]) catch {};
     }
 };
 
@@ -3768,7 +3810,7 @@ test "permission hook approve deny and nil fallback" {
     vm.setApp(&app_state);
 
     try vm.exec(
-        \\blitz.permissions.approve(function(p)
+        \\blitz.hooks.approve(function(p)
         \\  if p.kind == "diff" then return { approved = true } end
         \\  if p.tool == "bash" then return { approved = false, msg = "no shell for you" } end
         \\  return nil
@@ -3806,7 +3848,7 @@ test "permission hook sees ask options and numeric choice" {
     vm.setApp(&app_state);
 
     try vm.exec(
-        \\blitz.permissions.approve(function(p)
+        \\blitz.hooks.approve(function(p)
         \\  assert(p.kind == "ask")
         \\  assert(p.header == "Pick")
         \\  assert(p.options[2] == "beta")
@@ -3824,21 +3866,21 @@ test "permission hook sees ask options and numeric choice" {
     try std.testing.expectEqual(@as(u8, 0), decision.choice);
 
     try vm.exec(
-        \\blitz.permissions.approve(function(p)
+        \\blitz.hooks.approve(function(p)
         \\  return { approved = false, select = 9 }
         \\end)
     );
     try std.testing.expectEqual(r.permissions.State.denied, vm.permissionHookDecision(&ask_req).?);
 
     try vm.exec(
-        \\blitz.permissions.approve(function(p)
+        \\blitz.hooks.approve(function(p)
         \\  return { approved = true, select = 2 }
         \\end)
     );
     try std.testing.expectEqual(@as(u8, 1), vm.permissionHookDecision(&ask_req).?.choice);
 
     try vm.exec(
-        \\blitz.permissions.approve(function(p)
+        \\blitz.hooks.approve(function(p)
         \\  return { approved = true }
         \\end)
     );
@@ -3846,7 +3888,7 @@ test "permission hook sees ask options and numeric choice" {
     try std.testing.expectEqual(@as(u8, 0), approved_ask.choice);
 
     try vm.exec(
-        \\blitz.permissions.approve(function(p)
+        \\blitz.hooks.approve(function(p)
         \\  return { approved = false, msg = "no" }
         \\end)
     );
@@ -3861,7 +3903,7 @@ test "permission hook sees ask options and numeric choice" {
     try std.testing.expectEqualStrings("no", diff_decision.message);
 
     try vm.exec(
-        \\blitz.permissions.approve(function(p)
+        \\blitz.hooks.approve(function(p)
         \\  return { approved = true }
         \\end)
     );
@@ -3875,7 +3917,7 @@ test "permission hook error fails closed" {
     defer vm.deinit();
     vm.setApp(&app_state);
 
-    try vm.exec("blitz.permissions.approve(function(p) error('boom') end)");
+    try vm.exec("blitz.hooks.approve(function(p) error('boom') end)");
 
     var req = r.permissions.Request{
         .agent_id = .{ .index = 0, .generation = 0 },
@@ -3893,7 +3935,7 @@ test "permission hook malformed table denies" {
     defer vm.deinit();
     vm.setApp(&app_state);
 
-    try vm.exec("blitz.permissions.approve(function(p) return { approved = 'yes' } end)");
+    try vm.exec("blitz.hooks.approve(function(p) return { approved = 'yes' } end)");
 
     var req = r.permissions.Request{
         .agent_id = .{ .index = 0, .generation = 0 },
@@ -3903,11 +3945,11 @@ test "permission hook malformed table denies" {
     const non_bool = vm.permissionHookDecision(&req).?;
     try std.testing.expectEqualStrings("permission hook returned an unusable value", non_bool.message);
 
-    try vm.exec("blitz.permissions.approve(function(p) return 42 end)");
+    try vm.exec("blitz.hooks.approve(function(p) return 42 end)");
     const non_table = vm.permissionHookDecision(&req).?;
     try std.testing.expectEqualStrings("permission hook returned an unusable value", non_table.message);
 
-    try vm.exec("blitz.permissions.approve(function(p) return { approved = false } end)");
+    try vm.exec("blitz.hooks.approve(function(p) return { approved = false } end)");
     const no_reason = vm.permissionHookDecision(&req).?;
     try std.testing.expectEqual(r.permissions.State.denied, no_reason);
 }
@@ -3926,8 +3968,10 @@ test "permission hook clear and no handler fall back" {
     try std.testing.expect(vm.permissionHookDecision(&req) == null);
 
     try vm.exec(
-        \\blitz.permissions.approve(function(p) return { approved = true } end)
-        \\blitz.permissions.clear()
+        \\blitz.hooks.approve(function(p) return { approved = true } end)
+        \\blitz.hooks.inject(function(agent_id) return nil end)
+        \\blitz.hooks.clear()
     );
     try std.testing.expect(vm.permissionHookDecision(&req) == null);
+    try std.testing.expectEqual(c.LUA_NOREF, vm.inject_fn);
 }

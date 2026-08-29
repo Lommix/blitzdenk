@@ -195,22 +195,34 @@ Completion actions with their default keys: `completion_next` (`<Tab>`,
 `<C-n>`), `completion_prev` (`<C-p>`), `completion_accept` (`<C-y>`). A custom
 `blitz.bind` on the same key wins over the default.
 
-## Events
+## Hooks
+
+Each event is one registration function under `blitz.hooks`. Calling it adds
+a listener; multiple listeners per event run in registration order.
+Listeners live until the config reloads; a Lua reload clears all listeners
+and re-runs your config.
 
 ```lua
-blitz.events.add_listener(blitz.events.AGENT_COMPLETE, function(agent_id)
+blitz.hooks.agent_failed(function(ev)
+    blitz.cmd.message_chat("user", "agent " .. ev.id .. " failed: " .. ev.err)
 end)
 ```
 
-For the tag list read `BlitzEventDef` in `meta.lua`.
+Every payload is one table with the fields shown in `meta.lua` (`BlitzAgentEvent`,
+`BlitzAgentCreatedEvent`, `BlitzAgentFailedEvent`, `BlitzUserMessageEvent`);
+`session_reset` and `mcp_tools_reloaded` listeners take no argument. The full
+list with signatures lives in `BlitzHooks` in `meta.lua`.
 
-`ON_INJECT` fires for every agent on each step, right before the system
-reminder is built. Return a string to append it to that agent's
-`<system-reminder>` block. It runs in the main Lua VM with a brief lock. A nil
-return is skipped; errors are logged and the step continues.
+## Inject hook
+
+`blitz.hooks.inject(fn)` installs one hook that runs for every agent on each step,
+right before the system reminder is built. Return a string to append it to
+that agent's `<system-reminder>` block. It runs in the main Lua VM with a
+brief lock. A nil return is skipped; errors are logged and the step continues.
+Last registration wins. Never call `blitz.cmd.await_agent` inside the hook.
 
 ```lua
-blitz.events.add_listener(blitz.events.ON_INJECT, function(agent_id)
+blitz.hooks.inject(function(agent_id)
     if agent_id == blitz.get_main_agent() then
         return "[CUSTOM] main agent reminder\n"
     end
@@ -219,10 +231,10 @@ end)
 
 ## Permission hook
 
-`blitz.permissions.approve(fn)` installs one hook that decides every tool
+`blitz.hooks.approve(fn)` installs one hook that decides every tool
 approval before the approval-mode check. It runs in every approval mode and
 can deny what `--approval yolo` would auto-approve. Last registration wins;
-`blitz.permissions.clear()` removes the hook.
+`blitz.hooks.clear()` removes the approve and inject hooks.
 
 Return a `BlitzPermissionDecision` table, or `nil` for the normal flow
 (approval mode, then TUI):
@@ -239,7 +251,7 @@ A malformed table (missing `approved`) denies with a fixed reason. A hook
 error denies with `permission hook error: <msg>`.
 
 ```lua
-blitz.permissions.approve(function(p)
+blitz.hooks.approve(function(p)
     if p.kind == "diff" and p.path:find("^/tmp/") then
         return { approved = true }
     end

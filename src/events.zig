@@ -2,60 +2,60 @@ const std = @import("std");
 const r = @import("root.zig");
 const AgentId = r.AgentId;
 
-/// Events emitted by the app and agent subsystems. The AppEvent
-/// union is the single source of truth — any code that needs to react to
-/// system state changes (e.g. Lua callbacks, logging, status-bar updates)
-/// should dispatch from a central `onEvent` call.
 pub const AppEvent = union(enum) {
     session_reset,
-    agent_created: struct { id: AgentId, type_idx: u8, depth: u16 },
+    agent_created: struct { id: AgentId, name: []const u8, depth: u16 },
     agent_started: AgentId,
-    agent_complete: AgentId, // done
+    agent_complete: AgentId,
     agent_failed: struct { id: AgentId, err: []const u8 },
-    agent_cancelled: struct { id: AgentId },
-    compaction_started: struct { id: AgentId }, // done
-    compaction_complete: struct { id: AgentId },
+    agent_cancelled: AgentId,
+    compaction_started: AgentId,
+    compaction_complete: AgentId,
     user_message_sent: []const u8,
     mcp_tools_reloaded,
-    on_inject: AgentId,
 };
 
 pub const AppEventTag = @typeInfo(AppEvent).@"union".tag_type.?;
 
-pub const Listner = struct {
+pub const Listener = struct {
     func_ref: c_int,
 };
 
 pub const EventBus = struct {
-    listner: std.AutoHashMapUnmanaged(AppEventTag, std.ArrayList(Listner)) = .{},
-    listner_mu: std.Io.Mutex = .init,
-    pub fn emit(self: *const EventBus, app: *r.app.App, event: AppEvent) !void {
-        const listners = self.listner.get(event) orelse return;
-        for (listners.items) |en| {
-            // TODO: can explode, need new redesign of async lua
-            // try app.lua_vm.vm_mu.lock(app.context_factory.io);
-            // defer app.lua_vm.vm_mu.unlock(app.context_factory.io);
+    listener: std.AutoHashMapUnmanaged(AppEventTag, std.ArrayList(Listener)) = .{},
+    listener_mu: std.Io.Mutex = .init,
 
+    pub fn emit(self: *EventBus, app: *r.app.App, event: AppEvent) void {
+        self.listener_mu.lockUncancelable(app.io);
+        const listeners = self.listener.get(event) orelse {
+            self.listener_mu.unlock(app.io);
+            return;
+        };
+        const snapshot = app.gpa.dupe(Listener, listeners.items) catch {
+            self.listener_mu.unlock(app.io);
+            return;
+        };
+        self.listener_mu.unlock(app.io);
+        defer app.gpa.free(snapshot);
+
+        app.lua_vm.vm_mu.lockUncancelable(app.io);
+        defer app.lua_vm.vm_mu.unlock(app.io);
+
+        for (snapshot) |ln| {
             switch (event) {
-                .session_reset => app.lua_vm.invokeLuaFunction(en.func_ref, {}),
-                .agent_created => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                .agent_started => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                .agent_complete => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                .agent_failed => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                .agent_cancelled => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                .compaction_started => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                .compaction_complete => |ev| app.lua_vm.invokeLuaFunction(en.func_ref, ev),
-                .user_message_sent => |msg| app.lua_vm.invokeLuaFunction(en.func_ref, msg),
-                .mcp_tools_reloaded => app.lua_vm.invokeLuaFunction(en.func_ref, {}),
-                else => {},
+                .session_reset, .mcp_tools_reloaded => app.lua_vm.invokeLuaFunctionNoArgs(ln.func_ref),
+                .agent_created => |payload| app.lua_vm.invokeLuaFunction(ln.func_ref, payload),
+                .agent_started, .agent_complete, .agent_cancelled, .compaction_started, .compaction_complete => |id| app.lua_vm.invokeLuaFunction(ln.func_ref, .{ .id = id }),
+                .agent_failed => |payload| app.lua_vm.invokeLuaFunction(ln.func_ref, payload),
+                .user_message_sent => |text| app.lua_vm.invokeLuaFunction(ln.func_ref, .{ .text = text }),
             }
         }
     }
 
     pub fn addLuaListener(self: *EventBus, alloc: std.mem.Allocator, io: std.Io, event_type: AppEventTag, func_ref: c_int) !void {
-        self.listner_mu.lockUncancelable(io);
-        defer self.listner_mu.unlock(io);
-        const res = try self.listner.getOrPut(alloc, event_type);
+        self.listener_mu.lockUncancelable(io);
+        defer self.listener_mu.unlock(io);
+        const res = try self.listener.getOrPut(alloc, event_type);
         if (!res.found_existing) {
             res.value_ptr.* = .empty;
             try res.value_ptr.append(alloc, .{ .func_ref = func_ref });
@@ -67,11 +67,11 @@ pub const EventBus = struct {
     }
 
     pub fn clear(self: *EventBus, alloc: std.mem.Allocator, io: std.Io) void {
-        self.listner_mu.lockUncancelable(io);
-        defer self.listner_mu.unlock(io);
-        var it = self.listner.valueIterator();
+        self.listener_mu.lockUncancelable(io);
+        defer self.listener_mu.unlock(io);
+        var it = self.listener.valueIterator();
         while (it.next()) |list| list.deinit(alloc);
-        self.listner.deinit(alloc);
-        self.listner = .{};
+        self.listener.deinit(alloc);
+        self.listener = .{};
     }
 };

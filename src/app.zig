@@ -523,7 +523,7 @@ pub const App = struct {
         self.context_factory.resetLoadedTools() catch {};
         self.lua_vm.disableAllMcp();
         self.lua_state.reset(self.io, self.gpa);
-        self.event_bus.emit(self, .session_reset) catch {};
+        self.event_bus.emit(self, .session_reset);
         self.reloadMcpTools() catch {};
         self.reloadLuaTools() catch {};
 
@@ -753,7 +753,7 @@ pub const App = struct {
         if (state == .active) return;
         if (agent.queued_messages.items.len > 0) {
             try self.registry.run(agent_id, .{ .max_steps = std.math.maxInt(usize) });
-            try self.event_bus.emit(self, .{ .agent_started = agent_id });
+            self.event_bus.emit(self, .{ .agent_started = agent_id });
             return;
         }
         if (agent.reported_task_done) return;
@@ -792,7 +792,7 @@ pub const App = struct {
                 try parent.queueReminder(notice);
                 if (parent.task == null and parent.compact_task == null and parent.status != .retrying and parent.status != .compacting) {
                     try self.registry.run(parent_id, .{ .max_steps = std.math.maxInt(usize) });
-                    try self.event_bus.emit(self, .{ .agent_started = parent_id });
+                    self.event_bus.emit(self, .{ .agent_started = parent_id });
                 }
             }
         }
@@ -1067,7 +1067,7 @@ pub const App = struct {
         for (self.mcp_manager.registeredTools()) |entry| try self.context_factory.add(entry.tool, entry.flags);
 
         try self.refreshLiveAgentTools();
-        self.event_bus.emit(self, .mcp_tools_reloaded) catch {};
+        self.event_bus.emit(self, .mcp_tools_reloaded);
         self.dirty = true;
     }
     pub fn reloadLuaTools(self: *App) !void {
@@ -1231,7 +1231,7 @@ pub const App = struct {
         if (agent.status == .compacting) {
             if (!self.compaction_indicator_active) {
                 self.compaction_indicator_active = true;
-                self.event_bus.emit(self, .{ .compaction_started = .{ .id = agent_id } }) catch {};
+                self.event_bus.emit(self, .{ .compaction_started = agent_id });
             }
             return;
         }
@@ -1242,7 +1242,7 @@ pub const App = struct {
         if (compacted_count == 0 or compacted_count == self.compaction_completion_seen_count) return;
 
         self.compaction_completion_seen_count = compacted_count;
-        self.event_bus.emit(self, .{ .compaction_complete = .{ .id = agent_id } }) catch {};
+        self.event_bus.emit(self, .{ .compaction_complete = agent_id });
         self.pushSystemMessage("compact complete", .{});
         self.dirty = true;
     }
@@ -1746,7 +1746,7 @@ pub const App = struct {
                 try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
             },
             .complete => |result| {
-                try self.event_bus.emit(self, .{ .agent_complete = agent_id });
+                self.event_bus.emit(self, .{ .agent_complete = agent_id });
                 if (!is_main) return;
                 const skip_final = self.sdk_preview_flushed;
                 if (!skip_final and self.streaming_entry != null) {
@@ -1775,7 +1775,7 @@ pub const App = struct {
                         return;
                     }
                 }
-                try self.event_bus.emit(self, .{ .agent_failed = .{ .id = agent_id, .err = @errorName(err) } });
+                self.event_bus.emit(self, .{ .agent_failed = .{ .id = agent_id, .err = @errorName(err) } });
                 if (!is_main) return;
                 self.dropStreamingPreview();
                 const parts = try alloc.alloc(ChatPart, 1);
@@ -1844,7 +1844,7 @@ pub const App = struct {
         try self.waitForMcpTools();
         const alloc = self.sessionAlloc();
         const chat_entry = try ChatEntry.userMessageSimple(alloc, .user, chat_text);
-        try self.event_bus.emit(self, .{ .user_message_sent = chat_text });
+        self.event_bus.emit(self, .{ .user_message_sent = chat_text });
 
         if (self.main_agent_id) |id| {
             try self.appendChatEntry(alloc, chat_entry);

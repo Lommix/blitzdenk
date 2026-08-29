@@ -77,32 +77,27 @@
 ---@field START_MCP string
 ---@field SKILL string
 
----@class BlitzEventDef
----Emitted after the active session is reset.
----@field SESSION_RESET integer
----Emitted after an agent slot is created.
----@field AGENT_CREATED integer
----Emitted when an agent starts running.
----@field AGENT_STARTED integer
----Emitted when an agent completes.
----@field AGENT_COMPLETE integer
----Emitted when an agent fails.
----@field AGENT_FAILED integer
----Emitted when an agent is cancelled.
----@field AGENT_CANCELLED integer
----Emitted when compaction starts.
----@field COMPACTION_STARTED integer
----Emitted when compaction completes.
----@field COMPACTION_COMPLETE integer
----Emitted after the user sends a message.
----@field USER_MESSAGE_SENT integer
----Emitted after MCP tools are reloaded.
----@field MCP_TOOLS_RELOADED integer
----Emitted when an agent's system reminder is built. Return a string to append it to the injection.
----@field ON_INJECT integer
----Bind an event listener.
----Example: blitz.events.add_listener(blitz.events.AGENT_COMPLETE, function(agent_id) end)
----@field add_listener fun(event: integer, func: function)
+---@class BlitzAgentCreatedEvent
+---packed AgentId of the new agent
+---@field id integer
+---agent type name
+---@field name string
+---nesting depth below the main agent
+---@field depth integer
+
+---@class BlitzAgentEvent
+---packed AgentId of the agent
+---@field id integer
+
+---@class BlitzAgentFailedEvent
+---packed AgentId of the failed agent
+---@field id integer
+---error name
+---@field err string
+
+---@class BlitzUserMessageEvent
+---chat text as typed
+---@field text string
 
 ---@class BlitzPermissionPayload
 ---packed AgentId of the requesting agent
@@ -133,13 +128,38 @@
 ---1-based option index, ask payloads only; ignored otherwise
 ---@field select? integer
 
----@class BlitzPermissions
+---@class BlitzHooks
+---Register a listener for after the active session is reset. Takes no payload.
+---@field session_reset fun(func: fun())
+---Register a listener for after an agent slot is activated.
+---@field agent_created fun(func: fun(ev: BlitzAgentCreatedEvent))
+---Register a listener for when an agent starts running.
+---@field agent_started fun(func: fun(ev: BlitzAgentEvent))
+---Register a listener for when an agent completes.
+---@field agent_complete fun(func: fun(ev: BlitzAgentEvent))
+---Register a listener for when an agent run fails.
+---@field agent_failed fun(func: fun(ev: BlitzAgentFailedEvent))
+---Register a listener for when an agent is cancelled.
+---@field agent_cancelled fun(func: fun(ev: BlitzAgentEvent))
+---Register a listener for when chat compaction starts.
+---@field compaction_started fun(func: fun(ev: BlitzAgentEvent))
+---Register a listener for when chat compaction completes.
+---@field compaction_complete fun(func: fun(ev: BlitzAgentEvent))
+---Register a listener for after the user sends a message.
+---@field user_message_sent fun(func: fun(ev: BlitzUserMessageEvent))
+---Register a listener for after MCP tools are reloaded. Takes no payload.
+---@field mcp_tools_reloaded fun(func: fun())
+---Install the system-reminder injection hook. Runs for every agent step
+---before the reminder is built. Return a string to append it to the
+---agent's <system-reminder> block, nil for nothing. Last registration
+---wins. Never call blitz.cmd.await_agent inside the hook.
+---@field inject fun(hook: fun(agent_id: integer): string)
 ---Install the permission hook. Runs on every tool approval request
 ---before the approval-mode check. Return a BlitzPermissionDecision
 ---table, or nil for the normal flow. Last registration wins.
 ---Never call blitz.cmd.await_agent inside the hook.
----@field approve fun(hook: function)
----Remove the permission hook.
+---@field approve fun(hook: fun(payload: BlitzPermissionPayload): BlitzPermissionDecision)
+---Remove the approve and inject hooks.
 ---@field clear fun()
 
 ---@class BlitzArgDef
@@ -288,8 +308,7 @@
 ---@field base64 BlitzBase64
 ---@field cmd BlitzCmd
 ---@field tools BlitzToolDef
----@field events BlitzEventDef
----@field permissions BlitzPermissions
+---@field hooks BlitzHooks
 ---@field AGENT_GENERAL integer
 ---@field REQ_STATUS_PENDING integer
 ---@field REQ_STATUS_APPROVED integer
@@ -330,11 +349,11 @@
 ---@field set_compact_edge fun(tokens: integer)
 ---Bind a vim-style key combo to a Lua callback.
 ---Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
----@field bind fun(key: string, func: function)
+---@field bind fun(key: string, func: fun())
 ---Bind a slash command to a Lua callback. The leading "/" is added automatically.
 ---Example: blitz.add_command("help", function(args) end)
 ---
----@field add_command fun(command: string, func: function, description?: string)
+---@field add_command fun(command: string, func: fun(), description?: string)
 ---Override the tool set for a given agent type. Replaces defaults entirely.
 ---Names must match built-in tool names or names of tools registered via blitz.register_tool.
 ---@field set_agent_tools fun(agent_type: integer, tool_names: string[])

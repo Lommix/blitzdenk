@@ -750,11 +750,11 @@ pub fn run(
                 const new_config_mtime: i128 = if (config_lua) |info| scanDirMaxMtime(io, info.dir_path) else 0;
 
                 if (reload_requested or new_cwd_mtime != cwd_lua_mtime or new_config_mtime != config_lua_mtime) blk: {
+                    try app.waitForMcpTools();
                     // Tool worker may currently hold
                     // vm_mu. Skip this tick if busy — mtime stays unchanged so we retry.
                     if (!app.lua_vm.vm_mu.tryLock()) break :blk;
                     defer app.lua_vm.vm_mu.unlock(io);
-                    try app.waitForMcpTools();
 
                     cwd_lua_mtime = new_cwd_mtime;
                     config_lua_mtime = new_config_mtime;
@@ -1150,7 +1150,7 @@ pub fn run(
 
                                     if (app.running) {
                                         app.pushHistory(history_store_dir, input);
-                                        try app.event_bus.emit(&app, .{ .user_message_sent = chat_text });
+                                        app.event_bus.emit(&app, .{ .user_message_sent = chat_text });
                                         if (app.main_agent_id) |agent_id| {
                                             const alloc = app.sessionAlloc();
                                             const len: usize = if (app.screenshot_buf != null) 2 else 1;
