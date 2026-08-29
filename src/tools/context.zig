@@ -42,11 +42,12 @@ pub const Context = struct {
         return token.isCancelled();
     }
 
-    pub fn requestPermission(self: Context, call_id: []const u8, payload: permissions.Payload) permissions.State {
+    pub fn requestPermission(self: Context, call: sdk.ToolCall, payload: permissions.Payload) permissions.State {
         if (self.base.permissions.request == null) return .denied;
         var request = permissions.Request{
             .agent_id = self.base.self_id,
-            .call_id = call_id,
+            .call_id = call.id,
+            .tool_name = call.name,
             .payload = payload,
         };
         self.base.permissions.send(&request);

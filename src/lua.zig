@@ -332,8 +332,13 @@ const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
 const AppFlagsDef = LuaType{ .table_def = .{ .name = "BlitzAppFlags", .fields = &.{
     .{ .name = "show_thinking", .ty = LuaType.boolean, .optional = true },
     .{ .name = "debug_log", .ty = LuaType.boolean, .optional = true },
-    .{ .name = "skip_permissions", .ty = LuaType.boolean, .optional = true },
+    .{ .name = "approval_mode", .ty = LuaType.string, .optional = true, .desc = "strict|default|yolo|smart" },
 } } };
+const FlagsStrings = struct {
+    show_thinking: ?bool = null,
+    debug_log: ?bool = null,
+    approval_mode: ?[]const u8 = null,
+};
 const McpServerDef = LuaType{ .table_def = .{ .name = "BlitzMcpServerDef", .fields = &.{
     .{ .name = "name", .ty = LuaType.string },
     .{ .name = "command", .ty = LuaType.string },
@@ -357,6 +362,7 @@ pub const Blitz = LuaType{
             .{ .name = "cmd", .ty = BlitzCmd },
             .{ .name = "tools", .ty = BlitzToolDef },
             .{ .name = "events", .ty = BlitzEventDef },
+            .{ .name = "permissions", .ty = BlitzPermissions },
             .{ .name = "AGENT_GENERAL", .ty = LuaType.integer, .value = .{ .integer = 0 } },
             .{ .name = "REQ_STATUS_PENDING", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_PENDING } },
             .{ .name = "REQ_STATUS_APPROVED", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_APPROVED } },
@@ -866,24 +872,34 @@ pub const Blitz = LuaType{
                 .ty = LuaType{ .function = .{
                     .ret = &AppFlagsDef,
                     .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(a: *r.app.App) !r.app.AppFlags {
+                        fn lua_fn(a: *r.app.App) !FlagsStrings {
                             a.mu.lockUncancelable(a.io);
                             defer a.mu.unlock(a.io);
-                            return a.flags;
+                            return .{
+                                .show_thinking = a.flags.show_thinking,
+                                .debug_log = a.flags.debug_log,
+                                .approval_mode = @tagName(a.flags.approval_mode),
+                            };
                         }
                     }).lua_fn, "get_flags"),
                 } },
             },
             .{
                 .name = "set_flags",
-                .desc = "Set the app flags from a table. Missing fields are set to their default values.",
+                .desc = "Set the app flags from a table. Fields you omit are left unchanged.",
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "flags", .ty = AppFlagsDef }},
                     .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(a: *r.app.App, flags: r.app.AppFlags) !void {
+                        fn lua_fn(a: *r.app.App, flags: FlagsStrings) !void {
+                            const mode: r.permissions.ApprovalMode = if (flags.approval_mode) |str|
+                                r.permissions.parseApprovalMode(str) orelse return error.UnknownApprovalMode
+                            else
+                                .default;
                             a.mu.lockUncancelable(a.io);
                             defer a.mu.unlock(a.io);
-                            a.flags = flags;
+                            if (flags.show_thinking) |v| a.flags.show_thinking = v;
+                            if (flags.debug_log) |v| a.flags.debug_log = v;
+                            a.flags.approval_mode = mode;
                             a.dirty = true;
                         }
                     }).lua_fn, "set_flags"),
@@ -1116,6 +1132,61 @@ pub const BlitzEventDef = LuaType{
         },
     },
 };
+
+const BlitzPermissions = LuaType{
+    .table_def = .{
+        .name = "BlitzPermissions",
+        .fields = &.{
+            .{
+                .name = "approve",
+                .desc =
+                \\Install the permission hook. Runs on every tool approval request
+                \\before the approval-mode check. Return "approve", "deny", a reason
+                \\string (deny with reason), a number (option index for ask), or
+                \\"fallback" to use the normal flow. Last registration wins.
+                \\Never call blitz.cmd.await_agent inside the hook.
+                ,
+                .ty = LuaType{ .function = .{
+                    .args = &.{.{ .name = "hook", .ty = LuaType{ .function = .{
+                        .args = &.{.{ .name = "payload", .ty = PermissionPayloadDef }},
+                    } } }},
+                    .fn_ptr = LuaFnBind((struct {
+                        fn t(state: *c.lua_State, a: *r.app.App, hook: LuaFnRef) !void {
+                            if (try isToolVm(state)) return;
+                            a.lua_vm.permission_hook = hook.idx;
+                        }
+                    }).t, "approve"),
+                } },
+            },
+            .{
+                .name = "clear",
+                .desc = "Remove the permission hook.",
+                .ty = LuaType{ .function = .{
+                    .args = &.{},
+                    .fn_ptr = LuaFnBind((struct {
+                        fn t(state: *c.lua_State, a: *r.app.App) !void {
+                            if (try isToolVm(state)) return;
+                            a.lua_vm.permission_hook = c.LUA_NOREF;
+                        }
+                    }).t, "clear"),
+                } },
+            },
+        },
+    },
+};
+
+const PermissionPayloadDef = LuaType{ .table_def = .{ .name = "BlitzPermissionPayload", .fields = &.{
+    .{ .name = "agent_id", .ty = LuaType.integer, .desc = "packed AgentId of the requesting agent" },
+    .{ .name = "call_id", .ty = LuaType.string, .optional = true },
+    .{ .name = "kind", .ty = LuaType.string, .desc = "call|diff|ask|plan" },
+    .{ .name = "tool", .ty = LuaType.string, .desc = "tool name" },
+    .{ .name = "description", .ty = LuaType.string, .optional = true, .desc = "kind == call" },
+    .{ .name = "path", .ty = LuaType.string, .optional = true, .desc = "kind == diff|plan" },
+    .{ .name = "header", .ty = LuaType.string, .optional = true, .desc = "kind == ask" },
+    .{ .name = "question", .ty = LuaType.string, .optional = true, .desc = "kind == ask" },
+    .{ .name = "options", .ty = StringListDef, .optional = true, .desc = "kind == ask" },
+    .{ .name = "plan", .ty = LuaType.string, .optional = true, .desc = "kind == plan, plan text" },
+} } };
 
 const BlitzMcp = LuaType{
     .table_def = .{
@@ -1833,6 +1904,13 @@ fn pushAny(L: *c.lua_State, value: anytype) void {
     const T = @TypeOf(value);
     const Info = @typeInfo(T);
     switch (Info) {
+        .optional => {
+            if (value) |inner| {
+                pushAny(L, inner);
+            } else {
+                c.lua_pushnil(L);
+            }
+        },
         .bool => c.lua_pushboolean(L, @intFromBool(value)),
         .comptime_int, .int => c.lua_pushinteger(L, @intCast(value)),
         .comptime_float, .float => c.lua_pushnumber(L, @floatCast(value)),
@@ -2236,6 +2314,8 @@ pub const LuaVm = struct {
     /// Serializes lua_pcall across worker threads. Lua VMs are not
     /// thread-safe; native tools run in parallel, Lua tools serialize here.
     vm_mu: std.Io.Mutex = .init,
+    /// blitz.permissions.approve() slot. One handler, last registration wins.
+    permission_hook: c_int = c.LUA_NOREF,
 
     pub fn init(parent: Allocator) !*LuaVm {
         return create(parent, false);
@@ -2368,6 +2448,7 @@ pub const LuaVm = struct {
         self.command_entries.clearRetainingCapacity();
         self.mcp_entries.clearRetainingCapacity();
         self.stdout_buf.clearRetainingCapacity();
+        self.permission_hook = c.LUA_NOREF;
         if (self.app) |a| {
             a.config.reset();
             a.default_context_limit = app.CONTEXT_LIMIT;
@@ -2648,6 +2729,57 @@ pub const LuaVm = struct {
         const capped = @min(len, dest.len);
         @memcpy(dest[0..capped], ptr[0..capped]);
         return dest[0..capped];
+    }
+
+    /// Call blitz.permissions hook for `perm`. Caller must hold vm_mu.
+    /// Returns the decision, or null for "fallback"/no handler/non-string
+    /// returns. Strings other than the verbs deny with the string as reason.
+    fn runPermissionHook(self: *LuaVm, perm: *r.permissions.Request) ?r.permissions.State {
+        const L = self.L;
+        const top = c.lua_gettop(L);
+        defer c.lua_settop(L, top);
+
+        if (self.permission_hook == c.LUA_NOREF) return null;
+        _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, self.permission_hook);
+        if (c.lua_type(L, -1) != c.LUA_TFUNCTION) return null;
+
+        pushPermissionPayload(L, perm);
+
+        const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
+        if (status != 0) {
+            self.popError();
+            const msg = std.fmt.allocPrint(self.luaArena(), "permission hook error: {s}", .{self.getLastError()}) catch
+                return .{ .message = "permission hook error" };
+            return .{ .message = msg };
+        }
+
+        switch (c.lua_type(L, -1)) {
+            c.LUA_TNIL, c.LUA_TNONE => return null,
+            c.LUA_TNUMBER => {
+                const choice = c.lua_tointegerx(L, -1, null);
+                if (choice < 0 or choice > std.math.maxInt(u8)) return .{ .message = "permission hook choice out of range" };
+                return .{ .choice = @intCast(choice) };
+            },
+            c.LUA_TSTRING => {
+                var len: usize = 0;
+                const ptr = c.lua_tolstring(L, -1, &len) orelse return null;
+                const value = ptr[0..len];
+                if (std.mem.eql(u8, value, "approve")) return .approved;
+                if (std.mem.eql(u8, value, "deny")) return .denied;
+                if (std.mem.eql(u8, value, "fallback")) return null;
+                return .{ .message = value };
+            },
+            else => return .{ .message = "permission hook returned an unusable value" },
+        }
+    }
+
+    /// Invoke the permission hook for `perm`. Reads only memory owned by the
+    /// registry slot, never the Lua arena. Call on the main thread.
+    pub fn permissionHookDecision(self: *LuaVm, perm: *r.permissions.Request) ?r.permissions.State {
+        const a = self.app orelse return null;
+        self.vm_mu.lockUncancelable(a.io);
+        defer self.vm_mu.unlock(a.io);
+        return self.runPermissionHook(perm);
     }
 
     pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, cancel_token: ?*r.sdk.CancellationToken) void {
@@ -3123,6 +3255,64 @@ fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
 /// Push AgentId as the packed integer.
 fn pushAgentId(L: *c.lua_State, id: r.AgentId) void {
     c.lua_pushinteger(L, @intCast(id.pack()));
+}
+
+/// Push the hook payload table for a permission request. Strings point into
+/// registry-owned memory and stay valid for the duration of the hook call.
+fn pushPermissionPayload(L: *c.lua_State, perm: *r.permissions.Request) void {
+    c.lua_createtable(L, 0, 8);
+
+    c.lua_pushinteger(L, @intCast(perm.agent_id.pack()));
+    c.lua_setfield(L, -2, "agent_id");
+
+    if (perm.call_id) |call_id| {
+        c.lua_pushlstring(L, call_id.ptr, call_id.len);
+        c.lua_setfield(L, -2, "call_id");
+    }
+
+    c.lua_pushlstring(L, perm.tool_name.ptr, perm.tool_name.len);
+    c.lua_setfield(L, -2, "tool");
+
+    switch (perm.payload) {
+        .call => |call| {
+            pushTag(L, "call");
+            c.lua_setfield(L, -2, "kind");
+            c.lua_pushlstring(L, call.description.ptr, call.description.len);
+            c.lua_setfield(L, -2, "description");
+        },
+        .diff => |diff| {
+            pushTag(L, "diff");
+            c.lua_setfield(L, -2, "kind");
+            c.lua_pushlstring(L, diff.path.ptr, diff.path.len);
+            c.lua_setfield(L, -2, "path");
+        },
+        .ask => |ask| {
+            pushTag(L, "ask");
+            c.lua_setfield(L, -2, "kind");
+            c.lua_pushlstring(L, ask.header.ptr, ask.header.len);
+            c.lua_setfield(L, -2, "header");
+            c.lua_pushlstring(L, ask.question.ptr, ask.question.len);
+            c.lua_setfield(L, -2, "question");
+            c.lua_createtable(L, @intCast(ask.options.len), 0);
+            for (ask.options, 0..) |option, i| {
+                c.lua_pushlstring(L, option.ptr, option.len);
+                c.lua_rawseti(L, -2, @intCast(i + 1));
+            }
+            c.lua_setfield(L, -2, "options");
+        },
+        .plan => |plan| {
+            pushTag(L, "plan");
+            c.lua_setfield(L, -2, "kind");
+            c.lua_pushlstring(L, plan.path.ptr, plan.path.len);
+            c.lua_setfield(L, -2, "path");
+            c.lua_pushlstring(L, plan.plan_text.ptr, plan.plan_text.len);
+            c.lua_setfield(L, -2, "plan");
+        },
+    }
+}
+
+fn pushTag(L: *c.lua_State, tag: []const u8) void {
+    c.lua_pushlstring(L, tag.ptr, tag.len);
 }
 
 /// Read AgentId from integer at `idx`. Reports a Lua error on shape mismatch.

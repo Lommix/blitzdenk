@@ -25,8 +25,7 @@ pub const UiState = union(enum) {
 pub const AppFlags = packed struct {
     show_thinking: bool = false,
     debug_log: bool = true,
-    skip_permissions: bool = true,
-    skip_ssh_permissions: bool = false,
+    approval_mode: r.permissions.ApprovalMode = .default,
 };
 
 pub const Theme = struct {
@@ -1203,6 +1202,13 @@ pub const App = struct {
             }
             self.active_permission = null;
         }
+    }
+
+    /// Invoke the Lua permission hook for `perm` under vm_mu. Returns the
+    /// hook decision, or null when the hook is absent or returns "fallback".
+    /// A hook error denies with the reason in the message.
+    pub fn luaPermissionDecision(self: *App, perm: *r.permissions.Request) ?r.permissions.State {
+        return self.lua_vm.permissionHookDecision(perm);
     }
 
     pub fn appendBytes(self: *App, bytes: []const u8) void {
@@ -2613,7 +2619,11 @@ fn statusBarLine(app: *App, alloc: std.mem.Allocator) !r.tui.Line {
             formatTokenCount(&out_buf, usage.output_tokens),
             formatTokenCount(&cache_buf, usage.cache_read_tokens + usage.cache_write_tokens),
             ctx_pct,
-            if (app.flags.skip_permissions) "| AUTO APPROVAL" else "",
+            switch (app.flags.approval_mode) {
+                .yolo => "| AUTO APPROVAL",
+                .strict => "| APPROVAL",
+                .default, .smart => "",
+            },
         },
     ) catch " ?? ";
     return r.tui.Line.new(alloc, "{s}", .{status}, .{ .fg = app.theme.muted });

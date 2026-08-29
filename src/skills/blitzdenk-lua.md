@@ -179,6 +179,11 @@ blitz.bind("<C-t>", function()
 end)
 ```
 
+`set_flags` reads only the fields you pass: `show_thinking` and `debug_log`
+booleans, `approval_mode` string (`"strict"`, `"default"`, `"yolo"`,
+`"smart"`). Fields you omit stay unchanged; `get_flags` returns all three,
+`approval_mode` as its tag name. `smart` behaves like `default` today.
+
 Completion actions with their default keys: `completion_next` (`<Tab>`,
 `<C-n>`), `completion_prev` (`<C-p>`), `completion_accept` (`<C-y>`). A custom
 `blitz.bind` on the same key wins over the default.
@@ -249,5 +254,8 @@ The project root is the nearest ancestor of the working directory containing
 
 Frontmatter keys: `name` (kebab-case), `description`, optional `whenToUse`,
 `user-invocable` (default true), and `disable-model-invocation` (default
-false). Unknown keys are ignored. Descriptions support YAML folded (`>`) and
-literal (`|`) block scalars.
+false). Unknown keys are ignored. Keys and values may be single- or
+double-quoted; double quotes decode `\"` and `\\` escapes, single quotes
+decode `''` doubling. Descriptions support YAML folded (`>`) and literal
+(`|`) block scalars with chomp indicators (`>-`, `|+`); chomping itself is
+ignored, and digit indentation indicators (`>2`) are unsupported.

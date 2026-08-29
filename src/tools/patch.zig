@@ -174,7 +174,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     // 3. Request permission for every command before touching disk.
     for (previews.items, patch.commands) |p, cmd| {
-        const decision = ctx.requestPermission(call.id, .{ .diff = .{
+        const decision = ctx.requestPermission(call, .{ .diff = .{
             .before = p.before,
             .after = p.after orelse "",
             .path = commandPath(cmd),

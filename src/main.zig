@@ -319,9 +319,10 @@ pub fn main(init: std.process.Init) !void {
                 \\
                 \\Flags:
                 \\  --log              write debug.log in path
-                \\  --strict           request permissions
+                \\  --approval <mode>  strict|default|yolo|smart (default: default)
+                \\  --strict           shortcut for --approval strict
+                \\  --yolo             shortcut for --approval yolo
                 \\  --clean            skip local user context
-                \\  --yolo             auto-approve all requests in ssh sessions
                 \\  --prompt "STRING"  prefill input in current cwd
                 \\  --headless         with --prompt: run headless, print final message
                 \\
@@ -600,8 +601,7 @@ pub fn run(
     var reload_tick: u32 = 0;
 
     app.reset();
-    app.flags.skip_permissions = !flags.strict_mode;
-    app.flags.skip_ssh_permissions = flags.yolo;
+    app.flags.approval_mode = flags.approval_mode;
     if (wizard_pending) app.enterWizard();
     if (app.input_mode != .wizard) app.warnUnboundAgentModels();
 
@@ -706,17 +706,9 @@ pub fn run(
 
                     // check permission level against flags
                     app.mu.lockUncancelable(app.io);
-                    const skip_permissions = app.flags.skip_permissions;
-                    const skip_ssh_permissions = app.flags.skip_ssh_permissions;
+                    const mode = app.flags.approval_mode;
                     app.mu.unlock(app.io);
-                    if (skip_permissions and !app.exec_pool.ssh_active and !is_ask) {
-                        try app.persist_permission_to_history(next);
-                        next.state = .approved;
-                        next.event.set(app.io);
-                        continue;
-                    }
-
-                    if (skip_ssh_permissions and !is_ask) {
+                    if (r.permissions.shouldAutoApprove(mode, is_ask, app.exec_pool.ssh_active)) {
                         try app.persist_permission_to_history(next);
                         next.state = .approved;
                         next.event.set(app.io);
@@ -1669,26 +1661,56 @@ pub const AppCommand = union(enum) {
     }
 };
 
+fn approvalFail(val: []const u8) noreturn {
+    std.debug.print("blitz: invalid --approval mode '{s}' (strict|default|yolo|smart)\n", .{val});
+    std.process.exit(2);
+}
+
 pub const CliFlags = packed struct {
     /// enable debug log writing
     debug_log: bool = false,
     /// permission required
-    strict_mode: bool = false,
+    approval_mode: r.permissions.ApprovalMode = .default,
     /// don't load AGENTS.md
     no_context: bool = false,
     /// run --prompt headless, print final message instead of tui
     headless: bool = false,
-    /// auto-approve every request during ssh sessions
-    yolo: bool = false,
 
-    fn applyToken(self: *CliFlags, tok: []const u8) bool {
+    fn applyToken(self: *CliFlags, tok: []const u8, value: ?[]const u8) bool {
         if (std.mem.eql(u8, tok, "--log")) {
             self.debug_log = true;
             return true;
         }
 
         if (std.mem.eql(u8, tok, "--strict")) {
-            self.strict_mode = true;
+            self.approval_mode = .strict;
+            return true;
+        }
+
+        if (std.mem.eql(u8, tok, "--yolo")) {
+            self.approval_mode = .yolo;
+            return true;
+        }
+
+        if (std.mem.eql(u8, tok, "--smart")) {
+            self.approval_mode = .smart;
+            return true;
+        }
+
+        if (std.mem.eql(u8, tok, "--approval")) {
+            const val = value orelse approvalFail("");
+            if (val.len == 0 or val[0] == '-') approvalFail(val);
+            var buf: [16]u8 = undefined;
+            if (val.len > buf.len) approvalFail(val);
+            self.approval_mode = r.permissions.parseApprovalMode(
+                std.ascii.lowerString(&buf, val),
+            ) orelse approvalFail(val);
+            return true;
+        }
+
+        if (std.mem.startsWith(u8, tok, "--approval=")) {
+            const inline_value = tok["--approval=".len..];
+            _ = self.applyToken("--approval", inline_value);
             return true;
         }
 
@@ -1699,11 +1721,6 @@ pub const CliFlags = packed struct {
 
         if (std.mem.eql(u8, tok, "--headless")) {
             self.headless = true;
-            return true;
-        }
-
-        if (std.mem.eql(u8, tok, "--yolo")) {
-            self.yolo = true;
             return true;
         }
 
@@ -1729,14 +1746,20 @@ pub const CliArgs = struct {
         _ = it.next(); // skip exe name
 
         var pending_prompt = false;
+        var pending_approval = false;
         while (it.next()) |arg| {
             if (pending_prompt) {
                 pending_prompt = false;
                 if (arg.len >= 2 and arg[0] == '-' and arg[1] == '-') {
-                    _ = flags.applyToken(arg);
+                    _ = flags.applyToken(arg, null);
                 } else {
                     prompt = arg;
                 }
+                continue;
+            }
+            if (pending_approval) {
+                pending_approval = false;
+                _ = flags.applyToken("--approval", arg);
                 continue;
             }
             if (arg.len >= 2 and arg[0] == '-' and arg[1] == '-') {
@@ -1744,7 +1767,11 @@ pub const CliArgs = struct {
                     pending_prompt = true;
                     continue;
                 }
-                _ = flags.applyToken(arg);
+                if (std.mem.eql(u8, arg, "--approval")) {
+                    pending_approval = true;
+                    continue;
+                }
+                _ = flags.applyToken(arg, null);
                 continue;
             }
             if (n < buf.len) {

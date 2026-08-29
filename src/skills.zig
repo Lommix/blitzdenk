@@ -207,10 +207,11 @@ pub fn parseSkillMeta(raw: []u8) ?SkillMeta {
         if (line.len == 0 or line[0] == ' ' or line[0] == '\t') continue;
 
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        const key = std.mem.trim(u8, line[0..colon], " \t");
-        var val = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        const key = unquoteYamlInPlace(trimSpaces(line[0..colon]));
+        const scalar = trimSpaces(line[colon + 1 ..]);
+        var val: []const u8 = undefined;
 
-        if (val.len == 1 and (val[0] == '>' or val[0] == '|')) {
+        if (isBlockIndicator(scalar)) {
             const block_start = i;
             var block_end = i;
             while (block_end < header.len) {
@@ -219,8 +220,10 @@ pub fn parseSkillMeta(raw: []u8) ?SkillMeta {
                 if (block_line.len != 0 and block_line[0] != ' ' and block_line[0] != '\t') break;
                 block_end = if (next_end < header.len) next_end + 1 else header.len;
             }
-            val = parseYamlBlock(header[block_start..block_end], val[0] == '|');
+            val = parseYamlBlock(header[block_start..block_end], scalar[0] == '|');
             i = block_end;
+        } else {
+            val = unquoteYamlInPlace(scalar);
         }
 
         if (std.mem.eql(u8, key, "name")) {
@@ -270,6 +273,45 @@ fn parseBool(val: []const u8, default: bool) bool {
     return default;
 }
 
+fn isBlockIndicator(val: []const u8) bool {
+    if (val.len == 0 or val.len > 2) return false;
+    if (val[0] != '>' and val[0] != '|') return false;
+    if (val.len == 1) return true;
+    return val[1] == '-' or val[1] == '+';
+}
+
+fn unquoteYamlInPlace(val: []u8) []const u8 {
+    if (val.len < 2) return val;
+    const quote = val[0];
+    if (quote != val[val.len - 1]) return val;
+    if (quote != '"' and quote != '\'') return val;
+
+    const inner = val[1 .. val.len - 1];
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i < inner.len) {
+        const escapable = quote == '"' and inner[i] == '\\' and i + 1 < inner.len and
+            (inner[i + 1] == '"' or inner[i + 1] == '\\');
+        if (escapable) {
+            inner[out] = inner[i + 1];
+            i += 2;
+            out += 1;
+            continue;
+        }
+        if (quote == '\'' and inner[i] == '\'' and i + 1 < inner.len and inner[i + 1] == '\'') {
+            inner[out] = '\'';
+            i += 2;
+            out += 1;
+            continue;
+        }
+        if (inner[i] == quote) return val;
+        inner[out] = inner[i];
+        i += 1;
+        out += 1;
+    }
+    return inner[0..out];
+}
+
 fn lineEnd(buf: []const u8, start: usize) usize {
     return start + (std.mem.indexOfScalar(u8, buf[start..], '\n') orelse buf.len - start);
 }
@@ -277,6 +319,14 @@ fn lineEnd(buf: []const u8, start: usize) usize {
 fn trimCr(line: []u8) []u8 {
     if (line.len > 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
     return line;
+}
+
+fn trimSpaces(line: []u8) []u8 {
+    var start: usize = 0;
+    while (start < line.len and (line[start] == ' ' or line[start] == '\t')) start += 1;
+    var end = line.len;
+    while (end > start and (line[end - 1] == ' ' or line[end - 1] == '\t')) end -= 1;
+    return line[start..end];
 }
 
 fn parseYamlBlock(block: []u8, literal: bool) []const u8 {
@@ -309,10 +359,40 @@ fn parseYamlBlock(block: []u8, literal: bool) []const u8 {
     return std.mem.trim(u8, block[0..out], " \t\r\n");
 }
 
+test "skill meta strips quotes and accepts chomped block indicators" {
+    var raw = ("---\n" ++
+        "\"name\": 'quoted-skill'\n" ++
+        "description: \"Text with \\\"escapes\\\" and: colons\"\n" ++
+        "whenToUse: 'it''s fine'\n" ++
+        "user-invocable: 'false'\n" ++
+        "disable-model-invocation: \"true\"\n" ++
+        "---\n" ++
+        "body\n").*;
+
+    const meta = parseSkillMeta(raw[0..]).?;
+    try std.testing.expectEqualStrings("quoted-skill", meta.name);
+    try std.testing.expectEqualStrings("Text with \"escapes\" and: colons", meta.description);
+    try std.testing.expectEqualStrings("it's fine", meta.when_to_use.?);
+    try std.testing.expect(!meta.user_invocable);
+    try std.testing.expect(!meta.model_invocable);
+}
+
+test "skill meta keeps quotes inside values" {
+    var raw = ("---\n" ++
+        "name: apostrophe\n" ++
+        "description: it's 'quoted' here\n" ++
+        "---\n" ++
+        "body\n").*;
+
+    const meta = parseSkillMeta(raw[0..]).?;
+    try std.testing.expectEqualStrings("apostrophe", meta.name);
+    try std.testing.expectEqualStrings("it's 'quoted' here", meta.description);
+}
+
 test "skill meta parses folded yaml description" {
     var raw = ("---\n" ++
         "name: ponytail-audit\n" ++
-        "description: >\n" ++
+        "description: >-\n" ++
         "  Whole-repo audit for over-engineering. Like ponytail-review, but scans the\n" ++
         "  entire codebase instead of a diff.\n" ++
         "---\n" ++

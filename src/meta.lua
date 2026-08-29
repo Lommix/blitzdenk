@@ -213,7 +213,8 @@
 ---@class BlitzAppFlags
 ---@field show_thinking? boolean
 ---@field debug_log? boolean
----@field skip_permissions? boolean
+---strict|default|yolo|smart
+---@field approval_mode? string
 
 ---@class BlitzTheme
 ---@field bg? string
@@ -306,7 +307,7 @@
 ---@field set_prompt fun(agent_type: integer, prompt: string)
 ---Return the current app flags.
 ---@field get_flags fun(): BlitzAppFlags
----Set the app flags from a table. Missing fields are set to their default values.
+---Set the app flags from a table. Fields you omit are left unchanged.
 ---@field set_flags fun(flags: BlitzAppFlags)
 ---Return the current theme as a table of hex color strings.
 ---@field get_theme fun(): BlitzTheme

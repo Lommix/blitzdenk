@@ -57,7 +57,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         ctx.base.exec_pool.alloc.free(probe.stderr);
     } else |_| {}
 
-    const decision = ctx.requestPermission(call.id, .{ .diff = .{
+    const decision = ctx.requestPermission(call, .{ .diff = .{
         .before = null,
         .after = args.content,
         .path = args.file_path,

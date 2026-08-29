@@ -103,7 +103,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     }
     const new_content = replacement.?;
 
-    const decision = ctx.requestPermission(call.id, .{ .diff = .{
+    const decision = ctx.requestPermission(call, .{ .diff = .{
         .before = file_content,
         .after = new_content,
         .path = args.file_path,

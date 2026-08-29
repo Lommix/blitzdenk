@@ -65,7 +65,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         .{ args.description, args.command },
     ) catch args.description;
 
-    const decision = ctx.requestPermission(call.id, .{ .call = .{
+    const decision = ctx.requestPermission(call, .{ .call = .{
         .description = description,
     } });
 

@@ -50,7 +50,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     r.setToolStatus(ctx, call, w.finish()) catch {};
 
-    const decision = ctx.requestPermission(call.id, .{ .ask = .{
+    const decision = ctx.requestPermission(call, .{ .ask = .{
         .header = args.header,
         .options = args.options,
         .question = args.question,

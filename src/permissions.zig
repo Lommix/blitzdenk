@@ -40,6 +40,7 @@ pub const State = union(enum) {
 pub const Request = struct {
     agent_id: AgentId,
     call_id: ?[]const u8 = null,
+    tool_name: []const u8 = "",
     state: State = .pending,
     payload: Payload,
     event: std.Io.Event = .unset,
@@ -53,3 +54,50 @@ pub const Handler = struct {
         if (self.request) |request| request(self.ctx, value);
     }
 };
+
+pub const ApprovalMode = enum(u2) { strict, default, yolo, smart };
+
+pub fn parseApprovalMode(value: []const u8) ?ApprovalMode {
+    return std.meta.stringToEnum(ApprovalMode, value);
+}
+
+pub fn shouldAutoApprove(mode: ApprovalMode, is_ask: bool, ssh_active: bool) bool {
+    if (is_ask) return false;
+    return switch (mode) {
+        .strict => false,
+        .smart, .default => !ssh_active,
+        .yolo => true,
+    };
+}
+
+test "shouldAutoApprove decision table" {
+    const Case = struct { mode: ApprovalMode, is_ask: bool, ssh: bool, want: bool };
+    const cases = [_]Case{
+        .{ .mode = .strict, .is_ask = false, .ssh = false, .want = false },
+        .{ .mode = .strict, .is_ask = false, .ssh = true, .want = false },
+        .{ .mode = .strict, .is_ask = true, .ssh = false, .want = false },
+        .{ .mode = .strict, .is_ask = true, .ssh = true, .want = false },
+        .{ .mode = .default, .is_ask = false, .ssh = false, .want = true },
+        .{ .mode = .default, .is_ask = false, .ssh = true, .want = false },
+        .{ .mode = .default, .is_ask = true, .ssh = false, .want = false },
+        .{ .mode = .default, .is_ask = true, .ssh = true, .want = false },
+        .{ .mode = .smart, .is_ask = false, .ssh = false, .want = true },
+        .{ .mode = .smart, .is_ask = false, .ssh = true, .want = false },
+        .{ .mode = .smart, .is_ask = true, .ssh = false, .want = false },
+        .{ .mode = .smart, .is_ask = true, .ssh = true, .want = false },
+        .{ .mode = .yolo, .is_ask = false, .ssh = false, .want = true },
+        .{ .mode = .yolo, .is_ask = false, .ssh = true, .want = true },
+        .{ .mode = .yolo, .is_ask = true, .ssh = false, .want = false },
+        .{ .mode = .yolo, .is_ask = true, .ssh = true, .want = false },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.want, shouldAutoApprove(case.mode, case.is_ask, case.ssh));
+    }
+}
+
+test "parseApprovalMode" {
+    try std.testing.expectEqual(ApprovalMode.strict, parseApprovalMode("strict").?);
+    try std.testing.expectEqual(ApprovalMode.yolo, parseApprovalMode("yolo").?);
+    try std.testing.expectEqual(@as(?ApprovalMode, null), parseApprovalMode("YOLO"));
+    try std.testing.expectEqual(@as(?ApprovalMode, null), parseApprovalMode("nope"));
+}
