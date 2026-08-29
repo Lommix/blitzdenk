@@ -331,6 +331,7 @@ pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
     }
 
     a.main_agent_id = id;
+    a.registry.pin(id);
     a.registry.slots[id.index].state.store(.complete, .release);
     a.dirty = true;
     a.running = false;

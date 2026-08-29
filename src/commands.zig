@@ -292,6 +292,7 @@ pub const Command = union(enum) {
                 if (arg.parent_id == null) {
                     if (app.main_agent_id) |ag_id| app.detachMainAgent(ag_id);
                     app.main_agent_id = arg.agent_id;
+                    app.registry.pin(arg.agent_id);
                 }
 
                 if (arg.chat_entry) |en| {

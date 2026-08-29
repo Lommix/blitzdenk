@@ -515,6 +515,7 @@ pub const App = struct {
 
     pub fn tick(self: *App) !void {
         try self.finishMcpLoad(false);
+        self.registry.flush();
         for (&self.registry.slots, 0..) |*slot, index| {
             const state = slot.state.load(.acquire);
             if (state == .free or state == .reserved) continue;

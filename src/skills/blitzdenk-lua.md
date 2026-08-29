@@ -126,6 +126,8 @@ This is how you track useful commands for projects.
 
 `blitz.register_tool` returns the tool name string to use in tool sets.
 Omit both `args` and `schema` for a tool that takes no arguments.
+Write `args` as a map keyed by argument name. A list of `{ name = ... }` tables
+publishes an empty schema, and the model then guesses the argument names.
 
 Tool calls run in a separated VM an cannot mutate Lua State. If a tool requires
 State across calls, use the `blitz.state.set/get` helper.

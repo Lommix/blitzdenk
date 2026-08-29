@@ -21,6 +21,8 @@ pub const SlotState = enum(u8) {
 pub const Slot = struct {
     state: std.atomic.Value(SlotState) = .init(.free),
     generation: u16 = 0,
+    finish_seq: u64 = 0,
+    pinned: bool = false,
     agent: ?agent_mod.Agent = null,
     event: std.Io.Event = .unset,
     accounted_usage: sdk.Usage = .{},
@@ -42,14 +44,18 @@ pub const Registry = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
     slots: [max_agents]Slot = [_]Slot{.{}} ** max_agents,
+    finish_counter: u64 = 0,
     total_usage: sdk.Usage = .{},
     model_usage: std.StringArrayHashMapUnmanaged(sdk.Usage) = .{},
+    pending_mutex: std.Io.Mutex = .{ .state = .init(.unlocked) },
+    pending: std.ArrayListUnmanaged(agent_mod.Agent) = .empty,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io) Registry {
         return .{ .alloc = alloc, .io = io };
     }
 
     pub fn deinit(self: *Registry) void {
+        self.flush();
         for (&self.slots) |*slot| {
             self.accountUsage(slot);
             if (slot.agent) |*agent| {
@@ -81,7 +87,58 @@ pub const Registry = struct {
                 return .{ .index = @intCast(index), .generation = slot.generation };
             }
         }
-        return null;
+        // Registry full: claim the oldest unpinned finished slot as this
+        // caller's reservation. The cmpxchg hands the slot to exactly one
+        // evictor; a loser rescans (the raced slot is no longer finished).
+        // The victim's agent is retired to the pending list — deinits only
+        // happen on the app thread via flush(), never on reserving threads.
+        var victim: ?usize = null;
+        for (&self.slots, 0..) |*slot, index| {
+            const value = slot.state.load(.acquire);
+            if (value != .complete and value != .failed) continue;
+            if (slot.pinned) continue;
+            if (victim == null or slot.finish_seq < self.slots[victim.?].finish_seq) victim = index;
+        }
+        const index = victim orelse return null;
+        const slot = &self.slots[index];
+        if (slot.state.cmpxchgStrong(.complete, .reserved, .acq_rel, .monotonic) != null) {
+            if (slot.state.cmpxchgStrong(.failed, .reserved, .acq_rel, .monotonic) != null) return self.reserve();
+        }
+        self.retire(slot);
+        slot.accounted_usage = .{};
+        slot.finish_seq = 0;
+        slot.generation +%= 1;
+        slot.event.set(self.io);
+        return .{ .index = @intCast(index), .generation = slot.generation };
+    }
+
+    fn retire(self: *Registry, slot: *Slot) void {
+        var agent = slot.agent orelse return;
+        slot.agent = null;
+        self.pending_mutex.lockUncancelable(self.io);
+        defer self.pending_mutex.unlock(self.io);
+        self.pending.append(self.alloc, agent) catch {
+            // ponytail: OOM here leaks one dead agent; allocator failure is
+            // already a degraded mode, no recovery path worth the code
+            agent.deinit();
+        };
+    }
+
+    /// Deinit agents retired by evictions. App thread only: once the evictor
+    /// flipped the slot to .reserved, no observer can reach the retired agent
+    /// through the registry anymore.
+    pub fn flush(self: *Registry) void {
+        self.pending_mutex.lockUncancelable(self.io);
+        var batch = self.pending;
+        self.pending = .empty;
+        self.pending_mutex.unlock(self.io);
+        for (batch.items) |*dead| dead.deinit();
+        batch.deinit(self.alloc);
+    }
+
+    pub fn pin(self: *Registry, id: AgentId) void {
+        const slot = self.slotFor(id) orelse return;
+        slot.pinned = true;
     }
 
     pub fn activate(self: *Registry, id: AgentId, config: models.Config, options: agent_mod.InitOptions) !*agent_mod.Agent {
@@ -164,8 +221,10 @@ pub const Registry = struct {
             .failed => .failed,
             .idle, .running, .retrying, .compacting => .active,
         };
+        const previous = slot.state.load(.acquire);
         slot.state.store(state_value, .release);
-        if (state_value != .active) {
+        if (state_value != .active and previous != state_value) {
+            self.stampFinished(slot);
             self.accountUsage(slot);
             slot.event.set(self.io);
         }
@@ -200,6 +259,7 @@ pub const Registry = struct {
                 agent.last_error = err;
                 agent.status = .failed;
                 slot.state.store(.failed, .release);
+                self.stampFinished(slot);
                 self.accountUsage(slot);
                 slot.event.set(self.io);
             };
@@ -289,6 +349,11 @@ pub const Registry = struct {
         return result;
     }
 
+    fn stampFinished(self: *Registry, slot: *Slot) void {
+        slot.finish_seq = self.finish_counter;
+        self.finish_counter +%= 1;
+    }
+
     fn slotFor(self: *Registry, id: AgentId) ?*Slot {
         if (id.index >= max_agents) return null;
         const slot = &self.slots[id.index];
@@ -326,6 +391,7 @@ pub const Registry = struct {
             if (agent.depth != depth) continue;
             agent.cancelAndWait();
             slot.state.store(.complete, .release);
+            self.stampFinished(slot);
             self.accountUsage(slot);
             slot.event.set(self.io);
         }
@@ -411,6 +477,29 @@ test "registry keeps fixed generation-safe slots" {
     try std.testing.expect(stale.generation != reused.generation);
     registry.releaseReservation(stale);
     try std.testing.expectEqual(SlotState.reserved, registry.state(reused).?);
+}
+
+test "reserve evicts the oldest finished agent when full" {
+    var registry = Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    var ids: [max_agents]AgentId = undefined;
+    for (&ids, 0..) |*id, index| {
+        id.* = registry.reserve().?;
+        registry.slots[index].state.store(if (index == 3) .failed else .complete, .release);
+        registry.slots[index].finish_seq = index;
+    }
+    registry.pin(ids[0]);
+    registry.slots[0].finish_seq = 0;
+
+    const evicted = registry.reserve().?;
+    try std.testing.expectEqual(ids[1].index, evicted.index);
+    try std.testing.expect(ids[1].generation != evicted.generation);
+    try std.testing.expectEqual(SlotState.reserved, registry.state(evicted).?);
+
+    try std.testing.expectEqual(SlotState.complete, registry.state(ids[0]).?);
+    try std.testing.expectEqual(SlotState.failed, registry.state(ids[3]).?);
+    const next = registry.reserve().?;
+    try std.testing.expectEqual(ids[2].index, next.index);
 }
 
 test "registry reset preserves queued reservations" {
