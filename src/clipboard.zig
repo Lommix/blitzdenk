@@ -136,7 +136,7 @@ test "saveImage writes bytes and returns file URL" {
     const png = "fake-png-bytes";
     const url = try saveImage(io, alloc, png, ".png");
     defer alloc.free(url);
-    try std.testing.expect(std.mem.startsWith(u8, url, "file:///tmp/blitz/"));
+    try std.testing.expect(std.mem.startsWith(u8, url, "file:///tmp/blitzdenk/"));
 
     const path = url["file://".len..];
     var tmp_dir = try std.Io.Dir.openDirAbsolute(io, util.TMP_DIR, .{});

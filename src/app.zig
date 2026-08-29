@@ -3890,7 +3890,7 @@ test "background agent result is written for read" {
     const path = try app.writeBackgroundResult(.{ .index = 127, .generation = 65535 }, &agent);
     defer std.testing.allocator.free(path);
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, path) catch {};
-    try std.testing.expect(std.mem.startsWith(u8, path, "/tmp/blitz/"));
+    try std.testing.expect(std.mem.startsWith(u8, path, "/tmp/blitzdenk/"));
     const content = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited64(1024));
     defer std.testing.allocator.free(content);
     try std.testing.expectEqualStrings("result done", content);

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 /// Low-value scratch; wiped automatically when the system reboots.
-pub const TMP_DIR = "/tmp/blitz";
+pub const TMP_DIR = "/tmp/blitzdenk";
 
 pub fn cacheDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) ![]u8 {
     const xdg = env.get("XDG_CACHE_HOME") orelse "";
