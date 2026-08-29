@@ -37,7 +37,7 @@ Important modules:
 - `zig build gen` generate the lua meta file `src/meta.lua`
 - `make test` run the blitzdenk suite
 
-## Zig 0.16 traps (all hit this codebase)
+## Zig 0.16 traps
 
 - `std.json.parseFromSliceLeaky` default `.alloc_if_needed` returns string slices INTO the input slice; if the input is a reused buffer the parsed values alias freed/recycled memory — either give each line a fresh arena-allocated buffer (never free it; arena drop frees) or deep-clone
 - arena `free` of the last allocation rewinds; freeing a per-iteration buffer lets the next iteration reuse memory under live parsed slices — leak it into the arena instead
