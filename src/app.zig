@@ -2849,6 +2849,7 @@ fn buildToolGroupParagraph(
                     if (activity != .idle) try line.pushSpan(arena, .{ .content = switch (activity) {
                         .idle => "",
                         .thinking => "  thinking",
+                        .processing => "  processing",
                         .writing => "  writing",
                         .calling => "  calling",
                         .retrying => "  retrying",
@@ -3181,22 +3182,24 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
         else
             std.fmt.bufPrint(&queued_buf, "({d} queued messages up)", .{queued_count}) catch "(queued messages up)";
 
-        const state_str: []const u8 = switch (agent.activity) {
-            .idle => "",
-            .thinking => "thinking",
-            .writing => "writing",
-            .calling => "calling",
-            .retrying => "retrying",
-        };
-
         l.pushSpanPrint(alloc, "{s} (", .{spinner_str}, info) catch {};
         l.pushSpanPrint(alloc, "{s}", .{dur}, hl) catch {};
-        l.pushSpanPrint(alloc, ") Consuming Tokens at ", .{}, info) catch {};
-        l.pushSpanPrint(alloc, "{d} T/s", .{@as(u32, @intFromFloat(agent.tokens_per_second))}, hl) catch {};
+        l.pushSpanPrint(alloc, ")", .{}, info) catch {};
 
-        if (state_str.len > 0) {
-            l.pushSpanPrint(alloc, " while ", .{}, info) catch {};
-            l.pushSpanPrint(alloc, "{s}", .{state_str}, hl) catch {};
+        if (agent.tokens_per_second > 0) {
+            l.pushSpanPrint(alloc, " Consuming Tokens at ", .{}, info) catch {};
+            l.pushSpanPrint(alloc, "{d} T/s", .{@as(u32, @intFromFloat(agent.tokens_per_second))}, hl) catch {};
+            const state_str: []const u8 = switch (agent.activity) {
+                .idle, .processing => "",
+                .thinking => "thinking",
+                .writing => "writing",
+                .calling => "calling",
+                .retrying => "retrying",
+            };
+            if (state_str.len > 0) {
+                l.pushSpanPrint(alloc, " while ", .{}, info) catch {};
+                l.pushSpanPrint(alloc, "{s}", .{state_str}, hl) catch {};
+            }
         }
 
         l.pushSpanPrint(alloc, "{s} {s}", .{ ssh_suffix, queued_suffix }, info) catch {};

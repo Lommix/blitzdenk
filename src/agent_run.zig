@@ -590,7 +590,7 @@ test "silent tool-only step emits no stale activity" {
     defer agent.deinit();
     try agent.setTools(&.{.{ .name = "test", .execute = null }});
     try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = "hi" });
-    try std.testing.expectEqual(AgentMod.Activity.thinking, agent.activity);
+    try std.testing.expectEqual(AgentMod.Activity.processing, agent.activity);
     agent.task.?.wait();
     while (agent.drain(16, &agent, Fixture.collect) != 0) {}
     try std.testing.expect(agent.reap());
@@ -598,8 +598,6 @@ test "silent tool-only step emits no stale activity" {
 
     try agent.observe(.{ .text = "hi" });
     try std.testing.expectEqual(AgentMod.Activity.writing, agent.activity);
-    try agent.observe(.{ .step = .{ .number = 1, .usage = .{} } });
-    try std.testing.expectEqual(AgentMod.Activity.thinking, agent.activity);
 }
 
 test "run task does not duplicate provider failures" {

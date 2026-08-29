@@ -35,7 +35,7 @@ pub const Status = enum {
     canceled,
 };
 
-pub const Activity = enum { idle, thinking, writing, calling, retrying };
+pub const Activity = enum { idle, processing, thinking, writing, calling, retrying };
 
 pub const Identity = struct {
     type_idx: u8 = 0,
@@ -274,7 +274,7 @@ pub const Agent = struct {
         self.retry_at_ns = 0;
         self.endStream();
         self.tokens_per_second = 0;
-        self.activity = .thinking;
+        self.activity = .processing;
         var run_options = options;
         if (run_options.system.len == 0) run_options.system = self.system_prompt;
         if (run_options.prompt.len > 0) {
@@ -333,7 +333,7 @@ pub const Agent = struct {
                     self.context_from_provider = true;
                 }
                 self.endStream();
-                self.activity = .thinking;
+                self.activity = .processing;
             },
             .provider_error => |provider_error| {
                 self.endStream();
