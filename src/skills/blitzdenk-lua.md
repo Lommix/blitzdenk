@@ -38,19 +38,20 @@ local deepseek = blitz.add_model({
     cost = { input = 0.14, output = 0.28, cache = 0.028 },
 })
 
-blitz.set_agent_model(blitz.AGENT_GENERAL, deepseek, "max")
+blitz.set_agent_model(blitz.AGENT_GENERAL, deepseek)
+blitz.set_agent_effort(blitz.AGENT_GENERAL, "max")
 ```
 
 `add_provider` and `add_model` return integer handles. `vision` gates the
 `view_image` tool and image pasting. Set `replay_reasoning` on chat models that
 return reasoning but reject replayed history without that field (DeepSeek, GLM).
 Every agent needs a bound model; unbound agents fail to spawn. Bind with
-`blitz.set_agent_model(agent_type, handle, effort?)` (effort defaults to
-`"medium"`) or `model = handle` in `blitz.add_agent`. Change only the effort
-with `blitz.set_agent_effort(agent_type, effort)`.
+`blitz.set_agent_model(agent_type, handle)` or `model = handle` in
+`blitz.add_agent`. Set the effort separately with
+`blitz.set_agent_effort(agent_type, effort)`.
 
 Pass `force = true` to either call to also swap the model on live agents of
-that type: `blitz.set_agent_model(agent_type, handle, effort, true)`. Idle
+that type: `blitz.set_agent_model(agent_type, handle, true)`. Idle
 agents swap at once. An agent mid-run keeps its current model until that run
 ends, then adopts the new one. A fork made during that run starts on the new
 model. Without `force`, only new agents use the change.

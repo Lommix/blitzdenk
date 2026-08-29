@@ -1163,7 +1163,7 @@ pub const App = struct {
         }
         self.last_unbound_warn = joined;
         self.pushSystemMessage(
-            "Agent(s) without a bound model: {s}. Bind `model` per agent with `blitz.set_agent_model(AGENT_TYPE, model, effort?)` or `model =` in `blitz.add_agent`.",
+            "Agent(s) without a bound model: {s}. Bind `model` per agent with `blitz.set_agent_model(AGENT_TYPE, model)` or `model =` in `blitz.add_agent`.",
             .{joined},
         );
         self.notifications.append(self.gpa, "Agent(s) without a bound model: {s}", .{joined}) catch {};

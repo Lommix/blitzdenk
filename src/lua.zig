@@ -616,18 +616,13 @@ pub const Blitz = LuaType{
                         .args = &.{
                             .{ .name = "agent_type", .ty = LuaType.integer },
                             .{ .name = "model", .ty = LuaType.integer, .desc = "model handle from add_model" },
-                            .{ .name = "effort", .ty = LuaType.string, .optional = true },
                             .{ .name = "force", .ty = LuaType.boolean, .optional = true, .desc = "also swap the model on live agents of this type" },
                         },
                         .fn_ptr = LuaFnBind((struct {
-                            fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, model: u32, effort: ?[]const u8, force: ?bool) !void {
+                            fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, model: u32, force: ?bool) !void {
                                 if (try isToolVm(state)) return;
                                 const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
-                                const eff = if (effort) |eff|
-                                    r.config.parseReasoningEffort(eff) orelse return error.UnknownEffort
-                                else
-                                    .medium;
-                                try a.context_factory.setAgentModel(&a.config, agent_type, @enumFromInt(model), eff);
+                                try a.context_factory.setAgentModel(&a.config, agent_type, @enumFromInt(model));
                                 try a.refreshLiveAgentTools();
                                 if (force orelse false) try a.refreshLiveAgentModels(agent_type);
                             }

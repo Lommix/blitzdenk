@@ -356,7 +356,8 @@ fn showProviderOnboarding(app: *App, diagnostic: r.ContextFactory.AgentConfigDia
         \\    name = "gpt-5.4-mini",
         \\    provider = provider,
         \\})
-        \\blitz.set_agent_model(blitz.AGENT_GENERAL, model, "max")
+        \\blitz.set_agent_model(blitz.AGENT_GENERAL, model)
+        \\blitz.set_agent_effort(blitz.AGENT_GENERAL, "max")
         \\
         \\Then set the key before launching Blitzdenk:
         \\export OPENAI_API_KEY=...
@@ -366,7 +367,7 @@ fn showProviderOnboarding(app: *App, diagnostic: r.ContextFactory.AgentConfigDia
     switch (diagnostic) {
         .no_agent_model => |name| {
             app.pushSystemMessage(
-                "Agent `{s}` has no model bound. Bind a model per agent with `blitz.set_agent_model(AGENT_TYPE, model, effort?)` or `model =` in `blitz.add_agent`. Edit {s}.\n\n{s}",
+                "Agent `{s}` has no model bound. Bind a model per agent with `blitz.set_agent_model(AGENT_TYPE, model)` or `model =` in `blitz.add_agent`. Edit {s}.\n\n{s}",
                 .{ name, config_path, example },
             );
             app.notifications.append(app.gpa, "Agent `{s}` has no model bound", .{name}) catch {};

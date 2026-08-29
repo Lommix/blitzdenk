@@ -517,18 +517,24 @@ fn setModelAgentStub(state: ?*root.c.lua_State) callconv(.c) c_int {
     const tracker = trackerFromUpvalue(L);
     tracker.bound_agent = root.c.lua_tointegerx(L, 1, null);
     tracker.bound_model = root.c.lua_tointegerx(L, 2, null);
+    return 0;
+}
+
+fn setEffortStub(state: ?*root.c.lua_State) callconv(.c) c_int {
+    const L = state.?;
+    const tracker = trackerFromUpvalue(L);
     snapshotEffort(L, tracker);
     return 0;
 }
 
 fn snapshotEffort(state: ?*root.c.lua_State, tracker: *TestTracker) void {
     const L = state.?;
-    if (root.c.lua_type(L, 3) != root.c.LUA_TSTRING) {
+    if (root.c.lua_type(L, 2) != root.c.LUA_TSTRING) {
         tracker.bound_effort_len = 0;
         return;
     }
     var len: usize = 0;
-    const raw = root.c.lua_tolstring(L, 3, &len);
+    const raw = root.c.lua_tolstring(L, 2, &len);
     const value: []const u8 = if (raw) |p| p[0..len] else "";
     const copied = @min(len, tracker.bound_effort.len);
     @memcpy(tracker.bound_effort[0..copied], value[0..copied]);
@@ -859,6 +865,7 @@ test "default config loads without provider.lua and binds on require success" {
     registerStub(L, &tracker, "add_provider", &addProviderStub);
     registerStub(L, &tracker, "add_model", &addModelStub);
     registerStub(L, &tracker, "set_agent_model", &setModelAgentStub);
+    registerStub(L, &tracker, "set_agent_effort", &setEffortStub);
     c.lua_pop(L, 1);
 
     try execTestLua(L, stubBlitzPrelude);
