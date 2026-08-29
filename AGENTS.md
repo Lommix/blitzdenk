@@ -1,7 +1,6 @@
 # Project Blitzdenk
 
 A coding harness written in Zig with vendored Lua.
-
 Zig version: 0.16
 
 Important modules:
@@ -32,40 +31,11 @@ Important modules:
 - `sdk/` the blitz-sdk ai provider library
 - `sdk/src/provider/` one file per provider: `openai.zig` chat completions, `responses.zig` Responses API, `anthropic.zig`, `compat.zig`; `jsonx.zig` http + SSE plumbing
 
-## Run event flow
-
-- sdk `streamText` → `RunTask` queues `Event`s (text/reasoning/tool/tool_done/step/provider_error/complete/failed) → `registry.drain` → both `Agent.observe` (activity/usage/status) and app `applyRunEvent` (chat render)
-- `Agent.activity` is event-derived only; `startModel` and `.step` reset it to `thinking`, so silent steps fall back to `thinking` not the previous state
-- chat-completions providers emit `tool_call_streaming_start`/`tool_call_delta` live; the responses provider aggregates tool calls and emits `.tool_call` only after the SSE stream ends
-- app preview renders only `chunk.type == .tool_call`; activity updates consume all tool chunk types
-
-## Config and lua data flow
-
-- `zig build gen` regenerates `src/meta.lua` (type hints + signatures); edit bindings only in `src/lua.zig`
-- `~/.config/blitzdenk/meta.lua` is force-overwritten from embedded `src/meta.lua` at launch, so it lags until the next binary run
-- `~/.config/blitzdenk/blitz.lua` is write-once (`force = false`); upgrades never add new api calls to existing user configs
-- Lua-set definitions (prompts, tools, capability rules) are duped into the factory `prompt_arena`; `resetDefs()` clears them on hot reload and the reloaded config reinstalls them
-- In Lua an agent id is one packed integer (`AgentId.pack()`), used by `spawn_agent` returns, `cancel_agent`, `message_agent`, `await_agent`, event payloads, and the `agent` tool result string `agent_id: <int>`
-- `pushAny`/`readAnyValueAlloc` marshal Zig↔Lua; the packed-struct branch is gated to `T == r.AgentId` — widening it to all packed structs breaks the `get_flags`/`set_flags` `AppFlags` table roundtrip
-- `pushAgentId`/`readAgentIdArg` convert ids at the trust boundary; `readAgentIdArg` range-checks before `@intCast` since Lua integers are 64-bit
-- `isToolVm(state)` guard blocks `cmd.*` calls from tool VMs
-
 ## Commands
 
 - `zig build` compile the binary
 - `zig build gen` generate the lua meta file `src/meta.lua`
-- `make test` run the repo suite (`zig build test --summary all --error-style minimal`)
-- `cd sdk && zig build test` run the sdk suite separately
-- tests are in-file `test` blocks at the bottom of each module
-- ALWAYS run tests with `timeout -s KILL <s>`; a looping test once filled memory until OOM
-- `zig fmt src/` required after edits
-- command pattern: Lua binding validates and `cmd_queue.append`s (deep-clones into the queue arena), `Command.execute` runs on the app thread; handlers silently no-op on dead agent ids
-- spawn only reserves a registry slot (`.reserved`); activation happens when the queue drains, so a fresh id is not yet `registry.get`-able
-
-## Agent ids across save/restore
-
-- `registry.reserve()` bumps a slot's generation; restored chat entries stamped with an old id fail the renderer's generation gate, so anything persisted with an `AgentId` must be re-keyed after load (see `session.zig` `applySaveState` `main_agent` remap)
-- renderer tool-status lookup is keyed on `call.agent_id` pack + generation (`app.zig` render path); `App.setToolStatus`/`setToolChild` reset per-slot generation, which re-arms stale child ids
+- `make test` run the blitzdenk suite
 
 ## Zig 0.16 traps (all hit this codebase)
 
@@ -79,4 +49,4 @@ Important modules:
 
 ## RULES
 
-- Keep the user space blitzdenk skill up to date! `src/skills/blitzdenk-lua.md`
+- Keep the user space blitzdenk skill up to date (`src/skills/blitzdenk-lua.md`). Prose, direct, raw statements. No obvious facts that can re researched in the `meta.lua`
