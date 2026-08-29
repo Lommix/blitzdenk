@@ -3186,28 +3186,36 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
         l.pushSpanPrint(alloc, "{s}", .{dur}, hl) catch {};
         l.pushSpanPrint(alloc, ")", .{}, info) catch {};
 
+        const state_str: []const u8 = switch (agent.activity) {
+            .idle => "",
+            .processing => "processing",
+            .thinking => "thinking",
+            .writing => "writing",
+            .calling => "calling",
+            .retrying => "retrying",
+        };
+
+        l.pushSpanPrint(alloc, "{s}", .{ssh_suffix}, info) catch {};
+
+        if (active_agent_count > 1) {
+            l.pushSpanPrint(alloc, " (", .{}, info) catch {};
+            l.pushSpanPrint(alloc, "{d}", .{active_agent_count -| 1}, hl) catch {};
+            l.pushSpanPrint(alloc, " background agents)", .{}, info) catch {};
+        }
+
         if (agent.tokens_per_second > 0) {
             l.pushSpanPrint(alloc, " Consuming Tokens at ", .{}, info) catch {};
             l.pushSpanPrint(alloc, "{d} T/s", .{@as(u32, @intFromFloat(agent.tokens_per_second))}, hl) catch {};
-            const state_str: []const u8 = switch (agent.activity) {
-                .idle, .processing => "",
-                .thinking => "thinking",
-                .writing => "writing",
-                .calling => "calling",
-                .retrying => "retrying",
-            };
             if (state_str.len > 0) {
                 l.pushSpanPrint(alloc, " while ", .{}, info) catch {};
                 l.pushSpanPrint(alloc, "{s}", .{state_str}, hl) catch {};
             }
+        } else if (state_str.len > 0) {
+            l.pushSpanPrint(alloc, " {s}", .{state_str}, hl) catch {};
         }
 
-        l.pushSpanPrint(alloc, "{s} {s}", .{ ssh_suffix, queued_suffix }, info) catch {};
-
-        if (active_agent_count > 1) {
-            l.pushSpanPrint(alloc, "(", .{}, info) catch {};
-            l.pushSpanPrint(alloc, "{d} ", .{active_agent_count -| 1}, hl) catch {};
-            l.pushSpanPrint(alloc, "background agents)", .{}, info) catch {};
+        if (queued_count > 0) {
+            l.pushSpanPrint(alloc, " {s}", .{queued_suffix}, info) catch {};
         }
     } else if (waiting and state == .complete) {
         l.pushSpanPrint(alloc, "Waiting for ", .{}, info) catch {};
