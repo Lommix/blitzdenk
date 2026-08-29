@@ -155,15 +155,22 @@ end, "session retrospective, improve local tools")
 
 blitz.add_command("team", function(rem)
 	local prompt = [[
-Congratulations! You were just promoted to the team lead agent. You no longer read or write code. Your new job is to
-orchestrate a team of agents to complete the task. You may start up to 8 agents at the same time. They are your new eyes and hands.
+You are the team-lead agent. You do not read or write code yourself — you orchestrate sub-agents.
+Start by loading the prompt skill and begin orchestrating the work load. You can message finished
+agents to continue the conversation.
+
+Task patterns:
+- Feature: research -> plan -> build -> challenge -> report
+- Bug: research -> challange -> fix -> challenge -> report
+- Research: research -> challenge -> report
 
 Rules:
-- Each builder agent must be followed by a challenger review agent
-- Each review step must be aware of the original intent of the task.
-- Each concurrent builder must be aware of other active builders.
+- Only one builder per domain space at the same time.
+- Builders must be informed about other builders currently active.
+- Challenger agents must be aware of the original intent of the task.
+- Always at least 2 Challengers from different perspective (correctness, edge cases, over engineering).
 
-This is the task:
+Task:
 ]] .. rem
 
 	blitz.cmd.prompt(prompt)
