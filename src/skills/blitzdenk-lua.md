@@ -210,6 +210,46 @@ blitz.events.add_listener(blitz.events.ON_INJECT, function(agent_id)
 end)
 ```
 
+## Permission hook
+
+`blitz.permissions.approve(fn)` installs one hook that decides every tool
+approval before the approval-mode check. It runs in every approval mode and
+can deny what `--approval yolo` would auto-approve. Last registration wins;
+`blitz.permissions.clear()` removes the hook.
+
+Return a `BlitzPermissionDecision` table, or `nil` for the normal flow
+(approval mode, then TUI):
+
+- `{ approved = true }` — allow the call. On ask payloads this picks the
+  first option marked `(recommended)` (like the headless runner).
+- `{ approved = false }` — deny
+- `{ approved = false, msg = "..." }` — deny, `msg` reaches the model as tool error
+- `{ approved = false, select = 2 }` — ask payloads only: pick the 1-based
+  option. Ignored on other kinds and when `approved` is true. Out-of-range
+  values deny. On ask, a denial without `select` denies the question.
+
+A malformed table (missing `approved`) denies with a fixed reason. A hook
+error denies with `permission hook error: <msg>`.
+
+```lua
+blitz.permissions.approve(function(p)
+    if p.kind == "diff" and p.path:find("^/tmp/") then
+        return { approved = true }
+    end
+    if p.tool == "bash" and p.description:find("rm ") then
+        return { approved = false, msg = "no destructive commands" }
+    end
+    return nil
+end)
+```
+
+The payload is `BlitzPermissionPayload` in `meta.lua`: `agent_id`, `call_id`,
+`kind` (`call|diff|ask|plan`), `tool`, plus the kind fields. The decision
+shape is `BlitzPermissionDecision` in the same file.
+
+Never call `blitz.cmd.await_agent` inside the hook. The hook runs on the main
+thread; the await would block the loop that runs the agent.
+
 ## Shared state
 
 `blitz.state` is a key-value store shared across config, tools, and listeners.

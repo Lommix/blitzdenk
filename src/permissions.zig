@@ -70,6 +70,16 @@ pub fn shouldAutoApprove(mode: ApprovalMode, is_ask: bool, ssh_active: bool) boo
     };
 }
 
+/// The answer the interactive picker gives when a question is "approved"
+/// rather than answered: the first option marked "(recommended)", else the
+/// first option. Mirrored by the headless resolver in main.zig.
+pub fn recommendedChoice(options: []const []const u8) State {
+    for (options, 0..) |opt, i| {
+        if (std.mem.indexOf(u8, opt, "(recommended)") != null) return .{ .choice = @intCast(i) };
+    }
+    return .{ .choice = 0 };
+}
+
 test "shouldAutoApprove decision table" {
     const Case = struct { mode: ApprovalMode, is_ask: bool, ssh: bool, want: bool };
     const cases = [_]Case{

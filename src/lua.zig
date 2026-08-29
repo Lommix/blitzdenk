@@ -1141,19 +1141,21 @@ const BlitzPermissions = LuaType{
                 .name = "approve",
                 .desc =
                 \\Install the permission hook. Runs on every tool approval request
-                \\before the approval-mode check. Return "approve", "deny", a reason
-                \\string (deny with reason), a number (option index for ask), or
-                \\"fallback" to use the normal flow. Last registration wins.
+                \\before the approval-mode check. Return a BlitzPermissionDecision
+                \\table, or nil for the normal flow. Last registration wins.
                 \\Never call blitz.cmd.await_agent inside the hook.
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "hook", .ty = LuaType{ .function = .{
                         .args = &.{.{ .name = "payload", .ty = PermissionPayloadDef }},
+                        .ret = &PermissionDecisionDef,
                     } } }},
                     .fn_ptr = LuaFnBind((struct {
                         fn t(state: *c.lua_State, a: *r.app.App, hook: LuaFnRef) !void {
+                            _ = a;
                             if (try isToolVm(state)) return;
-                            a.lua_vm.permission_hook = hook.idx;
+                            const vm = fromState(state) orelse return error.NoLuaVm;
+                            vm.permission_hook = hook.idx;
                         }
                     }).t, "approve"),
                 } },
@@ -1165,8 +1167,10 @@ const BlitzPermissions = LuaType{
                     .args = &.{},
                     .fn_ptr = LuaFnBind((struct {
                         fn t(state: *c.lua_State, a: *r.app.App) !void {
+                            _ = a;
                             if (try isToolVm(state)) return;
-                            a.lua_vm.permission_hook = c.LUA_NOREF;
+                            const vm = fromState(state) orelse return error.NoLuaVm;
+                            vm.permission_hook = c.LUA_NOREF;
                         }
                     }).t, "clear"),
                 } },
@@ -1174,6 +1178,12 @@ const BlitzPermissions = LuaType{
         },
     },
 };
+
+const PermissionDecisionDef = LuaType{ .table_def = .{ .name = "BlitzPermissionDecision", .fields = &.{
+    .{ .name = "approved", .ty = LuaType.boolean, .desc = "false denies, true approves; on ask picks the recommended option" },
+    .{ .name = "msg", .ty = LuaType.string, .optional = true, .desc = "deny reason, reaches the model as tool error" },
+    .{ .name = "select", .ty = LuaType.integer, .optional = true, .desc = "1-based option index, ask payloads only; ignored otherwise" },
+} } };
 
 const PermissionPayloadDef = LuaType{ .table_def = .{ .name = "BlitzPermissionPayload", .fields = &.{
     .{ .name = "agent_id", .ty = LuaType.integer, .desc = "packed AgentId of the requesting agent" },
@@ -2732,8 +2742,8 @@ pub const LuaVm = struct {
     }
 
     /// Call blitz.permissions hook for `perm`. Caller must hold vm_mu.
-    /// Returns the decision, or null for "fallback"/no handler/non-string
-    /// returns. Strings other than the verbs deny with the string as reason.
+    /// Returns the decision, or null for fallback: no hook or a nil return.
+    /// A malformed decision table denies with a fixed reason.
     fn runPermissionHook(self: *LuaVm, perm: *r.permissions.Request) ?r.permissions.State {
         const L = self.L;
         const top = c.lua_gettop(L);
@@ -2748,33 +2758,63 @@ pub const LuaVm = struct {
         const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
         if (status != 0) {
             self.popError();
-            const msg = std.fmt.allocPrint(self.luaArena(), "permission hook error: {s}", .{self.getLastError()}) catch
+            const msg = std.fmt.allocPrint(std.heap.page_allocator, "permission hook error: {s}", .{self.getLastError()}) catch
                 return .{ .message = "permission hook error" };
             return .{ .message = msg };
         }
 
-        switch (c.lua_type(L, -1)) {
-            c.LUA_TNIL, c.LUA_TNONE => return null,
-            c.LUA_TNUMBER => {
-                const choice = c.lua_tointegerx(L, -1, null);
-                if (choice < 0 or choice > std.math.maxInt(u8)) return .{ .message = "permission hook choice out of range" };
-                return .{ .choice = @intCast(choice) };
-            },
-            c.LUA_TSTRING => {
-                var len: usize = 0;
-                const ptr = c.lua_tolstring(L, -1, &len) orelse return null;
-                const value = ptr[0..len];
-                if (std.mem.eql(u8, value, "approve")) return .approved;
-                if (std.mem.eql(u8, value, "deny")) return .denied;
-                if (std.mem.eql(u8, value, "fallback")) return null;
-                return .{ .message = value };
-            },
-            else => return .{ .message = "permission hook returned an unusable value" },
-        }
+        if (c.lua_type(L, -1) == c.LUA_TNIL) return null;
+        return permissionDecisionFromLua(L, perm.payload) orelse return .{ .message = "permission hook returned an unusable value" };
     }
 
-    /// Invoke the permission hook for `perm`. Reads only memory owned by the
-    /// registry slot, never the Lua arena. Call on the main thread.
+    /// Convert a BlitzPermissionDecision table on top of the stack. Lua shape:
+    /// `{ approved = bool, msg = string?, select = integer? }`. Returns null
+    /// only for a malformed table (caller denies with a fixed reason); null is
+    /// the fallback-to-TUI signal and must not double as an error path. The
+    /// deny reason is page-allocated process-lifetime; nothing frees it,
+    /// denials are rare. `select` is 1-based, validated against the live
+    /// option count (out of range denies), and ignored on non-ask payloads or
+    /// when `approved` is true. Ask payloads resolve fully here: select picks
+    /// the option, approval picks the recommended option, denial denies — no
+    /// `.message` leaks into the ask tool's answer channel.
+    fn permissionDecisionFromLua(L: *c.lua_State, payload: r.permissions.Payload) ?r.permissions.State {
+        if (c.lua_type(L, -1) != c.LUA_TTABLE) return null;
+
+        _ = c.lua_getfield(L, -1, "approved");
+        if (c.lua_type(L, -1) != c.LUA_TBOOLEAN) {
+            c.lua_pop(L, 1);
+            return null;
+        }
+        const approved = c.lua_toboolean(L, -1) != 0;
+        c.lua_pop(L, 1);
+
+        if (payload == .ask) {
+            _ = c.lua_getfield(L, -1, "select");
+            if (c.lua_type(L, -1) == c.LUA_TNUMBER) {
+                const one_based = c.lua_tointegerx(L, -1, null);
+                c.lua_pop(L, 1);
+                if (one_based < 1 or one_based > payload.ask.options.len) return .denied;
+                return .{ .choice = @intCast(one_based - 1) };
+            }
+            c.lua_pop(L, 1);
+            if (approved) return r.permissions.recommendedChoice(payload.ask.options);
+            return .denied;
+        }
+
+        if (approved) return .approved;
+
+        _ = c.lua_getfield(L, -1, "msg");
+        defer c.lua_pop(L, 1);
+        if (c.lua_type(L, -1) != c.LUA_TSTRING) return .denied;
+        var len: usize = 0;
+        const ptr = c.lua_tolstring(L, -1, &len) orelse return .denied;
+        const reason = std.heap.page_allocator.dupe(u8, ptr[0..len]) catch return .denied;
+        return .{ .message = reason };
+    }
+
+    /// Invoke the permission hook for `perm`. Deny reasons are page-allocated
+    /// process-lifetime strings; nothing frees them, denials are rare.
+    /// Call on the main thread.
     pub fn permissionHookDecision(self: *LuaVm, perm: *r.permissions.Request) ?r.permissions.State {
         const a = self.app orelse return null;
         self.vm_mu.lockUncancelable(a.io);
@@ -3266,36 +3306,36 @@ fn pushPermissionPayload(L: *c.lua_State, perm: *r.permissions.Request) void {
     c.lua_setfield(L, -2, "agent_id");
 
     if (perm.call_id) |call_id| {
-        c.lua_pushlstring(L, call_id.ptr, call_id.len);
+        _ = c.lua_pushlstring(L, call_id.ptr, call_id.len);
         c.lua_setfield(L, -2, "call_id");
     }
 
-    c.lua_pushlstring(L, perm.tool_name.ptr, perm.tool_name.len);
+    _ = c.lua_pushlstring(L, perm.tool_name.ptr, perm.tool_name.len);
     c.lua_setfield(L, -2, "tool");
 
     switch (perm.payload) {
         .call => |call| {
             pushTag(L, "call");
             c.lua_setfield(L, -2, "kind");
-            c.lua_pushlstring(L, call.description.ptr, call.description.len);
+            _ = c.lua_pushlstring(L, call.description.ptr, call.description.len);
             c.lua_setfield(L, -2, "description");
         },
         .diff => |diff| {
             pushTag(L, "diff");
             c.lua_setfield(L, -2, "kind");
-            c.lua_pushlstring(L, diff.path.ptr, diff.path.len);
+            _ = c.lua_pushlstring(L, diff.path.ptr, diff.path.len);
             c.lua_setfield(L, -2, "path");
         },
         .ask => |ask| {
             pushTag(L, "ask");
             c.lua_setfield(L, -2, "kind");
-            c.lua_pushlstring(L, ask.header.ptr, ask.header.len);
+            _ = c.lua_pushlstring(L, ask.header.ptr, ask.header.len);
             c.lua_setfield(L, -2, "header");
-            c.lua_pushlstring(L, ask.question.ptr, ask.question.len);
+            _ = c.lua_pushlstring(L, ask.question.ptr, ask.question.len);
             c.lua_setfield(L, -2, "question");
             c.lua_createtable(L, @intCast(ask.options.len), 0);
             for (ask.options, 0..) |option, i| {
-                c.lua_pushlstring(L, option.ptr, option.len);
+                _ = c.lua_pushlstring(L, option.ptr, option.len);
                 c.lua_rawseti(L, -2, @intCast(i + 1));
             }
             c.lua_setfield(L, -2, "options");
@@ -3303,16 +3343,16 @@ fn pushPermissionPayload(L: *c.lua_State, perm: *r.permissions.Request) void {
         .plan => |plan| {
             pushTag(L, "plan");
             c.lua_setfield(L, -2, "kind");
-            c.lua_pushlstring(L, plan.path.ptr, plan.path.len);
+            _ = c.lua_pushlstring(L, plan.path.ptr, plan.path.len);
             c.lua_setfield(L, -2, "path");
-            c.lua_pushlstring(L, plan.plan_text.ptr, plan.plan_text.len);
+            _ = c.lua_pushlstring(L, plan.plan_text.ptr, plan.plan_text.len);
             c.lua_setfield(L, -2, "plan");
         },
     }
 }
 
 fn pushTag(L: *c.lua_State, tag: []const u8) void {
-    c.lua_pushlstring(L, tag.ptr, tag.len);
+    _ = c.lua_pushlstring(L, tag.ptr, tag.len);
 }
 
 /// Read AgentId from integer at `idx`. Reports a Lua error on shape mismatch.
@@ -3712,4 +3752,183 @@ test "state conversion rejects non-integer numeric keys" {
     c.lua_rawset(L, -3);
 
     try std.testing.expectError(error.UnsupportedValue, stateValueFromLua(std.testing.allocator, L, -1, 1));
+}
+
+fn permissionTestApp() r.app.App {
+    var app_state: r.app.App = undefined;
+    app_state.io = std.testing.io;
+    app_state.gpa = std.testing.allocator;
+    app_state.config = .{};
+    return app_state;
+}
+
+test "permission hook approve deny and nil fallback" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.permissions.approve(function(p)
+        \\  if p.kind == "diff" then return { approved = true } end
+        \\  if p.tool == "bash" then return { approved = false, msg = "no shell for you" } end
+        \\  return nil
+        \\end)
+    );
+
+    var diff_req = r.permissions.Request{
+        .agent_id = .{ .index = 1, .generation = 2 },
+        .call_id = "call_9",
+        .tool_name = "write",
+        .payload = .{ .diff = .{ .path = "a.txt", .before = null, .after = "x" } },
+    };
+    try std.testing.expectEqual(r.permissions.State.approved, vm.permissionHookDecision(&diff_req).?);
+
+    var call_req = r.permissions.Request{
+        .agent_id = .{ .index = 1, .generation = 2 },
+        .tool_name = "bash",
+        .payload = .{ .call = .{ .description = "run" } },
+    };
+    const denied = vm.permissionHookDecision(&call_req).?;
+    try std.testing.expectEqualStrings("no shell for you", denied.message);
+
+    var other_req = r.permissions.Request{
+        .agent_id = .{ .index = 1, .generation = 2 },
+        .tool_name = "grep",
+        .payload = .{ .call = .{ .description = "search" } },
+    };
+    try std.testing.expect(vm.permissionHookDecision(&other_req) == null);
+}
+
+test "permission hook sees ask options and numeric choice" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.permissions.approve(function(p)
+        \\  assert(p.kind == "ask")
+        \\  assert(p.header == "Pick")
+        \\  assert(p.options[2] == "beta")
+        \\  return { approved = false, select = 1 }
+        \\end)
+    );
+
+    const options = [_][]const u8{ "alpha", "beta" };
+    var ask_req = r.permissions.Request{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .tool_name = "ask",
+        .payload = .{ .ask = .{ .header = "Pick", .question = "?", .options = &options } },
+    };
+    const decision = vm.permissionHookDecision(&ask_req).?;
+    try std.testing.expectEqual(@as(u8, 0), decision.choice);
+
+    try vm.exec(
+        \\blitz.permissions.approve(function(p)
+        \\  return { approved = false, select = 9 }
+        \\end)
+    );
+    try std.testing.expectEqual(r.permissions.State.denied, vm.permissionHookDecision(&ask_req).?);
+
+    try vm.exec(
+        \\blitz.permissions.approve(function(p)
+        \\  return { approved = true, select = 2 }
+        \\end)
+    );
+    try std.testing.expectEqual(@as(u8, 1), vm.permissionHookDecision(&ask_req).?.choice);
+
+    try vm.exec(
+        \\blitz.permissions.approve(function(p)
+        \\  return { approved = true }
+        \\end)
+    );
+    const approved_ask = vm.permissionHookDecision(&ask_req).?;
+    try std.testing.expectEqual(@as(u8, 0), approved_ask.choice);
+
+    try vm.exec(
+        \\blitz.permissions.approve(function(p)
+        \\  return { approved = false, msg = "no" }
+        \\end)
+    );
+    try std.testing.expectEqual(r.permissions.State.denied, vm.permissionHookDecision(&ask_req).?);
+
+    var diff_req = r.permissions.Request{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .tool_name = "write",
+        .payload = .{ .diff = .{ .path = "a.txt", .before = null, .after = "x" } },
+    };
+    const diff_decision = vm.permissionHookDecision(&diff_req).?;
+    try std.testing.expectEqualStrings("no", diff_decision.message);
+
+    try vm.exec(
+        \\blitz.permissions.approve(function(p)
+        \\  return { approved = true }
+        \\end)
+    );
+    const diff_decision2 = vm.permissionHookDecision(&diff_req).?;
+    try std.testing.expectEqual(r.permissions.State.approved, diff_decision2);
+}
+
+test "permission hook error fails closed" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec("blitz.permissions.approve(function(p) error('boom') end)");
+
+    var req = r.permissions.Request{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .tool_name = "bash",
+        .payload = .{ .call = .{ .description = "run" } },
+    };
+    const decision = vm.permissionHookDecision(&req).?;
+    try std.testing.expect(decision == .message);
+    try std.testing.expect(std.mem.indexOf(u8, decision.message, "boom") != null);
+}
+
+test "permission hook malformed table denies" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec("blitz.permissions.approve(function(p) return { approved = 'yes' } end)");
+
+    var req = r.permissions.Request{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .tool_name = "bash",
+        .payload = .{ .call = .{ .description = "run" } },
+    };
+    const non_bool = vm.permissionHookDecision(&req).?;
+    try std.testing.expectEqualStrings("permission hook returned an unusable value", non_bool.message);
+
+    try vm.exec("blitz.permissions.approve(function(p) return 42 end)");
+    const non_table = vm.permissionHookDecision(&req).?;
+    try std.testing.expectEqualStrings("permission hook returned an unusable value", non_table.message);
+
+    try vm.exec("blitz.permissions.approve(function(p) return { approved = false } end)");
+    const no_reason = vm.permissionHookDecision(&req).?;
+    try std.testing.expectEqual(r.permissions.State.denied, no_reason);
+}
+
+test "permission hook clear and no handler fall back" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    var req = r.permissions.Request{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .tool_name = "bash",
+        .payload = .{ .call = .{ .description = "run" } },
+    };
+    try std.testing.expect(vm.permissionHookDecision(&req) == null);
+
+    try vm.exec(
+        \\blitz.permissions.approve(function(p) return { approved = true } end)
+        \\blitz.permissions.clear()
+    );
+    try std.testing.expect(vm.permissionHookDecision(&req) == null);
 }

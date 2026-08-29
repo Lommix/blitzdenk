@@ -704,6 +704,15 @@ pub fn run(
                     const next = g.ptr.swapRemove(0);
                     const is_ask = next.payload == .ask or next.payload == .plan;
 
+                    // The Lua hook decides first. Only the fallback path
+                    // reaches the approval-mode check and the TUI.
+                    if (app.luaPermissionDecision(next)) |decision| {
+                        try app.persist_permission_to_history(next);
+                        next.state = decision;
+                        next.event.set(app.io);
+                        continue;
+                    }
+
                     // check permission level against flags
                     app.mu.lockUncancelable(app.io);
                     const mode = app.flags.approval_mode;
@@ -1461,7 +1470,7 @@ fn resolvePermissionsHeadless(app: *App, io: std.Io) void {
         const next = g.ptr.swapRemove(0);
         if (app.registry.state(next.agent_id) != .active) continue;
         next.state = switch (next.payload) {
-            .ask => |a| .{ .choice = recommendedOption(a.options) },
+            .ask => |a| r.permissions.recommendedChoice(a.options),
             else => .approved,
         };
         next.event.set(io);
@@ -1469,10 +1478,10 @@ fn resolvePermissionsHeadless(app: *App, io: std.Io) void {
 }
 
 fn recommendedOption(options: []const []const u8) u8 {
-    for (options, 0..) |opt, i| {
-        if (std.mem.indexOf(u8, opt, "(recommended)") != null) return @intCast(i);
+    switch (r.permissions.recommendedChoice(options)) {
+        .choice => |i| return i,
+        else => unreachable,
     }
-    return 0;
 }
 
 /// Probe `ssh -o BatchMode=yes user@host true`. On success → set SSH target

@@ -104,6 +104,44 @@
 ---Example: blitz.events.add_listener(blitz.events.AGENT_COMPLETE, function(agent_id) end)
 ---@field add_listener fun(event: integer, func: function)
 
+---@class BlitzPermissionPayload
+---packed AgentId of the requesting agent
+---@field agent_id integer
+---@field call_id? string
+---call|diff|ask|plan
+---@field kind string
+---tool name
+---@field tool string
+---kind == call
+---@field description? string
+---kind == diff|plan
+---@field path? string
+---kind == ask
+---@field header? string
+---kind == ask
+---@field question? string
+---kind == ask
+---@field options? string[]
+---kind == plan, plan text
+---@field plan? string
+
+---@class BlitzPermissionDecision
+---false denies, true approves; on ask picks the recommended option
+---@field approved boolean
+---deny reason, reaches the model as tool error
+---@field msg? string
+---1-based option index, ask payloads only; ignored otherwise
+---@field select? integer
+
+---@class BlitzPermissions
+---Install the permission hook. Runs on every tool approval request
+---before the approval-mode check. Return a BlitzPermissionDecision
+---table, or nil for the normal flow. Last registration wins.
+---Never call blitz.cmd.await_agent inside the hook.
+---@field approve fun(hook: function)
+---Remove the permission hook.
+---@field clear fun()
+
 ---@class BlitzArgDef
 ---@field type string
 ---@field description string
@@ -251,6 +289,7 @@
 ---@field cmd BlitzCmd
 ---@field tools BlitzToolDef
 ---@field events BlitzEventDef
+---@field permissions BlitzPermissions
 ---@field AGENT_GENERAL integer
 ---@field REQ_STATUS_PENDING integer
 ---@field REQ_STATUS_APPROVED integer
