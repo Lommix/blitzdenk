@@ -365,6 +365,8 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.event_bus.shutdown(self);
+        self.event_bus.joinPending(self.io);
         if (self.update_check) |*task| task.deinit();
         if (self.mcp_load) |*task| task.deinit();
         self.mcp_manager.deinit();
@@ -374,7 +376,7 @@ pub const App = struct {
         self.injection_hooks.deinit(self.gpa);
         self.permission_queue.value.deinit(self.gpa);
         self.notifications.deinit(self.gpa);
-        self.event_bus.clear(self.gpa, self.io);
+        self.event_bus.clear(self.io);
         if (self.last_unbound_warn) |s| self.gpa.free(s);
         for (self.history.items) |e| self.gpa.free(e.text);
         self.history.deinit(self.gpa);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const app = @import("app.zig");
 const c = @import("c");
 const Allocator = std.mem.Allocator;
@@ -9,6 +10,15 @@ const log = std.log.scoped(.lua);
 const r = @import("root.zig");
 const lua_state = @import("lua_state.zig");
 const lua = @This();
+
+fn hookLog(comptime level: std.log.Level, comptime fmt: []const u8, args: anytype) void {
+    if (builtin.is_test) return;
+    switch (level) {
+        .err => log.err(fmt, args),
+        .warn => log.warn(fmt, args),
+        else => log.info(fmt, args),
+    }
+}
 
 pub const REQ_STATUS_PENDING: c_int = 0;
 pub const REQ_STATUS_APPROVED: c_int = 1;
@@ -1128,9 +1138,13 @@ const BlitzUserMessageEvent = LuaType{ .table_def = .{
 fn EventFn(comptime tag: r.events.AppEventTag, comptime payload: ?LuaType) LuaType {
     const Bind = struct {
         fn t(state: *c.lua_State, a: *r.app.App, func: LuaFnRef) !void {
-            if (try isToolVm(state)) return;
-            a.event_bus.addLuaListener(a.gpa, a.io, tag, func.idx) catch
+            const vm = fromState(state) orelse return error.NoLuaVm;
+            vm.hook_entries.append(vm.luaArena(), .{ .tag = tag, .func_ref = func.idx }) catch {
                 c.luaL_unref(state, c.LUA_REGISTRYINDEX, func.idx);
+                return;
+            };
+            if (vm.is_tool_vm) return;
+            a.event_bus.addTag(a.io, tag);
         }
     };
     const ev_args: []const LuaType.Field = if (payload) |p|
@@ -1143,27 +1157,32 @@ fn EventFn(comptime tag: r.events.AppEventTag, comptime payload: ?LuaType) LuaTy
     } };
 }
 
+const ListenerVmDesc =
+    \\The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
+;
+
 pub const BlitzHooks = LuaType{
     .table_def = .{
         .name = "BlitzHooks",
         .fields = &.{
-            .{ .name = "session_reset", .desc = "Register a listener for after the active session is reset. Takes no payload.", .ty = EventFn(.session_reset, null) },
-            .{ .name = "agent_created", .desc = "Register a listener for after an agent slot is activated.", .ty = EventFn(.agent_created, BlitzAgentCreatedEvent) },
-            .{ .name = "agent_started", .desc = "Register a listener for when an agent starts running.", .ty = EventFn(.agent_started, BlitzAgentEvent) },
-            .{ .name = "agent_complete", .desc = "Register a listener for when an agent completes.", .ty = EventFn(.agent_complete, BlitzAgentEvent) },
-            .{ .name = "agent_failed", .desc = "Register a listener for when an agent run fails.", .ty = EventFn(.agent_failed, BlitzAgentFailedEvent) },
-            .{ .name = "agent_cancelled", .desc = "Register a listener for when an agent is cancelled.", .ty = EventFn(.agent_cancelled, BlitzAgentEvent) },
-            .{ .name = "compaction_started", .desc = "Register a listener for when chat compaction starts.", .ty = EventFn(.compaction_started, BlitzAgentEvent) },
-            .{ .name = "compaction_complete", .desc = "Register a listener for when chat compaction completes.", .ty = EventFn(.compaction_complete, BlitzAgentEvent) },
-            .{ .name = "user_message_sent", .desc = "Register a listener for after the user sends a message.", .ty = EventFn(.user_message_sent, BlitzUserMessageEvent) },
-            .{ .name = "mcp_tools_reloaded", .desc = "Register a listener for after MCP tools are reloaded. Takes no payload.", .ty = EventFn(.mcp_tools_reloaded, null) },
+            .{ .name = "session_reset", .desc = "Register a listener for after the active session is reset. Takes no payload. " ++ ListenerVmDesc, .ty = EventFn(.session_reset, null) },
+            .{ .name = "agent_created", .desc = "Register a listener for after an agent slot is activated. " ++ ListenerVmDesc, .ty = EventFn(.agent_created, BlitzAgentCreatedEvent) },
+            .{ .name = "agent_started", .desc = "Register a listener for when an agent starts running. " ++ ListenerVmDesc, .ty = EventFn(.agent_started, BlitzAgentEvent) },
+            .{ .name = "agent_complete", .desc = "Register a listener for when an agent completes. " ++ ListenerVmDesc, .ty = EventFn(.agent_complete, BlitzAgentEvent) },
+            .{ .name = "agent_failed", .desc = "Register a listener for when an agent run fails. " ++ ListenerVmDesc, .ty = EventFn(.agent_failed, BlitzAgentFailedEvent) },
+            .{ .name = "agent_cancelled", .desc = "Register a listener for when an agent is cancelled. " ++ ListenerVmDesc, .ty = EventFn(.agent_cancelled, BlitzAgentEvent) },
+            .{ .name = "compaction_started", .desc = "Register a listener for when chat compaction starts. " ++ ListenerVmDesc, .ty = EventFn(.compaction_started, BlitzAgentEvent) },
+            .{ .name = "compaction_complete", .desc = "Register a listener for when chat compaction completes. " ++ ListenerVmDesc, .ty = EventFn(.compaction_complete, BlitzAgentEvent) },
+            .{ .name = "user_message_sent", .desc = "Register a listener for after the user sends a message. " ++ ListenerVmDesc, .ty = EventFn(.user_message_sent, BlitzUserMessageEvent) },
+            .{ .name = "mcp_tools_reloaded", .desc = "Register a listener for after MCP tools are reloaded. Takes no payload. " ++ ListenerVmDesc, .ty = EventFn(.mcp_tools_reloaded, null) },
             .{
                 .name = "inject",
                 .desc =
                 \\Install the system-reminder injection hook. Runs for every agent step
-                \\before the reminder is built. Return a string to append it to the
-                \\agent's <system-reminder> block, nil for nothing. Last registration
-                \\wins. Never call blitz.cmd.await_agent inside the hook.
+                \\before the reminder is built, in the main Lua VM on the calling thread.
+                \\Return a string to append it to the agent's <system-reminder> block,
+                \\nil for nothing. Last registration wins. Never call
+                \\blitz.cmd.await_agent inside the hook.
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "hook", .ty = LuaType{ .function = .{
@@ -1185,9 +1204,10 @@ pub const BlitzHooks = LuaType{
                 .name = "approve",
                 .desc =
                 \\Install the permission hook. Runs on every tool approval request
-                \\before the approval-mode check. Return a BlitzPermissionDecision
-                \\table, or nil for the normal flow. Last registration wins.
-                \\Never call blitz.cmd.await_agent inside the hook.
+                \\before the approval-mode check, in the main Lua VM on the main
+                \\thread. Return a BlitzPermissionDecision table, or nil for the
+                \\normal flow. Last registration wins. Never call
+                \\blitz.cmd.await_agent inside the hook.
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "hook", .ty = LuaType{ .function = .{
@@ -1933,6 +1953,11 @@ const LuaBindEntry = struct {
     L: ?*c.lua_State = null,
 };
 
+const LuaHookEntry = struct {
+    tag: r.events.AppEventTag,
+    func_ref: c_int = c.LUA_NOREF,
+};
+
 const LuaCommandEntry = struct {
     name: [128]u8 = undefined,
     name_len: usize = 0,
@@ -2264,6 +2289,32 @@ fn findEntry(vm: *LuaVm, name: []const u8) ?*LuaToolEntry {
     return null;
 }
 
+fn findHookEntries(vm: *LuaVm, tag: r.events.AppEventTag) []const LuaHookEntry {
+    var count: usize = 0;
+    for (vm.hook_entries.items) |entry| {
+        if (entry.tag == tag) count += 1;
+    }
+    const matched = vm.luaArena().alloc(LuaHookEntry, count) catch return &.{};
+    var i: usize = 0;
+    for (vm.hook_entries.items) |entry| {
+        if (entry.tag != tag) continue;
+        matched[i] = entry;
+        i += 1;
+    }
+    return matched;
+}
+
+fn pushEventPayload(L: *c.lua_State, event: r.events.AppEvent) c_int {
+    switch (event) {
+        .session_reset, .mcp_tools_reloaded => return 0,
+        .agent_created => |payload| pushAny(L, payload),
+        .agent_failed => |payload| pushAny(L, payload),
+        .user_message_sent => |text| pushAny(L, .{ .text = text }),
+        .agent_started, .agent_complete, .agent_cancelled, .compaction_started, .compaction_complete => |id| pushAny(L, .{ .id = id }),
+    }
+    return 1;
+}
+
 // ── ToolContext bridge (passed as light userdata during tool calls) ──
 
 const CtxBridge = struct {
@@ -2360,6 +2411,7 @@ pub const LuaVm = struct {
     parent: Allocator,
     arena_state: std.heap.ArenaAllocator,
     tool_entries: std.ArrayList(LuaToolEntry) = .empty,
+    hook_entries: std.ArrayList(LuaHookEntry) = .empty,
     bind_entries: std.ArrayList(LuaBindEntry) = .empty,
     command_entries: std.ArrayList(LuaCommandEntry) = .empty,
     mcp_entries: std.ArrayList(LuaMcpServerEntry) = .empty,
@@ -2494,12 +2546,14 @@ pub const LuaVm = struct {
         c.lua_close(self.L);
         _ = self.arena_state.reset(.free_all);
         self.tool_entries = .empty;
+        self.hook_entries = .empty;
         self.bind_entries = .empty;
         self.command_entries = .empty;
         self.mcp_entries = .empty;
         self.stdout_buf = .empty;
         self.prepareArenaLists() catch return error.LuaInitFailed;
         self.tool_entries.clearRetainingCapacity();
+        self.hook_entries.clearRetainingCapacity();
         self.bind_entries.clearRetainingCapacity();
         self.command_entries.clearRetainingCapacity();
         self.mcp_entries.clearRetainingCapacity();
@@ -2676,17 +2730,38 @@ pub const LuaVm = struct {
         return false;
     }
 
-    pub fn invokeLuaFunction(self: *LuaVm, func_ref: c_int, args: anytype) void {
-        _ = c.lua_rawgeti(self.L, c.LUA_REGISTRYINDEX, func_ref);
-        pushAny(self.L, args);
-        const status = c.lua_pcallk(self.L, 1, 0, 0, 0, null);
-        if (status != 0) self.popError();
-    }
+    pub fn invokeEventHooks(self: *LuaVm, event: r.events.AppEvent) void {
+        const tag = std.meta.activeTag(event);
+        const entries = findHookEntries(self, tag);
+        if (entries.len == 0) {
+            hookLog(.warn, "no {s} listener registered after config load", .{@tagName(tag)});
+            return;
+        }
 
-    pub fn invokeLuaFunctionNoArgs(self: *LuaVm, func_ref: c_int) void {
-        _ = c.lua_rawgeti(self.L, c.LUA_REGISTRYINDEX, func_ref);
-        const status = c.lua_pcallk(self.L, 0, 0, 0, 0, null);
-        if (status != 0) self.popError();
+        const L = self.L;
+        const top = c.lua_gettop(L);
+        defer c.lua_settop(L, top);
+
+        for (entries) |entry| {
+            _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, entry.func_ref);
+            if (c.lua_type(L, -1) != c.LUA_TFUNCTION) {
+                c.lua_pop(L, 1);
+                continue;
+            }
+            const nargs = pushEventPayload(L, event);
+
+            const status = c.lua_pcallk(L, nargs, 0, 0, 0, null);
+            if (status != 0) {
+                var err_len: usize = 0;
+                const err_ptr = c.lua_tolstring(L, -1, &err_len);
+                hookLog(
+                    .err,
+                    "{s} listener failed: {s}",
+                    .{ @tagName(tag), if (err_ptr) |p| p[0..err_len] else "unknown error" },
+                );
+                c.lua_pop(L, 1);
+            }
+        }
     }
 
     pub fn appendCommandCompletions(
@@ -3005,6 +3080,40 @@ fn luaCancellationHook(L: ?*c.lua_State, ar: [*c]c.lua_Debug) callconv(.c) void 
     }
 }
 
+/// Run every listener of one event in a fresh sandboxed Lua VM, mirroring
+/// the lua tool trampoline: reload the config, call each listener of the
+/// event tag in registration order. The event bus owns the calling
+/// thread; `await_agent` inside a listener unlocks the sandbox VM mutex
+/// while it waits on the agent slot event.
+pub fn runEventHook(app_ptr: *r.app.App, event: r.events.AppEvent) void {
+    var vm = LuaVm.initTool(app_ptr.gpa) catch {
+        hookLog(.err, "hook lua vm init failed", .{});
+        return;
+    };
+    vm.setApp(app_ptr);
+    defer vm.deinit();
+
+    vm.cancel_token = &app_ptr.event_bus.hook_cancel;
+    c.lua_sethook(vm.L, &luaCancellationHook, c.LUA_MASKCOUNT, CANCELLATION_HOOK_INTERVAL);
+    defer {
+        c.lua_sethook(vm.L, null, 0, 0);
+        vm.cancel_token = null;
+    }
+
+    vm.vm_mu.lockUncancelable(app_ptr.io);
+    defer vm.vm_mu.unlock(app_ptr.io);
+
+    app_ptr.lua_vm.vm_mu.lockUncancelable(app_ptr.io);
+    loadToolConfig(vm, app_ptr) catch {
+        app_ptr.lua_vm.vm_mu.unlock(app_ptr.io);
+        hookLog(.err, "hook config load failed: {s}", .{vm.getLastError()});
+        return;
+    };
+    app_ptr.lua_vm.vm_mu.unlock(app_ptr.io);
+
+    vm.invokeEventHooks(event);
+}
+
 fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
     const app_ptr: *r.app.App = @ptrCast(@alignCast(ctx.base.app orelse return failedResult(call, "lua tool has no app")));
 
@@ -3020,8 +3129,13 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
     }
 
     // Reading shared app config/factory state must be serialized against
-    // hot-reload, which mutates it under lua_vm.vm_mu. Release before the
-    // pcall so the tool body itself still runs in parallel.
+    // hot-reload, which mutates it under lua_vm.vm_mu. The sandbox vm_mu is
+    // held for the whole call so a top-level blitz.cmd.await_agent in the
+    // config unlocks a locked mutex. Release main before the pcall so the
+    // tool body itself still runs in parallel.
+    vm.vm_mu.lockUncancelable(ctx.io);
+    defer vm.vm_mu.unlock(ctx.io);
+
     var app_lock_released = false;
     app_ptr.lua_vm.vm_mu.lockUncancelable(ctx.io);
     defer if (!app_lock_released) app_ptr.lua_vm.vm_mu.unlock(ctx.io);
@@ -3052,9 +3166,7 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
     app_lock_released = true;
     app_ptr.lua_vm.vm_mu.unlock(ctx.io);
 
-    vm.vm_mu.lockUncancelable(ctx.io);
     const status = c.lua_pcallk(L, 2, 1, 0, 0, null);
-    vm.vm_mu.unlock(ctx.io);
 
     if (status != 0) {
         var err_len: usize = 0;
@@ -3733,6 +3845,61 @@ test "tool VMs resolve their owner and isolate globals" {
     _ = c.lua_getglobal(vm2.L, "tool_shared_global");
     try std.testing.expectEqual(c.LUA_TNIL, c.lua_type(vm2.L, -1));
     c.lua_pop(vm2.L, 1);
+}
+
+fn readGlobalString(vm: *LuaVm, name: [*:0]const u8) ![]const u8 {
+    _ = c.lua_getglobal(vm.L, name);
+    defer c.lua_pop(vm.L, 1);
+    var len: usize = 0;
+    const ptr = c.lua_tolstring(vm.L, -1, &len) orelse return error.NotAString;
+    return try std.testing.allocator.dupe(u8, ptr[0..len]);
+}
+
+test "hook listeners run sandboxed by registration order" {
+    var app_state = permissionTestApp();
+    app_state.event_bus = .{};
+    defer app_state.event_bus.clear(std.testing.io);
+
+    const vm = try LuaVm.initTool(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\hook_log = ""
+        \\blitz.hooks.agent_failed(function(ev)
+        \\    hook_log = hook_log .. ev.err .. ":" .. ev.id
+        \\end)
+        \\blitz.hooks.agent_failed(function(ev)
+        \\    hook_log = hook_log .. "|"
+        \\end)
+        \\blitz.hooks.session_reset(function()
+        \\    hook_log = hook_log .. "R"
+        \\end)
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), vm.hook_entries.items.len);
+    try std.testing.expectEqual(r.events.AppEventTag.agent_failed, vm.hook_entries.items[1].tag);
+
+    const failed_id = r.AgentId{ .index = 2, .generation = 7 };
+    vm.invokeEventHooks(.{ .agent_failed = .{ .id = failed_id, .err = "ProviderError" } });
+    vm.invokeEventHooks(.session_reset);
+
+    const log_text = try readGlobalString(vm, "hook_log");
+    defer std.testing.allocator.free(log_text);
+    var expected_buf: [64]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "ProviderError:{d}|R", .{failed_id.pack()});
+    try std.testing.expectEqualStrings(expected, log_text);
+
+    const main_vm = try LuaVm.init(std.testing.allocator);
+    defer main_vm.deinit();
+    main_vm.setApp(&app_state);
+    try main_vm.exec(
+        \\blitz.hooks.agent_failed(function() end)
+        \\blitz.hooks.agent_complete(function() end)
+    );
+    try std.testing.expect(app_state.event_bus.active.contains(.agent_failed));
+    try std.testing.expect(app_state.event_bus.active.contains(.agent_complete));
+    try std.testing.expect(!app_state.event_bus.active.contains(.session_reset));
 }
 
 test "state values round-trip through the Lua stack" {

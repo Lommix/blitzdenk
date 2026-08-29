@@ -129,35 +129,37 @@
 ---@field select? integer
 
 ---@class BlitzHooks
----Register a listener for after the active session is reset. Takes no payload.
+---Register a listener for after the active session is reset. Takes no payload. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field session_reset fun(func: fun())
----Register a listener for after an agent slot is activated.
+---Register a listener for after an agent slot is activated. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field agent_created fun(func: fun(ev: BlitzAgentCreatedEvent))
----Register a listener for when an agent starts running.
+---Register a listener for when an agent starts running. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field agent_started fun(func: fun(ev: BlitzAgentEvent))
----Register a listener for when an agent completes.
+---Register a listener for when an agent completes. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field agent_complete fun(func: fun(ev: BlitzAgentEvent))
----Register a listener for when an agent run fails.
+---Register a listener for when an agent run fails. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field agent_failed fun(func: fun(ev: BlitzAgentFailedEvent))
----Register a listener for when an agent is cancelled.
+---Register a listener for when an agent is cancelled. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field agent_cancelled fun(func: fun(ev: BlitzAgentEvent))
----Register a listener for when chat compaction starts.
+---Register a listener for when chat compaction starts. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field compaction_started fun(func: fun(ev: BlitzAgentEvent))
----Register a listener for when chat compaction completes.
+---Register a listener for when chat compaction completes. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field compaction_complete fun(func: fun(ev: BlitzAgentEvent))
----Register a listener for after the user sends a message.
+---Register a listener for after the user sends a message. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field user_message_sent fun(func: fun(ev: BlitzUserMessageEvent))
----Register a listener for after MCP tools are reloaded. Takes no payload.
+---Register a listener for after MCP tools are reloaded. Takes no payload. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field mcp_tools_reloaded fun(func: fun())
 ---Install the system-reminder injection hook. Runs for every agent step
----before the reminder is built. Return a string to append it to the
----agent's <system-reminder> block, nil for nothing. Last registration
----wins. Never call blitz.cmd.await_agent inside the hook.
+---before the reminder is built, in the main Lua VM on the calling thread.
+---Return a string to append it to the agent's <system-reminder> block,
+---nil for nothing. Last registration wins. Never call
+---blitz.cmd.await_agent inside the hook.
 ---@field inject fun(hook: fun(agent_id: integer): string)
 ---Install the permission hook. Runs on every tool approval request
----before the approval-mode check. Return a BlitzPermissionDecision
----table, or nil for the normal flow. Last registration wins.
----Never call blitz.cmd.await_agent inside the hook.
+---before the approval-mode check, in the main Lua VM on the main
+---thread. Return a BlitzPermissionDecision table, or nil for the
+---normal flow. Last registration wins. Never call
+---blitz.cmd.await_agent inside the hook.
 ---@field approve fun(hook: fun(payload: BlitzPermissionPayload): BlitzPermissionDecision)
 ---Remove the approve and inject hooks.
 ---@field clear fun()

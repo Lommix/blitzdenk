@@ -202,9 +202,29 @@ a listener; multiple listeners per event run in registration order.
 Listeners live until the config reloads; a Lua reload clears all listeners
 and re-runs your config.
 
+Every emitted event runs its listeners in one sandbox Lua VM on a
+background thread, like a tool call. The config re-loads into that VM and
+each listener of the event runs in registration order. Config mutation
+(`add_provider`, `register_tool`, `set_agent_model`, ...) is a no-op inside
+a listener. Use `blitz.state.set/get` for data across calls. The event
+loop does not wait for listeners; an `await_agent` inside one listener
+delays only the listeners behind it. `blitz.cmd.spawn_agent` and
+`blitz.cmd.await_agent` work inside:
+
+A listener that spawns an agent retriggers `agent_created` and
+`agent_started`. Spawning from those two listeners loops without end.
+
 ```lua
-blitz.hooks.agent_failed(function(ev)
-    blitz.cmd.message_chat("user", "agent " .. ev.id .. " failed: " .. ev.err)
+blitz.hooks.user_message_sent(function(ev)
+    local id = blitz.cmd.spawn_agent({
+        agent_type = blitz.AGENT_GENERAL,
+        prompt = "Summarize in one line: " .. ev.text,
+    })
+    if blitz.cmd.await_agent(id) == blitz.AWAIT_COMPLETE then
+        blitz.cmd.message_chat("agent", blitz.cmd.await_agent_result(id))
+    else
+        blitz.cmd.message_chat("user", "helper agent failed")
+    end
 end)
 ```
 
