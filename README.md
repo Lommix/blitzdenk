@@ -13,11 +13,9 @@ Ships as a single 1.7MB binary using less then 99MB of ram.
 - MCP and Skill support.
 - Multi-provider: any OpenAI or Anthropic chat/response schema supported, including local AI.
 - Mermaid diagram render in tui.
-- Lua hot reload
-    - Agents can code tools and debug them at the same time.
-    - Supports global and project local configs.
+- Lua hot reload: Agents can code tools and debug them at the same time.
 - Version management: run `blitz update` on new releases.
-- Sessions are journaled per project: `blitz continue [ID]` resumes, `blitz sessions` lists the last 10.
+- Sessions management per project: `blitz continue <?session_id>` resumes, `blitz sessions` list all
 
 ## Defaults
 
@@ -25,10 +23,10 @@ The default config comes with some useful commands for quick testing.
 
 - `/plan <prompt>`: Plan with the agent - based on grill-me skill
 - `/review <?prompt>`: Launch multiple challenger agents to review what was done.
-- `/team <?prompt>`: Multiagent orchestrator mode
+- `/team <?prompt>`: Multiagent orchestrator mode `Ultramode`
 - `/show <?prompt>`: explain something with mermaid diagrams
 - `/ssh-<myconfig>..`: autocomplete your ssh config entries for quick connection.
-- `/improve <?prompt>`: After a task, let the agent improve the harness.
+- `/improve <?prompt>`: Review the conversation/task and start improving the harness.
 
 Connect remote without ssh config entries `/ssh user@host:/path/to/cwd`
 
