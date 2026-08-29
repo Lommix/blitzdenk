@@ -21,6 +21,8 @@ for that call. Each section below hides a buried list (event names, provider
 fields, status constants). For those, the meta file is the list: inspect the
 class and use it, do not enumerate.
 
+To see the CLI capabilities of blitzdenk run `blitz help`
+
 ## File layout
 
 - `~/.config/blitzdenk/blitz.lua`, global user config, loaded at startup.

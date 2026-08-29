@@ -1,8 +1,8 @@
 # Blitzdenk
 
 A self improving coding harness for POSIX. No dependencies, vendored Lua.
-It extends its own Lua sandbox on demand to fit your project
-ships as a single binary under 2 MB, and runs in under 100 MB of RAM.
+It extends its own Lua sandbox on demand to fit your project.
+Ships as a single 1.7MB binary using less then 99MB of ram.
 
 ![demo](docs/assets/demo.gif)
 
