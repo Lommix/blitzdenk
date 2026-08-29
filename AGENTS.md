@@ -50,3 +50,4 @@ Important modules:
 ## RULES
 
 - Keep the user space blitzdenk skill up to date (`src/skills/blitzdenk-lua.md`). Prose, direct, raw statements. No obvious facts that can re researched in the `meta.lua`
+- No comments and no Doc comments!

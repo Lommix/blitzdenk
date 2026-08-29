@@ -91,7 +91,7 @@ fn inject_cwd_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Ag
     else
         "unknown";
 
-    try w.print("[CWD] {s}\n[OS] {s}\n[TEMP WORKING DIR] {s}/{d}\n", .{ cwd, os_name, r.util.TMP_DIR, std.c.getpid() });
+    try w.print("[CWD] {s}\n[OS] {s}\n[TMP TESTING DIR] {s}/{d}\n", .{ cwd, os_name, r.util.TMP_DIR, std.c.getpid() });
 }
 
 fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.Agent) !void {

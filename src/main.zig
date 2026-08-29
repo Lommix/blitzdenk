@@ -1103,6 +1103,7 @@ pub fn run(
                                                 },
                                                 .ssh_off => {
                                                     app.exec_pool.clearSsh();
+                                                    app.invalidatePathCompletions();
                                                     app.notifications.append(gpa, "SSH mode disabled", .{}) catch {};
                                                     app.input_buffer.clearRetainingCapacity();
                                                 },
@@ -1498,11 +1499,24 @@ fn handleSshCommand(
             state.pushSystemMessage("ssh: failed to allocate target", .{});
             return;
         };
+        probeRemoteHome(state, cmd_pool);
         state.notifications.append(gpa, "SSH mode enabled: {s}@{s}", .{ args.user, args.host }) catch {};
         state.remote_cwd = args.cwd;
     } else {
         state.enterPassphrase(args.user, args.host, args.cwd);
     }
+}
+
+fn probeRemoteHome(state: *App, cmd_pool: *r.exec.CmdPool) void {
+    const res = cmd_pool.runAndWait(.{
+        .argv = &.{ "sh", "-lc", "echo $HOME" },
+    }) catch return;
+    defer cmd_pool.alloc.free(res.stdout);
+    defer cmd_pool.alloc.free(res.stderr);
+    if (res.ty != .success) return;
+    const home = std.mem.trim(u8, res.stdout, " \t\r\n");
+    if (home.len == 0 or home[0] != '/') return;
+    state.setRemoteHome(home);
 }
 
 /// Returns true iff a non-interactive ssh probe succeeds (key already loaded
@@ -1633,6 +1647,7 @@ fn handleSshUnlock(state: *App, cmd_pool: *r.exec.CmdPool, gpa: std.mem.Allocato
         state.pushSystemMessage("ssh: failed to allocate target", .{});
         return;
     };
+    probeRemoteHome(state, cmd_pool);
     state.notifications.append(gpa, "SSH mode enabled: {s}@{s}", .{ user, host }) catch {};
 }
 

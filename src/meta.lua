@@ -315,9 +315,9 @@
 ---Register a complete agent configuration.
 ---@field add_agent fun(def: BlitzAgentDef): integer
 ---Set the model config for a specific agent.
----@field set_agent_model fun(agent_type: integer, model: integer, effort?: string)
+---@field set_agent_model fun(agent_type: integer, model: integer, effort?: string, force?: boolean)
 ---Set the reasoning effort for an agent type without touching its model.
----@field set_agent_effort fun(agent_type: integer, effort: string)
+---@field set_agent_effort fun(agent_type: integer, effort: string, force?: boolean)
 ---Return the model name bound to an agent type.
 ---@field get_model_name fun(agent_type: integer): string
 ---Return the reasoning effort string bound to an agent type.

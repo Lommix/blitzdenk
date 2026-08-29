@@ -212,6 +212,23 @@ pub const Notifications = struct {
 
 const Locked = r.agent_state.Locked;
 
+const PathCompletion = struct {
+    cache: r.completion.DirCache = .{},
+    probe_handle: ?r.exec.CmdPool.Handle = null,
+    probe_dir: ?[]const u8 = null,
+    probe_include_hidden: bool = false,
+    probe_started_ms: i64 = 0,
+    debounce_ms: i64 = 0,
+    remote_home: ?[]const u8 = null,
+
+    fn cancelProbe(self: *PathCompletion, pool: *r.exec.CmdPool, alloc: std.mem.Allocator) void {
+        if (self.probe_handle) |h| pool.cancel(h);
+        self.probe_handle = null;
+        if (self.probe_dir) |d| alloc.free(d);
+        self.probe_dir = null;
+    }
+};
+
 const ToolStatusEntry = struct {
     lines: std.ArrayList(r.tui.Line) = .empty,
     child_id: ?r.AgentId = null,
@@ -315,6 +332,7 @@ pub const App = struct {
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
     injection_hooks: r.inject.InjectionsHooks = .{},
+    path_completion: PathCompletion = .{},
 
     // TODO: cleanup io
     pub fn init(
@@ -360,6 +378,8 @@ pub const App = struct {
         if (self.last_unbound_warn) |s| self.gpa.free(s);
         for (self.history.items) |e| self.gpa.free(e.text);
         self.history.deinit(self.gpa);
+        self.path_completion.cache.clear(self.appAlloc());
+        if (self.path_completion.remote_home) |h| self.appAlloc().free(h);
         self.context_factory.deinit();
         self.arena_streaming_preview.deinit();
         self.arena_streaming_snapshot.deinit();
@@ -526,6 +546,7 @@ pub const App = struct {
         self.registry.retryDue();
         self.running = self.registry.countActive() > 0;
         self.updateSessionTime();
+        self.tickPathCompletion();
 
         // --------------------------------------------------
         // pop permission
@@ -542,6 +563,182 @@ pub const App = struct {
             self.session_run_ns += now - self.session_run_started_ns;
             self.session_run_started_ns = 0;
         }
+    }
+
+    fn nowMillis(self: *App) i64 {
+        const now = std.Io.Clock.Timestamp.now(self.io, .real);
+        return @intCast(@divTrunc(now.raw.nanoseconds, std.time.ns_per_ms));
+    }
+
+    fn probeHome(self: *const App) []const u8 {
+        if (self.exec_pool.ssh_active) return self.path_completion.remote_home orelse "/";
+        return self.exec_pool.env.get("HOME") orelse "/";
+    }
+
+    fn pathTokenActive(self: *const App) bool {
+        return self.currentTokenParts() != null;
+    }
+
+    fn tickPathCompletion(self: *App) void {
+        const pc = &self.path_completion;
+        const parts_opt = if (self.input_mode == .text) self.currentTokenParts() else null;
+        const parts = parts_opt orelse {
+            if (pc.probe_handle != null or pc.debounce_ms != 0) pc.cancelProbe(self.exec_pool, self.appAlloc());
+            return;
+        };
+
+        const now_ms = self.nowMillis();
+        var probed_dir_buf: [1024]u8 = undefined;
+        const probe_dir = self.resolveProbeDir(parts.prefix, &probed_dir_buf) orelse {
+            if (pc.probe_handle != null or pc.debounce_ms != 0) pc.cancelProbe(self.exec_pool, self.appAlloc());
+            return;
+        };
+
+        if (pc.cache.find(probe_dir)) |hit| {
+            if (hit.fresh(now_ms) and (hit.include_hidden or !parts.include_hidden)) {
+                if (pc.probe_handle != null or pc.debounce_ms != 0) pc.cancelProbe(self.exec_pool, self.appAlloc());
+                return;
+            }
+        }
+
+        if (pc.probe_handle) |handle| {
+            const slot = &self.exec_pool.slots[@intFromEnum(handle)];
+            if (slot.done.load(.acquire)) {
+                self.harvestProbe(handle);
+            } else if (now_ms - pc.probe_started_ms > r.completion.PROBE_TIMEOUT_MS) {
+                self.timeoutProbe(handle);
+            } else {
+                pc.debounce_ms = 0;
+            }
+            return;
+        }
+
+        if (pc.debounce_ms == 0) {
+            pc.debounce_ms = now_ms;
+            return;
+        }
+        if (now_ms - pc.debounce_ms < r.completion.DEBOUNCE_MS) return;
+
+        self.spawnProbe(probe_dir, parts.include_hidden);
+    }
+
+    const TokenParts = struct {
+        prefix: []const u8,
+        filter: []const u8,
+        include_hidden: bool,
+    };
+
+    fn currentTokenParts(self: *const App) ?TokenParts {
+        const tok = r.completion.tokenAt(self.input_buffer.items, self.input_cursor);
+        if (!tok.is_path) return null;
+        if (tok.start == 0 and self.input_buffer.items.len > 0 and self.input_buffer.items[0] == '/') {
+            if (r.completion.commandTokenOwns(self.input_buffer.items, self.input_cursor)) return null;
+        }
+        const token = self.input_buffer.items[tok.start..tok.end];
+        const slash = std.mem.lastIndexOfScalar(u8, token, '/') orelse return null;
+        const filter = token[slash + 1 ..];
+        return .{
+            .prefix = token[0 .. slash + 1],
+            .filter = filter,
+            .include_hidden = filter.len > 0 and filter[0] == '.',
+        };
+    }
+
+    fn resolveProbeDir(self: *App, insert_prefix: []const u8, buf: *[1024]u8) ?[]const u8 {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const parts = r.completion.splitToken(arena.allocator(), insert_prefix, self.probeHome()) catch return null;
+        return std.fmt.bufPrint(buf, "{s}", .{parts.dir}) catch null;
+    }
+
+    fn spawnProbe(self: *App, dir: []const u8, include_hidden: bool) void {
+        const pc = &self.path_completion;
+        if (pc.probe_dir) |old| self.appAlloc().free(old);
+
+        const argv: []const []const u8 = if (include_hidden)
+            &.{ "ls", "-1pA", dir }
+        else
+            &.{ "ls", "-1p", dir };
+
+        const handle = self.exec_pool.runWithOpts(.{ .argv = argv, .cwd = self.exec_pool.effectiveCwd(self.cwd) }) catch {
+            pc.debounce_ms = 0;
+            return;
+        };
+
+        pc.probe_handle = handle;
+        pc.probe_dir = self.appAlloc().dupe(u8, dir) catch null;
+        pc.probe_include_hidden = include_hidden;
+        pc.probe_started_ms = self.nowMillis();
+        pc.debounce_ms = 0;
+    }
+
+    fn harvestProbe(self: *App, handle: r.exec.CmdPool.Handle) void {
+        const pc = &self.path_completion;
+        const dir = pc.probe_dir orelse "";
+        const include_hidden = pc.probe_include_hidden;
+        pc.probe_handle = null;
+        pc.probe_dir = null;
+        defer if (dir.len > 0) self.appAlloc().free(dir);
+
+        const res = self.exec_pool.killAndCollect(handle) catch return;
+        defer self.exec_pool.alloc.free(res.stdout);
+        defer self.exec_pool.alloc.free(res.stderr);
+        if (dir.len == 0) return;
+
+        const alloc = self.appAlloc();
+        const list = pc.cache.beginInsert(alloc, dir) catch return;
+        list.stamp_ms = self.nowMillis();
+        list.valid = true;
+        list.include_hidden = include_hidden;
+        if (res.ty != .success) {
+            list.valid = false;
+            return;
+        }
+        r.completion.parseLsOutput(alloc, list, res.stdout) catch {
+            list.valid = false;
+            return;
+        };
+        r.completion.sortEntries(list.entries.items);
+
+        if (self.input_mode == .text and self.pathTokenActive()) {
+            if (self.currentTokenDirMatches(dir)) self.syncCompletion();
+        }
+        self.dirty = true;
+    }
+
+    fn currentTokenDirMatches(self: *App, dir: []const u8) bool {
+        var buf: [1024]u8 = undefined;
+        const parts = self.currentTokenParts() orelse return false;
+        const resolved = self.resolveProbeDir(parts.prefix, &buf) orelse return false;
+        return std.mem.eql(u8, resolved, dir);
+    }
+
+    fn timeoutProbe(self: *App, handle: r.exec.CmdPool.Handle) void {
+        const pc = &self.path_completion;
+        const dir = pc.probe_dir orelse return;
+        pc.probe_handle = null;
+        pc.probe_dir = null;
+        defer if (dir.len > 0) self.appAlloc().free(dir);
+
+        const alloc = self.appAlloc();
+        const list = pc.cache.beginInsert(alloc, dir) catch return;
+        list.stamp_ms = self.nowMillis();
+        list.valid = false;
+        self.exec_pool.cancel(handle);
+    }
+
+    pub fn invalidatePathCompletions(self: *App) void {
+        self.path_completion.cache.clear(self.appAlloc());
+        if (self.path_completion.remote_home) |h| {
+            self.appAlloc().free(h);
+            self.path_completion.remote_home = null;
+        }
+        self.path_completion.cancelProbe(self.exec_pool, self.appAlloc());
+    }
+
+    pub fn setRemoteHome(self: *App, home: []const u8) void {
+        if (self.path_completion.remote_home) |h| self.appAlloc().free(h);
+        self.path_completion.remote_home = self.appAlloc().dupe(u8, home) catch null;
     }
 
     fn sessionRunSecs(self: *const App) u32 {
@@ -758,11 +955,16 @@ pub const App = struct {
     pub fn syncCompletion(self: *App) void {
         const t = self.textState() orelse return;
         t.completion_selected = 0;
-        t.completion_query_len = commandCompletionPrefix(self.input_buffer.items, self.input_cursor).len;
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        const rows = commandCompletions(self, arena.allocator(), self.input_buffer.items, self.input_cursor);
-        t.completion_open = completionVisible(self.input_buffer.items, self.input_cursor, rows.len);
+        if (self.pathTokenActive()) {
+            const rows = pathCompletions(self, arena.allocator());
+            t.completion_open = rows.len > 0;
+        } else {
+            t.completion_query_len = commandCompletionPrefix(self.input_buffer.items, self.input_cursor).len;
+            const rows = commandCompletions(self, arena.allocator(), self.input_buffer.items, self.input_cursor);
+            t.completion_open = rows.len > 0 and commandTokenActive(self.input_buffer.items, self.input_cursor);
+        }
     }
 
     pub fn closeCompletion(self: *App) bool {
@@ -784,7 +986,7 @@ pub const App = struct {
         defer arena.deinit();
         const alloc = arena.allocator();
 
-        const rows = commandCompletions(self, alloc, self.input_buffer.items, self.input_cursor);
+        const rows = activeCompletions(self, alloc, self.input_buffer.items, self.input_cursor);
         if (rows.len == 0) {
             t.completion_open = false;
             t.completion_selected = 0;
@@ -793,8 +995,20 @@ pub const App = struct {
         }
         if (t.completion_selected >= rows.len) t.completion_selected = 0;
 
-        const cur_end = @min(@as(usize, self.input_cursor), self.input_buffer.items.len);
-        const already = std.ascii.eqlIgnoreCase(self.input_buffer.items[0..cur_end], rows.items[t.completion_selected].text);
+        const path_mode = self.pathTokenActive();
+        if (path_mode and move != .accept) {
+            if (move == .next) {
+                t.completion_selected = @min(t.completion_selected + 1, rows.len - 1);
+            } else {
+                t.completion_selected -|= 1;
+            }
+            return;
+        }
+
+        const chosen = rows.items[t.completion_selected].text;
+        const cur_tok = r.completion.tokenAt(self.input_buffer.items, self.input_cursor);
+        const cur_token = self.input_buffer.items[cur_tok.start..cur_tok.end];
+        const already = std.ascii.eqlIgnoreCase(cur_token, chosen);
 
         switch (move) {
             .accept => {},
@@ -811,7 +1025,9 @@ pub const App = struct {
         insertCompletionToken(self, rows.items[t.completion_selected].text);
 
         if (move == .accept) {
-            t.completion_open = false;
+            const accepted = rows.items[t.completion_selected].text;
+            const descend = path_mode and accepted.len > 0 and accepted[accepted.len - 1] == '/';
+            t.completion_open = descend;
             t.completion_selected = 0;
             t.completion_query_len = 0;
         }
@@ -877,6 +1093,22 @@ pub const App = struct {
             } else {
                 try self.context_factory.refreshAgentTools(&self.config, agent, self.toolBase(.{ .index = @intCast(index), .generation = slot.generation }));
             }
+        }
+    }
+
+    pub fn refreshLiveAgentModels(self: *App, agent_type: r.ContextFactory.AgentType) !void {
+        const config = switch (self.context_factory.buildAgentApiConfig(agent_type, &self.config, self.exec_pool.env)) {
+            .config => |config| config,
+            .diagnostic => return error.InvalidProviderConfiguration,
+        };
+        for (&self.registry.slots) |*slot| {
+            const state = slot.state.load(.acquire);
+            if (state == .free or state == .reserved) continue;
+            const agent = &slot.agent.?;
+            if (agent.type_idx != @intFromEnum(agent_type)) continue;
+            agent.updateModel(config) catch |err| {
+                std.log.scoped(.app).warn("model update failed for agent `{s}`: {s}", .{ agent.name, @errorName(err) });
+            };
         }
     }
 
@@ -1031,7 +1263,7 @@ pub const App = struct {
             switch (app.input_mode) {
                 .text, .passphrase => {
                     const inner_w = area.width -| 5; // 2 left + 2 right padding + ❯ prompt
-                    const rows = inputWrappedRows(app, frame_alloc, inner_w);
+                    const rows: u16 = @intCast(@min(inputWrapPosition(app, frame_alloc, inner_w, false).row + 1, @as(usize, std.math.maxInt(u16))));
                     break :blk @min(rows +| 3, 9); // input rows + status + 2 padding
                 },
                 .perm_message => break :blk 8, // 5-row input box + status + 2 padding
@@ -1151,7 +1383,7 @@ pub const App = struct {
         renderNotifications(app, frame_alloc, area, buf);
 
         if (app.input_mode == .text and app.input_mode.text.completion_open) {
-            const completions = commandCompletions(app, frame_alloc, app.input_buffer.items, app.input_cursor);
+            const completions = activeCompletions(app, frame_alloc, app.input_buffer.items, app.input_cursor);
             if (completions.len > 0) {
                 var max_width: usize = 0;
                 for (completions.items[0..completions.len]) |cmp| {
@@ -1160,8 +1392,7 @@ pub const App = struct {
                 }
 
                 var p = r.tui.Paragraph{};
-                p.border = .single;
-                p.style.bg = app.theme.overlay_dark;
+                p.style.bg = app.theme.overlay;
 
                 const visible = 8;
                 const selected = @min(app.input_mode.text.completion_selected, completions.len - 1);
@@ -1181,11 +1412,24 @@ pub const App = struct {
                 }
 
                 if (p.lines.items.len > 0) {
-                    const height: u16 = @intCast(p.lines.items.len + 2);
+                    const anchor_para = r.tui.Paragraph{
+                        .border = .none,
+                        .padding = .{ .left = 1 },
+                    };
+                    const input_rect: r.tui.Rect = .{
+                        .x = _input_area.x +| 2,
+                        .y = _input_area.y +| 1 +| progress_h,
+                        .width = _input_area.width -| 4,
+                        .height = 1,
+                    };
+                    const text_origin = anchor_para.inner(input_rect);
+                    const anchor = inputWrapPosition(app, frame_alloc, text_origin.width, true);
+
+                    const height: u16 = @intCast(p.lines.items.len);
                     const completion_area = r.tui.Rect{
-                        .x = _input_area.x + 1,
-                        .y = _input_area.y -| height + 1,
-                        .width = @intCast(@min(max_width + 2, std.math.maxInt(u16))),
+                        .x = text_origin.x +| @as(u16, @intCast(@min(anchor.col, @as(usize, text_origin.width)))),
+                        .y = text_origin.y +| @as(u16, @intCast(@min(anchor.row, @as(usize, std.math.maxInt(u16))))) -| height,
+                        .width = @intCast(@min(max_width, std.math.maxInt(u16))),
                         .height = height,
                     };
                     p.renderSimple(frame_alloc, completion_area, buf);
@@ -2048,7 +2292,7 @@ fn commandCompletionPrefix(input: []const u8, cursor: u32) []const u8 {
     return input[0..command_end];
 }
 
-fn filterPrefix(input: []const u8, cursor: u32, query_len: usize, open: bool) []const u8 {
+fn commandQueryPrefix(input: []const u8, cursor: u32, query_len: usize, open: bool) []const u8 {
     if (open and query_len > 0 and query_len <= input.len) return input[0..query_len];
     return commandCompletionPrefix(input, cursor);
 }
@@ -2061,16 +2305,8 @@ fn containsCommandCompletion(items: []?CommandCompletion, needle: []const u8) bo
     return false;
 }
 
-fn startsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
-    if (prefix.len > value.len) return false;
-    for (prefix, 0..) |c, i| {
-        if (std.ascii.toLower(c) != std.ascii.toLower(value[i])) return false;
-    }
-    return true;
-}
-
 fn completionMatches(completion: []const u8, prefix: []const u8) bool {
-    return startsWithIgnoreCase(completion, prefix) and !std.ascii.eqlIgnoreCase(completion, prefix);
+    return std.ascii.startsWithIgnoreCase(completion, prefix) and !std.ascii.eqlIgnoreCase(completion, prefix);
 }
 
 fn commandTokenActive(input: []const u8, cursor: u32) bool {
@@ -2079,10 +2315,6 @@ fn commandTokenActive(input: []const u8, cursor: u32) bool {
     if (end == 0) return false;
     if (input[0] != '/') return false;
     return std.mem.indexOfScalar(u8, input[0..end], ' ') == null;
-}
-
-fn completionVisible(input: []const u8, cursor: u32, match_count: usize) bool {
-    return match_count > 0 and commandTokenActive(input, cursor);
 }
 
 fn textWidthCols(text: []const u8) usize {
@@ -2150,7 +2382,7 @@ fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cu
     var count: usize = 0;
 
     const prefix = switch (app.input_mode) {
-        .text => |t| filterPrefix(input, cursor, t.completion_query_len, t.completion_open),
+        .text => |t| commandQueryPrefix(input, cursor, t.completion_query_len, t.completion_open),
         else => commandCompletionPrefix(input, cursor),
     };
     appendBuiltinCommandCompletions(prefix, &matches, &count);
@@ -2168,7 +2400,40 @@ fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cu
     return rows;
 }
 
+fn activeCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: u32) CompletionRows {
+    if (app.pathTokenActive()) return pathCompletions(app, alloc);
+    return commandCompletions(app, alloc, input, cursor);
+}
+
+fn pathCompletions(app: *App, alloc: std.mem.Allocator) CompletionRows {
+    var rows = CompletionRows{};
+
+    const parts = app.currentTokenParts() orelse return rows;
+    var dir_buf: [1024]u8 = undefined;
+    const probe_dir = app.resolveProbeDir(parts.prefix, &dir_buf) orelse return rows;
+    const list = app.path_completion.cache.find(probe_dir) orelse return rows;
+    if (!list.valid) return rows;
+
+    for (list.entries.items) |entry| {
+        if (rows.len >= rows.items.len) break;
+        if (parts.filter.len > 0 and !std.ascii.startsWithIgnoreCase(entry.name, parts.filter)) continue;
+        const text = std.fmt.allocPrint(alloc, "{s}{s}", .{ parts.prefix, entry.name }) catch break;
+        rows.items[rows.len] = .{
+            .text = text,
+            .description = r.completion.kindDescription(entry.kind),
+        };
+        rows.len += 1;
+    }
+    return rows;
+}
+
 fn insertCompletionToken(self: *App, entry: []const u8) void {
+    if (self.pathTokenActive()) {
+        const tok = r.completion.tokenAt(self.input_buffer.items, self.input_cursor);
+        self.input_buffer.replaceRange(self.sessionAlloc(), tok.start, tok.end - tok.start, entry) catch return;
+        self.input_cursor = @intCast(tok.start + entry.len);
+        return;
+    }
     const token_end = std.mem.indexOfScalar(u8, self.input_buffer.items, ' ') orelse self.input_buffer.items.len;
     self.input_buffer.replaceRange(self.sessionAlloc(), 0, token_end, entry) catch return;
     self.input_cursor = @intCast(entry.len);
@@ -2290,24 +2555,42 @@ fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf
     }
 }
 
+fn inputWrapPosition(app: *App, arena: std.mem.Allocator, inner_w: u16, to_token_start: bool) struct { row: usize, col: usize } {
+    const display = app.displayInput(arena);
+    const cursor: usize = @min(display.cursor, display.text.len);
+    const target = if (to_token_start) r.completion.tokenAt(display.text, cursor).start else cursor;
+
+    var rows_above: usize = 0;
+    var consumed: usize = 0;
+    var it = std.mem.splitAny(u8, display.text, "\n");
+    while (it.next()) |raw_line| {
+        const line_start = consumed;
+        const line_end = line_start + raw_line.len;
+        var wrapped: std.ArrayList(r.tui.Line) = .empty;
+        defer wrapped.deinit(arena);
+        if (target >= line_start and target <= line_end) {
+            const off = target - line_start;
+            var line = r.tui.Line{};
+            line.pushText(arena, raw_line[0..off], .{}) catch break;
+            r.tui.wrapLine(arena, &line, inner_w, &wrapped) catch break;
+            const last = if (wrapped.items.len == 0) 0 else wrapped.items.len - 1;
+            var col: usize = 0;
+            if (wrapped.items.len > 0) {
+                for (wrapped.items[last].spans.items) |span| col += textWidthCols(span.content);
+            }
+            return .{ .row = rows_above + last, .col = col };
+        }
+        pushPlainWrappedLine(app, arena, raw_line, inner_w, &wrapped) catch break;
+        rows_above += wrapped.items.len;
+        consumed = line_end + 1;
+    }
+    return .{ .row = 0, .col = 0 };
+}
+
 fn pushPlainWrappedLine(app: *App, arena: std.mem.Allocator, raw_line: []const u8, inner_w: u16, out: *std.ArrayList(r.tui.Line)) !void {
     var line = r.tui.Line{};
     try line.pushText(arena, raw_line, .{ .fg = app.theme.text_hl });
     try r.tui.wrapLine(arena, &line, inner_w, out);
-}
-
-/// Number of visual rows the input text wraps to at `inner_w` columns.
-fn inputWrappedRows(app: *App, arena: std.mem.Allocator, inner_w: u16) u16 {
-    const display = app.displayInput(arena);
-    var rows: u16 = 0;
-    var it = std.mem.splitAny(u8, display.text, "\n");
-    while (it.next()) |raw_line| {
-        var wrapped: std.ArrayList(r.tui.Line) = .empty;
-        defer wrapped.deinit(arena);
-        pushPlainWrappedLine(app, arena, raw_line, inner_w, &wrapped) catch break;
-        rows +|= @intCast(wrapped.items.len);
-    }
-    return @max(rows, 1);
 }
 
 fn renderPermMessageContent(app: *App, pm: *const InputMode.PermMessage, area: r.tui.Rect, buf: *r.tui.Buffer) void {
@@ -4077,18 +4360,203 @@ test "completion matcher excludes exact prefix" {
     try std.testing.expect(completionMatches(skills[1], "/skill"));
 }
 
+test "inputWrapPosition reports rows above and column of token start" {
+    const testing = std.testing;
+    var app: App = undefined;
+    app.io = testing.io;
+    app.input_mode = .{ .text = .{} };
+    app.input_buffer = .empty;
+    app.input_cursor = 0;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    app.input_buffer.items = @constCast("check ./src/foo");
+    app.input_cursor = 15;
+
+    const anchor = inputWrapPosition(&app, arena.allocator(), 80, true);
+    try testing.expectEqual(@as(usize, 0), anchor.row);
+    try testing.expectEqual(@as(usize, 6), anchor.col);
+    const caret = inputWrapPosition(&app, arena.allocator(), 80, false);
+    try testing.expectEqual(@as(usize, 0), caret.row);
+
+    app.input_buffer.items = @constCast("hello\n./src/foo");
+    app.input_cursor = 15;
+    const multiline = inputWrapPosition(&app, arena.allocator(), 80, true);
+    try testing.expectEqual(@as(usize, 1), multiline.row);
+    try testing.expectEqual(@as(usize, 0), multiline.col);
+
+    app.input_buffer.items = @constCast("aa bb cc dd ee /file");
+    app.input_cursor = 20;
+    const wrapped = inputWrapPosition(&app, arena.allocator(), 10, true);
+    try testing.expectEqual(@as(usize, 1), wrapped.row);
+    try testing.expectEqual(@as(usize, 6), wrapped.col);
+}
+
 test "completion visibility rule" {
-    try std.testing.expect(completionVisible("/ski", 4, 2));
-    try std.testing.expect(!completionVisible("/skill-x ", 9, 2));
-    try std.testing.expect(!completionVisible("hello", 5, 2));
-    try std.testing.expect(!completionVisible("/cd /tm", 7, 2));
-    try std.testing.expect(!completionVisible("/ski", 4, 0));
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.input_mode = .{ .text = .{} };
+    app.input_buffer = .empty;
+    app.input_cursor = 0;
+    app.exec_pool = undefined;
+
+    app.input_buffer.items = @constCast("/ski");
+    app.input_cursor = 4;
+    try std.testing.expect(!app.pathTokenActive());
+    try std.testing.expect(commandTokenActive("/ski", 4));
+
+    app.input_buffer.items = @constCast("/cd /tm");
+    app.input_cursor = 7;
+    try std.testing.expect(app.pathTokenActive());
+    try std.testing.expect(!commandTokenActive("/cd /tm", 7));
+
+    app.input_buffer.items = @constCast("/etc/");
+    app.input_cursor = 5;
+    try std.testing.expect(app.pathTokenActive());
+    try std.testing.expect(!r.completion.commandTokenOwns("/etc/", 5));
 }
 
 test "completion filter keeps original query after insert" {
-    try std.testing.expectEqualStrings("/sk", filterPrefix("/skill-ponytail", 15, 3, true));
-    try std.testing.expectEqualStrings("/skill-ponytail", filterPrefix("/skill-ponytail", 15, 3, false));
-    try std.testing.expectEqualStrings("/ski", filterPrefix("/ski", 4, 0, true));
+    try std.testing.expectEqualStrings("/sk", commandQueryPrefix("/skill-ponytail", 15, 3, true));
+    try std.testing.expectEqualStrings("/skill-ponytail", commandQueryPrefix("/skill-ponytail", 15, 3, false));
+    try std.testing.expectEqualStrings("/ski", commandQueryPrefix("/ski", 4, 0, true));
+}
+
+const PathCompletionFixture = struct {
+    tmp: std.testing.TmpDir = undefined,
+    env: std.process.Environ.Map = undefined,
+    pool: r.exec.CmdPool = undefined,
+    app: App = undefined,
+
+    fn init(f: *PathCompletionFixture) !void {
+        const testing = std.testing;
+        f.tmp = testing.tmpDir(.{});
+        f.env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+        f.pool = r.exec.CmdPool.init(testing.allocator, testing.io, &f.env);
+        f.app = undefined;
+        f.app.io = testing.io;
+        f.app.gpa = testing.allocator;
+        f.app.arena_app = std.heap.ArenaAllocator.init(testing.allocator);
+        f.app.arena_session = std.heap.ArenaAllocator.init(testing.allocator);
+        f.app.exec_pool = &f.pool;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root_len = try f.tmp.dir.realPathFile(testing.io, ".", &buf);
+        f.app.cwd = try f.app.appAlloc().dupe(u8, buf[0..root_len]);
+        f.app.input_mode = .{ .text = .{} };
+        f.app.input_buffer = .empty;
+        f.app.input_cursor = 0;
+        f.app.path_completion = .{};
+    }
+
+    fn deinit(f: *PathCompletionFixture) void {
+        f.app.path_completion.cache.clear(f.app.appAlloc());
+        f.app.arena_session.deinit();
+        f.app.arena_app.deinit();
+        f.pool.deinit();
+        f.env.deinit();
+        f.tmp.cleanup();
+    }
+
+    fn waitForDirList(f: *PathCompletionFixture, dir: []const u8) !void {
+        var waited: usize = 0;
+        while (f.app.path_completion.cache.find(dir) == null and waited < 200) : (waited += 1) {
+            f.app.tickPathCompletion();
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake);
+        }
+    }
+};
+
+test "path completion probes dirs and lists entries" {
+    const testing = std.testing;
+    var f: PathCompletionFixture = .{};
+    try f.init();
+    defer f.deinit();
+    try f.tmp.dir.createDir(testing.io, "sub", .default_dir);
+    try f.tmp.dir.writeFile(testing.io, .{ .sub_path = "zz.txt", .data = "x" });
+
+    f.app.input_buffer.items = try f.app.sessionAlloc().dupe(u8, "./");
+    f.app.input_cursor = 2;
+    try f.waitForDirList(".");
+    try testing.expect(f.app.path_completion.cache.find(".") != null);
+
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+    const rows = pathCompletions(&f.app, frame.allocator());
+    try testing.expect(rows.len >= 2);
+
+    var saw_dir = false;
+    var saw_file = false;
+    for (rows.items[0..rows.len]) |row| {
+        if (std.mem.eql(u8, row.text, "./sub/")) saw_dir = true;
+        if (std.mem.eql(u8, row.text, "./zz.txt")) saw_file = true;
+    }
+    try testing.expect(saw_dir);
+    try testing.expect(saw_file);
+    try testing.expectEqualStrings("dir", rows.items[0].description.?);
+}
+
+test "path completion next prev highlight without descending" {
+    const testing = std.testing;
+    var f: PathCompletionFixture = .{};
+    try f.init();
+    defer f.deinit();
+    try f.tmp.dir.createDir(testing.io, "sub", .default_dir);
+    try f.tmp.dir.createDir(testing.io, "sub/nested", .default_dir);
+    try f.tmp.dir.writeFile(testing.io, .{ .sub_path = "zz.txt", .data = "x" });
+    try f.tmp.dir.writeFile(testing.io, .{ .sub_path = "sub/aa.txt", .data = "x" });
+
+    f.app.input_buffer.items = try f.app.sessionAlloc().dupe(u8, "./");
+    f.app.input_cursor = 2;
+    try f.waitForDirList(".");
+
+    f.app.syncCompletion();
+    try testing.expect(f.app.input_mode.text.completion_open);
+    try testing.expectEqual(@as(usize, 0), f.app.input_mode.text.completion_selected);
+
+    f.app.handleCompletion(.next);
+    try testing.expectEqualStrings("./", f.app.input_buffer.items);
+    try testing.expectEqual(@as(u32, 2), f.app.input_cursor);
+    try testing.expectEqual(@as(usize, 1), f.app.input_mode.text.completion_selected);
+
+    f.app.handleCompletion(.next);
+    try testing.expectEqual(@as(usize, 1), f.app.input_mode.text.completion_selected);
+
+    f.app.handleCompletion(.prev);
+    try testing.expectEqualStrings("./", f.app.input_buffer.items);
+    try testing.expectEqual(@as(u32, 2), f.app.input_cursor);
+    try testing.expectEqual(@as(usize, 0), f.app.input_mode.text.completion_selected);
+
+    f.app.handleCompletion(.accept);
+    try testing.expectEqualStrings("./sub/", f.app.input_buffer.items);
+    try testing.expectEqual(@as(u32, 6), f.app.input_cursor);
+    try testing.expect(f.app.input_mode.text.completion_open);
+    try testing.expectEqual(@as(usize, 0), f.app.input_mode.text.completion_selected);
+
+    try f.waitForDirList("sub");
+
+    f.app.handleCompletion(.next);
+    try testing.expectEqualStrings("./sub/", f.app.input_buffer.items);
+    try testing.expectEqual(@as(u32, 6), f.app.input_cursor);
+    try testing.expectEqual(@as(usize, 1), f.app.input_mode.text.completion_selected);
+
+    f.app.handleCompletion(.accept);
+    try testing.expectEqualStrings("./sub/aa.txt", f.app.input_buffer.items);
+    try testing.expect(!f.app.input_mode.text.completion_open);
+}
+
+test "path completion skips nonexistent dirs without crashing" {
+    const testing = std.testing;
+    var f: PathCompletionFixture = .{};
+    try f.init();
+    defer f.deinit();
+
+    f.app.input_buffer.items = @constCast("/no/such/path/");
+    f.app.input_cursor = 14;
+    try f.waitForDirList("/no/such/path");
+
+    const list = f.app.path_completion.cache.find("/no/such/path");
+    try testing.expect(list != null);
+    try testing.expect(!list.?.valid);
 }
 
 test "wizard confirm writes provider.lua and marker then returns to text" {

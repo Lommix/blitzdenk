@@ -49,6 +49,12 @@ Every agent needs a bound model; unbound agents fail to spawn. Bind with
 `"medium"`) or `model = handle` in `blitz.add_agent`. Change only the effort
 with `blitz.set_agent_effort(agent_type, effort)`.
 
+Pass `force = true` to either call to also swap the model on live agents of
+that type: `blitz.set_agent_model(agent_type, handle, effort, true)`. Idle
+agents swap at once. An agent mid-run keeps its current model until that run
+ends, then adopts the new one. A fork made during that run starts on the new
+model. Without `force`, only new agents use the change.
+
 The first-run wizard writes `~/.config/blitzdenk/provider.lua` and `blitz.lua`
 imports it with `pcall(require, "provider")`. Edit or delete that file to
 change provider and model.

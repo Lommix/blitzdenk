@@ -35,6 +35,7 @@ pub const c = @import("c");
 pub const inject = @import("inject.zig");
 pub const dash = @import("dashboard.zig");
 pub const wizard = @import("wizard.zig");
+pub const completion = @import("completion.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

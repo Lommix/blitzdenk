@@ -105,6 +105,7 @@ pub const Agent = struct {
     compact_task: ?compact.Task = null,
     resume_options: ?agent_run.OwnedOptions = null,
     run_model: ?sdk.LanguageModel = null,
+    pending_model: ?models.Model = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, config: models.Config, options: InitOptions) !Agent {
         var model = try models.Model.init(alloc, config);
@@ -136,7 +137,8 @@ pub const Agent = struct {
     }
 
     pub fn fork(self: *const Agent, parent: u32) !Agent {
-        var model = try self.model.clone(self.alloc);
+        const model_source = if (self.pending_model) |*parked| parked else &self.model;
+        var model = try model_source.clone(self.alloc);
         errdefer model.deinit(self.alloc);
         var child = try initModel(self.alloc, self.io, model, .{
             .identity = .{
@@ -162,6 +164,7 @@ pub const Agent = struct {
         if (self.compact_task) |*task| task.deinit();
         if (self.task) |*task| task.deinit();
         if (self.messages) |*messages| messages.deinit();
+        if (self.pending_model) |*model| model.deinit(self.alloc);
         self.model.deinit(self.alloc);
         self.state_arena.deinit();
         self.injection_arena.deinit();
@@ -209,6 +212,29 @@ pub const Agent = struct {
 
     pub fn markToolsDirty(self: *Agent) void {
         self.tools_dirty.store(true, .release);
+    }
+
+    pub fn updateModel(self: *Agent, config: models.Config) !void {
+        const replacement = try models.Model.init(self.alloc, config);
+        if (self.task != null or self.compact_task != null) {
+            if (self.pending_model) |*stale| stale.deinit(self.alloc);
+            self.pending_model = replacement;
+            return;
+        }
+        self.installModel(replacement);
+    }
+
+    fn installModel(self: *Agent, replacement: models.Model) void {
+        self.run_model = null;
+        self.model.deinit(self.alloc);
+        self.model = replacement;
+    }
+
+    pub fn applyPendingModel(self: *Agent) void {
+        if (self.pending_model == null) return;
+        if (self.task != null or self.compact_task != null) return;
+        self.installModel(self.pending_model.?);
+        self.pending_model = null;
     }
 
     pub fn history(self: *const Agent) []const sdk.Message {
@@ -383,6 +409,7 @@ pub const Agent = struct {
         task.deinit();
         self.task = null;
         self.clearRunHooks();
+        self.applyPendingModel();
         if (next_messages) |owned| {
             if (self.messages) |*previous| previous.deinit();
             self.messages = owned;
@@ -605,6 +632,7 @@ pub const Agent = struct {
         const outcome = task.takeOutcome();
         task.deinit();
         self.compact_task = null;
+        self.applyPendingModel();
         if (outcome) |value| {
             self.compaction.noteSuccess();
             self.compaction.completed_continue_after = self.compaction.continue_after;
@@ -748,6 +776,92 @@ test "agent owns SDK state and adopts completed history" {
     try std.testing.expectEqualStrings("/tmp", agent.cwd);
     Agent.toolCall(&agent, .{ .tool_call_id = "call", .tool_name = "run", .step = 1 });
     try std.testing.expect(!Agent.stopWhen(&agent, .{ .step = 1, .messages = &.{}, .tool_results = &.{} }));
+}
+
+test "forced model update swaps idle agents and defers busy agents" {
+    const Fixture = struct {
+        var release = std.atomic.Value(bool).init(false);
+
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generate(_: *anyopaque, alloc: std.mem.Allocator, io: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            while (!release.load(.acquire)) {
+                std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+            }
+            const result = try alloc.create(sdk.model.GenerateResult);
+            result.* = .{ .text = try alloc.dupe(u8, "done"), .finish_reason = .stop };
+            return result;
+        }
+
+        fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            return generate(ctx, alloc, io, params, client, retries);
+        }
+
+        fn collect(ctx: ?*anyopaque, event: agent_run.Event) void {
+            const agent: *Agent = @ptrCast(@alignCast(ctx.?));
+            agent.observe(event) catch unreachable;
+        }
+    };
+
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model-a",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+
+    try agent.updateModel(.{
+        .api_key = "key",
+        .model = "model-b",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    });
+    try std.testing.expectEqualStrings("model-b", agent.model.languageModel().modelId());
+    try std.testing.expect(agent.pending_model == null);
+
+    var fixture: u8 = 0;
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = "go" });
+    try agent.updateModel(.{
+        .api_key = "key",
+        .model = "model-c",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    });
+    try std.testing.expectEqualStrings("model-b", agent.model.languageModel().modelId());
+    try std.testing.expect(agent.pending_model != null);
+
+    Fixture.release.store(true, .release);
+    agent.task.?.wait();
+    while (agent.drain(2, &agent, Fixture.collect) != 0) {}
+    try std.testing.expect(agent.reap());
+    try std.testing.expectEqualStrings("model-c", agent.model.languageModel().modelId());
+    try std.testing.expect(agent.pending_model == null);
+    try std.testing.expect(agent.run_model == null);
+}
+
+test "fork adopts a parked model update" {
+    var agent = try Agent.init(std.testing.allocator, std.testing.io, .{
+        .api_key = "key",
+        .model = "model-a",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    agent.pending_model = try models.Model.init(std.testing.allocator, .{
+        .api_key = "key",
+        .model = "model-b",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    });
+
+    var child = try agent.fork(7);
+    defer child.deinit();
+    try std.testing.expectEqualStrings("model-b", child.model.languageModel().modelId());
 }
 
 test "prepare step merges queued messages and reminder" {
