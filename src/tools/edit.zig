@@ -1,10 +1,7 @@
 const r = @import("root.zig");
 const std = @import("std");
 
-// 4MB file edit limit
 pub const MAX_EDIT_SIZE: u32 = 1024 * 1024 * 4;
-
-var edit_mutex: std.Io.Mutex = .init;
 
 pub const EditTool = r.Tool{
     .def = .{
@@ -70,31 +67,32 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, "No changes to make: old_string and new_string are exactly the same.");
     }
 
-    const lock = &edit_mutex;
-    lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
-    defer lock.unlock(ctx.io);
-
-    // Read current content.
     const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } }) catch
         return r.errResult(call, "failed to read file");
     defer ctx.base.exec_pool.alloc.free(read_res.stdout);
     defer ctx.base.exec_pool.alloc.free(read_res.stderr);
 
     if (read_res.ty != .success) {
-        const msg = if (read_res.stderr.len > 0)
-            alloc.dupe(u8, read_res.stderr) catch "cannot read file"
-        else
-            "cannot read file";
-        return r.errResult(call, msg);
+        return r.errResult(call, "invalid file");
+    }
+
+    if (read_res.stdout.len > MAX_EDIT_SIZE) {
+        return r.errResult(call, "file exceeds the 4MB edit limit");
     }
 
     const file_content = alloc.dupe(u8, read_res.stdout) catch return r.errResult(call, "oom");
 
     const replacement = buildReplacement(alloc, file_content, args.old_string, args.new_string, args.replace_all) catch |err| switch (err) {
-        error.Ambiguous => return r.errResult(call,
-            \\Found multiple matches of the string to replace, but replace_all is false.
-            \\To replace only one occurrence, please provide more context to uniquely identify the instance.
-        ),
+        error.Ambiguous => {
+            const msg = if (args.replace_all)
+                \\Matched regions overlap; repeated adjacent regions cannot be replaced as separate occurrences.
+                \\Merge the repeated region into one larger edit.
+            else
+                \\Found multiple matches of the string to replace, but replace_all is false.
+                \\To replace only one occurrence, please provide more context to uniquely identify the instance.
+            ;
+            return r.errResult(call, msg);
+        },
         error.OutOfMemory => return r.errResult(call, "out of memory"),
     };
     if (replacement == null) {
@@ -124,10 +122,21 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-    const write_res = ctx.base.exec_pool.runAndWait(.{
-        .argv = &.{ "tee", resolved },
-        .stdin_data = new_content,
-    }) catch return r.errResult(call, "failed to start process");
+    const lock = &r.file_mutex;
+    lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
+    defer lock.unlock(ctx.io);
+
+    const verify_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } }) catch
+        return r.errResult(call, "failed to re-read file");
+    defer ctx.base.exec_pool.alloc.free(verify_res.stdout);
+    defer ctx.base.exec_pool.alloc.free(verify_res.stderr);
+
+    if (verify_res.ty != .success or !std.mem.eql(u8, verify_res.stdout, file_content)) {
+        return r.errResult(call, "file changed on disk while the edit was pending; re-read the file and retry");
+    }
+
+    const write_res = r.atomicWriteViaExec(ctx, resolved, new_content) orelse
+        return r.errResult(call, "failed to start process");
     defer ctx.base.exec_pool.alloc.free(write_res.stdout);
     defer ctx.base.exec_pool.alloc.free(write_res.stderr);
 
@@ -153,49 +162,33 @@ fn buildReplacement(
     new_string: []const u8,
     replace_all: bool,
 ) !?[]const u8 {
-    if (try exactReplace(alloc, file_content, old_string, new_string, replace_all)) |content| {
+    const newline_count = std.mem.count(u8, file_content, "\n");
+    const crlf_count = std.mem.count(u8, file_content, "\r\n");
+    const consistent_crlf = newline_count == crlf_count;
+
+    const exact_new = if (consistent_crlf and
+        std.mem.indexOfScalar(u8, new_string, '\n') != null and
+        std.mem.indexOfScalar(u8, new_string, '\r') == null)
+        try denormalizeLineEndings(alloc, new_string, true)
+    else
+        new_string;
+
+    if (try exactReplace(alloc, file_content, old_string, exact_new, replace_all)) |content| {
         return content;
     }
 
-    const native_crlf = std.mem.indexOf(u8, file_content, "\r\n") != null;
-    const file_lf = try normalizeLineEndings(alloc, file_content);
-    const old_lf = try normalizeLineEndings(alloc, old_string);
-    const new_lf = try normalizeLineEndings(alloc, new_string);
+    const normalize = consistent_crlf and std.mem.indexOfScalar(u8, file_content, '\r') != null;
+    const file_lf = if (normalize) try normalizeLineEndings(alloc, file_content) else file_content;
+    const old_lf = if (normalize) try normalizeLineEndings(alloc, old_string) else old_string;
+    const new_lf = if (normalize) try normalizeLineEndings(alloc, new_string) else new_string;
 
     if (!std.mem.eql(u8, file_lf, file_content) or
         !std.mem.eql(u8, old_lf, old_string) or
         !std.mem.eql(u8, new_lf, new_string))
     {
         if (try exactReplace(alloc, file_lf, old_lf, new_lf, replace_all)) |content_lf| {
-            return try denormalizeLineEndings(alloc, content_lf, native_crlf);
+            return try denormalizeLineEndings(alloc, content_lf, normalize);
         }
-    }
-
-    if (try unescapeCommon(alloc, old_lf)) |unescaped_old| {
-        if (!std.mem.eql(u8, unescaped_old, old_lf)) {
-            if (try exactReplace(alloc, file_lf, unescaped_old, new_lf, replace_all)) |content_lf| {
-                return try denormalizeLineEndings(alloc, content_lf, native_crlf);
-            }
-        }
-    }
-
-    const trimmed_old = trimBoundary(old_lf);
-    if (trimmed_old.len != old_lf.len) {
-        if (try exactReplace(alloc, file_lf, trimmed_old, new_lf, replace_all)) |content_lf| {
-            return try denormalizeLineEndings(alloc, content_lf, native_crlf);
-        }
-    }
-
-    if (try lineTrimmedReplace(alloc, file_lf, old_lf, new_lf, replace_all)) |content_lf| {
-        return try denormalizeLineEndings(alloc, content_lf, native_crlf);
-    }
-
-    if (try indentationFlexibleReplace(alloc, file_lf, old_lf, new_lf, replace_all)) |content_lf| {
-        return try denormalizeLineEndings(alloc, content_lf, native_crlf);
-    }
-
-    if (try whitespaceNormalizedReplace(alloc, file_lf, old_lf, new_lf, replace_all)) |content_lf| {
-        return try denormalizeLineEndings(alloc, content_lf, native_crlf);
     }
 
     return null;
@@ -256,256 +249,6 @@ fn denormalizeLineEndings(alloc: std.mem.Allocator, s: []const u8, crlf: bool) !
     return out;
 }
 
-fn unescapeCommon(alloc: std.mem.Allocator, s: []const u8) !?[]const u8 {
-    if (std.mem.indexOfScalar(u8, s, '\\') == null) return null;
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        if (s[i] != '\\' or i + 1 >= s.len) {
-            try out.append(alloc, s[i]);
-            continue;
-        }
-        i += 1;
-        try out.append(alloc, switch (s[i]) {
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            '\\' => '\\',
-            else => |c| c,
-        });
-    }
-    return try out.toOwnedSlice(alloc);
-}
-
-fn trimBoundary(s: []const u8) []const u8 {
-    return std.mem.trim(u8, s, " \t\r\n");
-}
-
-const Range = struct {
-    start: usize,
-    end: usize,
-};
-
-const Line = struct {
-    start: usize,
-    text_end: usize,
-    end: usize,
-    text: []const u8,
-};
-
-fn lineAt(s: []const u8, start: usize) Line {
-    var i = start;
-    while (i < s.len and s[i] != '\n') : (i += 1) {}
-    const end = if (i < s.len) i + 1 else i;
-    return .{ .start = start, .text_end = i, .end = end, .text = s[start..i] };
-}
-
-fn nextLineStart(s: []const u8, start: usize) ?usize {
-    if (start >= s.len) return null;
-    const line = lineAt(s, start);
-    if (line.end >= s.len) return null;
-    return line.end;
-}
-
-fn patternLineCount(s: []const u8) usize {
-    if (s.len == 0) return 0;
-    const nl = std.mem.count(u8, s, "\n");
-    return if (s[s.len - 1] == '\n') nl else nl + 1;
-}
-
-fn patternLine(s: []const u8, line_index: usize) []const u8 {
-    var start: usize = 0;
-    var idx: usize = 0;
-    while (idx < line_index) : (idx += 1) {
-        const nl = std.mem.indexOfScalarPos(u8, s, start, '\n') orelse s.len;
-        start = @min(nl + 1, s.len);
-    }
-    const end = std.mem.indexOfScalarPos(u8, s, start, '\n') orelse s.len;
-    return s[start..end];
-}
-
-fn lineTrimmedReplace(
-    alloc: std.mem.Allocator,
-    content: []const u8,
-    old_string: []const u8,
-    new_string: []const u8,
-    replace_all: bool,
-) !?[]const u8 {
-    return lineWindowReplace(alloc, content, old_string, new_string, replace_all, lineTrimmedEqual);
-}
-
-fn indentationFlexibleReplace(
-    alloc: std.mem.Allocator,
-    content: []const u8,
-    old_string: []const u8,
-    new_string: []const u8,
-    replace_all: bool,
-) !?[]const u8 {
-    return lineWindowReplace(alloc, content, old_string, new_string, replace_all, indentationFlexibleEqual);
-}
-
-fn lineWindowReplace(
-    alloc: std.mem.Allocator,
-    content: []const u8,
-    old_string: []const u8,
-    new_string: []const u8,
-    replace_all: bool,
-    comptime equal: fn ([]const u8, []const u8) bool,
-) !?[]const u8 {
-    const line_count = patternLineCount(old_string);
-    if (line_count == 0 or line_count > 128) return null;
-
-    var ranges: std.ArrayList(Range) = .empty;
-    var start_opt: ?usize = if (content.len == 0) null else 0;
-    while (start_opt) |start| {
-        var cursor = start;
-        var matched = true;
-        var last: Line = undefined;
-        var i: usize = 0;
-        while (i < line_count) : (i += 1) {
-            if (cursor > content.len) {
-                matched = false;
-                break;
-            }
-            const candidate = lineAt(content, cursor);
-            last = candidate;
-            if (!equal(candidate.text, patternLine(old_string, i))) {
-                matched = false;
-                break;
-            }
-            cursor = candidate.end;
-            if (i + 1 < line_count and cursor >= content.len) {
-                matched = false;
-                break;
-            }
-        }
-        if (matched) {
-            const old_ends_newline = old_string.len > 0 and old_string[old_string.len - 1] == '\n';
-            try ranges.append(alloc, .{ .start = start, .end = if (old_ends_newline) last.end else last.text_end });
-        }
-        start_opt = nextLineStart(content, start);
-    }
-
-    if (ranges.items.len == 0) return null;
-    if (ranges.items.len > 1 and !replace_all) return error.Ambiguous;
-    return try applyRanges(alloc, content, ranges.items, new_string);
-}
-
-fn lineTrimmedEqual(a: []const u8, b: []const u8) bool {
-    return std.mem.eql(u8, std.mem.trim(u8, a, " \t"), std.mem.trim(u8, b, " \t"));
-}
-
-fn indentationFlexibleEqual(a: []const u8, b: []const u8) bool {
-    return std.mem.eql(u8, stripIndent(a), stripIndent(b));
-}
-
-fn stripIndent(s: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < s.len and (s[i] == ' ' or s[i] == '\t')) : (i += 1) {}
-    return s[i..];
-}
-
-const Normalized = struct {
-    text: []const u8,
-    map: []const usize,
-};
-
-fn whitespaceNormalizedReplace(
-    alloc: std.mem.Allocator,
-    content: []const u8,
-    old_string: []const u8,
-    new_string: []const u8,
-    replace_all: bool,
-) !?[]const u8 {
-    if (old_string.len > 4096) return null;
-
-    const hay = try normalizeWhitespaceWithMap(alloc, content);
-    const needle = try normalizeWhitespaceOnly(alloc, old_string);
-    if (needle.len == 0) return null;
-
-    var ranges: std.ArrayList(Range) = .empty;
-    var pos: usize = 0;
-    while (std.mem.indexOfPos(u8, hay.text, pos, needle)) |idx| {
-        const end_idx = idx + needle.len - 1;
-        try ranges.append(alloc, .{ .start = hay.map[idx], .end = hay.map[end_idx] + 1 });
-        pos = idx + needle.len;
-    }
-
-    if (ranges.items.len == 0) return null;
-    if (ranges.items.len > 1 and !replace_all) return error.Ambiguous;
-    return try applyRanges(alloc, content, ranges.items, new_string);
-}
-
-fn normalizeWhitespaceOnly(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var prev_ws = true;
-    for (s) |c| {
-        if (isFuzzyWhitespace(c)) {
-            if (!prev_ws) try out.append(alloc, ' ');
-            prev_ws = true;
-        } else {
-            try out.append(alloc, c);
-            prev_ws = false;
-        }
-    }
-    if (out.items.len > 0 and out.items[out.items.len - 1] == ' ') _ = out.pop();
-    return out.toOwnedSlice(alloc);
-}
-
-fn normalizeWhitespaceWithMap(alloc: std.mem.Allocator, s: []const u8) !Normalized {
-    var text: std.ArrayList(u8) = .empty;
-    var map: std.ArrayList(usize) = .empty;
-    var prev_ws = true;
-    for (s, 0..) |c, i| {
-        if (isFuzzyWhitespace(c)) {
-            if (!prev_ws) {
-                try text.append(alloc, ' ');
-                try map.append(alloc, i);
-            }
-            prev_ws = true;
-        } else {
-            try text.append(alloc, c);
-            try map.append(alloc, i);
-            prev_ws = false;
-        }
-    }
-    if (text.items.len > 0 and text.items[text.items.len - 1] == ' ') {
-        _ = text.pop();
-        _ = map.pop();
-    }
-    return .{ .text = try text.toOwnedSlice(alloc), .map = try map.toOwnedSlice(alloc) };
-}
-
-fn isFuzzyWhitespace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
-}
-
-fn applyRanges(
-    alloc: std.mem.Allocator,
-    content: []const u8,
-    ranges: []const Range,
-    new_string: []const u8,
-) ![]const u8 {
-    var new_size = content.len;
-    for (ranges) |range| {
-        new_size = new_size - (range.end - range.start) + new_string.len;
-    }
-
-    const out = try alloc.alloc(u8, new_size);
-    var src: usize = 0;
-    var dst: usize = 0;
-    for (ranges) |range| {
-        if (range.start < src) return error.Ambiguous;
-        @memcpy(out[dst .. dst + (range.start - src)], content[src..range.start]);
-        dst += range.start - src;
-        @memcpy(out[dst .. dst + new_string.len], new_string);
-        dst += new_string.len;
-        src = range.end;
-    }
-    @memcpy(out[dst .. dst + (content.len - src)], content[src..]);
-    return out;
-}
-
 /// Build a diagnostic message when oldText is not found in file_content.
 /// Detects common causes: read-tool line-number prefix copied in, CRLF mismatch,
 /// trailing-newline mismatch, whitespace-only mismatch, and reports the closest
@@ -548,7 +291,7 @@ fn diagnoseMismatch(alloc: std.mem.Allocator, file_content: []const u8, oldText:
 
     // Near-match: find the longest prefix of oldText that occurs in file.
     if (oldText.len >= 16) {
-        var prefix_len: usize = oldText.len;
+        var prefix_len: usize = @min(oldText.len, 128);
         while (prefix_len >= 16) : (prefix_len -= 1) {
             if (std.mem.indexOf(u8, file_content, oldText[0..prefix_len])) |idx| {
                 const line_no = countLinesUpTo(file_content, idx) + 1;
@@ -571,15 +314,13 @@ fn looksLikeLineNumberPrefix(s: []const u8) bool {
 }
 
 fn whitespaceNormalisedMatch(haystack: []const u8, needle: []const u8) bool {
-    // Cheap normalisation: collapse runs of [ \t] to a single space, ignore trailing spaces.
-    // Only worth doing when needle is short enough to avoid quadratic cost.
     if (needle.len > 4096) return false;
-    var alloc_buf: [8192]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&alloc_buf);
-    const a = fba.allocator();
-    const nh = normaliseWs(a, haystack) catch return false;
-    fba.reset();
-    const nn = normaliseWs(a, needle) catch return false;
+    var hay_buf: [8192]u8 = undefined;
+    var needle_buf: [8192]u8 = undefined;
+    var fba_hay = std.heap.FixedBufferAllocator.init(&hay_buf);
+    var fba_needle = std.heap.FixedBufferAllocator.init(&needle_buf);
+    const nh = normaliseWs(fba_hay.allocator(), haystack) catch return false;
+    const nn = normaliseWs(fba_needle.allocator(), needle) catch return false;
     return std.mem.indexOf(u8, nh, nn) != null;
 }
 
@@ -605,4 +346,35 @@ fn countLinesUpTo(s: []const u8, idx: usize) usize {
         if (s[i] == '\n') n += 1;
     }
     return n;
+}
+
+const testing = std.testing;
+
+test "mixed line endings require exact bytes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const res = try buildReplacement(arena.allocator(), "a\r\nb\nc\nd\n", "a\nb", "A\nB", false);
+    try testing.expect(res == null);
+}
+
+test "consistent CRLF file still denormalizes fallback path" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const res = try buildReplacement(arena.allocator(), "a\r\nb\r\n", "a\nb", "A\nB", false);
+    try testing.expectEqualStrings("A\r\nB\r\n", res.?);
+}
+
+test "exact path converts LF new_string on consistent CRLF file" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const res = try buildReplacement(arena.allocator(), "a\r\nb\r\n", "a\r\nb", "A\nB", false);
+    try testing.expectEqualStrings("A\r\nB\r\n", res.?);
+}
+
+test "whitespaceNormalisedMatch rejects unrelated needle" {
+    try testing.expect(!whitespaceNormalisedMatch("const alpha = 1;\nfn main() {}\n", "zzzz_unrelated_qq"));
+}
+
+test "whitespaceNormalisedMatch accepts real whitespace variant" {
+    try testing.expect(whitespaceNormalisedMatch("let  x  =  1;\n", "let x = 1;"));
 }

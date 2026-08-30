@@ -1,4 +1,3 @@
-const exec = @import("exec");
 const r = @import("root.zig");
 const std = @import("std");
 
@@ -78,8 +77,15 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-    const res = runWrite(ctx, resolved, args.content) orelse
+    const lock = &r.file_mutex;
+    lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
+
+    const res = r.atomicWriteViaExec(ctx, resolved, args.content) orelse {
+        lock.unlock(ctx.io);
         return r.errResult(call, "failed to start process");
+    };
+    lock.unlock(ctx.io);
+
     defer ctx.base.exec_pool.alloc.free(res.stdout);
     defer ctx.base.exec_pool.alloc.free(res.stderr);
 
@@ -96,19 +102,4 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const msg = std.fmt.allocPrint(ctx.alloc, "Successfully wrote {d} bytes to {s}", .{ args.content.len, args.file_path }) catch
         "write failed";
     return r.okResult(call, msg);
-}
-
-fn runWrite(ctx: r.ToolContext, resolved: []const u8, content: []const u8) ?exec.CmdResult {
-    if (std.fs.path.dirname(resolved)) |dir| {
-        const cmd_str = std.fmt.allocPrint(ctx.alloc, "mkdir -p {s} && tee {s}", .{ dir, resolved }) catch
-            return null;
-        return ctx.base.exec_pool.runAndWait(.{
-            .argv = &.{ "/bin/sh", "-c", cmd_str },
-            .stdin_data = content,
-        }) catch null;
-    }
-    return ctx.base.exec_pool.runAndWait(.{
-        .argv = &.{ "tee", resolved },
-        .stdin_data = content,
-    }) catch null;
 }

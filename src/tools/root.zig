@@ -129,6 +129,39 @@ pub fn markConfigTouched(ctx: ToolContext, resolved: []const u8) void {
     }
 }
 
+pub var file_mutex: std.Io.Mutex = .init;
+
+fn shellQuote(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(alloc, '\'');
+    for (s) |c| {
+        if (c == '\'') {
+            try out.appendSlice(alloc, "'\\''");
+        } else {
+            try out.append(alloc, c);
+        }
+    }
+    try out.append(alloc, '\'');
+    return out.toOwnedSlice(alloc);
+}
+
+pub fn atomicWriteViaExec(ctx: ToolContext, resolved: []const u8, content: []const u8) ?r.exec.CmdResult {
+    const alloc = ctx.alloc;
+    const dir = std.fs.path.dirname(resolved) orelse ".";
+    const qdir = shellQuote(alloc, dir) catch return null;
+    const qdest = shellQuote(alloc, resolved) catch return null;
+    const qtmp = std.fmt.allocPrint(alloc, "{s}.$$.blitztmp", .{qdest}) catch return null;
+    const command = std.fmt.allocPrint(
+        alloc,
+        "mkdir -p {[qdir]s} && cat > {[qtmp]s} && {{ chmod --reference={[qdest]s} {[qtmp]s} 2>/dev/null; mv -f {[qtmp]s} {[qdest]s}; }}",
+        .{ .qdir = qdir, .qtmp = qtmp, .qdest = qdest },
+    ) catch return null;
+    return ctx.base.exec_pool.runAndWait(.{
+        .argv = &.{ "/bin/sh", "-c", command },
+        .stdin_data = content,
+    }) catch null;
+}
+
 pub fn errResult(_: ToolCall, msg: []const u8) ToolResult {
     return .{
         .content = msg,

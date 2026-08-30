@@ -201,8 +201,12 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         const abs_cmd = withResolvedPath(alloc, ctx.base.cwd, cmd, resolved) catch
             return r.errResult(call, "failed to resolve path");
 
+        const lock = &r.file_mutex;
+        lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
+
         var diag: ApplyDiagnostics = .{};
         executeCommand(ctx, abs_cmd, &diag) catch |err| {
+            lock.unlock(ctx.io);
             const detail = applyErrorDescription(alloc, err, &diag) catch "patch apply failed";
             const msg = std.fmt.allocPrint(
                 alloc,
@@ -211,6 +215,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
             ) catch "patch apply failed";
             return r.errResult(call, msg);
         };
+        lock.unlock(ctx.io);
 
         r.markConfigTouched(ctx, resolved);
         applied += 1;
@@ -1215,13 +1220,7 @@ fn writeFileViaExec(
     content: []const u8,
     diag: *ApplyDiagnostics,
 ) ApplyError!void {
-    const command = try writeShellCommand(ctx.alloc, path);
-    defer ctx.alloc.free(command);
-
-    const res = ctx.base.exec_pool.runAndWait(.{
-        .argv = &.{ "/bin/sh", "-c", command },
-        .stdin_data = content,
-    }) catch return ApplyError.ExecFailed;
+    const res = r.atomicWriteViaExec(ctx, path, content) orelse return ApplyError.ExecFailed;
     defer ctx.base.exec_pool.alloc.free(res.stdout);
     defer ctx.base.exec_pool.alloc.free(res.stderr);
 
@@ -1249,35 +1248,6 @@ fn deleteFileViaExec(ctx: r.ToolContext, path: []const u8, diag: *ApplyDiagnosti
         }
         return ApplyError.ExecFailed;
     }
-}
-
-fn writeShellCommand(alloc: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const quoted_path = try shellQuote(alloc, path);
-    defer alloc.free(quoted_path);
-
-    if (std.fs.path.dirname(path)) |dir| {
-        const quoted_dir = try shellQuote(alloc, dir);
-        defer alloc.free(quoted_dir);
-        return std.fmt.allocPrint(alloc, "mkdir -p {s} && tee {s} >/dev/null", .{ quoted_dir, quoted_path });
-    }
-
-    return std.fmt.allocPrint(alloc, "tee {s} >/dev/null", .{quoted_path});
-}
-
-fn shellQuote(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-
-    try out.append(alloc, '\'');
-    for (s) |c| {
-        if (c == '\'') {
-            try out.appendSlice(alloc, "'\\''");
-        } else {
-            try out.append(alloc, c);
-        }
-    }
-    try out.append(alloc, '\'');
-    return out.toOwnedSlice(alloc);
 }
 
 /// Like joinLines but always end with a newline (file-add lines come from `+` rows).
