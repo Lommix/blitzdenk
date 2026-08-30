@@ -25,7 +25,7 @@ blitz.set_capabilities({
 })
 
 ---------------------------------------------------------------------------------------------------
---- Default Agent tool set overwrites
+--- Custom Lua tooling
 ---------------------------------------------------------------------------------------------------
 
 --- let the agent change it's sandbox
@@ -56,6 +56,50 @@ local lua_repl = blitz.register_tool({
 	end,
 })
 
+local idle_tool = blitz.register_tool({
+	name = "idle",
+	description = "End your turn. The next event or sub agent will wake you up.",
+	func = function(ctx, _)
+		ctx:set_status("Waiting for something to happen")
+		return { exit_loop = true }
+	end,
+})
+
+local message_tool = blitz.register_tool({
+	name = "message_agent",
+	description = "send a message to another agent",
+	args = {
+		agent_id = { type = "integer", description = "the id of the agent", required = true },
+		message = { type = "string", description = "the text to deliver", required = true },
+	},
+	func = function(ctx, call)
+		local id = tonumber(call.arguments.agent_id) or error("no agent id provided")
+		local msg = tostring(call.arguments.message or error("no message provided"))
+
+		ctx:set_status("To agent(" .. tostring(id) .. ") :\n> \27[38;2;112;122;140m" .. msg .. "\27[0m")
+		blitz.cmd.message_agent(id, msg)
+		return { msg = "send" }
+	end,
+})
+
+local cancel_tool = blitz.register_tool({
+	name = "cancel_agent",
+	description = "abort a sub agent",
+	args = {
+		agent_id = { type = "integer", description = "the id of the agent", required = true },
+	},
+	func = function(ctx, call)
+		local id = tonumber(call.arguments.agent_id) or error("no agent id provided")
+		ctx:set_status("Cancel agent(" .. tostring(id) .. ")")
+		blitz.cmd.cancel_agent(id)
+		return { msg = "canceled" }
+	end,
+})
+
+---------------------------------------------------------------------------------------------------
+--- Default Agent tool set overwrites
+---------------------------------------------------------------------------------------------------
+
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.BASH,
 	blitz.tools.READ,
@@ -67,6 +111,9 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.START_MCP,
 	blitz.tools.VIEW_IMAGE,
 	lua_repl,
+	cancel_tool,
+	message_tool,
+	idle_tool,
 	-- blitz.tools.PATCH, -- EDIT/WRITE alternative
 })
 

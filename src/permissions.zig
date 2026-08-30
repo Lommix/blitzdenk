@@ -15,6 +15,7 @@ pub const AskPayload = struct {
     header: []const u8,
     question: []const u8,
     options: []const []const u8,
+    allow_message: bool = true,
 };
 
 pub const PlanApprovalPayload = struct {

@@ -176,6 +176,36 @@ into the chat and sends it to the main agent, or starts a fresh general agent
 if none exists. Use it instead of `message_chat("user", ...)` (display only)
 or `get_main_agent()` + `message_agent` (queues silently, no chat echo).
 
+## Selection
+
+`blitz.cmd.select(request, cb)` opens the ask widget from a command and
+returns at once. The request is one table: `header`, `question`, `options`
+(1-8 strings), optional `allow_message` (default false) to append the
+custom-message row. When the user picks, the callback runs as
+`cb(option_text, index)` with a 1-based index. The custom-message row reports
+`cb(message, nil)` and only exists with `allow_message = true`. A cancel
+(`cancel` command, session reset, Lua reload) reports `cb(nil, nil)`.
+
+```lua
+blitz.add_command("effort", function()
+    blitz.cmd.select({
+        header = "Effort",
+        question = "Set reasoning effort for the general agent?",
+        options = { "minimal", "low", "medium", "high", "max" },
+    }, function(choice)
+        if choice then
+            blitz.set_agent_effort(blitz.AGENT_GENERAL, choice)
+            blitz.cmd.message_chat("system", "effort set to " .. choice)
+        end
+    end)
+end, "pick agent reasoning effort")
+```
+
+Callbacks run on the main thread under the Lua lock, so they may call other
+`blitz.cmd` functions, including another `select`. Permissions from agents
+take the screen first; the selection shows after they resolve. Selections
+need the TUI; a headless run drops them at exit.
+
 ## Keybinds
 
 ```lua

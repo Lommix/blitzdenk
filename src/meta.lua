@@ -33,6 +33,16 @@
 ---@field agent_type? integer
 ---@field fork? boolean
 
+---@class BlitzSelectRequest
+---very short label shown as a chip
+---@field header string
+---the question shown above the options
+---@field question string
+---1-8 option strings; a custom message row is appended when allow_message is on
+---@field options string[]
+---show the trailing custom message row; default false
+---@field allow_message? boolean
+
 ---@class BlitzCmd
 ---Reset the active session.
 ---@field reset_session fun()
@@ -56,6 +66,8 @@
 ---@field prompt fun(text: string)
 ---Reserve a free slot and enqueue a spawn or fork into it.
 ---@field spawn_agent fun(args: BlitzSpawnArgs): integer|nil
+---Open a multiple-choice selection (same widget as the ask tool) and return at once. The callback runs with the picked option text and its 1-based index when the user chooses, with (message, nil) for the custom message row when allow_message is on, and with (nil, nil) when canceled.
+---@field select fun(request: BlitzSelectRequest, func: fun(choice: string?, index: integer?))
 ---Block until the referenced agent reaches a terminal state.
 ---@field await_agent fun(agent_id: integer): integer
 ---Return the awaited agent's last assistant text.

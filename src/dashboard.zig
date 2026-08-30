@@ -18,6 +18,17 @@ const keybinds = .{
     .{ "c+d", "scroll down" },
 };
 
+pub var start_ns: i128 = 0;
+var startup_ms: ?i64 = null;
+
+fn startupMs(io: std.Io) i64 {
+    if (startup_ms == null) {
+        const now_ns: i128 = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+        startup_ms = @intCast(@divTrunc(now_ns - start_ns, std.time.ns_per_ms));
+    }
+    return startup_ms.?;
+}
+
 pub fn build_header(frame: usize, base_color: r.tui.Color, alloc: std.mem.Allocator, out: *std.ArrayList(r.tui.Line)) !void {
     const base = base_color.toRgb();
     var line_iter = std.mem.splitAny(u8, HEADER_ART, "\n");
@@ -60,9 +71,9 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
     try out.append(
         alloc,
         try r.tui.Line.new(alloc,
-            \\├[github.com/lommix/blitzdenk ............................... v{s}
+            \\├[github.com/lommix/blitzdenk ................... v{s}  startup {d}ms
             \\
-        , .{r.VERSION}, .{ .fg = app.theme.muted }),
+        , .{ r.VERSION, startupMs(app.io) }, .{ .fg = app.theme.muted }),
     );
 
     if (app.availableUpdateVersion()) |version| {

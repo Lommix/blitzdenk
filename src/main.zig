@@ -191,6 +191,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer io_state.deinit();
     const io = io_state.io();
+    r.dash.start_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
 
     var pos_buf: [16][:0]const u8 = undefined;
     const split = CliArgs.split(init.minimal.args, &pos_buf);
@@ -731,10 +732,20 @@ pub fn run(
                 }
             }
 
+            // cmd.select requests: show when no permission is on screen.
+            if (app.active_permission == null and app.active_selection == null) {
+                const g = app.selection_queue.lock(io);
+                if (g.ptr.items.len > 0) {
+                    app.active_selection = g.ptr.orderedRemove(0);
+                    app.dirty = true;
+                }
+                g.unlock();
+            }
+
             // Drive input_mode from perm presence — single source of truth.
             switch (app.input_mode) {
-                .text => if (app.active_permission != null) app.enterPermSelect(),
-                .perm_select, .perm_message => if (app.active_permission == null) app.returnToText(),
+                .text => if (app.active_permission != null or app.active_selection != null) app.enterPermSelect(),
+                .perm_select, .perm_message => if (app.active_permission == null and app.active_selection == null) app.returnToText(),
                 .passphrase, .wizard, .session_picker => {},
             }
 
@@ -768,6 +779,7 @@ pub fn run(
                         lua_reload_failed = true;
                         std.log.scoped(.lua).err("hot-reload: failed to reset lua vm ({any})", .{err});
                     };
+                    app.clearSelections(false);
                     context_factory.resetDefs();
                     try context_factory.resetLoadedTools();
                     if (config_lua) |info| {
@@ -929,13 +941,7 @@ pub fn run(
                                         app.appendBytes(k.textSlice());
                                     },
                                     .perm_select => |*ps| {
-                                        const entry = app.active_permission orelse break;
-
-                                        const max_sel: u8 = switch (entry.payload) {
-                                            .ask => |a| @intCast(@min(a.options.len, tools.ask.MAX_OPTIONS)),
-                                            .plan => 3,
-                                            else => 2,
-                                        };
+                                        const max_sel = app.permSelectMaxIndex();
                                         if (c == 'j' and ps.selected < max_sel) ps.selected += 1;
                                         if (c == 'k' and ps.selected > 0) ps.selected -= 1;
                                     },
@@ -979,12 +985,7 @@ pub fn run(
                             .arrow_down => switch (app.input_mode) {
                                 .text => if (!app.running) app.historyDown(),
                                 .perm_select => |*ps| {
-                                    const entry = app.active_permission orelse break;
-                                    const max_sel: u8 = switch (entry.payload) {
-                                        .ask => |a| @intCast(@min(a.options.len, tools.ask.MAX_OPTIONS)),
-                                        .plan => 3,
-                                        else => 2,
-                                    };
+                                    const max_sel = app.permSelectMaxIndex();
                                     if (ps.selected < max_sel) ps.selected += 1;
                                 },
                                 .perm_message => {},
@@ -1024,6 +1025,17 @@ pub fn run(
                             },
                             .enter => switch (app.input_mode) {
                                 .perm_message => |*pm| {
+                                    if (app.active_permission == null) {
+                                        if (app.active_selection != null) {
+                                            if (pm.len == 0) {
+                                                app.enterPermSelect();
+                                                break;
+                                            }
+                                            const sel_msg = pm.buf[0..pm.len];
+                                            app.resolveActiveSelection(sel_msg, null);
+                                            break;
+                                        }
+                                    }
                                     const entry = app.active_permission orelse break;
 
                                     const is_ask = entry.payload == .ask;
@@ -1042,6 +1054,18 @@ pub fn run(
                                     app.scroll_offset = 0;
                                 },
                                 .perm_select => |*ps| {
+                                    if (app.active_permission == null) {
+                                        if (app.active_selection) |sel| {
+                                            const sel_opts_len: u8 = @intCast(@min(sel.ask.options.len, tools.ask.MAX_OPTIONS));
+                                            if (sel.ask.allow_message and ps.selected >= sel_opts_len) {
+                                                app.enterPermMessage();
+                                                break;
+                                            }
+                                            app.resolveActiveSelection(sel.ask.options[ps.selected], ps.selected + 1);
+                                            break;
+                                        }
+                                    }
+
                                     const entry = app.active_permission orelse break;
                                     if (entry.payload == .ask) {
                                         const args = entry.payload.ask;

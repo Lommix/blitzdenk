@@ -14,6 +14,7 @@ pub const compact = @import("compact.zig");
 pub const exec = @import("exec");
 pub const artifact = @import("artifact.zig");
 pub const permissions = @import("permissions");
+pub const selection = @import("selection.zig");
 pub const ContextFactory = @import("context_factory.zig");
 pub const skills = @import("skills.zig");
 pub const session = @import("session.zig");

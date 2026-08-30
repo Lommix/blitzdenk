@@ -275,9 +275,11 @@ pub const App = struct {
     // ---------------
     // async interface
     permission_queue: Locked(std.ArrayList(*r.permissions.Request)),
+    selection_queue: Locked(std.ArrayList(*r.selection.Selection)),
     tool_status_entries: Locked(ToolStatusStore) = .{},
     //-----------------
     active_permission: ?*r.permissions.Request = null,
+    active_selection: ?*r.selection.Selection = null,
     registry: *r.agent_registry.Registry = undefined,
     exec_pool: *r.exec.CmdPool = undefined,
     update_check: ?r.update.CheckTask = null,
@@ -361,10 +363,15 @@ pub const App = struct {
             .permission_queue = .{
                 .value = try .initCapacity(gpa, 16),
             },
+            .selection_queue = .{
+                .value = try .initCapacity(gpa, 4),
+            },
         };
     }
 
     pub fn deinit(self: *App) void {
+        self.clearSelections(false);
+        self.selection_queue.value.deinit(self.gpa);
         self.event_bus.shutdown(self);
         self.event_bus.joinPending(self.io);
         if (self.update_check) |*task| task.deinit();
@@ -406,7 +413,68 @@ pub const App = struct {
         }
         g.ptr.clearRetainingCapacity();
 
+        self.clearSelections(true);
         self.returnToText();
+    }
+
+    /// Resolve the active selection: run its Lua callback with the picked
+    /// text and 1-based index (nil/nil on cancel), then free it.
+    pub fn resolveActiveSelection(self: *App, choice: ?[]const u8, index: ?u8) void {
+        const sel = self.active_selection orelse return;
+        self.active_selection = null;
+        self.auto_scroll = true;
+        self.scroll_offset = 0;
+        self.dirty = true;
+        self.lua_vm.invokeSelection(self.io, sel.func_ref, choice, index);
+        sel.destroy();
+        self.returnToText();
+    }
+
+    /// Cancel active and queued selections. With `run_callbacks` each
+    /// callback reports (nil, nil); otherwise they are dropped silently.
+    /// Callbacks run without the queue lock, so they may call cmd.select.
+    pub fn clearSelections(self: *App, run_callbacks: bool) void {
+        const active = self.active_selection;
+        self.active_selection = null;
+
+        const g = self.selection_queue.lock(self.io);
+        var queued = g.ptr.*;
+        g.ptr.* = .empty;
+        g.unlock();
+        defer queued.deinit(self.gpa);
+
+        if (!run_callbacks) {
+            if (active) |sel| sel.destroy();
+            for (queued.items) |sel| sel.destroy();
+            return;
+        }
+
+        if (active) |sel| {
+            self.lua_vm.invokeSelection(self.io, sel.func_ref, null, null);
+            sel.destroy();
+        }
+        for (queued.items) |sel| {
+            self.lua_vm.invokeSelection(self.io, sel.func_ref, null, null);
+            sel.destroy();
+        }
+    }
+
+    /// Highest reachable perm_select row for the active permission or
+    /// selection: option count (the trailing "enter message" row) for ask
+    /// style payloads, 3 for plan, 2 for call/diff.
+    pub fn permSelectMaxIndex(self: *App) u8 {
+        if (self.active_permission) |entry| {
+            return switch (entry.payload) {
+                .ask => |a| @intCast(@min(a.options.len, r.tools.ask.MAX_OPTIONS)),
+                .plan => 3,
+                .call, .diff => 2,
+            };
+        }
+        if (self.active_selection) |sel| {
+            const opts: u8 = @intCast(@min(sel.ask.options.len, r.tools.ask.MAX_OPTIONS));
+            return if (sel.ask.allow_message) opts else opts -| 1;
+        }
+        return 0;
     }
 
     /// Session-scoped allocator. Wiped on reset.
@@ -1272,15 +1340,18 @@ pub const App = struct {
                 .wizard => break :blk 18,
                 .session_picker => |*picker| break :blk @intCast(@min(6 + @max(picker.rows.len, 1), area.height -| 1)),
                 .perm_select => {
-                    const entry = app.active_permission orelse break :blk 9;
-                    if (entry.payload == .ask) {
-                        break :blk askPermissionInputHeight(entry.payload.ask.options, entry.payload.ask.header, entry.payload.ask.question, area.width, area.height);
+                    if (app.active_permission) |entry| {
+                        if (entry.payload == .ask) {
+                            break :blk askPermissionInputHeight(entry.payload.ask, area.width, area.height);
+                        }
+                        if (entry.payload == .call) {
+                            const rows = text_utils.wrappedRowCount(entry.payload.call.description, area.width -| 7);
+                            break :blk @min(8 +| rows, area.height -| 1);
+                        }
+                        break :blk 9;
                     }
-                    if (entry.payload == .call) {
-                        const rows = text_utils.wrappedRowCount(entry.payload.call.description, area.width -| 7);
-                        break :blk @min(8 +| rows, area.height -| 1);
-                    }
-                    break :blk 9;
+                    const sel = app.active_selection orelse break :blk 9;
+                    break :blk askPermissionInputHeight(sel.ask, area.width, area.height);
                 },
             }
         };
@@ -3538,10 +3609,14 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
     const inner = block.innerArea(area);
     if (inner.width == 0 or inner.height == 0) return;
 
-    const entry = app.active_permission orelse return;
+    const entry = app.active_permission orelse {
+        const sel = app.active_selection orelse return;
+        renderAskWidget(app, sel.ask, inner, buf);
+        return;
+    };
 
     if (entry.payload == .ask) {
-        renderAskWidget(app, entry, inner, buf);
+        renderAskWidget(app, entry.payload.ask, inner, buf);
         return;
     }
 
@@ -3587,10 +3662,9 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
     }
 }
 
-fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const args = req.payload.ask;
+fn renderAskWidget(app: *App, args: r.permissions.AskPayload, inner: r.tui.Rect, buf: *r.tui.Buffer) void {
     const opts_len = @min(args.options.len, r.tools.ask.MAX_OPTIONS);
-    const total_rows: usize = opts_len + 1; // + "enter message"
+    const total_rows: usize = opts_len + @intFromBool(args.allow_message); // + "enter message"
 
     // Clamp selection.
     const ps = &app.input_mode.perm_select;
@@ -3602,7 +3676,7 @@ fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, bu
     const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ args.header, args.question }) catch args.question;
     const width = inner.width -| 1;
 
-    var opts_rows: u16 = 1; // "enter message"
+    var opts_rows: u16 = @intFromBool(args.allow_message); // "enter message"
     opts_rows +|= wrappedOptionRows(args.options[0..opts_len], width);
 
     const max_q_rows = inner.height -| opts_rows -| 1;
@@ -3616,7 +3690,6 @@ fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, bu
         const style: r.tui.Style = if (selected) .{ .modifier = .{ .reverse = true } } else .{};
         const prefix: []const u8 = if (selected) "> " else "  ";
         const label: []const u8 = if (row < opts_len) args.options[row] else "enter message";
-
         var line_buf: [512]u8 = undefined;
         const line = std.fmt.bufPrint(&line_buf, "{s}{s}", .{ prefix, label }) catch label;
         const used = text_utils.renderWrappedText(buf, line, inner.x + 1, y, width, inner.y +| inner.height -| y, 2, style);
@@ -3625,15 +3698,15 @@ fn renderAskWidget(app: *App, req: *r.permissions.Request, inner: r.tui.Rect, bu
     }
 }
 
-fn askPermissionInputHeight(options: []const []const u8, header: []const u8, question: []const u8, area_width: u16, area_height: u16) u16 {
-    const opts_count: usize = @min(options.len, r.tools.ask.MAX_OPTIONS);
+fn askPermissionInputHeight(args: r.permissions.AskPayload, area_width: u16, area_height: u16) u16 {
+    const opts_count: usize = @min(args.options.len, r.tools.ask.MAX_OPTIONS);
     const width = area_width -| 7;
     var rows: u16 = 0;
     var header_buf: [256]u8 = undefined;
-    const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ header, question }) catch question;
+    const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ args.header, args.question }) catch args.question;
     rows +|= text_utils.wrappedRowCount(header_line, width);
-    rows +|= 1; // "enter message"
-    rows +|= wrappedOptionRows(options[0..opts_count], width);
+    rows +|= @intFromBool(args.allow_message); // "enter message"
+    rows +|= wrappedOptionRows(args.options[0..opts_count], width);
     const max_area = area_height -| 1;
     return @min(rows +| 6, max_area);
 }

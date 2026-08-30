@@ -362,6 +362,12 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "agent_type", .ty = LuaType.integer, .optional = true },
     .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
 } } };
+const SelectRequestDef = LuaType{ .table_def = .{ .name = "BlitzSelectRequest", .fields = &.{
+    .{ .name = "header", .ty = LuaType.string, .desc = "very short label shown as a chip" },
+    .{ .name = "question", .ty = LuaType.string, .desc = "the question shown above the options" },
+    .{ .name = "options", .ty = StringListDef, .desc = "1-8 option strings; a custom message row is appended when allow_message is on" },
+    .{ .name = "allow_message", .ty = LuaType.boolean, .optional = true, .desc = "show the trailing custom message row; default false" },
+} } };
 pub const Blitz = LuaType{
     .table_def = .{
         .name = "Blitz",
@@ -1781,6 +1787,81 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
+        .name = "select",
+        .desc = "Open a multiple-choice selection (same widget as the ask tool) and return at once. The callback runs with the picked option text and its 1-based index when the user chooses, with (message, nil) for the custom message row when allow_message is on, and with (nil, nil) when canceled.",
+        .ty = LuaType{ .function = .{
+            .args = &.{
+                .{ .name = "request", .ty = SelectRequestDef },
+                .{ .name = "func", .ty = LuaType{ .raw = "fun(choice: string?, index: integer?)" } },
+            },
+            .fn_ptr = (struct {
+                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                    const state = L.?;
+                    const a = getAppFromRegistry(state) orelse {
+                        _ = c.luaL_error(state, "cmd.select: app not initialized");
+                        return 0;
+                    };
+                    const vm = fromState(state) orelse {
+                        _ = c.luaL_error(state, "cmd.select: no active lua vm");
+                        return 0;
+                    };
+                    if (vm.is_tool_vm) {
+                        _ = c.luaL_error(state, "cmd.select: not available in tool vms");
+                        return 0;
+                    }
+
+                    const Request = struct {
+                        header: []const u8,
+                        question: []const u8,
+                        options: [][]const u8,
+                        allow_message: ?bool,
+                    };
+                    const req = switch (readAnyValueAlloc(Request, state, "cmd.select", 1, vm.luaArena())) {
+                        .ok => |v| v,
+                        .err => |msg| {
+                            _ = c.luaL_error(state, "%s", msg.ptr);
+                            return 0;
+                        },
+                    };
+                    if (req.options.len == 0) {
+                        _ = c.luaL_error(state, "cmd.select: options must contain at least one entry");
+                        return 0;
+                    }
+                    if (req.options.len > r.tools.ask.MAX_OPTIONS) {
+                        _ = c.luaL_error(state, "cmd.select: too many options (max 8)");
+                        return 0;
+                    }
+
+                    c.lua_pushvalue(state, 2);
+                    const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+
+                    const sel = r.selection.Selection.create(a.gpa, .{
+                        .header = req.header,
+                        .question = req.question,
+                        .options = req.options,
+                        .allow_message = req.allow_message orelse false,
+                    }, func_ref) catch {
+                        c.luaL_unref(state, c.LUA_REGISTRYINDEX, func_ref);
+                        _ = c.luaL_error(state, "cmd.select: out of memory");
+                        return 0;
+                    };
+
+                    const g = a.selection_queue.lock(a.io);
+                    g.ptr.append(a.gpa, sel) catch {
+                        g.unlock();
+                        sel.destroy();
+                        c.luaL_unref(state, c.LUA_REGISTRYINDEX, func_ref);
+                        _ = c.luaL_error(state, "cmd.select: queue append failed");
+                        return 0;
+                    };
+                    g.unlock();
+                    a.dirty = true;
+                    return 0;
+                }
+            }).lua_fn,
+        } },
+    },
+    .{
         .name = "await_agent",
         .desc = "Block until the referenced agent reaches a terminal state.",
         .ty = LuaType{ .function = .{
@@ -2948,6 +3029,37 @@ pub const LuaVm = struct {
         self.vm_mu.lockUncancelable(a.io);
         defer self.vm_mu.unlock(a.io);
         return self.runPermissionHook(perm);
+    }
+
+    /// Run a cmd.select callback with (choice, index) or (nil, nil) on cancel.
+    /// Consumes the registry ref.
+    pub fn invokeSelection(self: *LuaVm, io: std.Io, func_ref: c_int, choice: ?[]const u8, index: ?u8) void {
+        self.vm_mu.lockUncancelable(io);
+        defer self.vm_mu.unlock(io);
+
+        const L = self.L;
+        const top = c.lua_gettop(L);
+        defer c.lua_settop(L, top);
+
+        _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, func_ref);
+        if (c.lua_type(L, -1) != c.LUA_TFUNCTION) {
+            c.lua_pop(L, 1);
+            c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
+            return;
+        }
+        if (choice) |text| {
+            _ = c.lua_pushlstring(L, text.ptr, text.len);
+        } else {
+            c.lua_pushnil(L);
+        }
+        if (index) |i| {
+            c.lua_pushinteger(L, i);
+        } else {
+            c.lua_pushnil(L);
+        }
+        const status = c.lua_pcallk(L, 2, 0, 0, 0, null);
+        if (status != 0) self.popError();
+        c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
     }
 
     pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, cancel_token: ?*r.sdk.CancellationToken) void {
