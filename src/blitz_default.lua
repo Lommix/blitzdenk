@@ -9,7 +9,7 @@ local ok, provider = pcall(require, "provider")
 if ok and type(provider) == "number" then
 	default_model = provider
 	blitz.set_agent_model(blitz.AGENT_GENERAL, default_model)
-	blitz.set_agent_effort(blitz.AGENT_GENERAL, "max")
+	blitz.set_agent_effort(blitz.AGENT_GENERAL, "high")
 end
 
 blitz.set_compact_edge(250000)

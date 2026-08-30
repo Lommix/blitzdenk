@@ -4,7 +4,11 @@ A self improving coding harness for POSIX. No dependencies, vendored Lua.
 It extends its own Lua sandbox on demand to fit your project.
 Ships as a single 1.7MB binary using less then 99MB of ram.
 
-![demo](docs/assets/demo.gif)
+![demo]("docs/assets/screenshot.png")
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh | sh
+```
 
 ## Core features and patterns
 
@@ -30,17 +34,10 @@ The default config comes with some useful commands for quick testing.
 
 Connect remote without ssh config entries `/ssh user@host:/path/to/cwd`
 
-## Install
+## Build
 
-One line, no sudo. Installs to `~/.local/bin/blitz`
-
-```
-curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh | sh
-```
-
-You can also download the pre compiled binaries by hand on [the release page](https://github.com/Lommix/blitzdenk/releases)
-
-build yourself:
+You can also download the pre compiled binaries for your system on [the release page](https://github.com/Lommix/blitzdenk/releases)
+or build yourself:
 
 ```
 zig build --release=small
