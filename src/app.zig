@@ -3617,21 +3617,29 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
         }
 
         if (agent.tokens_per_second > 0) {
-            l.pushSpanPrint(alloc, " Consuming Tokens at ", .{}, info) catch {};
-            l.pushSpanPrint(alloc, "{d} T/s", .{@as(u32, @intFromFloat(agent.tokens_per_second))}, hl) catch {};
+            l.pushSpanPrint(alloc, " ", .{}, info) catch {};
+            pushGradientWave(&l, alloc, "consuming tokens", app.theme.text_hl, app.theme.info, app.frame_count);
+            l.pushSpanPrint(alloc, " at ", .{}, info) catch {};
+            l.pushSpanPrint(alloc, "{d} t/s", .{@as(u32, @intFromFloat(agent.tokens_per_second))}, hl) catch {};
             if (state_str.len > 0) {
                 l.pushSpanPrint(alloc, " while ", .{}, info) catch {};
-                l.pushSpanPrint(alloc, "{s}", .{state_str}, hl) catch {};
             }
         } else if (state_str.len > 0) {
-            l.pushSpanPrint(alloc, " {s}", .{state_str}, hl) catch {};
+            l.pushSpanPrint(alloc, " ", .{}, info) catch {};
+        }
+
+        if (agent.activity == .processing) {
+            pushGradientWave(&l, alloc, state_str, app.theme.text_hl, app.theme.info, app.frame_count);
+        } else if (state_str.len > 0) {
+            l.pushSpanPrint(alloc, "{s}", .{state_str}, hl) catch {};
         }
 
         if (queued_count > 0) {
             l.pushSpanPrint(alloc, " {s}", .{queued_suffix}, info) catch {};
         }
     } else if (waiting and state == .complete) {
-        l.pushSpanPrint(alloc, "Waiting for ", .{}, info) catch {};
+        pushGradientWave(&l, alloc, "waiting", app.theme.text_hl, app.theme.info, app.frame_count);
+        l.pushSpanPrint(alloc, " for ", .{}, info) catch {};
         l.pushSpanPrint(alloc, "{d}", .{active_agent_count}, hl) catch {};
         l.pushSpanPrint(alloc, " agents (", .{}, info) catch {};
         l.pushSpanPrint(alloc, "{s}", .{dur}, hl) catch {};
@@ -3641,6 +3649,13 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
         l.pushSpanPrint(alloc, "{s} ({s}){s}", .{ label, dur, ssh_suffix }, info) catch {};
     }
     return l;
+}
+
+fn pushGradientWave(line: *r.tui.Line, alloc: std.mem.Allocator, text: []const u8, from_color: r.tui.Color, to_color: r.tui.Color, frame_count: usize) void {
+    var wave = text_utils.gradientWave(text, from_color, to_color, frame_count);
+    while (wave.next()) |chunk| {
+        line.pushSpan(alloc, .{ .content = chunk.text, .style = .{ .fg = chunk.color, .modifier = .{ .bold = true } } }) catch {};
+    }
 }
 
 fn formatDuration(buf: []u8, secs: u32) []const u8 {

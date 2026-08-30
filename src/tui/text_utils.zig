@@ -4,6 +4,7 @@ const cell_mod = @import("cell.zig");
 
 pub const Buffer = buffer_mod.Buffer;
 pub const Style = cell_mod.Style;
+const Color = cell_mod.Color;
 
 pub const WrappedTextIter = struct {
     const Self = @This();
@@ -217,4 +218,74 @@ pub fn spinnerWave(frame_count: usize) []const u8 {
         "▂▁▂▄▆█▆▄▂▁",
     };
     return frames[(frame_count / 6) % frames.len];
+}
+
+pub const GradientWaveChunk = struct {
+    text: []const u8,
+    color: Color,
+};
+
+pub const GradientWave = struct {
+    text: []const u8,
+    from_color: Color,
+    to_color: Color,
+    frame_count: usize,
+    byte_index: usize = 0,
+    column_index: usize = 0,
+
+    pub fn next(self: *GradientWave) ?GradientWaveChunk {
+        if (self.byte_index >= self.text.len) return null;
+        const sequence_length = std.unicode.utf8ByteSequenceLength(self.text[self.byte_index]) catch {
+            self.byte_index += 1;
+            return self.next();
+        };
+        if (self.byte_index + sequence_length > self.text.len) return null;
+        const slice = self.text[self.byte_index..][0..sequence_length];
+        const color = mixColors(self.from_color, self.to_color, waveMix(self.column_index, self.frame_count));
+        self.byte_index += sequence_length;
+        self.column_index += 1;
+        return .{ .text = slice, .color = color };
+    }
+};
+
+pub fn gradientWave(text: []const u8, from_color: Color, to_color: Color, frame_count: usize) GradientWave {
+    return .{
+        .text = text,
+        .from_color = from_color,
+        .to_color = to_color,
+        .frame_count = frame_count,
+    };
+}
+
+fn waveMix(column_index: usize, frame_count: usize) u8 {
+    const phase: u8 = @truncate(column_index *% 32 -% frame_count *% 8);
+    if (phase < 128) return phase *% 2;
+    return (255 - phase) *% 2;
+}
+
+fn mixColors(from_color: Color, to_color: Color, mix: u8) Color {
+    const from_rgb = from_color.toRgb();
+    const to_rgb = to_color.toRgb();
+    return .{ .rgb = .{
+        .r = mixChannel(from_rgb.r, to_rgb.r, mix),
+        .g = mixChannel(from_rgb.g, to_rgb.g, mix),
+        .b = mixChannel(from_rgb.b, to_rgb.b, mix),
+    } };
+}
+
+fn mixChannel(from_value: u8, to_value: u8, mix: u8) u8 {
+    const from_wide: u16 = from_value;
+    const to_wide: u16 = to_value;
+    const mix_wide: u16 = mix;
+    return @intCast((from_wide * (255 - mix_wide) + to_wide * mix_wide) / 255);
+}
+
+test "gradient wave travels with frame" {
+    const from_color = Color{ .rgb = .{ .r = 0, .g = 0, .b = 0 } };
+    const to_color = Color{ .rgb = .{ .r = 255, .g = 255, .b = 255 } };
+    var wave_at_start = gradientWave("ab", from_color, to_color, 0);
+    var wave_shifted = gradientWave("ab", from_color, to_color, 16);
+    const start_color = wave_at_start.next().?.color.toRgb();
+    const shifted_color = wave_shifted.next().?.color.toRgb();
+    try std.testing.expect(start_color.r != shifted_color.r);
 }
