@@ -885,7 +885,7 @@ test "default config loads without provider.lua and binds on require success" {
 
     try std.testing.expectEqual(@as(i64, 77), tracker.bound_model);
     try std.testing.expectEqual(@as(i64, 1), tracker.bound_agent);
-    try std.testing.expectEqualStrings("max", tracker.bound_effort[0..tracker.bound_effort_len]);
+    try std.testing.expectEqualStrings("high", tracker.bound_effort[0..tracker.bound_effort_len]);
 }
 
 fn execTestLua(L: ?*root.c.lua_State, code: []const u8) !void {

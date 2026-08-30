@@ -13,6 +13,12 @@
 ---Enable an MCP server for this session.
 ---@field enable fun(mcp_id: integer)
 
+---@class BlitzSsh
+---Turn ssh routing on. Without a target nothing routes, but auto-approval is still denied.
+---@field enable fun()
+---Turn ssh routing off. The target stays for re-enable.
+---@field disable fun()
+
 ---@class BlitzJson
 ---Encode a Lua value as JSON.
 ---Supports nil, booleans, numbers, strings, and tables.
@@ -326,6 +332,7 @@
 
 ---@class Blitz
 ---@field mcp BlitzMcp
+---@field ssh BlitzSsh
 ---@field json BlitzJson
 ---@field base64 BlitzBase64
 ---@field cmd BlitzCmd

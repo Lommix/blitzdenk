@@ -373,6 +373,7 @@ pub const Blitz = LuaType{
         .name = "Blitz",
         .fields = &.{
             .{ .name = "mcp", .ty = BlitzMcp },
+            .{ .name = "ssh", .ty = BlitzSsh },
             .{ .name = "json", .ty = BlitzJson },
             .{ .name = "base64", .ty = BlitzBase64 },
             .{ .name = "cmd", .ty = BlitzCmd },
@@ -1337,6 +1338,38 @@ const BlitzMcp = LuaType{
                         }).lua_fn, "mcp.enable"),
                     },
                 },
+            },
+        },
+    },
+};
+
+const BlitzSsh = LuaType{
+    .table_def = .{
+        .name = "BlitzSsh",
+        .fields = &.{
+            .{
+                .name = "enable",
+                .desc =
+                \\Turn ssh routing on. Without a target nothing routes, but auto-approval is still denied.
+                ,
+                .ty = LuaType{ .function = .{
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(_: *c.lua_State, a: *r.app.App) !void {
+                            try a.cmd_queue.append(a.io, .ssh_enable);
+                        }
+                    }).lua_fn, "ssh.enable"),
+                } },
+            },
+            .{
+                .name = "disable",
+                .desc = "Turn ssh routing off. The target stays for re-enable.",
+                .ty = LuaType{ .function = .{
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(_: *c.lua_State, a: *r.app.App) !void {
+                            try a.cmd_queue.append(a.io, .ssh_disable);
+                        }
+                    }).lua_fn, "ssh.disable"),
+                } },
             },
         },
     },

@@ -77,6 +77,8 @@ pub const Command = union(enum) {
     custom: CustomCmd,
     attach_screenshot: ScreenshotArgs,
     add_tool: AddToolArgs,
+    ssh_enable,
+    ssh_disable,
     // -------------------------------------------
 
     pub const AddToolArgs = struct {
@@ -345,6 +347,14 @@ pub const Command = union(enum) {
                 const encoded = try alloc.alloc(u8, encoded_len);
                 _ = std.base64.standard.Encoder.encode(encoded, arg.data);
                 app.screenshot_buf = encoded;
+                app.dirty = true;
+            },
+            .ssh_enable => {
+                app.exec_pool.ssh_active = true;
+                app.dirty = true;
+            },
+            .ssh_disable => {
+                app.exec_pool.ssh_active = false;
                 app.dirty = true;
             },
             .add_tool => |arg| {
