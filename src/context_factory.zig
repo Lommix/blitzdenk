@@ -1179,7 +1179,7 @@ test "capability rules gate on binary and bash ownership" {
     });
 
     const prompt = try factory.build_system_prompt(alloc, .general);
-    const env_idx = std.mem.indexOf(u8, prompt, "# Envirement:") orelse return error.TestExpectedEnvSection;
+    const env_idx = std.mem.indexOf(u8, prompt, "# Environment:") orelse return error.TestExpectedEnvSection;
     const section = prompt[env_idx..];
 
     try std.testing.expect(std.mem.indexOf(u8, section, "sh: RULE_PRESENT") != null);

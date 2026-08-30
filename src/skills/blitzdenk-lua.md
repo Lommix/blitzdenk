@@ -167,7 +167,9 @@ blitz.add_command("plan", function(rem)
 end, "plan a task without editing")
 ```
 
-The optional description shows next to the command in the completion popup.
+The callback always receives one string: the remaining input after the
+command name, `""` when none. Always declare the parameter. The optional
+description shows next to the command in the completion popup.
 The full command queue API (`reset_session`, `cancel`, `spawn_agent`,
 `await_agent`, and so on) is `BlitzCmd` in `meta.lua`.
 

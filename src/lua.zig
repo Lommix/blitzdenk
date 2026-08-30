@@ -806,13 +806,17 @@ pub const Blitz = LuaType{
                 .name = "add_command",
                 .desc =
                 \\Bind a slash command to a Lua callback. The leading "/" is added automatically.
-                \\Example: blitz.add_command("help", function(args) end)
+                \\The callback always receives one string: the remaining input after the
+                \\command name, empty when none. Always declare the parameter.
+                \\Example: blitz.add_command("help", function(rem) end)
                 \\
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{
                         .{ .name = "command", .ty = LuaType.string },
-                        .{ .name = "func", .ty = LuaType{ .function = .{} } },
+                        .{ .name = "func", .ty = LuaType{ .function = .{
+                            .args = &.{.{ .name = "rem", .ty = LuaType.string }},
+                        } } },
                         .{ .name = "description", .ty = LuaType.string, .optional = true, .desc = "shown next to the command in the completion popup" },
                     },
                     .fn_ptr = LuaFnBind((struct {
