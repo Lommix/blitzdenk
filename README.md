@@ -54,12 +54,14 @@ local opencode = blitz.add_provider({
 	type = "openai", -- "response" | "anthropic"
 	url = "https://opencode.ai/zen/go/v1",
 	key_envar = "OPENCODE_API_KEY",
+    -- key = "..." -- or
 })
 
 local opencode_ds_flash = blitz.add_model({
 	name = "deepseek-v4-flash",
 	provider = opencode,
     vision = false,
+	replay_reasoning = true,
 	cost = { input = 0.14, output = 0.28, cache = 0.028 },
 })
 
