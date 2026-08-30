@@ -321,6 +321,14 @@
 ---@field role_agent? string
 ---@field role_system? string
 
+---@class BlitzShellOpts
+---the shell command to run
+---@field cmd string
+---kill the command after this many seconds
+---@field timeout? number
+---run on this machine even when SSH routing is active
+---@field force_local? boolean
+
 ---@class BlitzState
 ---Set a value in the shared state. Pass nil to delete the key.
 ---Returns true on success, or nil,false on a non-string key or unsupported value type.
@@ -406,8 +414,8 @@
 ---@field set_theme fun(theme: BlitzTheme)
 ---Write a debug log line.
 ---@field log fun(msg: string)
----Execute a shell command. Returns output, ok. Optionally a timeout in seconds.
----@field shell fun(cmd: string, timeout?: number): any
+---Execute a shell command. Returns output, ok.
+---@field shell fun(opts: BlitzShellOpts): any
 ---Write content to a named file in the active session temp directory and return its path.
 ---@field write_tempfile fun(name: string, content: string): string
 ---Push a new popup notification with a lifetime of 8s to the top right corner.

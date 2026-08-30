@@ -360,6 +360,10 @@ blitz.ssh.enable()
 blitz.ssh.disable()
 ```
 
+`blitz.shell` opts carry `force_local`: true runs the command on this machine
+and skips the ssh wrap. Use it for commands that only make sense locally, like
+`git status` before a push or a local `ssh-add` check.
+
 Calls are safe from config, tools, and listeners.
 
 ## UI and status

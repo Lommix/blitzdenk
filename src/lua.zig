@@ -368,6 +368,11 @@ const SelectRequestDef = LuaType{ .table_def = .{ .name = "BlitzSelectRequest", 
     .{ .name = "options", .ty = StringListDef, .desc = "1-8 option strings; a custom message row is appended when allow_message is on" },
     .{ .name = "allow_message", .ty = LuaType.boolean, .optional = true, .desc = "show the trailing custom message row; default false" },
 } } };
+const ShellOptsDef = LuaType{ .table_def = .{ .name = "BlitzShellOpts", .fields = &.{
+    .{ .name = "cmd", .ty = LuaType.string, .desc = "the shell command to run" },
+    .{ .name = "timeout", .ty = LuaType.number, .optional = true, .desc = "kill the command after this many seconds" },
+    .{ .name = "force_local", .ty = LuaType.boolean, .optional = true, .desc = "run on this machine even when SSH routing is active" },
+} } };
 pub const Blitz = LuaType{
     .table_def = .{
         .name = "Blitz",
@@ -1017,11 +1022,10 @@ pub const Blitz = LuaType{
             },
             .{
                 .name = "shell",
-                .desc = "Execute a shell command. Returns output, ok. Optionally a timeout in seconds.",
+                .desc = "Execute a shell command. Returns output, ok.",
                 .ty = LuaType{ .function = .{
                     .args = &.{
-                        .{ .name = "cmd", .ty = LuaType.string },
-                        .{ .name = "timeout", .ty = LuaType.number, .optional = true, .desc = "Timeout in seconds." },
+                        .{ .name = "opts", .ty = ShellOptsDef },
                     },
                     .ret = &LuaAny,
                     .fn_ptr = (struct {
@@ -1031,17 +1035,33 @@ pub const Blitz = LuaType{
                                 _ = c.luaL_error(state, "shell: app not initialized");
                                 return 0;
                             };
-                            const cmd = readAnyArg([]const u8, state, "shell", 1) orelse return pushNilBool(state, false);
-                            const cwd: ?[]const u8 = if (a.cwd.len > 0) a.cwd else null;
+                            _ = c.luaL_checktype(state, 1, c.LUA_TTABLE);
 
                             var timeout_ms: ?i64 = null;
-                            if (c.lua_gettop(state) >= 2 and c.lua_type(state, 2) != c.LUA_TNIL) {
-                                const t = c.lua_tonumberx(state, 2, null);
-                                if (!std.math.isFinite(t) or t <= 0) return pushNilBool(state, false);
-                                timeout_ms = @intFromFloat(@min(t, 2_147_483.0) * 1000);
+                            var force_local = false;
+                            if (c.lua_getfield(state, 1, "timeout") != c.LUA_TNIL) {
+                                const t = c.lua_tonumberx(state, -1, null);
+                                if (!std.math.isFinite(t) or t <= 0)
+                                    return c.luaL_error(state, "shell: opts.timeout must be a positive number");
+                                timeout_ms = @max(1, @as(i64, @intFromFloat(@min(t, 2_147_483.0) * 1000)));
                             }
+                            c.lua_pop(state, 1);
+                            if (c.lua_getfield(state, 1, "force_local") != c.LUA_TNIL)
+                                force_local = c.lua_toboolean(state, -1) != 0;
+                            c.lua_pop(state, 1);
 
-                            const opts: @TypeOf(a.exec_pool.*).RunOpts = .{ .cwd = cwd, .argv = &.{ "/bin/sh", "-c", cmd } };
+                            _ = c.lua_getfield(state, 1, "cmd");
+                            const cmd = readAnyValue([]const u8, state, -1) orelse {
+                                _ = c.luaL_error(state, "shell: opts.cmd must be a string");
+                                return 0;
+                            };
+                            const cwd: ?[]const u8 = if (a.cwd.len > 0) a.cwd else null;
+
+                            const opts: @TypeOf(a.exec_pool.*).RunOpts = .{
+                                .cwd = cwd,
+                                .argv = &.{ "/bin/sh", "-c", cmd },
+                                .force_local = force_local,
+                            };
                             const result = (if (timeout_ms) |ms|
                                 a.exec_pool.runAndWaitTimeout(opts, ms)
                             else
