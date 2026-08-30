@@ -46,6 +46,7 @@ Important modules:
 - `std.posix.chdir` doesn't exist → `std.c.chdir` (needs `-lc`); `Dir.cwd().realPath` fails FileNotFound on Linux → use `realPathFile(io, ".")`
 - tests can't `zig test` a file with module imports; use `zig build test` (build.zig wires `blitz-sdk`, `agent-id`, etc.)
 - `File.mtime.nanoseconds` is i96 Unix ns → `.toMilliseconds()`; `statFile` on a not-yet-created dir errors FileNotFound (create path first)
+- running tests will print `failed command: ..` if the test writes to stdout/err via the log or print. To prevent that: `if(!@import("builtin").is_test) ..`
 
 ## RULES
 

@@ -357,7 +357,7 @@ fn isCutPoint(message: sdk.Message) bool {
     return true;
 }
 
-fn isSummaryMessage(message: sdk.Message) bool {
+pub fn isSummaryMessage(message: sdk.Message) bool {
     for (message.parts()) |part| switch (part) {
         .text => |text| if (std.mem.startsWith(u8, text, SUMMARY_PREFIX)) return true,
         else => {},

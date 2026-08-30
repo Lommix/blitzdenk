@@ -871,7 +871,9 @@ pub const App = struct {
         if (agent.parent) |packed_id| {
             const parent_id = r.AgentId.unpack(packed_id);
             if (self.registry.get(parent_id)) |parent| {
-                try parent.queueReminder(notice);
+                const wrapped = try std.fmt.allocPrint(self.gpa, "<system-reminder>\n{s}\n</system-reminder>", .{notice});
+                defer self.gpa.free(wrapped);
+                try parent.queueReminder(wrapped);
                 if (parent.task == null and parent.compact_task == null and parent.status != .retrying and parent.status != .compacting) {
                     try self.registry.run(parent_id, .{ .max_steps = std.math.maxInt(usize) });
                     self.event_bus.emit(self, .{ .agent_started = parent_id });
@@ -1681,26 +1683,39 @@ pub const App = struct {
         self.syncCompletion();
     }
 
-    pub fn undoLastUserMessage(self: *App) void {
+    pub fn undoLastTurn(self: *App) void {
         if (self.input_mode != .text) return;
         if (self.running) return;
         if (self.chat_entries.items.len == 0) return;
 
-        const last = self.chat_entries.items[self.chat_entries.items.len - 1];
-        if (last.role != .user) return;
-        const text = chatEntryUserText(last) orelse return;
+        var start = self.chat_entries.items.len;
+        while (start > 0) {
+            start -= 1;
+            if (self.chat_entries.items[start].role == .user) break;
+        }
+        if (self.chat_entries.items[start].role != .user) return;
+        const text = chatEntryUserText(self.chat_entries.items[start]) orelse return;
 
         const agent = self.mainAgent() orelse return;
         const history = agent.history();
-        if (history.len == 0 or history[history.len - 1].role != .user) return;
-        agent.setMessages(history[0 .. history.len - 1]) catch return;
+        var cut: ?usize = null;
+        for (history, 0..) |message, index| {
+            if (message.role != .user) continue;
+            if (r.session.isReminderText(message.text())) continue;
+            if (r.compact.isSummaryMessage(message)) continue;
+            cut = index;
+        }
+        const turn_start = cut orelse return;
+        agent.setMessages(history[0..turn_start]) catch return;
 
-        const alloc = self.sessionAlloc();
-        self.input_buffer.clearRetainingCapacity();
-        self.input_buffer.appendSlice(alloc, text) catch return;
-        self.input_cursor = @intCast(self.input_buffer.items.len);
+        self.chat_entries.shrinkRetainingCapacity(start);
+        if (text.len > 0) {
+            const alloc = self.sessionAlloc();
+            self.input_buffer.clearRetainingCapacity();
+            self.input_buffer.appendSlice(alloc, text) catch return;
+            self.input_cursor = @intCast(self.input_buffer.items.len);
+        }
 
-        _ = self.chat_entries.pop();
         if (self.textState()) |t| {
             t.completion_open = false;
             t.completion_selected = 0;
@@ -3978,20 +3993,31 @@ test "checkpoint history skips rendered assistant steps" {
     try std.testing.expectEqualStrings("pending", app.chat_entries.items[0].parts[0].message);
 }
 
-test "undoLastUserMessage pops the last user message into the input" {
+fn undoTestApp() App {
     var app: App = undefined;
     app.io = std.testing.io;
     app.arena_session = .init(std.testing.allocator);
-    defer app.arena_session.deinit();
     app.chat_entries = .empty;
     app.input_buffer = .empty;
     app.input_cursor = 0;
     app.input_mode = .{ .text = .{} };
     app.running = false;
     app.dirty = false;
+    app.main_agent_id = null;
+    return app;
+}
 
-    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
-    defer registry.deinit();
+fn undoTestTeardown(app: *App) void {
+    app.arena_session.deinit();
+    app.registry.deinit();
+    std.testing.allocator.destroy(app.registry);
+}
+
+fn undoTestAgent(app: *App) !*r.agent.Agent {
+    const registry = try std.testing.allocator.create(r.agent_registry.Registry);
+    errdefer std.testing.allocator.destroy(registry);
+    registry.* = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    errdefer registry.deinit();
     const id = registry.reserve().?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
@@ -3999,15 +4025,28 @@ test "undoLastUserMessage pops the last user message into the input" {
         .base_url = "https://example.com/v1",
         .provider = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "main", .cwd = "/tmp" } });
-    try agent.setMessages(&.{ r.sdk.UserMessage("old"), r.sdk.UserMessage("hello") });
+    app.registry = registry;
     app.main_agent_id = id;
-    app.registry = &registry;
+    return agent;
+}
+
+test "undoLastTurn pops the last turn into the input" {
+    var app = undoTestApp();
+    const agent = try undoTestAgent(&app);
+    defer undoTestTeardown(&app);
+    try agent.setMessages(&.{
+        r.sdk.UserMessage("old"),
+        r.sdk.UserMessage("hello"),
+        r.sdk.AssistantMessage("hi"),
+        r.sdk.UserMessage("<system-reminder>\nAgent result done: /tmp/x\n</system-reminder>"),
+    });
 
     const alloc = app.sessionAlloc();
     try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "hello"));
-    try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "hi"));
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .system, "notice"));
 
-    app.undoLastUserMessage();
+    app.undoLastTurn();
 
     try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
     try std.testing.expectEqualStrings("hello", app.input_buffer.items);
@@ -4015,23 +4054,102 @@ test "undoLastUserMessage pops the last user message into the input" {
     try std.testing.expectEqualStrings("old", agent.history()[0].text());
 }
 
-test "undoLastUserMessage does not fire while running" {
-    var app: App = undefined;
-    app.io = std.testing.io;
-    app.arena_session = .init(std.testing.allocator);
+test "undoLastTurn removes tool calls together with their results" {
+    var app = undoTestApp();
+    const agent = try undoTestAgent(&app);
+    defer undoTestTeardown(&app);
+    try agent.setMessages(&.{
+        r.sdk.UserMessage("run it"),
+        .{ .role = .assistant, .content = &.{.{ .tool_call = .{ .id = "c1", .name = "bash", .input = "{}" } }} },
+        .{ .role = .tool, .content = &.{.{ .tool_result = .{ .id = "c1", .name = "bash", .output = "out" } }} },
+        r.sdk.AssistantMessage("done"),
+    });
+
+    const alloc = app.sessionAlloc();
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "run it"));
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "done"));
+
+    app.undoLastTurn();
+
+    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), agent.history().len);
+    try std.testing.expectEqualStrings("run it", app.input_buffer.items);
+}
+
+test "undoLastTurn pops only the last of queued parallel turns" {
+    var app = undoTestApp();
+    const agent = try undoTestAgent(&app);
+    defer undoTestTeardown(&app);
+    try agent.setMessages(&.{
+        r.sdk.UserMessage("first"),
+        r.sdk.AssistantMessage("one"),
+        r.sdk.UserMessage("second"),
+        r.sdk.AssistantMessage("two"),
+    });
+
+    const alloc = app.sessionAlloc();
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "first"));
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "one"));
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "second"));
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "two"));
+
+    app.undoLastTurn();
+
+    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
+    try std.testing.expectEqualStrings("first", app.chat_entries.items[0].parts[0].message);
+    try std.testing.expectEqual(@as(usize, 2), agent.history().len);
+    try std.testing.expectEqualStrings("second", app.input_buffer.items);
+}
+
+test "undoLastTurn ignores the compaction summary turn" {
+    var app = undoTestApp();
+    const agent = try undoTestAgent(&app);
+    defer undoTestTeardown(&app);
+    try agent.setMessages(&.{
+        r.sdk.UserMessage("old"),
+        r.sdk.UserMessage("run it"),
+        r.sdk.AssistantMessage("done"),
+        r.sdk.UserMessage(r.compact.SUMMARY_PREFIX ++ "state of the tools"),
+    });
+
+    const alloc = app.sessionAlloc();
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "run it"));
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "done"));
+
+    app.undoLastTurn();
+
+    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), agent.history().len);
+    try std.testing.expectEqualStrings("old", agent.history()[0].text());
+    try std.testing.expectEqualStrings("run it", app.input_buffer.items);
+}
+
+test "undoLastTurn does nothing without a user entry" {
+    var app = undoTestApp();
+    const agent = try undoTestAgent(&app);
+    defer undoTestTeardown(&app);
+    try agent.setMessages(&.{r.sdk.AssistantMessage("unsolicited")});
+
+    const alloc = app.sessionAlloc();
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .system, "welcome"));
+    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "unsolicited"));
+
+    app.undoLastTurn();
+
+    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), agent.history().len);
+    try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
+}
+
+test "undoLastTurn does not fire while running" {
+    var app = undoTestApp();
     defer app.arena_session.deinit();
-    app.chat_entries = .empty;
-    app.input_buffer = .empty;
-    app.input_cursor = 0;
-    app.input_mode = .{ .text = .{} };
     app.running = true;
-    app.dirty = false;
 
     const alloc = app.sessionAlloc();
     try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "hello"));
-    app.main_agent_id = null;
 
-    app.undoLastUserMessage();
+    app.undoLastTurn();
 
     try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
     try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);

@@ -925,7 +925,7 @@ pub fn run(
                                     continue;
                                 },
                                 .undo => {
-                                    app.undoLastUserMessage();
+                                    app.undoLastTurn();
                                     continue;
                                 },
                                 .paste_image => {
