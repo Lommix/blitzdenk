@@ -122,27 +122,42 @@ pub const Command = union(enum) {
         switch (self.*) {
             .reset_session => app.reset(),
             .cancel => {
-                const checkpoint_start = if (app.main_agent_id) |id|
+                const main_id = app.main_agent_id;
+                var main_active = false;
+                if (main_id) |id| {
+                    if (app.registry.get(id)) |agent| {
+                        main_active = (app.registry.state(id) orelse .complete) == .active and agent.status != .canceled;
+                    }
+                }
+                const checkpoint_start = if (main_id) |id|
                     if (app.registry.get(id)) |agent| agent.history().len else null
                 else
                     null;
-                if (app.main_agent_id) |id| {
-                    app.event_bus.emit(app, .{ .agent_cancelled = id });
+                if (main_id) |id| {
+                    if (app.registry.get(id)) |agent| {
+                        if (agent.status != .canceled) app.event_bus.emit(app, .{ .agent_cancelled = id });
+                    }
                 }
-                app.cancelPermissions();
-                app.exec_pool.cancelAll();
-                app.registry.cancelAll();
+                if (main_active) {
+                    app.cancelPermissions(main_id);
+                    app.registry.cancel(main_id.?);
+                } else {
+                    app.cancelPermissions(null);
+                    app.exec_pool.cancelAll();
+                    app.registry.cancelAll();
+                }
                 app.dropStreamingPreview();
-                if (app.main_agent_id) |id| {
+                if (main_id) |id| {
                     if (checkpoint_start) |start| try app.appendAgentHistory(id, start, app.sdk_run_rendered_steps);
                 }
                 app.sdk_run_rendered_steps = 0;
 
-                app.running = false;
+                app.running = app.registry.countActive() > 0;
                 app.auto_scroll = true;
             },
             .cancel_agent => |id| {
                 if (app.registry.get(id) == null) return;
+                app.cancelPermissions(id);
                 app.registry.cancel(id);
                 app.event_bus.emit(app, .{ .agent_cancelled = id });
             },

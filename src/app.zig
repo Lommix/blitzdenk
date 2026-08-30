@@ -397,22 +397,34 @@ pub const App = struct {
         self.arena_app.deinit();
     }
 
-    pub fn cancelPermissions(self: *App) void {
+    pub fn cancelPermissions(self: *App, only: ?r.AgentId) void {
+        var cleared_active = false;
         if (self.active_permission) |req| {
-            req.state = .denied;
-            req.event.set(self.io);
-            self.active_permission = null;
+            if (only == null or req.agent_id == only.?) {
+                req.state = .denied;
+                req.event.set(self.io);
+                self.active_permission = null;
+                cleared_active = true;
+            }
         }
 
         const g = self.permission_queue.lock(self.io);
         defer g.unlock();
 
-        for (g.ptr.items) |req| {
-            req.state = .denied;
-            req.event.set(self.io);
+        var index: usize = 0;
+        while (index < g.ptr.items.len) {
+            const req = g.ptr.items[index];
+            if (only == null or req.agent_id == only.?) {
+                req.state = .denied;
+                req.event.set(self.io);
+                _ = g.ptr.swapRemove(index);
+            } else index += 1;
         }
-        g.ptr.clearRetainingCapacity();
 
+        if (only != null) {
+            if (cleared_active) self.returnToText();
+            return;
+        }
         self.clearSelections(true);
         self.returnToText();
     }
@@ -560,7 +572,7 @@ pub const App = struct {
         if (self.mcp_load) |*task| task.deinit();
         self.mcp_load = null;
         self.dropStreamingPreview();
-        self.cancelPermissions();
+        self.cancelPermissions(null);
         self.exec_pool.cancelAll();
         self.registry.cancelAll();
         r.artifact.cleanup(self.exec_pool);
@@ -1839,6 +1851,7 @@ pub const App = struct {
                 }
             },
             .failed => |err| {
+                const canceled = err == error.Canceled;
                 if (self.registry.get(agent_id)) |agent| {
                     if (agent.shouldAutoRetry(err)) {
                         if (is_main) {
@@ -1848,9 +1861,10 @@ pub const App = struct {
                         return;
                     }
                 }
-                self.event_bus.emit(self, .{ .agent_failed = .{ .id = agent_id, .err = @errorName(err) } });
+                if (!canceled) self.event_bus.emit(self, .{ .agent_failed = .{ .id = agent_id, .err = @errorName(err) } });
                 if (!is_main) return;
                 self.dropStreamingPreview();
+                if (canceled) return;
                 const parts = try alloc.alloc(ChatPart, 1);
                 parts[0] = .{ .plain_text = try std.fmt.allocPrint(alloc, "Agent failed: {s}", .{@errorName(err)}) };
                 try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });

@@ -550,7 +550,7 @@ pub fn run(
         app.lua_config_abs = info.abs_path;
     }
     defer {
-        app.cancelPermissions();
+        app.cancelPermissions(null);
         exec_pool.cancelAll();
         registry.cancelAll();
         r.artifact.cleanup(&exec_pool);
@@ -1099,6 +1099,7 @@ pub fn run(
                                     app.scroll_offset = 0;
                                 },
                                 .text => {
+                                    _ = app.closeCompletion();
                                     if (app.input_buffer.items.len == 0) break;
                                     const input = std.fmt.allocPrint(app.sessionAlloc(), "{f}", .{std.unicode.fmtUtf8(app.inputSlice())}) catch break;
                                     var send_text: []const u8 = input;
