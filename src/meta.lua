@@ -363,7 +363,8 @@
 ---@field set_compact_edge fun(tokens: integer)
 ---Bind a vim-style key combo to a Lua callback.
 ---Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
----@field bind fun(key: string, func: fun())
+---
+---@field bind fun(key: string, func: fun(), description?: string)
 ---Bind a slash command to a Lua callback. The leading "/" is added automatically.
 ---Example: blitz.add_command("help", function(args) end)
 ---

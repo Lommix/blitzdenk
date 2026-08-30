@@ -21,7 +21,7 @@ pub const Action = union(enum) {
     lua: c_int,
 };
 
-pub const KeyBind = struct { key: tui.Key, action: Action };
+pub const KeyBind = struct { key: tui.Key, action: Action, description: []const u8 = "" };
 pub const KeyMap = struct {
     custom: std.ArrayList(KeyBind) = .empty,
 
@@ -50,6 +50,77 @@ pub const KeyMap = struct {
         return null;
     }
 };
+
+pub fn formatKey(key: tui.Key, buf: []u8) []const u8 {
+    var len: usize = 0;
+    if (key.mods.ctrl) len += put(buf[len..], "c+");
+    if (key.mods.alt) len += put(buf[len..], "m+");
+    if (key.mods.shift) len += put(buf[len..], "s+");
+    switch (key.code) {
+        .char => |c| {
+            if (c == ' ') {
+                len += put(buf[len..], "space");
+            } else {
+                buf[len] = c;
+                len += 1;
+            }
+        },
+        .enter => len += put(buf[len..], "cr"),
+        .backspace => len += put(buf[len..], "bs"),
+        .tab => len += put(buf[len..], "tab"),
+        .esc => len += put(buf[len..], "esc"),
+        .arrow_up => len += put(buf[len..], "↑"),
+        .arrow_down => len += put(buf[len..], "↓"),
+        .arrow_left => len += put(buf[len..], "←"),
+        .arrow_right => len += put(buf[len..], "→"),
+        .home => len += put(buf[len..], "home"),
+        .end => len += put(buf[len..], "end"),
+        .page_up => len += put(buf[len..], "pgup"),
+        .page_down => len += put(buf[len..], "pgdn"),
+        .insert => len += put(buf[len..], "ins"),
+        .delete => len += put(buf[len..], "del"),
+        .f1 => len += put(buf[len..], "f1"),
+        .f2 => len += put(buf[len..], "f2"),
+        .f3 => len += put(buf[len..], "f3"),
+        .f4 => len += put(buf[len..], "f4"),
+        .f5 => len += put(buf[len..], "f5"),
+        .f6 => len += put(buf[len..], "f6"),
+        .f7 => len += put(buf[len..], "f7"),
+        .f8 => len += put(buf[len..], "f8"),
+        .f9 => len += put(buf[len..], "f9"),
+        .f10 => len += put(buf[len..], "f10"),
+        .f11 => len += put(buf[len..], "f11"),
+        .f12 => len += put(buf[len..], "f12"),
+    }
+    return buf[0..len];
+}
+
+pub fn actionName(action: Action) []const u8 {
+    return switch (action) {
+        .noop => "noop",
+        .exit => "quit",
+        .scroll_up => "scroll up",
+        .scroll_down => "scroll down",
+        .clear_session => "clear",
+        .retry => "retry",
+        .cancel => "cancel",
+        .cursor_left => "left",
+        .cursor_right => "right",
+        .cursor_up => "up",
+        .cursor_down => "down",
+        .completion_next => "cmp next",
+        .completion_prev => "cmp prev",
+        .completion_accept => "cmp accept",
+        .paste_image => "paste img",
+        .undo => "undo",
+        .lua => "custom",
+    };
+}
+
+fn put(buf: []u8, s: []const u8) usize {
+    @memcpy(buf[0..s.len], s);
+    return s.len;
+}
 
 // vim style key bind parsing
 // <C-c> <M-S-a> <Esc> <Up> <F1> ...
@@ -286,4 +357,32 @@ test "KeyMap defaults bind completion actions" {
     try std.testing.expectEqual(Action.completion_next, map.parse(.{ .mods = .{ .ctrl = true }, .code = .{ .char = 'n' } }).?);
     try std.testing.expectEqual(Action.completion_prev, map.parse(.{ .mods = .{ .ctrl = true }, .code = .{ .char = 'p' } }).?);
     try std.testing.expectEqual(Action.completion_accept, map.parse(.{ .mods = .{ .ctrl = true }, .code = .{ .char = 'y' } }).?);
+}
+
+test "formatKey ctrl char" {
+    var buf: [16]u8 = undefined;
+    const k = parseKeyString("<C-c>").?;
+    try std.testing.expectEqualStrings("c+c", formatKey(k, &buf));
+}
+
+test "formatKey multi mods" {
+    var buf: [16]u8 = undefined;
+    const k = parseKeyString("<M-S-a>").?;
+    try std.testing.expectEqualStrings("m+s+a", formatKey(k, &buf));
+}
+
+test "formatKey named keys" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("esc", formatKey(parseKeyString("<Esc>").?, &buf));
+    try std.testing.expectEqualStrings("↑", formatKey(parseKeyString("<Up>").?, &buf));
+    try std.testing.expectEqualStrings("f12", formatKey(parseKeyString("<F12>").?, &buf));
+    try std.testing.expectEqualStrings("space", formatKey(parseKeyString("<Space>").?, &buf));
+    try std.testing.expectEqualStrings("s+tab", formatKey(parseKeyString("<S-Tab>").?, &buf));
+}
+
+test "actionName short names" {
+    try std.testing.expectEqualStrings("quit", actionName(.exit));
+    try std.testing.expectEqualStrings("scroll up", actionName(.scroll_up));
+    try std.testing.expectEqualStrings("cmp accept", actionName(.completion_accept));
+    try std.testing.expectEqualStrings("custom", actionName(.{ .lua = 3 }));
 }

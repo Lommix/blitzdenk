@@ -772,19 +772,31 @@ pub const Blitz = LuaType{
                 .desc =
                 \\Bind a vim-style key combo to a Lua callback.
                 \\Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
+                \\
                 ,
                 .ty = LuaType{
                     .function = .{
-                        .args = &.{ .{ .name = "key", .ty = LuaType.string }, .{ .name = "func", .ty = LuaType{ .function = .{} } } },
+                        .args = &.{
+                            .{ .name = "key", .ty = LuaType.string },
+                            .{ .name = "func", .ty = LuaType{ .function = .{} } },
+                            .{ .name = "description", .ty = LuaType.string, .optional = true, .desc = "shown next to the keybind in the dashboard" },
+                        },
                         .fn_ptr = LuaFnBind((struct {
-                            fn lua_fn(a: *r.app.App, state: *c.lua_State, key: []const u8, func: LuaFnRef) !void {
+                            fn lua_fn(a: *r.app.App, state: *c.lua_State, key: []const u8, func: LuaFnRef, description: ?[]const u8) !void {
                                 if (try isToolVm(state)) return;
                                 const parsed = keys.parseKeyString(key) orelse return error.InvalidKeyCombo;
-                                a.lua_vm.bind_entries.appendAssumeCapacity(.{
+                                const vm = a.lua_vm;
+                                if (vm.bind_entries.items.len >= MAX_LUA_BINDS) return error.TooManyBinds;
+                                const desc_len = if (description) |d| d.len else 0;
+                                if (desc_len > 128) return error.BindDescriptionTooLong;
+                                var entry = LuaBindEntry{
                                     .key = parsed,
+                                    .description_len = desc_len,
                                     .func_ref = func.idx,
                                     .L = state,
-                                });
+                                };
+                                if (description) |d| @memcpy(entry.description[0..d.len], d);
+                                vm.bind_entries.appendAssumeCapacity(entry);
                             }
                         }).lua_fn, "bind"),
                     },
@@ -2030,8 +2042,14 @@ const LuaToolEntry = struct {
 
 const LuaBindEntry = struct {
     key: tui.Key = .{ .code = .{ .char = 0 } },
+    description: [128]u8 = undefined,
+    description_len: usize = 0,
     func_ref: c_int = c.LUA_NOREF,
     L: ?*c.lua_State = null,
+
+    fn descriptionSlice(self: *const LuaBindEntry) []const u8 {
+        return self.description[0..self.description_len];
+    }
 };
 
 const LuaHookEntry = struct {
@@ -2695,6 +2713,7 @@ pub const LuaVm = struct {
 
     pub const LuaBind = struct {
         key: tui.Key,
+        description: []const u8 = "",
         lua_fn: c_int,
     };
 
@@ -2702,7 +2721,11 @@ pub const LuaVm = struct {
         if (self.bind_entries.items.len == 0) return &.{};
         const out = try alloc.alloc(LuaBind, self.bind_entries.items.len);
         for (self.bind_entries.items, 0..) |entry, i| {
-            out[i] = .{ .key = entry.key, .lua_fn = entry.func_ref };
+            out[i] = .{
+                .key = entry.key,
+                .description = try alloc.dupe(u8, entry.descriptionSlice()),
+                .lua_fn = entry.func_ref,
+            };
         }
         return out;
     }

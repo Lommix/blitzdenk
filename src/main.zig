@@ -591,7 +591,7 @@ pub fn run(
     context_factory.precalcGeneralPromptSize();
 
     for (lua_binds) |bind| {
-        try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn } });
+        try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn }, .description = bind.description });
     }
 
     var cwd_lua_mtime: i128 = blk: {
@@ -829,7 +829,7 @@ pub fn run(
                     lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
                     app.keymap.custom.clearRetainingCapacity();
                     for (lua_binds) |bind| {
-                        try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn } });
+                        try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn }, .description = bind.description });
                     }
 
                     if (reload_requested) app.lua_reload_failed.store(false, .release);

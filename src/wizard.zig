@@ -480,6 +480,7 @@ const stubBlitzPrelude =
     \\blitz.register_tool = function() return "lua_repl" end
     \\blitz.set_agent_tools = function() end
     \\blitz.add_command = function() end
+    \\blitz.bind = function() end
     \\blitz.tools = setmetatable({}, { __index = function() return "tool" end })
     \\blitz.add_agent = function() return 2 end
     \\

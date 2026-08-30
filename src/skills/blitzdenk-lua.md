@@ -213,8 +213,11 @@ blitz.bind("<C-t>", function()
     local f = blitz.get_flags()
     f.show_thinking = not f.show_thinking
     blitz.set_flags(f)
-end)
+end, "toggle thinking output")
 ```
+
+The optional description shows next to the keybind in the dashboard. Without
+it the row falls back to `custom`.
 
 `set_flags` reads only the fields you pass: `show_thinking` and `debug_log`
 booleans, `approval_mode` string (`"strict"`, `"default"`, `"yolo"`,

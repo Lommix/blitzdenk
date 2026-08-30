@@ -10,14 +10,6 @@ const HEADER_ART =
     \\╚═════╝ ╚══════╝╚═╝   ╚═╝   ╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝
 ;
 
-// TODO: load keybindings
-const keybinds = .{
-    .{ "esc", "cancel" },
-    .{ "c+c", "quit" },
-    .{ "c+u", "scroll up" },
-    .{ "c+d", "scroll down" },
-};
-
 pub var start_ns: i128 = 0;
 var startup_ms: ?i64 = null;
 
@@ -64,6 +56,53 @@ pub fn build_header(frame: usize, base_color: r.tui.Color, alloc: std.mem.Alloca
     }
 }
 
+const bind_cols = 3;
+
+const BindCell = struct { key_str: []const u8, name: []const u8 };
+
+fn formatBindKey(alloc: std.mem.Allocator, key: r.tui.Key) ![]const u8 {
+    var buf: [16]u8 = undefined;
+    return alloc.dupe(u8, r.keys.formatKey(key, &buf));
+}
+
+fn strWidth(s: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(s) catch s.len;
+}
+
+fn buildBindLines(
+    alloc: std.mem.Allocator,
+    theme: r.app.Theme,
+    cells: []const BindCell,
+    out: *std.ArrayList(r.tui.Line),
+) !void {
+    var key_w = [bind_cols]usize{ 0, 0, 0 };
+    var name_w = [bind_cols]usize{ 0, 0, 0 };
+    for (cells, 0..) |cell, i| {
+        const col = i % bind_cols;
+        key_w[col] = @max(key_w[col], strWidth(cell.key_str));
+        name_w[col] = @max(name_w[col], strWidth(cell.name));
+    }
+
+    for (cells, 0..) |cell, i| {
+        const col = i % bind_cols;
+        if (col == 0) try out.append(alloc, r.tui.Line{});
+        const l = &out.items[out.items.len - 1];
+        if (col != 0) try l.pushSpan(alloc, .{ .content = " ", .style = .{ .fg = theme.muted } });
+        const prefix: []const u8 = if (col == 0) "├[" else "[";
+        try l.pushSpan(alloc, .{ .content = prefix, .style = .{ .fg = theme.muted } });
+        try pushPadded(l, alloc, cell.key_str, key_w[col], .{ .fg = theme.info });
+        try l.pushSpan(alloc, .{ .content = "] ", .style = .{ .fg = theme.muted } });
+        const is_last_cell = col + 1 == bind_cols or i + 1 == cells.len;
+        try pushPadded(l, alloc, cell.name, if (is_last_cell) 0 else name_w[col], .{ .fg = theme.muted });
+    }
+}
+
+fn pushPadded(l: *r.tui.Line, alloc: std.mem.Allocator, text: []const u8, width: usize, style: r.tui.Style) !void {
+    try l.pushSpanPrint(alloc, "{s}", .{text}, style);
+    const pad = width -| strWidth(text);
+    if (pad > 0) try l.pushSpanPrint(alloc, "{s: <[1]}", .{ "", pad }, style);
+}
+
 pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
     try build_header(app.frame_count, app.theme.info, app.arena_frame.allocator(), out);
     const alloc = app.arena_frame.allocator();
@@ -86,36 +125,24 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
     try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
 
     {
-        const bind_count = keybinds.len;
-        inline for (0..bind_count / 2) |row| {
-            const left = row * 2;
-            const right = left + 1;
-            const bind0 = keybinds[left];
-            const bind1 = keybinds[right];
-
-            var l = r.tui.Line{};
-            try l.pushSpan(alloc, .{ .content = "├[", .style = .{ .fg = app.theme.muted } });
-            try l.pushSpanPrint(alloc, "{s}", .{bind0.@"0"}, .{ .fg = app.theme.info });
-            try l.pushSpan(alloc, .{ .content = "] ", .style = .{ .fg = app.theme.muted } });
-            try l.pushSpanPrint(alloc, "{s: <22}", .{bind0.@"1"}, .{ .fg = app.theme.muted });
-
-            try l.pushSpan(alloc, .{ .content = "[", .style = .{ .fg = app.theme.muted } });
-            try l.pushSpanPrint(alloc, "{s}", .{bind1.@"0"}, .{ .fg = app.theme.info });
-            try l.pushSpan(alloc, .{ .content = "] ", .style = .{ .fg = app.theme.muted } });
-            try l.pushSpanPrint(alloc, "{s}", .{bind1.@"1"}, .{ .fg = app.theme.muted });
-
-            try out.append(alloc, l);
+        var cells: std.ArrayList(BindCell) = .empty;
+        for (app.keymap.custom.items) |bind| {
+            try cells.append(alloc, .{
+                .key_str = try formatBindKey(alloc, bind.key),
+                .name = if (bind.description.len > 0) bind.description else r.keys.actionName(bind.action),
+            });
         }
-
-        if (bind_count % 2 != 0) {
-            const bind0 = keybinds[bind_count - 1];
-            var l = r.tui.Line{};
-            try l.pushSpan(alloc, .{ .content = "├[", .style = .{ .fg = app.theme.muted } });
-            try l.pushSpanPrint(alloc, "{s}", .{bind0.@"0"}, .{ .fg = app.theme.info });
-            try l.pushSpan(alloc, .{ .content = "] ", .style = .{ .fg = app.theme.muted } });
-            try l.pushSpanPrint(alloc, "{s}", .{bind0.@"1"}, .{ .fg = app.theme.muted });
-            try out.append(alloc, l);
+        for (r.keys.KeyMap.defaults) |bind| {
+            switch (bind.action) {
+                .cursor_left, .cursor_right, .cursor_up, .cursor_down => continue,
+                else => {},
+            }
+            try cells.append(alloc, .{
+                .key_str = try formatBindKey(alloc, bind.key),
+                .name = if (bind.description.len > 0) bind.description else r.keys.actionName(bind.action),
+            });
         }
+        try buildBindLines(alloc, app.theme, cells.items, out);
     }
 
     try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
@@ -212,4 +239,48 @@ test "formatSize" {
     for (cases) |c| {
         try std.testing.expectEqualStrings(c.expect, formatSize(&buf, c.count));
     }
+}
+
+fn lineText(buf: []u8, line: *const r.tui.Line) ![]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    for (line.spans.items) |span| try w.writeAll(span.content);
+    return w.buffered();
+}
+
+test "bind table renders three aligned cells per row" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(r.tui.Line) = .empty;
+    defer out.deinit(a);
+    defer for (out.items) |*l| l.deinit(a);
+    const cells = [_]BindCell{
+        .{ .key_str = "↑", .name = "up" },
+        .{ .key_str = "c+c", .name = "quit" },
+        .{ .key_str = "esc", .name = "cancel" },
+        .{ .key_str = "tab", .name = "cmp next" },
+    };
+    try buildBindLines(a, .default, &cells, &out);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "├[↑  ] up       [c+c] quit [esc] cancel",
+        try lineText(&buf, &out.items[0]),
+    );
+    try std.testing.expectEqualStrings("├[tab] cmp next", try lineText(&buf, &out.items[1]));
+}
+
+test "bind table single row pads all but the last name" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(r.tui.Line) = .empty;
+    defer out.deinit(a);
+    defer for (out.items) |*l| l.deinit(a);
+    const cells = [_]BindCell{
+        .{ .key_str = "c+u", .name = "scroll up" },
+        .{ .key_str = "c+d", .name = "scroll down" },
+    };
+    try buildBindLines(a, .default, &cells, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("├[c+u] scroll up [c+d] scroll down", try lineText(&buf, &out.items[0]));
 }
