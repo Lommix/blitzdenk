@@ -2484,6 +2484,8 @@ fn luaAllocWith(alloc: *const Allocator, ptr: ?*anyopaque, osize: usize, nsize: 
 }
 
 const MAX_LUA_TOOLS = 64;
+const LUA_ERROR_SHOW_MS: i64 = 8_000;
+pub const LUA_ERROR_FADE_NS: i128 = 2 * std.time.ns_per_s;
 const MAX_LUA_BINDS = 64;
 const MAX_LUA_COMMANDS = 64;
 const MAX_LUA_MCP_SERVERS = 16;
@@ -2501,6 +2503,8 @@ pub const LuaMcpServerEntry = struct {
     conf_enabled: bool = false,
 };
 
+pub const LuaErrorSource = enum { config, action };
+
 pub const LuaVm = struct {
     L: *c.lua_State,
     app: ?*app.App = null,
@@ -2517,6 +2521,7 @@ pub const LuaVm = struct {
     stdout_buf: std.ArrayList(u8) = .empty,
     last_error: [512]u8 = undefined,
     last_error_len: usize = 0,
+    last_error_until_ns: i128 = 0,
     /// Serializes lua_pcall across worker threads. Lua VMs are not
     /// thread-safe; native tools run in parallel, Lua tools serialize here.
     vm_mu: std.Io.Mutex = .init,
@@ -2608,12 +2613,12 @@ pub const LuaVm = struct {
 
         const status = c.luaL_loadfilex(self.L, &buf, null);
         if (status != 0) {
-            self.popError();
+            self.popError(.config);
             return error.LuaLoadFailed;
         }
         const call_status = c.lua_pcallk(self.L, 0, c.LUA_MULTRET, 0, 0, null);
         if (call_status != 0) {
-            self.popError();
+            self.popError(.config);
             return error.LuaLoadFailed;
         }
     }
@@ -2621,12 +2626,12 @@ pub const LuaVm = struct {
     pub fn exec(self: *LuaVm, code: []const u8) !void {
         const status = c.luaL_loadbufferx(self.L, code.ptr, code.len, null, null);
         if (status != 0) {
-            self.popError();
+            self.popError(.config);
             return error.LuaExecFailed;
         }
         const call_status = c.lua_pcallk(self.L, 0, c.LUA_MULTRET, 0, 0, null);
         if (call_status != 0) {
-            self.popError();
+            self.popError(.config);
             return error.LuaExecFailed;
         }
     }
@@ -2667,7 +2672,7 @@ pub const LuaVm = struct {
         if (self.app) |a| self.setApp(a);
     }
 
-    fn popError(self: *LuaVm) void {
+    fn popError(self: *LuaVm, source: LuaErrorSource) void {
         if (c.lua_gettop(self.L) > 0) {
             var len: usize = 0;
             const ptr = c.lua_tolstring(self.L, -1, &len);
@@ -2682,14 +2687,32 @@ pub const LuaVm = struct {
         } else {
             self.last_error_len = 0;
         }
+        self.last_error_until_ns = switch (source) {
+            .config => std.math.maxInt(i128),
+            .action => self.nowAwakeNs() + LUA_ERROR_SHOW_MS * std.time.ns_per_ms,
+        };
+    }
+
+    fn nowAwakeNs(self: *LuaVm) i128 {
+        const a = self.app orelse return 0;
+        return std.Io.Clock.Timestamp.now(a.io, .awake).raw.nanoseconds;
     }
 
     pub fn getLastError(self: *const LuaVm) []const u8 {
         return self.last_error[0..self.last_error_len];
     }
 
+    pub fn errorAlive(self: *const LuaVm, now_ns: i128) bool {
+        return self.last_error_len != 0 and now_ns < self.last_error_until_ns;
+    }
+
+    pub fn errorNeedsFrame(self: *const LuaVm, now_ns: i128) bool {
+        return self.errorAlive(now_ns) and self.last_error_until_ns -| now_ns <= LUA_ERROR_FADE_NS;
+    }
+
     pub fn clearLastError(self: *LuaVm) void {
         self.last_error_len = 0;
+        self.last_error_until_ns = 0;
     }
 
     /// Build Tool array from registered Lua tools. Caller owns slice.
@@ -2804,7 +2827,7 @@ pub const LuaVm = struct {
             return;
         }
         const status = c.lua_pcallk(self.L, 0, 0, 0, 0, null);
-        if (status != 0) self.popError();
+        if (status != 0) self.popError(.action);
     }
 
     /// Invoke a registered lua command. `input` may be the full typed command
@@ -2827,7 +2850,7 @@ pub const LuaVm = struct {
 
             _ = c.lua_pushlstring(self.L, args.ptr, args.len);
             const status = c.lua_pcallk(self.L, 1, 0, 0, 0, null);
-            if (status != 0) self.popError();
+            if (status != 0) self.popError(.action);
             return true;
         }
 
@@ -2961,7 +2984,7 @@ pub const LuaVm = struct {
 
         const status = c.lua_pcallk(L, 0, 1, 0, 0, null);
         if (status != 0) {
-            self.popError();
+            self.popError(.action);
             return null;
         }
 
@@ -2989,7 +3012,7 @@ pub const LuaVm = struct {
 
         const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
         if (status != 0) {
-            self.popError();
+            self.popError(.action);
             const msg = std.fmt.allocPrint(std.heap.page_allocator, "permission hook error: {s}", .{self.getLastError()}) catch
                 return .{ .message = "permission hook error" };
             return .{ .message = msg };
@@ -3081,7 +3104,7 @@ pub const LuaVm = struct {
             c.lua_pushnil(L);
         }
         const status = c.lua_pcallk(L, 2, 0, 0, 0, null);
-        if (status != 0) self.popError();
+        if (status != 0) self.popError(.action);
         c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
     }
 
@@ -3109,7 +3132,7 @@ pub const LuaVm = struct {
         pushAgentId(L, agent_id);
         const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
         if (status != 0) {
-            self.popError();
+            self.popError(.action);
             return;
         }
         if (c.lua_type(L, -1) != c.LUA_TSTRING) return;

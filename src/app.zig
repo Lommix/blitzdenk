@@ -3024,28 +3024,56 @@ fn refreshLuaStatusBar(app: *App) void {
     }
 }
 
-fn luaErrorParagraph(app: *App, arena: std.mem.Allocator, msg: []const u8) !r.tui.Paragraph {
-    var p: r.tui.Paragraph = .{
-        .style = .{ .fg = app.theme.on_err, .bg = app.theme.err },
+fn blendTo(from: r.tui.Color, to: r.tui.Color, t: f64) r.tui.Color {
+    if (t >= 1) return to;
+    const a = from.toRgb();
+    const b = to.toRgb();
+    const ch = struct {
+        fn mix(x: u8, y: u8, k: f64) u8 {
+            const xf: f64 = @floatFromInt(x);
+            const yf: f64 = @floatFromInt(y);
+            return @intFromFloat(@round(xf + (yf - xf) * k));
+        }
+    }.mix;
+    return .{ .rgb = .{ .r = ch(a.r, b.r, t), .g = ch(a.g, b.g, t), .b = ch(a.b, b.b, t) } };
+}
+
+fn luaErrorStyle(app: *App, now_ns: i128) r.tui.Style {
+    const remain = app.lua_vm.last_error_until_ns -| now_ns;
+    if (remain >= r.lua.LUA_ERROR_FADE_NS) return .{ .fg = app.theme.on_err, .bg = app.theme.err };
+    const span: f64 = @floatFromInt(r.lua.LUA_ERROR_FADE_NS);
+    const left: f64 = @floatFromInt(@max(remain, 0));
+    const t = 1 - left / span;
+    return .{
+        .fg = blendTo(app.theme.on_err, app.theme.bg, t),
+        .bg = blendTo(app.theme.err, app.theme.bg, t),
     };
-    try p.appendText(arena, msg, .{ .fg = app.theme.on_err, .bg = app.theme.err });
+}
+
+fn luaErrorParagraph(arena: std.mem.Allocator, msg: []const u8, style: r.tui.Style) !r.tui.Paragraph {
+    var p: r.tui.Paragraph = .{ .style = style };
+    try p.appendText(arena, msg, style);
     return p;
 }
 
 fn luaErrorHeight(app: *App, arena: std.mem.Allocator, width: u16, max_height: u16) !u16 {
+    const now_ns = std.Io.Clock.Timestamp.now(app.io, .awake).raw.nanoseconds;
+    if (!app.lua_vm.errorAlive(now_ns)) return 0;
     const msg = app.lua_vm.getLastError();
     if (msg.len == 0 or width == 0 or max_height == 0) return 0;
 
-    var p = try luaErrorParagraph(app, arena, msg);
+    var p = try luaErrorParagraph(arena, msg, luaErrorStyle(app, now_ns));
     return @min(p.totalHeight(width), max_height);
 }
 
 fn renderLuaError(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
     if (area.width == 0 or area.height == 0) return;
+    const now_ns = std.Io.Clock.Timestamp.now(app.io, .awake).raw.nanoseconds;
+    if (!app.lua_vm.errorAlive(now_ns)) return;
     const msg = app.lua_vm.getLastError();
     if (msg.len == 0) return;
 
-    var p = try luaErrorParagraph(app, arena, msg);
+    var p = try luaErrorParagraph(arena, msg, luaErrorStyle(app, now_ns));
     p.renderSimple(arena, area, buf);
 }
 

@@ -675,11 +675,15 @@ pub fn run(
         defer term.deinit();
 
         var was_running = app.running;
+        var error_fade_pending = false;
         main_loop: while (true) {
             // tick notifications
             const had_visible_notifications = app.notifications.hasVisible();
             app.notifications.tick(1.0 / 60.0);
             if (had_visible_notifications or app.notifications.hasVisible()) app.dirty = true;
+            const error_fading = app.lua_vm.errorNeedsFrame(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
+            if (error_fading or error_fade_pending) app.dirty = true;
+            error_fade_pending = error_fading;
 
             if (app.dirty or app.main_agent_id == null) {
                 try term.drawWith(&app, App.render);
