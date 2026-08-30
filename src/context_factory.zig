@@ -823,7 +823,7 @@ pub fn build_system_prompt(
     if (self.agentHasTool(agent_type, r.tools.bash.BashTool.def.name) and self.capability_lines.len > 0) {
         try w.writeAll(
             \\
-            \\# Envirement:
+            \\# Environment:
             \\
         );
         for (self.capability_lines) |line| {
