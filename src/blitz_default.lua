@@ -129,6 +129,18 @@ end, "show thinking")
 ---------------------------------------------------------------------------------------------------
 --- Commands
 ---------------------------------------------------------------------------------------------------
+blitz.add_command("effort", function()
+	blitz.cmd.select({
+		header = "Effort",
+		question = "Set reasoning effort for the general agent?",
+		options = { "low", "medium", "high", "xhigh", "max" },
+	}, function(choice)
+		if choice then
+			blitz.set_agent_effort(blitz.AGENT_GENERAL, choice, true)
+		end
+	end)
+end, "set effort level")
+
 blitz.add_command("cd", function(rem)
 	blitz.cmd.cd(rem)
 end, "cd to dir")
