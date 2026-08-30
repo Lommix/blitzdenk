@@ -67,6 +67,9 @@ pub const Command = union(enum) {
     scroll_to: usize,
     scroll_up: usize,
     scroll_down: usize,
+    completion_next,
+    completion_prev,
+    completion_accept,
     cd: []const u8,
     compact,
     reload_mcp,
@@ -186,6 +189,9 @@ pub const Command = union(enum) {
                 app.scroll_offset -|= delta;
                 if (app.scroll_offset == 0) app.auto_scroll = true;
             },
+            .completion_next => app.handleCompletion(.next),
+            .completion_prev => app.handleCompletion(.prev),
+            .completion_accept => app.handleCompletion(.accept),
             .queue_agent_message => |arg| {
                 const parts = try r.util.deepClone(@TypeOf(arg.parts), arg.parts, alloc);
                 const chat_entry = if (arg.chat_entry) |en| try r.util.deepClone(ChatEntry, en, alloc) else null;

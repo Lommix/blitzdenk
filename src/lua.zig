@@ -376,6 +376,7 @@ pub const Blitz = LuaType{
             .{ .name = "json", .ty = BlitzJson },
             .{ .name = "base64", .ty = BlitzBase64 },
             .{ .name = "cmd", .ty = BlitzCmd },
+            .{ .name = "cmp", .ty = BlitzCmp },
             .{ .name = "tools", .ty = BlitzToolDef },
             .{ .name = "hooks", .ty = BlitzHooks },
             .{ .name = "AGENT_GENERAL", .ty = LuaType.integer, .value = .{ .integer = 0 } },
@@ -1455,6 +1456,42 @@ const BlitzState = LuaType{ .table_def = .{ .name = "BlitzState", .fields = &.{
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "key", .ty = LuaType.string }},
             .fn_ptr = &luaStateGet,
+        } },
+    },
+} } };
+
+const BlitzCmp = LuaType{ .table_def = .{ .name = "BlitzCmp", .fields = &.{
+    .{
+        .name = "next",
+        .desc = "Select the next completion row, like <Tab>. No-op when the popup is closed.",
+        .ty = LuaType{ .function = .{
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App) !void {
+                    try a.cmd_queue.append(a.io, .completion_next);
+                }
+            }).lua_fn, "cmp.next"),
+        } },
+    },
+    .{
+        .name = "prev",
+        .desc = "Select the previous completion row, like <C-p>. No-op when the popup is closed.",
+        .ty = LuaType{ .function = .{
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App) !void {
+                    try a.cmd_queue.append(a.io, .completion_prev);
+                }
+            }).lua_fn, "cmp.prev"),
+        } },
+    },
+    .{
+        .name = "accept",
+        .desc = "Insert the selected completion, like <C-y>. No-op when the popup is closed.",
+        .ty = LuaType{ .function = .{
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App) !void {
+                    try a.cmd_queue.append(a.io, .completion_accept);
+                }
+            }).lua_fn, "cmp.accept"),
         } },
     },
 } } };

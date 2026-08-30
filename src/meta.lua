@@ -75,6 +75,14 @@
 ---Attach a screenshot/image to the current input.
 ---@field attach_screenshot fun(data: string, media_type?: string)
 
+---@class BlitzCmp
+---Select the next completion row, like <Tab>. No-op when the popup is closed.
+---@field next fun()
+---Select the previous completion row, like <C-p>. No-op when the popup is closed.
+---@field prev fun()
+---Insert the selected completion, like <C-y>. No-op when the popup is closed.
+---@field accept fun()
+
 ---@class BlitzToolDef
 ---@field BASH string
 ---@field READ string
@@ -321,6 +329,7 @@
 ---@field json BlitzJson
 ---@field base64 BlitzBase64
 ---@field cmd BlitzCmd
+---@field cmp BlitzCmp
 ---@field tools BlitzToolDef
 ---@field hooks BlitzHooks
 ---@field AGENT_GENERAL integer

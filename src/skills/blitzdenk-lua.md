@@ -226,9 +226,10 @@ booleans, `approval_mode` string (`"strict"`, `"default"`, `"yolo"`,
 `"smart"`). Fields you omit stay unchanged; `get_flags` returns all three,
 `approval_mode` as its tag name. `smart` behaves like `default` today.
 
-Completion actions with their default keys: `completion_next` (`<Tab>`,
-`<C-n>`), `completion_prev` (`<C-p>`), `completion_accept` (`<C-y>`). A custom
-`blitz.bind` on the same key wins over the default.
+The completion popup answers to `blitz.cmp.next`, `blitz.cmp.prev`, and
+`blitz.cmp.accept`. Each queues one action, the same as the default keys
+`<Tab>`/`<C-n>`, `<C-p>`, and `<C-y>`; a call is a no-op when the popup is
+closed. A custom `blitz.bind` on the same key wins over the default.
 
 ## Hooks
 
