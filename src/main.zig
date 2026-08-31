@@ -430,7 +430,19 @@ fn sessionsTui(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
     const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
     var app = try App.init(io, gpa, context_factory, cwd);
-    defer app.deinit();
+    var registry = r.agent_registry.Registry.init(gpa, io);
+    var exec_pool = r.exec.CmdPool.init(gpa, io, env);
+    app.registry = &registry;
+    app.exec_pool = &exec_pool;
+    defer {
+        app.cancelPermissions(null);
+        registry.cancelAll();
+        exec_pool.cancelAll();
+        r.artifact.cleanup(&exec_pool);
+        app.deinit();
+        registry.deinit();
+        exec_pool.deinit();
+    }
     app.enterSessionPicker(rows);
 
     var term = try tui.Terminal.init(arena, io);
