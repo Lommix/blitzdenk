@@ -13,11 +13,22 @@
 ---Enable an MCP server for this session.
 ---@field enable fun(mcp_id: integer)
 
+---@class BlitzSshState
+---true while tool calls route through ssh
+---@field active boolean
+---@field user? string
+---@field host? string
+---remote working directory
+---@field cwd? string
+
 ---@class BlitzSsh
 ---Turn ssh routing on. Without a target nothing routes, but auto-approval is still denied.
 ---@field enable fun()
 ---Turn ssh routing off. The target stays for re-enable.
 ---@field disable fun()
+---Return the current ssh state. user, host, and cwd are nil without a target;
+---the target survives disable.
+---@field get_state fun(): BlitzSshState
 
 ---@class BlitzJson
 ---Encode a Lua value as JSON.

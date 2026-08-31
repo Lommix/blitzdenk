@@ -360,6 +360,18 @@ blitz.ssh.enable()
 blitz.ssh.disable()
 ```
 
+`blitz.ssh.get_state()` reads the live state: `{ active, user, host, cwd }`.
+`active` is true while tool calls actually route through ssh, so it implies a
+target and all three fields are set. After `disable` the target fields stay
+but `active` is false. Safe to call from config, tools, and listeners.
+
+```lua
+local s = blitz.ssh.get_state()
+if s.active then
+    blitz.cmd.message_chat("system", "routing to " .. s.user .. "@" .. s.host)
+end
+```
+
 `blitz.shell` opts carry `force_local`: true runs the command on this machine
 and skips the ssh wrap. Use it for commands that only make sense locally, like
 `git status` before a push or a local `ssh-add` check.

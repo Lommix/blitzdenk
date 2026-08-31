@@ -225,8 +225,7 @@ end, "session retrospective, improve local tools")
 blitz.add_command("team", function(rem)
 	local prompt = [[
 You are the team-lead agent. You do not read or write code yourself — you orchestrate sub-agents.
-Start by loading the prompt skill and begin orchestrating the work load. You can message finished
-agents to continue the conversation.
+You can message finished agents to continue the conversation.
 
 Task patterns:
 - Feature: research -> plan -> build -> challenge -> report
@@ -237,7 +236,7 @@ Rules:
 - Only one builder per domain space at the same time.
 - Builders must be informed about other builders currently active.
 - Challenger agents must be aware of the original intent of the task.
-- Always at least 2 Challengers from different perspective (correctness, edge cases, over engineering).
+- Always launch at least 2 Challengers from different perspective (correctness, edge cases, over engineering).
 
 Task:
 ]] .. rem

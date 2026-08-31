@@ -1363,6 +1363,19 @@ const BlitzMcp = LuaType{
     },
 };
 
+const SshState = struct {
+    active: bool,
+    user: ?[]const u8,
+    host: ?[]const u8,
+    cwd: ?[]const u8,
+};
+const BlitzSshStateDef = LuaType{ .table_def = .{ .name = "BlitzSshState", .fields = &.{
+    .{ .name = "active", .ty = LuaType.boolean, .desc = "true while tool calls route through ssh" },
+    .{ .name = "user", .ty = LuaType.string, .optional = true },
+    .{ .name = "host", .ty = LuaType.string, .optional = true },
+    .{ .name = "cwd", .ty = LuaType.string, .optional = true, .desc = "remote working directory" },
+} } };
+
 const BlitzSsh = LuaType{
     .table_def = .{
         .name = "BlitzSsh",
@@ -1389,6 +1402,29 @@ const BlitzSsh = LuaType{
                             try a.cmd_queue.append(a.io, .ssh_disable);
                         }
                     }).lua_fn, "ssh.disable"),
+                } },
+            },
+            .{
+                .name = "get_state",
+                .desc =
+                \\Return the current ssh state. user, host, and cwd are nil without a target;
+                \\the target survives disable.
+                ,
+                .ty = LuaType{ .function = .{
+                    .ret = &BlitzSshStateDef,
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App) !SshState {
+                            a.mu.lockUncancelable(a.io);
+                            defer a.mu.unlock(a.io);
+                            const target = a.exec_pool.ssh_target;
+                            return .{
+                                .active = target != null and a.exec_pool.ssh_active,
+                                .user = if (target) |t| t.user else null,
+                                .host = if (target) |t| t.host else null,
+                                .cwd = if (target) |t| t.cwd else null,
+                            };
+                        }
+                    }).lua_fn, "ssh.get_state"),
                 } },
             },
         },
