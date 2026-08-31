@@ -148,7 +148,6 @@ pub const Command = union(enum) {
                     app.registry.cancel(main_id.?);
                 } else {
                     app.cancelPermissions(null);
-                    app.exec_pool.cancelAll();
                     app.registry.cancelAll();
                 }
                 app.dropStreamingPreview();

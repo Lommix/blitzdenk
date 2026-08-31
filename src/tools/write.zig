@@ -45,6 +45,9 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
 
+    const lock = &r.file_mutex;
+    lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
+
     var before: ?[]const u8 = null;
     var has_before = false;
     if (ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } })) |probe| {
@@ -76,9 +79,6 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     }
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
-
-    const lock = &r.file_mutex;
-    lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
 
     const res = r.atomicWriteViaExec(ctx, resolved, args.content) orelse {
         lock.unlock(ctx.io);

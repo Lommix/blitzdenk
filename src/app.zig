@@ -573,7 +573,6 @@ pub const App = struct {
         self.mcp_load = null;
         self.dropStreamingPreview();
         self.cancelPermissions(null);
-        self.exec_pool.cancelAll();
         self.registry.cancelAll();
         r.artifact.cleanup(self.exec_pool);
 

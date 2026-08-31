@@ -304,6 +304,7 @@ pub fn countLines(output: []const u8) usize {
 
 test {
     @import("std").testing.refAllDecls(@This());
+    _ = @import("../repro_cancel_race.zig");
 }
 
 test "truncateOutputToOwned keeps valid utf8 as string payload" {

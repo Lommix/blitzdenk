@@ -5,7 +5,8 @@
 //!   tools that trust the child to exit.
 //! - `runAndWaitTimeout` is the same synchronous surface with a wall-clock
 //!   deadline. Used by foreground tools that spawn potentially hanging children.
-//! - `release`/`cancel`/`cancelAll` release or cancel a worker future.
+//! - `release`/`cancel` release or cancel a worker future. Only the slot
+//!   owner (the `runAndWait` caller or `Handle` holder) may release.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -14,6 +15,11 @@ const SLOT_COUNT = 64;
 
 pub const CmdSlot = struct {
     in_use: std.atomic.Value(bool) = .init(false),
+    /// Set by the fiber that claimed the slot until it finished collecting the
+    /// result. Only the owner may release: joining or freeing a future another
+    /// fiber is currently `await`ing is undefined behavior (panic: `await`
+    /// raced with `await`).
+    owned: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
     future: std.Io.Future(std.Io.Cancelable!void) = .{ .any_future = null, .result = {} },
     stdout: std.ArrayList(u8) = .empty,
@@ -218,12 +224,17 @@ pub const CmdPool = struct {
         } else return error.PoolExhausted;
 
         const slot = &self.slots[idx];
+        slot.owned.store(true, .release);
         slot.stdout = .empty;
         slot.stderr = .empty;
         slot.done.store(false, .release);
         slot.result_ty = .failed;
         slot.exit_code = null;
         slot.signal = null;
+        errdefer {
+            slot.owned.store(false, .release);
+            slot.in_use.store(false, .release);
+        }
 
         var final_argv: ?[]const []const u8 = try self.maybeWrapSsh(opts.argv, opts.force_local);
         errdefer if (final_argv) |a| self.freeArgv(a);
@@ -322,9 +333,14 @@ pub const CmdPool = struct {
         return out;
     }
 
+    /// Release a slot owned by the caller (the `runAndWait`/`Handle` holder).
+    /// Must not be called by anyone else: joining or freeing a future another
+    /// fiber is currently `await`ing is undefined behavior (panic: `await`
+    /// raced with `await`). Owners release exactly once, when done.
     pub fn release(self: *Self, handle: Handle) void {
         const slot = &self.slots[@intFromEnum(handle)];
         if (!slot.in_use.load(.acquire)) return;
+        if (!slot.owned.swap(false, .acq_rel)) return;
 
         if (slot.done.load(.acquire)) {
             slot.future.await(self.io) catch {};
@@ -341,13 +357,6 @@ pub const CmdPool = struct {
 
     pub fn cancel(self: *Self, handle: Handle) void {
         self.release(handle);
-    }
-
-    pub fn cancelAll(self: *Self) void {
-        for (0..self.slots.len) |i| {
-            const handle: Handle = @enumFromInt(i);
-            self.release(handle);
-        }
     }
 
     /// Cancels a running worker and returns its partial output. Buffers are

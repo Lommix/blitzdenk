@@ -67,6 +67,12 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, "No changes to make: old_string and new_string are exactly the same.");
     }
 
+    r.file_mutex.lock(ctx.io) catch {
+        if (ctx.isCanceled()) return r.errResult(call, "canceled while waiting for the file lock");
+        return r.errResult(call, "failed to lock file");
+    };
+    defer r.file_mutex.unlock(ctx.io);
+
     const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } }) catch
         return r.errResult(call, "failed to read file");
     defer ctx.base.exec_pool.alloc.free(read_res.stdout);
@@ -96,6 +102,9 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         error.OutOfMemory => return r.errResult(call, "out of memory"),
     };
     if (replacement == null) {
+        if (std.mem.indexOf(u8, file_content, args.new_string) != null) {
+            return r.errResult(call, "edit already applied: new_string is already present in the file; verify the file state instead of retrying the same edit");
+        }
         const diag = diagnoseMismatch(alloc, file_content, args.old_string);
         return r.errResult(call, diag);
     }
@@ -121,10 +130,6 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     }
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
-
-    const lock = &r.file_mutex;
-    lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
-    defer lock.unlock(ctx.io);
 
     const verify_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } }) catch
         return r.errResult(call, "failed to re-read file");

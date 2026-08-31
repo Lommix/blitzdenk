@@ -127,6 +127,12 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     // 2. Preview every command. Nothing is written here, so any failure aborts
     // the whole patch with no partial changes.
+    r.file_mutex.lock(ctx.io) catch {
+        if (ctx.isCanceled()) return r.errResult(call, "canceled while waiting for the file lock");
+        return r.errResult(call, "failed to lock file");
+    };
+    defer r.file_mutex.unlock(ctx.io);
+
     var previews: std.ArrayList(Preview) = .empty;
     defer {
         for (previews.items) |p| {
@@ -201,12 +207,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         const abs_cmd = withResolvedPath(alloc, ctx.base.cwd, cmd, resolved) catch
             return r.errResult(call, "failed to resolve path");
 
-        const lock = &r.file_mutex;
-        lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
-
         var diag: ApplyDiagnostics = .{};
         executeCommand(ctx, abs_cmd, &diag) catch |err| {
-            lock.unlock(ctx.io);
             const detail = applyErrorDescription(alloc, err, &diag) catch "patch apply failed";
             const msg = std.fmt.allocPrint(
                 alloc,
@@ -215,7 +217,6 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
             ) catch "patch apply failed";
             return r.errResult(call, msg);
         };
-        lock.unlock(ctx.io);
 
         r.markConfigTouched(ctx, resolved);
         applied += 1;
