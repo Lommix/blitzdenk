@@ -79,6 +79,12 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 
 ## Env capabilities
 
+Rules form the `<env_capabilities>` catalogue. It is injected once per chat as
+a system-reminder. Each rule names a binary; before prompting the binary resolves through the exec pool, so the
+probe runs over SSH when routing is active. A routing change re-resolves and
+re-appends the catalogue to the chat. Rules only show for agents that own the
+bash tool.
+
 ```lua
 blitz.set_capabilities({
     { binary = "rg", rule = "Use rg for fast recursive grep searches." },

@@ -82,6 +82,7 @@ pub const Agent = struct {
     cwd: []const u8,
     system_prompt: []const u8 = "",
     skill_catalog_digest: ?u64 = null,
+    capability_catalog_digest: ?u64 = null,
     usage: sdk.Usage = .{},
     context_tokens: u64 = 0,
     context_from_provider: bool = false,

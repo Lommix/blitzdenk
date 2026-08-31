@@ -877,8 +877,10 @@ pub const Blitz = LuaType{
                 .name = "set_capabilities",
                 .desc =
                 \\Register environment capability rules. Each rule names a binary; when it
-                \\resolves on PATH, its rule line is added to the system prompt of agents
-                \\that own the bash tool. Rules resolve on registration and on Lua reload.
+                \\resolves through the exec pool, the rule line lands in the injected
+                \\env_capabilities catalogue of agents that own the bash tool. Binaries
+                \\resolve before prompting and follow SSH routing, so the catalogue is
+                \\re-injected whenever the routing changes.
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "rules", .ty = CapabilityRuleListDef }},

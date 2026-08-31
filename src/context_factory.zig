@@ -18,7 +18,11 @@ agents: std.EnumArray(AgentType, ?AgentDef) = .initFill(null),
 // ---
 available_mcp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
 available_mcp_count: usize = 0,
-capability_lines: []const []const u8 = &.{},
+capability_rules: []const CapabilityRule = &.{},
+capability_catalog_route: ?u64 = null,
+capability_catalog_body: []const u8 = "",
+capability_catalog_mu: std.Io.Mutex = .init,
+capability_arena: std.heap.ArenaAllocator = undefined,
 // Arena holds definitions set from Lua. Reset on hot-reload so the
 // factory keeps using the embedded defaults until lua re-installs them.
 prompt_arena: std.heap.ArenaAllocator,
@@ -181,6 +185,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8, cwd: []const
         .alloc = alloc,
         .loaded_tools = try buildDefaultTools(alloc),
         .prompt_arena = std.heap.ArenaAllocator.init(alloc),
+        .capability_arena = std.heap.ArenaAllocator.init(alloc),
         .io = io,
         .skill_dir = skill_dir,
         .config_dir = config_dir,
@@ -192,19 +197,90 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8, cwd: []const
     return self;
 }
 
-/// Register env rules from Lua. Binaries resolve once here; installed rules
-/// render to prompt lines immediately. Results live in the prompt arena; the
-/// arena resets on hot-reload, so a reload must reinstall them.
+/// Register env rules from Lua. Rules are stored verbatim; their binaries
+/// resolve lazily through the exec pool on the first capability injection, so
+/// the probe follows the active SSH routing. State lives in the capability
+/// arena under the catalogue mutex: agent threads render the catalogue while
+/// the reload path replaces the rules, so both share one lock.
 pub fn setCapabilityRules(self: *Self, rules: []const CapabilityRule) !void {
-    const alloc = self.prompt_arena.allocator();
-    var lines = try alloc.alloc([]const u8, rules.len);
-    var count: usize = 0;
-    for (rules) |rule| {
-        if (!binaryExists(self.io, rule.binary)) continue;
-        lines[count] = try std.fmt.allocPrint(alloc, "- {s}: {s}\n", .{ rule.binary, rule.rule });
-        count += 1;
+    self.capability_catalog_mu.lockUncancelable(self.io);
+    defer self.capability_catalog_mu.unlock(self.io);
+
+    _ = self.capability_arena.reset(.retain_capacity);
+    const alloc = self.capability_arena.allocator();
+    const stored = try alloc.alloc(CapabilityRule, rules.len);
+    for (rules, 0..) |rule, i| {
+        stored[i] = .{
+            .binary = try alloc.dupe(u8, rule.binary),
+            .rule = try alloc.dupe(u8, rule.rule),
+        };
     }
-    self.capability_lines = lines[0..count];
+    self.capability_rules = stored;
+    self.capability_catalog_route = null;
+}
+
+/// Probe the registered binaries through the exec pool and cache the rendered
+/// catalogue for the current routing. A routing change (local ↔ SSH, new
+/// target) invalidates the cache, so the next injection re-resolves remotely.
+/// A failed probe stays uncached and retries on the next step.
+pub fn ensureCapabilityCatalog(self: *Self, pool: *r.exec.CmdPool) !void {
+    self.capability_catalog_mu.lockUncancelable(self.io);
+    defer self.capability_catalog_mu.unlock(self.io);
+
+    const route = pool.routeKey();
+    if (self.capability_catalog_route == route) return;
+
+    const body = renderCapabilityCatalog(
+        self.capability_arena.allocator(),
+        self.capability_rules,
+        pool,
+    ) catch |err| switch (err) {
+        error.CapabilityProbeFailed => return,
+        else => return err,
+    };
+    self.capability_catalog_body = body;
+    self.capability_catalog_route = route;
+}
+
+/// Returns the rendered catalogue, "" when the probe found no rule binary, or
+/// `error.CapabilityProbeFailed` when the probe could not run to completion.
+fn renderCapabilityCatalog(
+    alloc: std.mem.Allocator,
+    rules: []const CapabilityRule,
+    pool: *r.exec.CmdPool,
+) ![]const u8 {
+    if (rules.len == 0) return "";
+
+    var script: std.ArrayList(u8) = .empty;
+    defer script.deinit(alloc);
+    for (rules) |rule| {
+        try script.print(alloc, "command -v {s} >/dev/null 2>&1 && echo {s};", .{ rule.binary, rule.binary });
+    }
+    try script.appendSlice(alloc, "exit 0;");
+
+    const res = pool.runAndWait(.{ .argv = &.{ "sh", "-c", script.items } }) catch return error.CapabilityProbeFailed;
+    defer pool.alloc.free(res.stdout);
+    defer pool.alloc.free(res.stderr);
+    if (res.ty != .success) return error.CapabilityProbeFailed;
+
+    var out = std.Io.Writer.Allocating.init(alloc);
+    try out.writer.writeAll("<env_capabilities>\n");
+    var matched = false;
+    for (rules) |rule| {
+        if (!probeOutputHas(res.stdout, rule.binary)) continue;
+        matched = true;
+        try out.writer.print("- {s}: {s}\n", .{ rule.binary, rule.rule });
+    }
+    try out.writer.writeAll("</env_capabilities>\n");
+    return if (matched) out.written() else "";
+}
+
+fn probeOutputHas(stdout: []const u8, binary: []const u8) bool {
+    var it = std.mem.splitScalar(u8, stdout, '\n');
+    while (it.next()) |raw| {
+        if (std.mem.eql(u8, std.mem.trim(u8, raw, " \t\r"), binary)) return true;
+    }
+    return false;
 }
 
 pub fn buildAgentApiConfig(
@@ -495,7 +571,11 @@ fn rebuildSkillNames(self: *Self) void {
 /// Restore embedded defaults and free any Lua-installed definitions.
 pub fn resetDefs(self: *Self) void {
     _ = self.prompt_arena.reset(.retain_capacity);
-    self.capability_lines = &.{};
+    self.capability_catalog_mu.lockUncancelable(self.io);
+    _ = self.capability_arena.reset(.retain_capacity);
+    self.capability_rules = &.{};
+    self.capability_catalog_route = null;
+    self.capability_catalog_mu.unlock(self.io);
     self.agent_counter = 3;
     self.available_mcp_count = 0;
     self.agents = .initFill(null);
@@ -715,6 +795,7 @@ pub fn resetLoadedTools(self: *Self) !void {
 
 pub fn deinit(self: *Self) void {
     self.loaded_tools.deinit(self.alloc);
+    self.capability_arena.deinit();
     for (self.skill_names.items) |name| self.alloc.free(name);
     self.skill_names.deinit(self.alloc);
     self.skills.deinit(self.alloc);
@@ -820,17 +901,6 @@ pub fn build_system_prompt(
         }
     }
 
-    if (self.agentHasTool(agent_type, r.tools.bash.BashTool.def.name) and self.capability_lines.len > 0) {
-        try w.writeAll(
-            \\
-            \\# Environment:
-            \\
-        );
-        for (self.capability_lines) |line| {
-            try w.writeAll(line);
-        }
-    }
-
     return allocating.written();
 }
 
@@ -866,23 +936,6 @@ pub fn parsePrefixedCommand(raw: []const u8, prefix: []const u8) ?ParsedCommand 
 pub fn parseSshAliasCommand(raw: []const u8) ?[]const u8 {
     const parsed = parsePrefixedCommand(raw, "ssh-") orelse return null;
     return parsed.name;
-}
-
-/// Checks whether `binary` can be resolved on the PATH. Uses `sh -c "command -v"`.
-fn binaryExists(io: std.Io, binary: []const u8) bool {
-    var buf: [256]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&buf, "command -v {s} >/dev/null 2>&1", .{binary}) catch return false;
-    const argv = [_][]const u8{ "sh", "-c", cmd };
-
-    var child = std.process.spawn(io, .{
-        .argv = &argv,
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch return false;
-    defer if (child.id != null) child.kill(io);
-    const term = child.wait(io) catch return false;
-    return term == .exited and term.exited == 0;
 }
 
 test "ssh alias command parse" {
@@ -974,10 +1027,12 @@ test "agent defaults can be replaced with an empty tool list" {
     var factory = Self{
         .alloc = std.testing.allocator,
         .prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .capability_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .io = undefined,
         .config_dir = null,
         .skill_dir = null,
     };
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
     defer factory.loaded_tools.deinit(std.testing.allocator);
 
@@ -998,10 +1053,12 @@ test "remove deletes the matched loaded tool" {
     var factory = Self{
         .alloc = std.testing.allocator,
         .prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .capability_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .io = undefined,
         .config_dir = null,
         .skill_dir = null,
     };
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
     defer factory.loaded_tools.deinit(std.testing.allocator);
 
@@ -1023,6 +1080,7 @@ fn initTestFactory() Self {
     var factory = Self{
         .alloc = std.testing.allocator,
         .prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .capability_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .io = undefined,
         .config_dir = null,
         .skill_dir = null,
@@ -1033,6 +1091,7 @@ fn initTestFactory() Self {
 
 test "agent config diagnoses an unbound agent model" {
     var factory = initTestFactory();
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     var cfg: r.config.BlitzdenkCfg = .{};
@@ -1050,6 +1109,7 @@ test "agent config diagnoses an unbound agent model" {
 
 test "agent config diagnoses an invalid provider" {
     var factory = initTestFactory();
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     var cfg: r.config.BlitzdenkCfg = .{};
@@ -1067,6 +1127,7 @@ test "agent config diagnoses an invalid provider" {
 
 test "agent config reports the missing API key environment variable" {
     var factory = initTestFactory();
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     var cfg: r.config.BlitzdenkCfg = .{};
@@ -1088,6 +1149,7 @@ test "agent config reports the missing API key environment variable" {
 
 test "agent config permits keyless providers" {
     var factory = initTestFactory();
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     var cfg: r.config.BlitzdenkCfg = .{};
@@ -1109,6 +1171,7 @@ test "agent config permits keyless providers" {
 
 test "agent config carries the replay_reasoning model capability" {
     var factory = initTestFactory();
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     var cfg: r.config.BlitzdenkCfg = .{};
@@ -1127,6 +1190,7 @@ test "agent config carries the replay_reasoning model capability" {
 
 test "agent config uses the stored key when the envar is absent" {
     var factory = initTestFactory();
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     var cfg: r.config.BlitzdenkCfg = .{};
@@ -1145,6 +1209,7 @@ test "agent config uses the stored key when the envar is absent" {
 
 test "agent config prefers the envar value over the stored key" {
     var factory = initTestFactory();
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     var cfg: r.config.BlitzdenkCfg = .{};
@@ -1162,7 +1227,7 @@ test "agent config prefers the envar value over the stored key" {
     }
 }
 
-test "capability rules gate on binary and bash ownership" {
+test "capability catalogue probes binaries through the exec pool" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1170,7 +1235,13 @@ test "capability rules gate on binary and bash ownership" {
     const io = std.testing.io_instance;
     const home_dir = io.environ.process_environ.getPosix("HOME") orelse "/root";
 
+    var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
+    defer env.deinit();
+    var pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &env);
+    defer pool.deinit();
+
     var factory = try Self.init(alloc, std.testing.io, home_dir, "/");
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     try factory.setCapabilityRules(&.{
@@ -1178,22 +1249,27 @@ test "capability rules gate on binary and bash ownership" {
         .{ .binary = "definitely_missing_binary_xyz", .rule = "RULE_MISSING" },
     });
 
-    const prompt = try factory.build_system_prompt(alloc, .general);
-    const env_idx = std.mem.indexOf(u8, prompt, "# Environment:") orelse return error.TestExpectedEnvSection;
-    const section = prompt[env_idx..];
+    try factory.ensureCapabilityCatalog(&pool);
+    const body = factory.capability_catalog_body;
 
+    const start = std.mem.indexOf(u8, body, "<env_capabilities>") orelse return error.TestExpectedCatalogTag;
+    const section = body[start..];
     try std.testing.expect(std.mem.indexOf(u8, section, "sh: RULE_PRESENT") != null);
     try std.testing.expect(std.mem.indexOf(u8, section, "RULE_MISSING") == null);
+    try std.testing.expectEqual(pool.routeKey(), factory.capability_catalog_route.?);
 
-    var no_bash_factory = try Self.init(alloc, std.testing.io, home_dir, "/");
-    defer no_bash_factory.prompt_arena.deinit();
-    try no_bash_factory.setCapabilityRules(&.{
-        .{ .binary = "sh", .rule = "RULE_SHOULD_HIDE" },
-    });
-    try no_bash_factory.setAgentTools(.general, &.{});
+    const route_before = pool.routeKey();
+    try factory.ensureCapabilityCatalog(&pool);
+    try std.testing.expectEqualStrings(body, factory.capability_catalog_body);
 
-    const prompt_no_bash = try no_bash_factory.build_system_prompt(alloc, .general);
-    try std.testing.expect(std.mem.indexOf(u8, prompt_no_bash, "RULE_SHOULD_HIDE") == null);
+    try factory.setCapabilityRules(&.{.{ .binary = "definitely_missing_binary_xyz", .rule = "X" }});
+    try factory.ensureCapabilityCatalog(&pool);
+    try std.testing.expectEqualStrings("", factory.capability_catalog_body);
+    try std.testing.expect(factory.capability_catalog_route != null);
+
+    try pool.setSsh("u", "h", "/");
+    defer pool.clearSsh();
+    try std.testing.expect(route_before != pool.routeKey());
 }
 
 test "resetDefs clears capability rules before the next install" {
@@ -1204,14 +1280,20 @@ test "resetDefs clears capability rules before the next install" {
     const io = std.testing.io_instance;
     const home_dir = io.environ.process_environ.getPosix("HOME") orelse "/root";
 
+    var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
+    defer env.deinit();
+    var pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &env);
+    defer pool.deinit();
+
     var factory = try Self.init(alloc, std.testing.io, home_dir, "/");
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     try factory.setCapabilityRules(&.{.{ .binary = "sh", .rule = "RULE_BEFORE_RESET" }});
     factory.resetDefs();
 
-    const prompt = try factory.build_system_prompt(alloc, .general);
-    try std.testing.expect(std.mem.indexOf(u8, prompt, "# Envirement:") == null);
+    try factory.ensureCapabilityCatalog(&pool);
+    try std.testing.expectEqualStrings("", factory.capability_catalog_body);
 }
 
 test "system_prompt" {
@@ -1223,6 +1305,7 @@ test "system_prompt" {
     const home_dir = io.environ.process_environ.getPosix("HOME") orelse "/root";
 
     var factory = try Self.init(alloc, std.testing.io, home_dir, "/");
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     const prompt = try factory.build_system_prompt(alloc, .general);
@@ -1242,6 +1325,7 @@ test "precalcGeneralPromptSize measures the general system prompt" {
     const home_dir = io.environ.process_environ.getPosix("HOME") orelse "/root";
 
     var factory = try Self.init(alloc, std.testing.io, home_dir, "/");
+    defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
     factory.precalcGeneralPromptSize();

@@ -410,8 +410,10 @@
 ---Names must match built-in tool names or names of tools registered via blitz.register_tool.
 ---@field set_agent_tools fun(agent_type: integer, tool_names: string[])
 ---Register environment capability rules. Each rule names a binary; when it
----resolves on PATH, its rule line is added to the system prompt of agents
----that own the bash tool. Rules resolve on registration and on Lua reload.
+---resolves through the exec pool, the rule line lands in the injected
+---env_capabilities catalogue of agents that own the bash tool. Binaries
+---resolve before prompting and follow SSH routing, so the catalogue is
+---re-injected whenever the routing changes.
 ---@field set_capabilities fun(rules: BlitzCapabilityRule[])
 ---Override the system prompt for a given agent type.
 ---@field set_prompt fun(agent_type: integer, prompt: string)

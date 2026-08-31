@@ -178,6 +178,19 @@ pub const CmdPool = struct {
         return fallback;
     }
 
+    /// Stable identity of the current routing environment. Distinct values for
+    /// local mode and each SSH target let callers cache per-environment state
+    /// and detect routing changes.
+    pub fn routeKey(self: *const Self) u64 {
+        if (!self.ssh_active) return 1;
+        const target = self.ssh_target.?;
+        var hash = std.hash.Wyhash.init(0);
+        hash.update(target.user);
+        hash.update("@");
+        hash.update(target.host);
+        return hash.final();
+    }
+
     pub const RunOpts = struct {
         cwd: ?[]const u8 = null,
         argv: []const []const u8,

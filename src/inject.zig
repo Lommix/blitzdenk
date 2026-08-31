@@ -16,6 +16,7 @@ pub const InjectionsHooks = struct {
             &inject_datetime_information,
             &inject_cwd_information,
             &inject_available_skills,
+            &inject_capability_catalog,
         }) |cb| {
             try self._hooks.append(alloc, cb);
         }
@@ -134,6 +135,35 @@ fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.A
         try w.writeAll(serialized);
     }
     try w.writeAll("</available_skills>\n");
+}
+
+fn inject_capability_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    if (!agentHasBashTool(agent)) return;
+
+    const factory = app.context_factory;
+    try factory.ensureCapabilityCatalog(app.exec_pool);
+
+    factory.capability_catalog_mu.lockUncancelable(factory.io);
+    const body = agent.injection_arena.allocator().dupe(u8, factory.capability_catalog_body) catch "";
+    const route = factory.capability_catalog_route;
+    factory.capability_catalog_mu.unlock(factory.io);
+
+    if (body.len == 0) return;
+
+    const digest = std.hash.Wyhash.hash(route orelse 0, body);
+    if (agent.capability_catalog_digest) |last| {
+        if (last == digest) return;
+    }
+
+    try w.writeAll(body);
+    agent.capability_catalog_digest = digest;
+}
+
+fn agentHasBashTool(agent: *const r.agent.Agent) bool {
+    for (agent.tools) |tool| {
+        if (std.mem.eql(u8, tool.name, r.tools.bash.BashTool.def.name)) return true;
+    }
+    return false;
 }
 
 fn writeCatalogField(w: *std.Io.Writer, value: []const u8) !void {

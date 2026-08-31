@@ -12,7 +12,6 @@ pub const AskTool = r.Tool{
         \\
         ,
         .prompt_snippet = "Ask the user a question",
-        .prompt_guidelines = "Call ask when the task is ambiguous.",
         .parameters_schema =
         \\{
         \\  "type": "object",

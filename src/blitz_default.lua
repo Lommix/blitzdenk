@@ -16,7 +16,8 @@ blitz.set_compact_edge(250000)
 
 ---------------------------------------------------------------------------------------------------
 --- Env capability rules
---- Each rule is added to the system prompt when its binary exists on PATH.
+--- Each rule joins the injected env_capabilities catalogue when its binary
+--- resolves in the active (possibly SSH-routed) environment.
 ---------------------------------------------------------------------------------------------------
 blitz.set_capabilities({
 	{ binary = "rg", rule = "Use rg for fast recursive grep searches. Prefer rg over grep." },
