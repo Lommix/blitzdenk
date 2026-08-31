@@ -594,15 +594,17 @@ fn executeTools(
         };
         const futures = try alloc.alloc(std.Io.Future(anyerror!Job), calls.len);
         defer alloc.free(futures);
-        for (calls, 0..) |tc, i| {
-            futures[i] = std.Io.async(io, Job.run, .{ alloc, io, opts, tc, step });
-        }
+        const parallel = @max(opts.max_parallel_calls, 1);
+        var spawned: usize = 0;
         var awaited: usize = 0;
-        errdefer for (futures[awaited..]) |*future| {
+        errdefer for (futures[awaited..spawned]) |*future| {
             if (future.cancel(io)) |job| freeToolResults(alloc, &.{job.result}) else |_| {}
         };
-        for (futures) |*future| {
-            const job = try future.await(io);
+        while (awaited < calls.len) {
+            while (spawned < calls.len and spawned - awaited < parallel) : (spawned += 1) {
+                futures[spawned] = std.Io.async(io, Job.run, .{ alloc, io, opts, calls[spawned], step });
+            }
+            const job = try futures[awaited].await(io);
             results[awaited] = job.result;
             awaited += 1;
             completed = awaited;
@@ -708,8 +710,14 @@ fn executeTool(
     const Selection = union(enum) { output: anyerror!types.ToolOutput, canceled: void };
     var buffer: [2]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
-    try select.concurrent(.output, runToolCallback, .{ exec, ctx, alloc, io, call });
-    select.async(.canceled, options.CancellationToken.waitUntilCanceled, .{ token, io });
+    select.concurrent(.output, runToolCallback, .{ exec, ctx, alloc, io, call }) catch {
+        try token.check();
+        return runToolCallback(exec, ctx, alloc, io, call);
+    };
+    select.concurrent(.canceled, options.CancellationToken.waitUntilCanceled, .{ token, io }) catch {
+        const degraded = try select.await();
+        return degraded.output;
+    };
     switch (try select.await()) {
         .output => |output| {
             select.cancelDiscard();
@@ -788,4 +796,44 @@ pub fn streamObject(
         },
         .arena = object_arena,
     };
+}
+
+test "executeTools completes a burst under a tiny io async limit" {
+    const Fixture = struct {
+        fn tool(_: ?*anyopaque, _: std.mem.Allocator, io_: std.Io, call: types.ToolCall) anyerror!types.ToolOutput {
+            std.Io.sleep(io_, .fromMilliseconds(10), .awake) catch {};
+            return .{ .content = call.id };
+        }
+    };
+    var io_state = std.Io.Threaded.init(std.testing.allocator, .{
+        .async_limit = .limited(1),
+        .concurrent_limit = .unlimited,
+    });
+    defer io_state.deinit();
+    const io = io_state.io();
+
+    var cancellation: options.CancellationToken = .{};
+    var calls: [8]types.ToolCall = undefined;
+    for (&calls, 0..) |*call, i| {
+        call.* = .{
+            .id = try std.fmt.allocPrint(std.testing.allocator, "call_{d}", .{i}),
+            .name = "test",
+            .input = "{}",
+        };
+    }
+    defer for (&calls) |*call| std.testing.allocator.free(call.id);
+
+    const results = try executeTools(
+        std.testing.allocator,
+        io,
+        .{ .tools = &.{.{ .name = "test", .execute = Fixture.tool }}, .cancellation = &cancellation },
+        &calls,
+        1,
+    );
+    defer {
+        freeToolResults(std.testing.allocator, results);
+        std.testing.allocator.free(results);
+    }
+    try std.testing.expectEqual(calls.len, results.len);
+    for (results) |result| try std.testing.expect(!result.is_error);
 }

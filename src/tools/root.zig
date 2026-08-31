@@ -24,6 +24,9 @@ pub const MAX_DISPLAY_LINES = 2000;
 pub const DISPLAY_CAP_TEXT = std.fmt.comptimePrint("{d} lines or {d}KB", .{ MAX_DISPLAY_LINES, @divTrunc(MAX_DISPLAY_BYTES, 1024) });
 pub const STATUS_BUF: usize = 512;
 
+/// Global file mutation lock, it just works!
+pub var file_mutex: std.Io.Mutex = .init;
+
 pub fn setToolStatusPrint(ctx: ToolContext, call: ToolCall, comptime fmt: []const u8, args: anytype) void {
     const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var buf: [STATUS_BUF]u8 = undefined;
@@ -128,8 +131,6 @@ pub fn markConfigTouched(ctx: ToolContext, resolved: []const u8) void {
         }
     }
 }
-
-pub var file_mutex: std.Io.Mutex = .init;
 
 fn shellQuote(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;

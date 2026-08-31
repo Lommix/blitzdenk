@@ -47,6 +47,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     const lock = &r.file_mutex;
     lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
+    defer lock.unlock(ctx.io);
 
     var before: ?[]const u8 = null;
     var has_before = false;
@@ -80,11 +81,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-    const res = r.atomicWriteViaExec(ctx, resolved, args.content) orelse {
-        lock.unlock(ctx.io);
+    const res = r.atomicWriteViaExec(ctx, resolved, args.content) orelse
         return r.errResult(call, "failed to start process");
-    };
-    lock.unlock(ctx.io);
 
     defer ctx.base.exec_pool.alloc.free(res.stdout);
     defer ctx.base.exec_pool.alloc.free(res.stderr);

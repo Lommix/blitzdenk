@@ -187,6 +187,7 @@ pub const GenerateOptions = struct {
     max_steps: usize = 1,
     sequential_tool_execution: bool = false,
     tool_choice: ToolChoice = .auto,
+    max_parallel_calls: usize = 4,
 
     max_output_tokens: u32 = 0,
     temperature: ?f64 = null,
