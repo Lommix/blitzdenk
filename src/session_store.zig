@@ -10,6 +10,8 @@ const NAME_EXTENSION = ".jsonl";
 const HEX = "0123456789abcdef";
 pub const ID_LEN = "20250827-184000-".len + ID_RANDOM_LEN;
 pub const PROMPT_CLIP: usize = 80;
+pub const LEGACY_PROMPT = "<legacy format>";
+const PROMPT_FIELD_MAX = 512;
 
 pub const Header = struct {
     id: []const u8,
@@ -113,12 +115,7 @@ pub const Store = struct {
         const name = self.file_name.?;
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
-        const alloc = arena.allocator();
-
-        var line: std.Io.Writer.Allocating = .init(alloc);
-        try line.writer.print("{{\"kind\":\"checkpoint\",\"ms\":{d},\"save\":", .{wallMillis(self.io)});
-        try std.json.Stringify.value(save, .{}, &line.writer);
-        try line.writer.writeAll("}\n");
+        const line = try checkpointLine(arena.allocator(), self.io, save);
 
         var buffer: [512]u8 = undefined;
         var sessions_dir = try openSessionsDir(self.base, self.io);
@@ -135,7 +132,7 @@ pub const Store = struct {
             const got = try file.readPositionalAll(self.io, &tail, end - 1);
             if (got == 1 and tail[0] != '\n') try writer.interface.writeByte('\n');
         }
-        try writer.interface.writeAll(line.written());
+        try writer.interface.writeAll(line);
         try writer.interface.flush();
         self.checkpoint_count += 1;
 
@@ -162,18 +159,14 @@ pub const Store = struct {
         defer sessions_dir.close(self.io);
 
         const header_line = try headerLine(alloc, loaded.header.id, loaded.header.created_ms, loaded.header.cwd);
-
-        var line: std.Io.Writer.Allocating = .init(alloc);
-        try line.writer.print("{{\"kind\":\"checkpoint\",\"ms\":{d},\"save\":", .{wallMillis(self.io)});
-        try std.json.Stringify.value(loaded.save, .{}, &line.writer);
-        try line.writer.writeAll("}\n");
+        const line = try checkpointLine(alloc, self.io, loaded.save);
 
         var buffer: [512]u8 = undefined;
         const tmp = try sessions_dir.createFile(self.io, tmp_name, .{});
         defer tmp.close(self.io);
         var writer = tmp.writer(self.io, &buffer);
         try writer.interface.writeAll(header_line);
-        try writer.interface.writeAll(line.written());
+        try writer.interface.writeAll(line);
         try writer.interface.flush();
 
         try std.Io.Dir.rename(sessions_dir, tmp_name, sessions_dir, name, self.io);
@@ -280,8 +273,10 @@ pub fn fileName(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
 
 /// Full read: header + last parseable checkpoint line, allocated in `alloc`
 /// (use an arena and drop it to free). Null when the file is missing or has
-/// no usable checkpoint. A corrupt or missing header line does not disable
-/// checkpoint scanning; the id then falls back to the file name.
+/// no usable checkpoint. Scans backwards from the end of file so the cost is
+/// one checkpoint line, not the whole journal; a corrupt or torn line walks
+/// back to the previous one. A corrupt or missing header line does not
+/// disable the scan; the id then falls back to the file name.
 pub fn load(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, name: []const u8) !?Loaded {
     var sessions_dir = base.openDir(io, DIR_NAME, .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
@@ -294,45 +289,117 @@ pub fn load(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, name: []cons
     };
     defer file.close(io);
 
-    var read_buffer: [4096]u8 = undefined;
-    var file_reader = file.reader(io, &read_buffer);
-    const reader = &file_reader.interface;
-
-    var last: ?session.SaveState = null;
-    var header: ?Header = null;
-    // One pass; each iteration consumes the line plus its delimiter (the
-    // delimiter consumption is what guarantees loop progress), and EOF ends
-    // the scan. Each line gets its own Allocating buffer that is deliberately
-    // NOT freed: parsed header/checkpoint strings reference it, and freeing
-    // would let the arena recycle the region under those slices. All line
-    // buffers die together when the caller drops its arena.
-    while (true) {
-        var line_buf: std.Io.Writer.Allocating = .init(alloc);
-        _ = reader.streamDelimiterEnding(&line_buf.writer, '\n') catch break;
-        const line = line_buf.written();
-        if (line.len > 0) {
-            if (parseHeader(alloc, line)) |parsed| {
-                if (header == null) header = parsed;
-            } else if (parseCheckpoint(alloc, line)) |save| {
-                last = save;
+    const header = readHeader(alloc, io, file);
+    var limit = try endOffset(file, io);
+    while (limit > 0) {
+        const bounds = try prevLineBounds(alloc, io, file, limit);
+        if (bounds.end > bounds.start) {
+            const line = try readRange(alloc, io, file, bounds);
+            if (parseCheckpoint(alloc, line)) |save| {
+                if (header) |parsed| return .{ .header = parsed, .save = save };
+                return .{ .header = .{
+                    .id = try alloc.dupe(u8, name[0 .. name.len - NAME_EXTENSION.len]),
+                    .cwd = "",
+                }, .save = save };
             }
         }
-        // Skip the '\n' delimiter; on EOF (or a final line without '\n') stop.
-        _ = reader.discardDelimiterInclusive('\n') catch break;
+        if (bounds.start == 0) break;
+        limit = bounds.start - 1;
     }
-    const save = last orelse return null;
-    if (header) |parsed| {
-        return .{ .header = parsed, .save = save };
-    }
-    // Header line missing/corrupt: derive the id from the journal file name.
-    return .{ .header = .{
-        .id = try alloc.dupe(u8, name[0 .. name.len - NAME_EXTENSION.len]),
-        .cwd = "",
-    }, .save = save };
+    return null;
 }
 
 fn parseHeader(alloc: std.mem.Allocator, line: []const u8) ?Header {
     return std.json.parseFromSliceLeaky(Header, alloc, line, .{ .ignore_unknown_fields = true }) catch null;
+}
+
+fn readHeader(alloc: std.mem.Allocator, io: std.Io, file: std.Io.File) ?Header {
+    const window = alloc.alloc(u8, 64 * 1024) catch return null;
+    const got = file.readPositionalAll(io, window, 0) catch return null;
+    const nl = std.mem.indexOfScalar(u8, window[0..got], '\n') orelse got;
+    const parsed = parseHeader(alloc, window[0..nl]) orelse return null;
+    return .{
+        .id = alloc.dupe(u8, parsed.id) catch return null,
+        .created_ms = parsed.created_ms,
+        .cwd = alloc.dupe(u8, parsed.cwd) catch return null,
+    };
+}
+
+const LineBounds = struct { start: u64, end: u64 };
+
+fn prevLineBounds(alloc: std.mem.Allocator, io: std.Io, file: std.Io.File, limit: u64) !LineBounds {
+    var block_len: usize = 8192;
+    while (true) {
+        const read_len: usize = @intCast(@min(limit, block_len));
+        const block_start = limit - read_len;
+        const buf = try alloc.alloc(u8, read_len);
+        const got = try file.readPositionalAll(io, buf, block_start);
+        if (got != read_len) return error.UnexpectedEof;
+        var i: usize = got;
+        while (i > 0) {
+            i -= 1;
+            if (buf[i] == '\n') return .{ .start = block_start + i + 1, .end = limit };
+        }
+        if (block_start == 0) return .{ .start = 0, .end = limit };
+        block_len *= 8;
+    }
+}
+
+fn readRange(alloc: std.mem.Allocator, io: std.Io, file: std.Io.File, bounds: LineBounds) ![]u8 {
+    const len: usize = @intCast(bounds.end - bounds.start);
+    const buf = try alloc.alloc(u8, len);
+    const got = try file.readPositionalAll(io, buf, bounds.start);
+    if (got != len) return error.UnexpectedEof;
+    return buf;
+}
+
+fn checkpointLine(alloc: std.mem.Allocator, io: std.Io, save: session.SaveState) ![]u8 {
+    var line: std.Io.Writer.Allocating = .init(alloc);
+    const writer = &line.writer;
+    try writer.print("{{\"kind\":\"checkpoint\",\"ms\":{d},\"save\":", .{wallMillis(io)});
+    try std.json.Stringify.value(save, .{}, writer);
+    try writer.writeAll(",\"prompt\":");
+    try std.json.Stringify.value(checkpointPrompt(alloc, save), .{}, writer);
+    try writer.writeAll("}\n");
+    return line.toOwnedSlice();
+}
+
+fn checkpointPrompt(alloc: std.mem.Allocator, save: session.SaveState) []const u8 {
+    const text = firstUserText(save.chat) orelse return "";
+    return clipPrompt(alloc, text);
+}
+
+/// Extracts the trailing `"prompt"` value straight from the last bytes of a
+/// checkpoint line. Null when the field is absent (legacy journal) or the
+/// value does not fit the window; callers then fall back to a full load.
+fn tailPrompt(alloc: std.mem.Allocator, io: std.Io, file: std.Io.File) ?[]const u8 {
+    const size = endOffset(file, io) catch return null;
+    if (size == 0) return null;
+    var window: [2048]u8 = undefined;
+    const read_len: usize = @intCast(@min(window.len, size));
+    const got = file.readPositionalAll(io, window[0..read_len], size - read_len) catch return null;
+    if (got != read_len) return null;
+    const marker = ",\"prompt\":\"";
+    const at = std.mem.lastIndexOf(u8, window[0..got], marker) orelse return null;
+    const value = window[at + marker.len .. got];
+    var closed: ?usize = null;
+    var i: usize = 0;
+    while (i < value.len) : (i += 1) {
+        if (value[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (value[i] == '"') {
+            closed = i;
+            break;
+        }
+    }
+    const end = closed orelse return null;
+    if (end > PROMPT_FIELD_MAX) return null;
+    var wrap: std.Io.Writer.Allocating = .init(alloc);
+    wrap.writer.print("{{\"p\":\"{s}}}", .{value[0 .. end + 1]}) catch return null;
+    const decoded = std.json.parseFromSliceLeaky(struct { p: []const u8 = "" }, alloc, wrap.written(), .{}) catch return null;
+    return decoded.p;
 }
 
 fn firstUserText(chat: []const session.WireMessage) ?[]const u8 {
@@ -352,14 +419,17 @@ fn firstUserText(chat: []const session.WireMessage) ?[]const u8 {
     return null;
 }
 
-/// Initial user prompt of a session, whitespace collapsed and cut to
-/// PROMPT_CLIP bytes with a trailing "...". Empty when the journal has no
-/// readable checkpoint or no text prompt.
+/// Prompt of the newest checkpoint, whitespace collapsed and cut to
+/// PROMPT_CLIP bytes with a trailing "...". Reads the checkpoint line tail
+/// directly. Journals without the prompt field report `LEGACY_PROMPT` and
+/// stay fully loadable through `load`.
 pub fn firstPrompt(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) []const u8 {
-    const name = fileName(alloc, id) catch return "";
-    const loaded = load(alloc, io, base, name) catch return "";
-    const text = firstUserText((loaded orelse return "").save.chat) orelse return "";
-    return clipPrompt(alloc, text);
+    const name = fileName(alloc, id) catch return LEGACY_PROMPT;
+    var sessions_dir = base.openDir(io, DIR_NAME, .{}) catch return LEGACY_PROMPT;
+    defer sessions_dir.close(io);
+    const file = sessions_dir.openFile(io, name, .{}) catch return LEGACY_PROMPT;
+    defer file.close(io);
+    return tailPrompt(alloc, io, file) orelse LEGACY_PROMPT;
 }
 
 fn clipPrompt(alloc: std.mem.Allocator, text: []const u8) []const u8 {
@@ -670,4 +740,81 @@ test "firstPrompt skips reminders and reports an empty prompt when no text exist
     try store.appendCheckpoint(.{ .chat = &only_tools, .chat_render = &.{} });
     const silent = store.file_name.?[0 .. store.file_name.?.len - NAME_EXTENSION.len];
     try testing.expectEqualStrings("", firstPrompt(arena.allocator(), io, base, silent));
+}
+
+test "firstPrompt reads newest prompt from the tail; load scans backwards" {
+    const testing = std.testing;
+    var io_state = std.Io.Threaded.init(testing.allocator, .{});
+    defer io_state.deinit();
+    const io = io_state.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = std.Io.Dir{ .handle = tmp.dir.handle };
+
+    var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
+    defer store.deinit();
+    try store.create("/tmp/project");
+    const first = [_]session.WireMessage{
+        .{ .role = .user, .parts = &.{.{ .text = "first task" }} },
+    };
+    try store.appendCheckpoint(.{ .chat = &first, .chat_render = &.{} });
+
+    const big_payload = "x" ** 9000;
+    const second = [_]session.WireMessage{
+        .{ .role = .user, .parts = &.{.{ .text = "second \"quoted\" task" }} },
+        .{ .role = .agent, .parts = &.{.{ .text = big_payload }} },
+    };
+    try store.appendCheckpoint(.{ .chat = &second, .chat_render = &.{} });
+
+    var id_buf: [64]u8 = undefined;
+    const id = store.currentId(&id_buf).?;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("second \"quoted\" task", firstPrompt(arena.allocator(), io, base, id));
+
+    const name = try fileName(arena.allocator(), id);
+    const loaded = (try load(arena.allocator(), io, base, name)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), loaded.save.chat.len);
+    try testing.expectEqual(@as(usize, 9000), loaded.save.chat[1].parts[0].text.len);
+    try testing.expectEqualStrings("/tmp/project", loaded.header.cwd);
+}
+
+test "legacy journal is flagged, still loadable, converts on next checkpoint" {
+    const testing = std.testing;
+    var io_state = std.Io.Threaded.init(testing.allocator, .{});
+    defer io_state.deinit();
+    const io = io_state.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = std.Io.Dir{ .handle = tmp.dir.handle };
+    try base.createDirPath(io, DIR_NAME);
+
+    var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
+    defer sessions_dir.close(io);
+    const file = try sessions_dir.createFile(io, "20250101-000000-cccc.jsonl", .{});
+    defer file.close(io);
+    var wb: [256]u8 = undefined;
+    var w = file.writer(io, &wb);
+    try w.interface.writeAll("{\"kind\":\"header\",\"v\":1,\"id\":\"ccc\",\"created_ms\":0,\"cwd\":\"/x\"}\n");
+    try w.interface.writeAll("{\"kind\":\"checkpoint\",\"ms\":9,\"save\":{\"chat\":[{\"role\":\"user\",\"parts\":[{\"text\":\"legacy   prompt\"}]}],\"chat_render\":[]}}\n");
+    try w.interface.flush();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    try testing.expectEqualStrings(LEGACY_PROMPT, firstPrompt(alloc, io, base, "20250101-000000-cccc"));
+    const loaded = try load(alloc, io, base, "20250101-000000-cccc.jsonl");
+    try testing.expect(loaded != null);
+    try testing.expectEqual(@as(usize, 1), loaded.?.save.chat.len);
+
+    var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
+    defer store.deinit();
+    try store.open("20250101-000000-cccc.jsonl");
+    const resumed = [_]session.WireMessage{
+        .{ .role = .user, .parts = &.{.{ .text = "fresh prompt" }} },
+    };
+    try store.appendCheckpoint(.{ .chat = &resumed, .chat_render = &.{} });
+    try testing.expectEqualStrings("fresh prompt", firstPrompt(alloc, io, base, "20250101-000000-cccc"));
 }
