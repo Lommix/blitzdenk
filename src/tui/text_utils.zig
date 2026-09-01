@@ -21,15 +21,17 @@ pub const WrappedTextIter = struct {
         };
     }
 
-    pub fn peek(self: *Self) ?u21 {
-        var s = self.*;
-        return s.next();
-    }
-
     pub fn next(self: *Self) ?u21 {
+        if (self.width == 0) return null;
         const word = self.word orelse blk: {
             const next_word = self.wit.next() orelse return null;
             self.word = next_word;
+
+            if (next_word.len == 1 and next_word[0] == '\n') {
+                self.word = null;
+                self.line_width = 0;
+                return '\n';
+            }
 
             const word_cols = std.unicode.utf8CountCodepoints(next_word) catch next_word.len;
             const is_overflow = self.line_width > 0 and self.line_width + word_cols > self.width;
@@ -84,8 +86,13 @@ pub const WordIterator = struct {
         }
         if (self.pos >= self.text.len) return null;
 
+        if (self.text[self.pos] == '\n') {
+            self.pos += 1;
+            return "\n";
+        }
+
         const start = self.pos;
-        while (self.pos < self.text.len and self.text[self.pos] != ' ') {
+        while (self.pos < self.text.len and self.text[self.pos] != ' ' and self.text[self.pos] != '\n') {
             self.pos += 1;
         }
         // include trailing space as part of word so widths account for gaps
@@ -182,6 +189,48 @@ test "wrapped rows honor newlines" {
     try std.testing.expectEqual(@as(u16, 3), wrappedRowCount("first\nsecond line", 6));
     try std.testing.expectEqual(@as(u16, 3), wrappedRowCount("first\n\nlast", 20));
     try std.testing.expectEqual(@as(u16, 2), wrappedRowCount("first line\nlast", 20));
+}
+
+fn expectRowEqual(idx: *usize, expected: []const []const u8, got: []const u8) !void {
+    if (idx.* >= expected.len) return error.TooManyRows;
+    try std.testing.expectEqualStrings(expected[idx.*], got);
+    idx.* += 1;
+}
+
+fn expectWrappedRows(text: []const u8, width: u16, expected: []const []const u8) !void {
+    var it = WrappedTextIter.new(text, width);
+    var row: std.ArrayList(u8) = .empty;
+    defer row.deinit(std.testing.allocator);
+    var idx: usize = 0;
+    while (it.next()) |c| {
+        if (c == '\n') {
+            try expectRowEqual(&idx, expected, row.items);
+            row.clearRetainingCapacity();
+            continue;
+        }
+        var utf8: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(c, &utf8) catch return error.InvalidCodepoint;
+        try row.appendSlice(std.testing.allocator, utf8[0..n]);
+    }
+    try expectRowEqual(&idx, expected, row.items);
+    try std.testing.expectEqual(expected.len, idx);
+}
+
+test "wrapped iter breaks at newlines not around them" {
+    try expectWrappedRows("one\ntwo three", 10, &.{ "one", "two three" });
+}
+
+test "wrapped iter resets row width on newline" {
+    try expectWrappedRows("hi\n0123456789abc", 10, &.{ "hi", "0123456789", "abc" });
+}
+
+test "wrapped iter emits single break for full row plus newline" {
+    try expectWrappedRows("abcdef\nghij", 6, &.{ "abcdef", "ghij" });
+}
+
+test "wrapped iter with zero width yields nothing" {
+    var it = WrappedTextIter.new("text", 0);
+    try std.testing.expect(it.next() == null);
 }
 
 pub fn renderError(buf: *Buffer, last_error: ?anyerror, detail: ?[]const u8, x: u16, y: u16, width: u16, height: u16) void {

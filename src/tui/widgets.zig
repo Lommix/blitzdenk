@@ -1024,6 +1024,7 @@ pub const Input = struct {
 
         const input_end = inner.x + inner.width;
         const input_start = inner.x + 2;
+        const inner_end_y = inner.y + inner.height;
 
         buf.set(inner.x, inner.y, .{ .char = '❯' });
 
@@ -1039,15 +1040,18 @@ pub const Input = struct {
         var cx = input_start;
         var cy = inner.y;
 
-        var w_it = util.WrappedTextIter.new(self.text, inner.width - 2);
+        var w_it = util.WrappedTextIter.new(self.text, inner.width -| 2);
         while (w_it.next()) |c| {
             if (c == '\n') {
-                cx = inner.x + 2;
+                cx = input_start;
                 cy += 1;
+                if (cy >= inner_end_y) break;
                 continue;
             }
 
-            buf.set(cx, cy, .{ .char = c, .style = self.text_style });
+            if (cy < inner_end_y) {
+                buf.set(cx, cy, .{ .char = c, .style = self.text_style });
+            }
             cx += 1;
         }
 
@@ -1055,7 +1059,9 @@ pub const Input = struct {
             cx = input_start;
             cy += 1;
         }
-        buf.set(cx, cy, .{ .char = '_', .style = self.border_style });
+        if (cy < inner_end_y and cx < input_end) {
+            buf.set(cx, cy, .{ .char = '_', .style = self.border_style });
+        }
     }
 };
 
@@ -1787,3 +1793,57 @@ pub const PasswordInput = struct {
         .border = .single,
     },
 };
+
+test "input keeps overflowing text inside the box" {
+    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });
+    defer buf.deinit();
+    const input: Input = .{ .text = "r1\nr2\nr3\nr4\nr5\nr6" };
+    input.render(.{ .width = 16, .height = 9 }, &buf);
+
+    try std.testing.expectEqual(@as(u21, '╰'), buf.get(0, 4).char);
+    try std.testing.expectEqual(@as(u21, '╯'), buf.get(15, 4).char);
+    var x: u16 = 1;
+    while (x < 15) : (x += 1) {
+        try std.testing.expectEqual(@as(u21, '─'), buf.get(x, 4).char);
+    }
+    var y: u16 = 5;
+    while (y < 9) : (y += 1) {
+        var x2: u16 = 0;
+        while (x2 < 16) : (x2 += 1) {
+            try std.testing.expectEqual(@as(u21, ' '), buf.get(x2, y).char);
+        }
+    }
+}
+
+test "input renders newline rows without phantom breaks" {
+    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });
+    defer buf.deinit();
+    const input: Input = .{ .text = "one\ntwo three" };
+    input.render(.{ .width = 16, .height = 9 }, &buf);
+
+    const row1 = "one";
+    for (row1, 0..) |ch, i| {
+        try std.testing.expectEqual(@as(u21, ch), buf.get(3 + @as(u16, @intCast(i)), 1).char);
+    }
+    const row2 = "two three";
+    for (row2, 0..) |ch, i| {
+        try std.testing.expectEqual(@as(u21, ch), buf.get(3 + @as(u16, @intCast(i)), 2).char);
+    }
+}
+
+test "input renders nothing when the box is too narrow" {
+    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 4, .height = 9 });
+    defer buf.deinit();
+    const input: Input = .{ .text = "some long text\nwith lines" };
+    input.render(.{ .width = 4, .height = 9 }, &buf);
+
+    try std.testing.expectEqual(@as(u21, '╰'), buf.get(0, 4).char);
+    try std.testing.expectEqual(@as(u21, '╯'), buf.get(3, 4).char);
+    var y: u16 = 0;
+    while (y < 9) : (y += 1) {
+        var x: u16 = 0;
+        while (x < 4) : (x += 1) {
+            try std.testing.expect(buf.get(x, y).char != '_');
+        }
+    }
+}
