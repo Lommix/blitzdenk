@@ -301,6 +301,7 @@ pub const App = struct {
     lua_config_abs: ?[]const u8 = null,
     lua_reload_requested: std.atomic.Value(bool) = .init(false),
     lua_reload_failed: std.atomic.Value(bool) = .init(false),
+    lua_reload_generation: std.atomic.Value(u64) = .init(0),
     remote_cwd: []const u8 = "/",
     flags: AppFlags = .{},
     default_context_limit: u32 = CONTEXT_LIMIT,
@@ -1289,6 +1290,7 @@ pub const App = struct {
     pub fn configureAgent(self: *const App, id: r.AgentId, agent: *r.agent.Agent) !void {
         try self.context_factory.configureAgent(&self.config, agent, self.toolBase(id));
         agent.context_limit = self.default_context_limit;
+        agent.lua_reload_generation_seen = self.lua_reload_generation.load(.monotonic);
         agent.lifetime.reminder = buildReminderOpaque;
         agent.lifetime.reminder_ctx = @ptrCast(@constCast(self));
         agent.lifetime.refresh_tools = refreshRunningAgentTools;

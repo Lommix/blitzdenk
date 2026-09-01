@@ -875,6 +875,7 @@ pub fn run(
 
                     if (reload_requested) app.lua_reload_failed.store(false, .release);
                     try app.refreshLiveAgentTools();
+                    _ = app.lua_reload_generation.fetchAdd(1, .monotonic);
                     if (reload_requested) app.markLuaReloadDone();
                 }
             }

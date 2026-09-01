@@ -17,6 +17,7 @@ pub const InjectionsHooks = struct {
             &inject_cwd_information,
             &inject_available_skills,
             &inject_capability_catalog,
+            &inject_lua_reload_notice,
         }) |cb| {
             try self._hooks.append(alloc, cb);
         }
@@ -157,6 +158,13 @@ fn inject_capability_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent
 
     try w.writeAll(body);
     agent.capability_catalog_digest = digest;
+}
+
+fn inject_lua_reload_notice(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    const generation = app.lua_reload_generation.load(.acquire);
+    if (generation == agent.lua_reload_generation_seen) return;
+    agent.lua_reload_generation_seen = generation;
+    try w.writeAll("[LUA SANDBOX RELOADED]\n");
 }
 
 fn agentHasBashTool(agent: *const r.agent.Agent) bool {
