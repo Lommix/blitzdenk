@@ -227,10 +227,11 @@ end, "toggle thinking output")
 The optional description shows next to the keybind in the dashboard. Without
 it the row falls back to `custom`.
 
-`set_flags` reads only the fields you pass: `show_thinking` and `debug_log`
-booleans, `approval_mode` string (`"strict"`, `"default"`, `"yolo"`,
-`"smart"`). Fields you omit stay unchanged; `get_flags` returns all three,
-`approval_mode` as its tag name. `smart` behaves like `default` today.
+`set_flags` reads only the fields you pass: `show_thinking`, `show_diffs`,
+and `debug_log` booleans, `approval_mode` string (`"strict"`, `"default"`,
+`"yolo"`, `"smart"`). Fields you omit stay unchanged; `get_flags` returns all
+four, `approval_mode` as its tag name. `smart` behaves like `default` today.
+`show_diffs` is true by default; false hides diff blocks in the chat history.
 
 The completion popup answers to `blitz.cmp.next`, `blitz.cmp.prev`, and
 `blitz.cmp.accept`. Each queues one action, the same as the default keys

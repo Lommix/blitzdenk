@@ -24,6 +24,7 @@ pub const UiState = union(enum) {
 
 pub const AppFlags = packed struct {
     show_thinking: bool = false,
+    show_diffs: bool = true,
     debug_log: bool = true,
     approval_mode: r.permissions.ApprovalMode = .default,
 };
@@ -3212,10 +3213,12 @@ fn buildChatEntryParagraph(
                         total.* += h;
                     },
                     .diff => |diff| {
-                        const p = buildDiffParagraph(arena, app, diff);
-                        const h = p.totalHeightLong(inner_w);
-                        try out.append(arena, .{ .p = p, .h = h });
-                        total.* += h;
+                        if (app.flags.show_diffs) {
+                            const p = buildDiffParagraph(arena, app, diff);
+                            const h = p.totalHeightLong(inner_w);
+                            try out.append(arena, .{ .p = p, .h = h });
+                            total.* += h;
+                        }
                     },
                     .tool_call => unreachable,
                 }
