@@ -1378,7 +1378,7 @@ pub const App = struct {
             switch (app.input_mode) {
                 .text, .passphrase => {
                     const inner_w = area.width -| 5; // 2 left + 2 right padding + ❯ prompt
-                    const rows: u16 = @intCast(@min(inputWrapPosition(app, frame_alloc, inner_w, false).row + 1, @as(usize, std.math.maxInt(u16))));
+                    const rows: u16 = @intCast(@min(@max(inputWrapPosition(app, frame_alloc, inner_w, false).total, 1), @as(usize, std.math.maxInt(u16))));
                     break :blk @min(rows +| 3, 9); // input rows + status + 2 padding
                 },
                 .perm_message => break :blk 8, // 5-row input box + status + 2 padding
@@ -2692,36 +2692,65 @@ fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf
     }
 }
 
-fn inputWrapPosition(app: *App, arena: std.mem.Allocator, inner_w: u16, to_token_start: bool) struct { row: usize, col: usize } {
+const InputWrapPos = struct { row: usize, col: usize, total: usize };
+
+fn inputWrapPosition(app: *App, arena: std.mem.Allocator, inner_w: u16, to_token_start: bool) InputWrapPos {
     const display = app.displayInput(arena);
     const cursor: usize = @min(display.cursor, display.text.len);
     const target = if (to_token_start) r.completion.tokenAt(display.text, cursor).start else cursor;
 
     var rows_above: usize = 0;
+    var total: usize = 0;
+    var found_row: ?usize = null;
+    var found_col: usize = 0;
     var consumed: usize = 0;
     var it = std.mem.splitAny(u8, display.text, "\n");
     while (it.next()) |raw_line| {
         const line_start = consumed;
         const line_end = line_start + raw_line.len;
+        const in_target = target >= line_start and target <= line_end;
+
         var wrapped: std.ArrayList(r.tui.Line) = .empty;
         defer wrapped.deinit(arena);
-        if (target >= line_start and target <= line_end) {
+
+        if (in_target) {
             const off = target - line_start;
+            const cursor_marker: r.tui.Style = .{ .bg = .{ .indexed = 255 } };
             var line = r.tui.Line{};
-            line.pushText(arena, raw_line[0..off], .{}) catch break;
-            r.tui.wrapLine(arena, &line, inner_w, &wrapped) catch break;
-            const last = if (wrapped.items.len == 0) 0 else wrapped.items.len - 1;
-            var col: usize = 0;
-            if (wrapped.items.len > 0) {
-                for (wrapped.items[last].spans.items) |span| col += textWidthCols(span.content);
+            if (off == raw_line.len) {
+                line.pushText(arena, raw_line, .{}) catch break;
+                line.pushText(arena, " ", cursor_marker) catch break;
+            } else {
+                const char_len = std.unicode.utf8ByteSequenceLength(raw_line[off]) catch 1;
+                const mid = @min(off + char_len, raw_line.len);
+                line.pushText(arena, raw_line[0..off], .{}) catch break;
+                line.pushText(arena, raw_line[off..mid], cursor_marker) catch break;
+                line.pushText(arena, raw_line[mid..], .{}) catch break;
             }
-            return .{ .row = rows_above + last, .col = col };
+            r.tui.wrapLine(arena, &line, inner_w, &wrapped) catch break;
+            for (wrapped.items, 0..) |*row, ri| {
+                var col: usize = 0;
+                var hit = false;
+                for (row.spans.items) |span| {
+                    if (span.style.bg.eql(cursor_marker.bg)) {
+                        found_row = rows_above + ri;
+                        found_col = col;
+                        hit = true;
+                        break;
+                    }
+                    col += textWidthCols(span.content);
+                }
+                if (hit) break;
+            }
+        } else {
+            pushPlainWrappedLine(app, arena, raw_line, inner_w, &wrapped) catch break;
         }
-        pushPlainWrappedLine(app, arena, raw_line, inner_w, &wrapped) catch break;
-        rows_above += wrapped.items.len;
+        const line_rows = @max(wrapped.items.len, 1);
+        rows_above += line_rows;
+        total += line_rows;
         consumed = line_end + 1;
     }
-    return .{ .row = 0, .col = 0 };
+    return .{ .row = found_row orelse 0, .col = found_col, .total = total };
 }
 
 fn pushPlainWrappedLine(app: *App, arena: std.mem.Allocator, raw_line: []const u8, inner_w: u16, out: *std.ArrayList(r.tui.Line)) !void {
@@ -4671,12 +4700,44 @@ test "inputWrapPosition reports rows above and column of token start" {
     const multiline = inputWrapPosition(&app, arena.allocator(), 80, true);
     try testing.expectEqual(@as(usize, 1), multiline.row);
     try testing.expectEqual(@as(usize, 0), multiline.col);
+    try testing.expectEqual(@as(usize, 2), multiline.total);
+
+    app.input_cursor = 2;
+    const cursor_back = inputWrapPosition(&app, arena.allocator(), 80, false);
+    try testing.expectEqual(@as(usize, 0), cursor_back.row);
+    try testing.expectEqual(@as(usize, 2), cursor_back.total);
+
+    app.input_buffer.items = @constCast("ab\n");
+    app.input_cursor = 3;
+    const trailing = inputWrapPosition(&app, arena.allocator(), 80, false);
+    try testing.expectEqual(@as(usize, 1), trailing.row);
+    try testing.expectEqual(@as(usize, 2), trailing.total);
+
+    app.input_buffer.items = @constCast("aa bb cc d");
+    app.input_cursor = 10;
+    const exact_fill = inputWrapPosition(&app, arena.allocator(), 10, false);
+    try testing.expectEqual(@as(usize, 0), exact_fill.row);
+    try testing.expectEqual(@as(usize, 1), exact_fill.total);
+
+    app.input_buffer.items = @constCast("aa bb cc d ");
+    app.input_cursor = 11;
+    const space_wrap = inputWrapPosition(&app, arena.allocator(), 10, false);
+    try testing.expectEqual(@as(usize, 1), space_wrap.row);
+    try testing.expectEqual(@as(usize, 2), space_wrap.total);
+
+    app.input_buffer.items = @constCast("a  ");
+    app.input_cursor = 2;
+    const mid_run = inputWrapPosition(&app, arena.allocator(), 1, false);
+    try testing.expectEqual(@as(usize, 1), mid_run.row);
+    try testing.expectEqual(@as(usize, 0), mid_run.col);
+    try testing.expectEqual(@as(usize, 2), mid_run.total);
 
     app.input_buffer.items = @constCast("aa bb cc dd ee /file");
     app.input_cursor = 20;
     const wrapped = inputWrapPosition(&app, arena.allocator(), 10, true);
     try testing.expectEqual(@as(usize, 1), wrapped.row);
     try testing.expectEqual(@as(usize, 6), wrapped.col);
+    try testing.expectEqual(@as(usize, 3), wrapped.total);
 }
 
 test "completion visibility rule" {
