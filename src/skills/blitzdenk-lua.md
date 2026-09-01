@@ -329,7 +329,33 @@ The payload is `BlitzPermissionPayload` in `meta.lua`: `agent_id`, `call_id`,
 shape is `BlitzPermissionDecision` in the same file.
 
 Never call `blitz.cmd.await_agent` inside the hook. The hook runs on the main
-thread; the await would block the loop that runs the agent.
+thread; the await would block the loop that runs the agent. The hook runs
+before the ticket exists, so `blitz.permissions.resolve` from inside it always
+misses.
+
+## Permission queue
+
+Requests that pass the approve hook untouched and miss auto-approval park in a
+pending set. Each parked request gets an integer `ticket`, and Lua can inspect
+and decide parked requests at any time from commands, keybinds, or event
+listeners. `list_pending()` returns an array of snapshot tables, `get(ticket)`
+one snapshot or nil, and `resolve(ticket, decision)` decides one ticket. It
+returns `false` for unknown or already-resolved tickets. Snapshots carry
+`ticket`, `agent_id`, `call_id`, `kind`, `tool`, and the kind fields, the same
+shape as the hook payload; `decision` takes the same `BlitzPermissionDecision`
+table as the approve hook, including `msg` and ask `select`. Requests whose
+agent died deny on resolve no matter what the decision says.
+
+`blitz.hooks.permission_requested(fn)` fires when a request parks. The event
+carries the ticket; fetch details with `blitz.permissions.get`. Listeners run
+in the sandbox VM, so they may spawn agents. The lazy reviewer pattern: the
+listener only spawns a judge agent, and the judge decides by calling a custom
+tool that resolves the ticket. No awaiting, no answer parsing.
+
+Give the reviewer read-only tools plus the review tool. Tool calls from the
+reviewer emit their own permission events, and a reviewer that can run bash
+spawns reviewers without end. Unresolved tickets fall back to the TUI. A
+snapshot never goes stale, only `resolve` can fail late.
 
 ## Shared state
 

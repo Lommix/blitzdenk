@@ -45,6 +45,7 @@ pub const Request = struct {
     state: State = .pending,
     payload: Payload,
     event: std.Io.Event = .unset,
+    ticket: u64 = 0,
 };
 
 pub const Handler = struct {

@@ -707,43 +707,70 @@ pub fn run(
             // Drain new agent messages from broadcast into chat_entries
             // app.drainBroadcast();
             // Mirror in-progress streaming message so TUI shows tokens as they arrive.
-            perm: {
-                if (app.active_permission != null) break :perm;
-
-                const g = app.permission_queue.lock(io);
-                defer g.unlock();
-
-                if (g.ptr.items.len == 0) break :perm;
-
-                for (0..g.ptr.items.len) |_| {
+            {
+                var g = app.permission_queue.lock(io);
+                while (g.ptr.items.len > 0) {
                     const next = g.ptr.swapRemove(0);
-                    const is_ask = next.payload == .ask or next.payload == .plan;
+                    g.unlock();
 
                     // The Lua hook decides first. Only the fallback path
-                    // reaches the approval-mode check and the TUI.
-                    if (app.luaPermissionDecision(next)) |decision| {
+                    // reaches the approval-mode check, the pending set, and
+                    // the TUI.
+                    const decided: ?r.permissions.State = decision: {
+                        if (app.luaPermissionDecision(next)) |d| break :decision d;
+                        app.mu.lockUncancelable(app.io);
+                        const mode = app.flags.approval_mode;
+                        app.mu.unlock(app.io);
+                        const is_ask = next.payload == .ask or next.payload == .plan;
+                        if (r.permissions.shouldAutoApprove(mode, is_ask, app.exec_pool.ssh_active)) {
+                            break :decision .approved;
+                        }
+                        break :decision null;
+                    };
+
+                    if (decided != null) {
                         try app.persist_permission_to_history(next);
-                        next.state = decision;
+                    }
+
+                    g = app.permission_queue.lock(io);
+                    if (decided) |d| {
+                        next.state = d;
                         next.event.set(app.io);
                         continue;
                     }
 
-                    // check permission level against flags
-                    app.mu.lockUncancelable(app.io);
-                    const mode = app.flags.approval_mode;
-                    app.mu.unlock(app.io);
-                    if (r.permissions.shouldAutoApprove(mode, is_ask, app.exec_pool.ssh_active)) {
-                        try app.persist_permission_to_history(next);
-                        next.state = .approved;
+                    if (app.registry.state(next.agent_id) != .active) {
+                        next.state = .denied;
                         next.event.set(app.io);
                         continue;
                     }
 
-                    if (app.registry.state(next.agent_id) == .active) {
-                        app.active_permission = next;
-                        break :perm;
-                    }
+                    app.permission_ticket_next += 1;
+                    next.ticket = app.permission_ticket_next;
+                    app.pending_permissions.append(app.gpa, next) catch {
+                        next.state = .denied;
+                        next.event.set(app.io);
+                        continue;
+                    };
+                    app.event_bus.emit(&app, .{ .permission_requested = next.ticket });
                 }
+
+                var index: usize = 0;
+                while (index < app.pending_permissions.items.len) {
+                    const req = app.pending_permissions.items[index];
+                    if (req.state != .pending or app.registry.state(req.agent_id) != .active) {
+                        if (req.state == .pending) {
+                            app.settlePermission(req, .denied);
+                        } else {
+                            _ = app.pending_permissions.orderedRemove(index);
+                            if (app.active_permission == req) app.active_permission = null;
+                        }
+                        continue;
+                    }
+                    if (app.active_permission == null) app.active_permission = req;
+                    index += 1;
+                }
+                g.unlock();
             }
 
             // cmd.select requests: show when no permission is on screen.

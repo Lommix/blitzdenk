@@ -136,6 +136,10 @@
 ---chat text as typed
 ---@field text string
 
+---@class BlitzPermissionRequestEvent
+---hand to blitz.permissions.resolve, or blitz.permissions.get for the full payload
+---@field ticket integer
+
 ---@class BlitzPermissionPayload
 ---packed AgentId of the requesting agent
 ---@field agent_id integer
@@ -186,6 +190,11 @@
 ---@field user_message_sent fun(func: fun(ev: BlitzUserMessageEvent))
 ---Register a listener for after MCP tools are reloaded. Takes no payload. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field mcp_tools_reloaded fun(func: fun())
+---Register a listener for when a tool approval parks for a decision.
+---The event carries the ticket; fetch details with
+---blitz.permissions.get and decide with blitz.permissions.resolve.
+---Unresolved tickets fall back to the TUI. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
+---@field permission_requested fun(func: fun(ev: BlitzPermissionRequestEvent))
 ---Install the system-reminder injection hook. Runs for every agent step
 ---before the reminder is built, in the main Lua VM on the calling thread.
 ---Return a string to append it to the agent's <system-reminder> block,
@@ -200,6 +209,14 @@
 ---@field approve fun(hook: fun(payload: BlitzPermissionPayload): BlitzPermissionDecision)
 ---Remove the approve and inject hooks.
 ---@field clear fun()
+
+---@class BlitzPermissions
+---Snapshot every parked approval request as a list of tables: ticket, agent_id, call_id, kind, tool, and the kind fields.
+---@field list_pending fun(): table
+---Snapshot one parked approval request by ticket, or nil when the ticket is unknown or already resolved.
+---@field get fun(ticket: integer): table
+---Decide a parked approval request: true when the ticket resolved, false when unknown or already gone. Takes the same BlitzPermissionDecision table as the approve hook. Requests of dead agents deny regardless.
+---@field resolve fun(ticket: integer, decision: BlitzPermissionDecision): boolean
 
 ---@class BlitzArgDef
 ---@field type string
@@ -358,6 +375,7 @@
 ---@field cmp BlitzCmp
 ---@field tools BlitzToolDef
 ---@field hooks BlitzHooks
+---@field permissions BlitzPermissions
 ---@field AGENT_GENERAL integer
 ---@field REQ_STATUS_PENDING integer
 ---@field REQ_STATUS_APPROVED integer

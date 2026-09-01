@@ -275,6 +275,8 @@ pub const App = struct {
     // ---------------
     // async interface
     permission_queue: Locked(std.ArrayList(*r.permissions.Request)),
+    pending_permissions: std.ArrayList(*r.permissions.Request) = .empty,
+    permission_ticket_next: u64 = 0,
     selection_queue: Locked(std.ArrayList(*r.selection.Selection)),
     tool_status_entries: Locked(ToolStatusStore) = .{},
     //-----------------
@@ -382,6 +384,7 @@ pub const App = struct {
         self.cmd_queue.deinit();
         self.injection_hooks.deinit(self.gpa);
         self.permission_queue.value.deinit(self.gpa);
+        self.pending_permissions.deinit(self.gpa);
         self.notifications.deinit(self.gpa);
         self.event_bus.clear(self.io);
         if (self.last_unbound_warn) |s| self.gpa.free(s);
@@ -395,6 +398,19 @@ pub const App = struct {
         self.arena_frame.deinit();
         self.arena_session.deinit();
         self.arena_app.deinit();
+    }
+
+    /// Decide one parked request. Callers must hold the permission_queue lock.
+    pub fn settlePermission(self: *App, req: *r.permissions.Request, state: r.permissions.State) void {
+        req.state = state;
+        req.event.set(self.io);
+        for (self.pending_permissions.items, 0..) |pending, index| {
+            if (pending == req) {
+                _ = self.pending_permissions.orderedRemove(index);
+                break;
+            }
+        }
+        if (self.active_permission == req) self.active_permission = null;
     }
 
     pub fn cancelPermissions(self: *App, only: ?r.AgentId) void {
@@ -418,6 +434,14 @@ pub const App = struct {
                 req.state = .denied;
                 req.event.set(self.io);
                 _ = g.ptr.swapRemove(index);
+            } else index += 1;
+        }
+
+        index = 0;
+        while (index < self.pending_permissions.items.len) {
+            const req = self.pending_permissions.items[index];
+            if (only == null or req.agent_id == only.?) {
+                self.settlePermission(req, .denied);
             } else index += 1;
         }
 
@@ -610,7 +634,12 @@ pub const App = struct {
 
         // cleanup
         self.tool_status_entries = .{};
-        self.permission_queue.value.clearRetainingCapacity();
+        {
+            const g = self.permission_queue.lock(self.io);
+            self.permission_queue.value.clearRetainingCapacity();
+            self.pending_permissions.clearRetainingCapacity();
+            g.unlock();
+        }
     }
 
     pub fn tick(self: *App) !void {
@@ -1525,12 +1554,15 @@ pub const App = struct {
     }
 
     pub fn resolveActivePermission(self: *App, state: r.permissions.State) void {
-        if (self.active_permission) |perm| {
-            if (self.registry.state(perm.agent_id) == .active) {
-                perm.state = state;
-                perm.event.set(self.io);
-            }
-            self.active_permission = null;
+        const g = self.permission_queue.lock(self.io);
+        defer g.unlock();
+        const perm = self.active_permission orelse return;
+        self.active_permission = null;
+        if (perm.state != .pending) return;
+        if (self.registry.state(perm.agent_id) == .active) {
+            self.settlePermission(perm, state);
+        } else {
+            self.settlePermission(perm, .denied);
         }
     }
 

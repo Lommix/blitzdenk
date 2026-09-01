@@ -172,6 +172,8 @@ pub const LuaType = union(enum) {
 };
 
 const LuaInteger: LuaType = .integer;
+const LuaTable: LuaType = .table;
+const LuaBool: LuaType = .boolean;
 const LuaNumber: LuaType = .number;
 const LuaString: LuaType = .string;
 const LuaAny: LuaType = .any;
@@ -385,6 +387,7 @@ pub const Blitz = LuaType{
             .{ .name = "cmp", .ty = BlitzCmp },
             .{ .name = "tools", .ty = BlitzToolDef },
             .{ .name = "hooks", .ty = BlitzHooks },
+            .{ .name = "permissions", .ty = BlitzPermissions },
             .{ .name = "AGENT_GENERAL", .ty = LuaType.integer, .value = .{ .integer = 0 } },
             .{ .name = "REQ_STATUS_PENDING", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_PENDING } },
             .{ .name = "REQ_STATUS_APPROVED", .ty = LuaType.integer, .value = .{ .integer = lua.REQ_STATUS_APPROVED } },
@@ -1221,6 +1224,12 @@ pub const BlitzHooks = LuaType{
             .{ .name = "compaction_complete", .desc = "Register a listener for when chat compaction completes. " ++ ListenerVmDesc, .ty = EventFn(.compaction_complete, BlitzAgentEvent) },
             .{ .name = "user_message_sent", .desc = "Register a listener for after the user sends a message. " ++ ListenerVmDesc, .ty = EventFn(.user_message_sent, BlitzUserMessageEvent) },
             .{ .name = "mcp_tools_reloaded", .desc = "Register a listener for after MCP tools are reloaded. Takes no payload. " ++ ListenerVmDesc, .ty = EventFn(.mcp_tools_reloaded, null) },
+            .{ .name = "permission_requested", .desc =
+            \\Register a listener for when a tool approval parks for a decision.
+            \\The event carries the ticket; fetch details with
+            \\blitz.permissions.get and decide with blitz.permissions.resolve.
+            \\Unresolved tickets fall back to the TUI. 
+            ++ ListenerVmDesc, .ty = EventFn(.permission_requested, BlitzPermissionRequestEvent) },
             .{
                 .name = "inject",
                 .desc =
@@ -1308,6 +1317,226 @@ const PermissionPayloadDef = LuaType{ .table_def = .{ .name = "BlitzPermissionPa
     .{ .name = "options", .ty = StringListDef, .optional = true, .desc = "kind == ask" },
     .{ .name = "plan", .ty = LuaType.string, .optional = true, .desc = "kind == plan, plan text" },
 } } };
+const BlitzPermissionRequestEvent = LuaType{ .table_def = .{ .name = "BlitzPermissionRequestEvent", .fields = &.{
+    .{ .name = "ticket", .desc = "hand to blitz.permissions.resolve, or blitz.permissions.get for the full payload", .ty = LuaType.integer },
+} } };
+
+const PermSnapshot = struct {
+    ticket: u64,
+    agent_id: r.AgentId,
+    call_id: ?[]const u8,
+    tool: []const u8,
+    payload: r.permissions.Payload,
+};
+
+fn dupePermPayload(arena: std.mem.Allocator, payload: r.permissions.Payload) !r.permissions.Payload {
+    return switch (payload) {
+        .call => |p| .{ .call = .{ .description = try arena.dupe(u8, p.description) } },
+        .diff => |p| .{ .diff = .{
+            .path = try arena.dupe(u8, p.path),
+            .before = if (p.before) |b| try arena.dupe(u8, b) else null,
+            .after = try arena.dupe(u8, p.after),
+        } },
+        .ask => |p| blk: {
+            const options = try arena.alloc([]const u8, p.options.len);
+            for (p.options, 0..) |option, i| options[i] = try arena.dupe(u8, option);
+            break :blk .{ .ask = .{
+                .header = try arena.dupe(u8, p.header),
+                .question = try arena.dupe(u8, p.question),
+                .options = options,
+                .allow_message = p.allow_message,
+            } };
+        },
+        .plan => |p| .{ .plan = .{
+            .path = try arena.dupe(u8, p.path),
+            .plan_text = try arena.dupe(u8, p.plan_text),
+        } },
+    };
+}
+
+fn copyPermSnapshot(arena: std.mem.Allocator, req: *r.permissions.Request) !PermSnapshot {
+    return .{
+        .ticket = req.ticket,
+        .agent_id = req.agent_id,
+        .call_id = if (req.call_id) |id| try arena.dupe(u8, id) else null,
+        .tool = try arena.dupe(u8, req.tool_name),
+        .payload = try dupePermPayload(arena, req.payload),
+    };
+}
+
+fn pushPermSnapshot(L: *c.lua_State, snap: PermSnapshot) void {
+    c.lua_createtable(L, 0, 9);
+    c.lua_pushinteger(L, @intCast(snap.ticket));
+    c.lua_setfield(L, -2, "ticket");
+    setPermissionFields(L, snap.agent_id, snap.call_id, snap.tool, snap.payload);
+}
+
+fn findPendingTicket(a: *r.app.App, ticket: u64) ?*r.permissions.Request {
+    for (a.pending_permissions.items) |req| {
+        if (req.ticket == ticket) return req;
+    }
+    return null;
+}
+
+const BlitzPermissions = LuaType{ .table_def = .{
+    .name = "BlitzPermissions",
+    .fields = &.{
+        .{
+            .name = "list_pending",
+            .desc = "Snapshot every parked approval request as a list of tables: ticket, agent_id, call_id, kind, tool, and the kind fields.",
+            .ty = LuaType{ .function = .{
+                .args = &.{},
+                .ret = &LuaTable,
+                .fn_ptr = (struct {
+                    fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                        const state = L.?;
+                        const a = getAppFromRegistry(state) orelse {
+                            _ = c.luaL_error(state, "blitz.permissions.list_pending: app not initialized");
+                            return 0;
+                        };
+                        const vm = fromState(state) orelse {
+                            _ = c.luaL_error(state, "blitz.permissions.list_pending: no active lua vm");
+                            return 0;
+                        };
+                        const arena = vm.luaArena();
+
+                        const g = a.permission_queue.lock(a.io);
+                        const snaps = arena.alloc(PermSnapshot, a.pending_permissions.items.len) catch {
+                            g.unlock();
+                            _ = c.luaL_error(state, "blitz.permissions.list_pending: out of memory");
+                            return 0;
+                        };
+                        for (a.pending_permissions.items, 0..) |req, i| {
+                            snaps[i] = copyPermSnapshot(arena, req) catch {
+                                g.unlock();
+                                _ = c.luaL_error(state, "blitz.permissions.list_pending: out of memory");
+                                return 0;
+                            };
+                        }
+                        g.unlock();
+
+                        c.lua_createtable(state, @intCast(snaps.len), 0);
+                        for (snaps, 0..) |snap, i| {
+                            pushPermSnapshot(state, snap);
+                            c.lua_rawseti(state, -2, @intCast(i + 1));
+                        }
+                        return 1;
+                    }
+                }).lua_fn,
+            } },
+        },
+        .{
+            .name = "get",
+            .desc = "Snapshot one parked approval request by ticket, or nil when the ticket is unknown or already resolved.",
+            .ty = LuaType{ .function = .{
+                .args = &.{.{ .name = "ticket", .ty = LuaType.integer }},
+                .ret = &LuaTable,
+                .fn_ptr = (struct {
+                    fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                        const state = L.?;
+                        const a = getAppFromRegistry(state) orelse {
+                            _ = c.luaL_error(state, "blitz.permissions.get: app not initialized");
+                            return 0;
+                        };
+                        const vm = fromState(state) orelse {
+                            _ = c.luaL_error(state, "blitz.permissions.get: no active lua vm");
+                            return 0;
+                        };
+                        const raw_ticket = c.lua_tointegerx(state, 1, null);
+
+                        var snap: ?PermSnapshot = null;
+                        if (raw_ticket >= 1) {
+                            const g = a.permission_queue.lock(a.io);
+                            if (findPendingTicket(a, @intCast(raw_ticket))) |req| {
+                                snap = copyPermSnapshot(vm.luaArena(), req) catch null;
+                            }
+                            g.unlock();
+                        }
+                        if (snap) |found| {
+                            pushPermSnapshot(state, found);
+                        } else {
+                            c.lua_pushnil(state);
+                        }
+                        return 1;
+                    }
+                }).lua_fn,
+            } },
+        },
+        .{
+            .name = "resolve",
+            .desc = "Decide a parked approval request: true when the ticket resolved, false when unknown or already gone. Takes the same BlitzPermissionDecision table as the approve hook. Requests of dead agents deny regardless.",
+            .ty = LuaType{ .function = .{
+                .args = &.{
+                    .{ .name = "ticket", .ty = LuaType.integer },
+                    .{ .name = "decision", .ty = PermissionDecisionDef },
+                },
+                .ret = &LuaBool,
+                .fn_ptr = (struct {
+                    fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                        const state = L.?;
+                        const a = getAppFromRegistry(state) orelse {
+                            _ = c.luaL_error(state, "blitz.permissions.resolve: app not initialized");
+                            return 0;
+                        };
+                        const vm = fromState(state) orelse {
+                            _ = c.luaL_error(state, "blitz.permissions.resolve: no active lua vm");
+                            return 0;
+                        };
+                        if (c.lua_gettop(state) < 2 or c.lua_type(state, 2) != c.LUA_TTABLE) {
+                            _ = c.luaL_error(state, "blitz.permissions.resolve: decision table required");
+                            return 0;
+                        }
+                        const raw_ticket = c.lua_tointegerx(state, 1, null);
+                        if (raw_ticket < 1) {
+                            c.lua_pushboolean(state, 0);
+                            return 1;
+                        }
+
+                        var snap: ?PermSnapshot = null;
+                        {
+                            const g = a.permission_queue.lock(a.io);
+                            if (findPendingTicket(a, @intCast(raw_ticket))) |req| {
+                                snap = copyPermSnapshot(vm.luaArena(), req) catch {
+                                    g.unlock();
+                                    _ = c.luaL_error(state, "blitz.permissions.resolve: out of memory");
+                                    return 0;
+                                };
+                            }
+                            g.unlock();
+                        }
+                        if (snap == null) {
+                            c.lua_pushboolean(state, 0);
+                            return 1;
+                        }
+
+                        const decision = LuaVm.permissionDecisionFromLua(state, snap.?.payload) orelse {
+                            _ = c.luaL_error(state, "blitz.permissions.resolve: decision table lacks a boolean approved field");
+                            return 0;
+                        };
+
+                        var resolved = false;
+                        const g = a.permission_queue.lock(a.io);
+                        if (findPendingTicket(a, @intCast(raw_ticket))) |req| {
+                            resolved = true;
+                            req.state = if (a.registry.state(req.agent_id) == .active) decision else .denied;
+                            for (a.pending_permissions.items, 0..) |pending, index| {
+                                if (pending == req) {
+                                    _ = a.pending_permissions.orderedRemove(index);
+                                    break;
+                                }
+                            }
+                            req.event.set(a.io);
+                        }
+                        g.unlock();
+
+                        c.lua_pushboolean(state, @intFromBool(resolved));
+                        return 1;
+                    }
+                }).lua_fn,
+            } },
+        },
+    },
+} };
 
 const BlitzMcp = LuaType{
     .table_def = .{
@@ -2542,6 +2771,11 @@ fn pushEventPayload(L: *c.lua_State, event: r.events.AppEvent) c_int {
         .agent_failed => |payload| pushAny(L, payload),
         .user_message_sent => |text| pushAny(L, .{ .text = text }),
         .agent_started, .agent_complete, .agent_cancelled, .compaction_started, .compaction_complete => |id| pushAny(L, .{ .id = id }),
+        .permission_requested => |ticket| {
+            c.lua_createtable(L, 0, 1);
+            c.lua_pushinteger(L, @intCast(ticket));
+            c.lua_setfield(L, -2, "ticket");
+        },
     }
     return 1;
 }
@@ -3744,19 +3978,28 @@ fn pushAgentId(L: *c.lua_State, id: r.AgentId) void {
 /// registry-owned memory and stay valid for the duration of the hook call.
 fn pushPermissionPayload(L: *c.lua_State, perm: *r.permissions.Request) void {
     c.lua_createtable(L, 0, 8);
+    setPermissionFields(L, perm.agent_id, perm.call_id, perm.tool_name, perm.payload);
+}
 
-    c.lua_pushinteger(L, @intCast(perm.agent_id.pack()));
+fn setPermissionFields(
+    L: *c.lua_State,
+    agent_id: r.AgentId,
+    call_id: ?[]const u8,
+    tool_name: []const u8,
+    payload: r.permissions.Payload,
+) void {
+    c.lua_pushinteger(L, @intCast(agent_id.pack()));
     c.lua_setfield(L, -2, "agent_id");
 
-    if (perm.call_id) |call_id| {
-        _ = c.lua_pushlstring(L, call_id.ptr, call_id.len);
+    if (call_id) |id| {
+        _ = c.lua_pushlstring(L, id.ptr, id.len);
         c.lua_setfield(L, -2, "call_id");
     }
 
-    _ = c.lua_pushlstring(L, perm.tool_name.ptr, perm.tool_name.len);
+    _ = c.lua_pushlstring(L, tool_name.ptr, tool_name.len);
     c.lua_setfield(L, -2, "tool");
 
-    switch (perm.payload) {
+    switch (payload) {
         .call => |call| {
             pushTag(L, "call");
             c.lua_setfield(L, -2, "kind");
@@ -4366,6 +4609,65 @@ test "permission hook sees ask options and numeric choice" {
     );
     const diff_decision2 = vm.permissionHookDecision(&diff_req).?;
     try std.testing.expectEqual(r.permissions.State.approved, diff_decision2);
+}
+
+test "permission queue snapshots, resolves, and rejects stale tickets" {
+    var app_state = permissionTestApp();
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    registry.slots[0].state.store(.active, .release);
+    app_state.registry = &registry;
+    app_state.pending_permissions = .empty;
+    app_state.permission_ticket_next = 0;
+    app_state.permission_queue = .{};
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    var req = r.permissions.Request{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .call_id = "call_1",
+        .tool_name = "bash",
+        .payload = .{ .call = .{ .description = "Run: `ls`?" } },
+    };
+    req.ticket = 7;
+    try app_state.pending_permissions.append(std.testing.allocator, &req);
+    defer app_state.pending_permissions.deinit(std.testing.allocator);
+
+    try vm.exec(
+        \\local list = blitz.permissions.list_pending()
+        \\assert(#list == 1)
+        \\assert(list[1].ticket == 7)
+        \\assert(list[1].kind == "call")
+        \\assert(list[1].tool == "bash")
+        \\local snap = blitz.permissions.get(7)
+        \\assert(snap ~= nil and snap.call_id == "call_1")
+        \\assert(blitz.permissions.get(999) == nil)
+        \\assert(blitz.permissions.resolve(7, { approved = true }) == true)
+        \\assert(blitz.permissions.resolve(7, { approved = true }) == false)
+        \\assert(#blitz.permissions.list_pending() == 0)
+    );
+    try std.testing.expectEqual(r.permissions.State.approved, req.state);
+
+    req.state = .pending;
+    req.ticket = 8;
+    try app_state.pending_permissions.append(std.testing.allocator, &req);
+
+    try vm.exec(
+        \\assert(blitz.permissions.resolve(8, { approved = true, msg = "ignored" }) == true)
+    );
+    try std.testing.expectEqual(r.permissions.State.approved, req.state);
+
+    registry.slots[0].state.store(.free, .release);
+    req.state = .pending;
+    req.ticket = 9;
+    try app_state.pending_permissions.append(std.testing.allocator, &req);
+
+    try vm.exec(
+        \\assert(blitz.permissions.resolve(9, { approved = true }) == true)
+    );
+    try std.testing.expectEqual(r.permissions.State.denied, req.state);
 }
 
 test "permission hook error fails closed" {

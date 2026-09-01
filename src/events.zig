@@ -13,6 +13,7 @@ pub const AppEvent = union(enum) {
     compaction_complete: AgentId,
     user_message_sent: []const u8,
     mcp_tools_reloaded,
+    permission_requested: u64,
 };
 
 pub const AppEventTag = @typeInfo(AppEvent).@"union".tag_type.?;
@@ -118,6 +119,7 @@ pub fn dupEvent(alloc: std.mem.Allocator, event: AppEvent) !AppEvent {
         .compaction_started => event,
         .compaction_complete => event,
         .user_message_sent => |text| .{ .user_message_sent = try alloc.dupe(u8, text) },
+        .permission_requested => event,
     };
 }
 
