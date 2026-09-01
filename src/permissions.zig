@@ -57,7 +57,7 @@ pub const Handler = struct {
     }
 };
 
-pub const ApprovalMode = enum(u2) { strict, default, yolo, smart };
+pub const ApprovalMode = enum(u2) { strict, default, yolo };
 
 pub fn parseApprovalMode(value: []const u8) ?ApprovalMode {
     return std.meta.stringToEnum(ApprovalMode, value);
@@ -67,7 +67,7 @@ pub fn shouldAutoApprove(mode: ApprovalMode, is_ask: bool, ssh_active: bool) boo
     if (is_ask) return false;
     return switch (mode) {
         .strict => false,
-        .smart, .default => !ssh_active,
+        .default => !ssh_active,
         .yolo => true,
     };
 }
@@ -93,10 +93,6 @@ test "shouldAutoApprove decision table" {
         .{ .mode = .default, .is_ask = false, .ssh = true, .want = false },
         .{ .mode = .default, .is_ask = true, .ssh = false, .want = false },
         .{ .mode = .default, .is_ask = true, .ssh = true, .want = false },
-        .{ .mode = .smart, .is_ask = false, .ssh = false, .want = true },
-        .{ .mode = .smart, .is_ask = false, .ssh = true, .want = false },
-        .{ .mode = .smart, .is_ask = true, .ssh = false, .want = false },
-        .{ .mode = .smart, .is_ask = true, .ssh = true, .want = false },
         .{ .mode = .yolo, .is_ask = false, .ssh = false, .want = true },
         .{ .mode = .yolo, .is_ask = false, .ssh = true, .want = true },
         .{ .mode = .yolo, .is_ask = true, .ssh = false, .want = false },

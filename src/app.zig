@@ -3071,7 +3071,7 @@ fn statusBarLine(app: *App, alloc: std.mem.Allocator) !r.tui.Line {
             switch (app.flags.approval_mode) {
                 .yolo => "| AUTO APPROVAL",
                 .strict => "| APPROVAL",
-                .default, .smart => "",
+                .default => "",
             },
         },
     ) catch " ?? ";

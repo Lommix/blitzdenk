@@ -320,7 +320,7 @@ pub fn main(init: std.process.Init) !void {
                 \\
                 \\Flags:
                 \\  --log              write debug.log in path
-                \\  --approval <mode>  strict|default|yolo|smart (default: default)
+                \\  --approval <mode>  strict|default|yolo (default: default)
                 \\  --strict           shortcut for --approval strict
                 \\  --yolo             shortcut for --approval yolo
                 \\  --clean            skip local user context
@@ -1753,7 +1753,7 @@ pub const AppCommand = union(enum) {
 };
 
 fn approvalFail(val: []const u8) noreturn {
-    std.debug.print("blitz: invalid --approval mode '{s}' (strict|default|yolo|smart)\n", .{val});
+    std.debug.print("blitz: invalid --approval mode '{s}' (strict|default|yolo)\n", .{val});
     std.process.exit(2);
 }
 
@@ -1780,11 +1780,6 @@ pub const CliFlags = packed struct {
 
         if (std.mem.eql(u8, tok, "--yolo")) {
             self.approval_mode = .yolo;
-            return true;
-        }
-
-        if (std.mem.eql(u8, tok, "--smart")) {
-            self.approval_mode = .smart;
             return true;
         }
 
