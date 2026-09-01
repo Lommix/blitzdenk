@@ -173,6 +173,7 @@ pub const Command = union(enum) {
                 if (app.main_agent_id) |id| {
                     app.sdk_run_rendered_steps = 0;
                     try app.registry.retry(id, .{ .max_steps = std.math.maxInt(usize) });
+                    app.event_bus.emit(app, .{ .agent_started = .{ .id = id, .fresh = false } });
                     app.running = true;
                     app.auto_scroll = true;
                     app.scroll_offset = 0;
@@ -209,6 +210,7 @@ pub const Command = union(enum) {
                 if (state != .active) {
                     if (app.main_agent_id == arg.agent_id) app.sdk_run_rendered_steps = 0;
                     try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
+                    app.event_bus.emit(app, .{ .agent_started = .{ .id = arg.agent_id, .fresh = false } });
                 }
             },
             .cd => |path| {
@@ -325,7 +327,7 @@ pub const Command = union(enum) {
                 try agent.setMessages(&.{.{ .role = .user, .content = arg.prompt }});
                 if (arg.parent_id == null) app.sdk_run_rendered_steps = 0;
                 try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
-                app.event_bus.emit(app, .{ .agent_started = arg.agent_id });
+                app.event_bus.emit(app, .{ .agent_started = .{ .id = arg.agent_id, .fresh = true } });
                 app.running = true;
             },
             .push_notification => |msg| {

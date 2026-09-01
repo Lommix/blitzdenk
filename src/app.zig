@@ -864,7 +864,7 @@ pub const App = struct {
         if (state == .active) return;
         if (agent.queued_messages.items.len > 0) {
             try self.registry.run(agent_id, .{ .max_steps = std.math.maxInt(usize) });
-            self.event_bus.emit(self, .{ .agent_started = agent_id });
+            self.event_bus.emit(self, .{ .agent_started = .{ .id = agent_id, .fresh = false } });
             return;
         }
         if (agent.reported_task_done) return;
@@ -905,7 +905,7 @@ pub const App = struct {
                 try parent.queueReminder(wrapped);
                 if (parent.task == null and parent.compact_task == null and parent.status != .retrying and parent.status != .compacting) {
                     try self.registry.run(parent_id, .{ .max_steps = std.math.maxInt(usize) });
-                    self.event_bus.emit(self, .{ .agent_started = parent_id });
+                    self.event_bus.emit(self, .{ .agent_started = .{ .id = parent_id, .fresh = false } });
                 }
             }
         }
@@ -1987,6 +1987,7 @@ pub const App = struct {
             try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
             self.sdk_run_rendered_steps = 0;
             try self.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
+            self.event_bus.emit(self, .{ .agent_started = .{ .id = id, .fresh = false } });
         } else {
             const id = self.registry.reserve().?;
             self.cmd_queue.append(io, .{

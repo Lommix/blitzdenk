@@ -122,6 +122,12 @@
 ---nesting depth below the main agent
 ---@field depth integer
 
+---@class BlitzAgentStartedEvent
+---packed AgentId of the agent
+---@field id integer
+---true on the first run after spawn, false when a queued message or agent result woke the agent
+---@field fresh boolean
+
 ---@class BlitzAgentEvent
 ---packed AgentId of the agent
 ---@field id integer
@@ -174,8 +180,8 @@
 ---@field session_reset fun(func: fun())
 ---Register a listener for after an agent slot is activated. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field agent_created fun(func: fun(ev: BlitzAgentCreatedEvent))
----Register a listener for when an agent starts running. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
----@field agent_started fun(func: fun(ev: BlitzAgentEvent))
+---Register a listener for when an agent starts running; fires on spawn and on every wake-up. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
+---@field agent_started fun(func: fun(ev: BlitzAgentStartedEvent))
 ---Register a listener for when an agent completes. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field agent_complete fun(func: fun(ev: BlitzAgentEvent))
 ---Register a listener for when an agent run fails. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`

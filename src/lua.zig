@@ -1160,6 +1160,14 @@ const BlitzAgentEvent = LuaType{ .table_def = .{
     },
 } };
 
+const BlitzAgentStartedEvent = LuaType{ .table_def = .{
+    .name = "BlitzAgentStartedEvent",
+    .fields = &.{
+        .{ .name = "id", .desc = "packed AgentId of the agent", .ty = LuaType.integer },
+        .{ .name = "fresh", .desc = "true on the first run after spawn, false when a queued message or agent result woke the agent", .ty = LuaType.boolean },
+    },
+} };
+
 const BlitzAgentCreatedEvent = LuaType{ .table_def = .{
     .name = "BlitzAgentCreatedEvent",
     .fields = &.{
@@ -1216,7 +1224,7 @@ pub const BlitzHooks = LuaType{
         .fields = &.{
             .{ .name = "session_reset", .desc = "Register a listener for after the active session is reset. Takes no payload. " ++ ListenerVmDesc, .ty = EventFn(.session_reset, null) },
             .{ .name = "agent_created", .desc = "Register a listener for after an agent slot is activated. " ++ ListenerVmDesc, .ty = EventFn(.agent_created, BlitzAgentCreatedEvent) },
-            .{ .name = "agent_started", .desc = "Register a listener for when an agent starts running. " ++ ListenerVmDesc, .ty = EventFn(.agent_started, BlitzAgentEvent) },
+            .{ .name = "agent_started", .desc = "Register a listener for when an agent starts running; fires on spawn and on every wake-up. " ++ ListenerVmDesc, .ty = EventFn(.agent_started, BlitzAgentStartedEvent) },
             .{ .name = "agent_complete", .desc = "Register a listener for when an agent completes. " ++ ListenerVmDesc, .ty = EventFn(.agent_complete, BlitzAgentEvent) },
             .{ .name = "agent_failed", .desc = "Register a listener for when an agent run fails. " ++ ListenerVmDesc, .ty = EventFn(.agent_failed, BlitzAgentFailedEvent) },
             .{ .name = "agent_cancelled", .desc = "Register a listener for when an agent is cancelled. " ++ ListenerVmDesc, .ty = EventFn(.agent_cancelled, BlitzAgentEvent) },
@@ -2770,7 +2778,8 @@ fn pushEventPayload(L: *c.lua_State, event: r.events.AppEvent) c_int {
         .agent_created => |payload| pushAny(L, payload),
         .agent_failed => |payload| pushAny(L, payload),
         .user_message_sent => |text| pushAny(L, .{ .text = text }),
-        .agent_started, .agent_complete, .agent_cancelled, .compaction_started, .compaction_complete => |id| pushAny(L, .{ .id = id }),
+        .agent_started => |payload| pushAny(L, .{ .id = payload.id, .fresh = payload.fresh }),
+        .agent_complete, .agent_cancelled, .compaction_started, .compaction_complete => |id| pushAny(L, .{ .id = id }),
         .permission_requested => |ticket| {
             c.lua_createtable(L, 0, 1);
             c.lua_pushinteger(L, @intCast(ticket));

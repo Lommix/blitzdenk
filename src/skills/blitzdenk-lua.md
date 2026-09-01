@@ -256,6 +256,10 @@ delays only the listeners behind it. `blitz.cmd.spawn_agent` and
 A listener that spawns an agent retriggers `agent_created` and
 `agent_started`. Spawning from those two listeners loops without end.
 
+`agent_started` fires on spawn and on every wake-up: a queued message, a
+background agent result, or a new prompt. `ev.fresh` is true only on the
+first run of a new agent; it is false on continuation runs.
+
 ```lua
 blitz.hooks.user_message_sent(function(ev)
     local id = blitz.cmd.spawn_agent({
@@ -271,7 +275,7 @@ end)
 ```
 
 Every payload is one table with the fields shown in `meta.lua` (`BlitzAgentEvent`,
-`BlitzAgentCreatedEvent`, `BlitzAgentFailedEvent`, `BlitzUserMessageEvent`);
+`BlitzAgentStartedEvent`, `BlitzAgentCreatedEvent`, `BlitzAgentFailedEvent`, `BlitzUserMessageEvent`);
 `session_reset` and `mcp_tools_reloaded` listeners take no argument. The full
 list with signatures lives in `BlitzHooks` in `meta.lua`.
 

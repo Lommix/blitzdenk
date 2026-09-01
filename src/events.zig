@@ -5,7 +5,7 @@ const AgentId = r.AgentId;
 pub const AppEvent = union(enum) {
     session_reset,
     agent_created: struct { id: AgentId, name: []const u8, depth: u16 },
-    agent_started: AgentId,
+    agent_started: struct { id: AgentId, fresh: bool },
     agent_complete: AgentId,
     agent_failed: struct { id: AgentId, err: []const u8 },
     agent_cancelled: AgentId,
