@@ -596,9 +596,10 @@ pub const Blitz = LuaType{
                         };
                     }
 
-                    fn lua_fn(state: *c.lua_State, a: *r.app.App) ![]AgentRow {
-                        const arena = fromState(state).?.luaArena();
-                        const rows = try arena.alloc(AgentRow, r.agent_registry.max_agents);
+                    /// NOTE: solves the problem, revisit later
+                    threadlocal var rows: [r.agent_registry.max_agents]AgentRow = undefined;
+
+                    fn lua_fn(a: *r.app.App) ![]AgentRow {
                         var count: usize = 0;
                         for (&a.registry.slots, 0..) |*slot, index| {
                             const slot_state = slot.state.load(.acquire);
