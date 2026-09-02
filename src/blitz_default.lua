@@ -78,7 +78,7 @@ local message_tool = blitz.register_tool({
 		local msg = tostring(call.arguments.message or error("no message provided"))
 
 		ctx:set_status("To agent(" .. tostring(id) .. ") :\n> \27[38;2;112;122;140m" .. msg .. "\27[0m")
-		blitz.cmd.message_agent(id, msg)
+		blitz.agent.message(id, msg)
 		return { msg = "send" }
 	end,
 })
@@ -92,7 +92,7 @@ local cancel_tool = blitz.register_tool({
 	func = function(ctx, call)
 		local id = tonumber(call.arguments.agent_id) or error("no agent id provided")
 		ctx:set_status("Cancel agent(" .. tostring(id) .. ")")
-		blitz.cmd.cancel_agent(id)
+		blitz.agent.cancel(id)
 		return { msg = "canceled" }
 	end,
 })

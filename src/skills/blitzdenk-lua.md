@@ -127,7 +127,7 @@ Tool function rules:
 - Tool calls run in a separate VM and cannot mutate config Lua state. Use
   `blitz.state.set/get` for data across calls.
 - Model-emitted numbers can arrive as strings (`{"id":"65537"}`). Call
-  `tonumber()` before any `cmd.*` call that takes an agent id or integer;
+  `tonumber()` before any `blitz.agent.*` call that takes an agent id or integer;
   those bindings reject a non-number with `not a number`.
 - `error("...")` fails the call. Only the message reaches the chat.
 - Return `{ msg = "..." }`. Attach an image with
@@ -151,21 +151,21 @@ local researcher = blitz.add_agent({
 ```
 
 An agent id is one packed integer; the agent tool result carries it as
-`agent_id: <int>`. `fork = true` in `spawn_agent` requires `parent_id`.
+`agent_id: <int>`. `fork = true` in `blitz.agent.spawn` requires `parent_id`.
 
 Slots are finite (128) and finished agents keep their slot. History stays
-readable, and `message_agent` on a finished agent starts a new turn that
-continues the same conversation. Free a slot with `blitz.cmd.close_agent`.
-`spawn_agent` without `parent_id` cancels the running main agent and frees its
-slot; the old conversation stays rendered, the new agent replaces it in the
-chat.
+readable, and `blitz.agent.message` on a finished agent starts a new turn that
+continues the same conversation. Free a slot with `blitz.agent.close`.
+`blitz.agent.spawn` without `parent_id` cancels the running main agent and
+frees its slot; the old conversation stays rendered, the new agent replaces it
+in the chat.
 
 ## Commands
 
 ```lua
 blitz.add_command("plan", function(rem)
     blitz.cmd.reset_session()
-    blitz.cmd.spawn_agent({
+    blitz.agent.spawn({
         agent_type = blitz.AGENT_GENERAL,
         prompt = "Plan, do not edit. Request:\n" .. rem,
     })
@@ -176,13 +176,18 @@ end, "plan a task without editing")
 The callback always receives one string: the remaining input after the
 command name, `""` when none. Always declare the parameter. The optional
 description shows next to the command in the completion popup.
-The full command queue API (`reset_session`, `cancel`, `spawn_agent`,
-`await_agent`, and so on) is `BlitzCmd` in `meta.lua`.
+
+Two tables split the queue API. `blitz.cmd` holds app commands
+(`reset_session`, `cancel`, `retry`, `compact`, `prompt`, `select`, and so
+on, `BlitzCmd` in `meta.lua`). `blitz.agent` holds agent bindings (`spawn`,
+`message`, `await`, `result`, `cancel`, `close`, `BlitzAgent` in
+`meta.lua`).
 
 `blitz.cmd.prompt(text)` is the "say something" command: it echoes the text
 into the chat and sends it to the main agent, or starts a fresh general agent
 if none exists. Use it instead of `message_chat("user", ...)` (display only)
-or `get_main_agent()` + `message_agent` (queues silently, no chat echo).
+or `get_main_agent()` + `blitz.agent.message` (queues silently, no chat
+echo).
 
 ## Selection
 
@@ -250,9 +255,9 @@ background thread, like a tool call. The config re-loads into that VM and
 each listener of the event runs in registration order. Config mutation
 (`add_provider`, `register_tool`, `set_agent_model`, ...) is a no-op inside
 a listener. Use `blitz.state.set/get` for data across calls. The event
-loop does not wait for listeners; an `await_agent` inside one listener
-delays only the listeners behind it. `blitz.cmd.spawn_agent` and
-`blitz.cmd.await_agent` work inside:
+loop does not wait for listeners; a `blitz.agent.await` inside one listener
+delays only the listeners behind it. `blitz.agent.spawn` and
+`blitz.agent.await` work inside:
 
 A listener that spawns an agent retriggers `agent_created` and
 `agent_started`. Spawning from those two listeners loops without end.
@@ -263,12 +268,12 @@ first run of a new agent; it is false on continuation runs.
 
 ```lua
 blitz.hooks.user_message_sent(function(ev)
-    local id = blitz.cmd.spawn_agent({
+    local id = blitz.agent.spawn({
         agent_type = blitz.AGENT_GENERAL,
         prompt = "Summarize in one line: " .. ev.text,
     })
-    if blitz.cmd.await_agent(id) == blitz.AWAIT_COMPLETE then
-        blitz.cmd.message_chat("agent", blitz.cmd.await_agent_result(id))
+    if blitz.agent.await(id) == blitz.AWAIT_COMPLETE then
+        blitz.cmd.message_chat("agent", blitz.agent.result(id))
     else
         blitz.cmd.message_chat("user", "helper agent failed")
     end
@@ -286,7 +291,7 @@ list with signatures lives in `BlitzHooks` in `meta.lua`.
 right before the system reminder is built. Return a string to append it to
 that agent's `<system-reminder>` block. It runs in the main Lua VM with a
 brief lock. A nil return is skipped; errors are logged and the step continues.
-Last registration wins. Never call `blitz.cmd.await_agent` inside the hook.
+Last registration wins. Never call `blitz.agent.await` inside the hook.
 
 ```lua
 blitz.hooks.inject(function(agent_id)
@@ -333,7 +338,7 @@ The payload is `BlitzPermissionPayload` in `meta.lua`: `agent_id`, `call_id`,
 `kind` (`call|diff|ask|plan`), `tool`, plus the kind fields. The decision
 shape is `BlitzPermissionDecision` in the same file.
 
-Never call `blitz.cmd.await_agent` inside the hook. The hook runs on the main
+Never call `blitz.agent.await` inside the hook. The hook runs on the main
 thread; the await would block the loop that runs the agent. The hook runs
 before the ticket exists, so `blitz.permissions.resolve` from inside it always
 misses.

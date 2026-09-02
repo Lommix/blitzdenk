@@ -44,12 +44,6 @@
 ---Decode standard padded Base64 into a binary-safe Lua string.
 ---@field decode fun(base64: string): string|nil, boolean
 
----@class BlitzSpawnArgs
----@field parent_id? integer
----@field prompt string
----@field agent_type? integer
----@field fork? boolean
-
 ---@class BlitzSelectRequest
 ---very short label shown as a chip
 ---@field header string
@@ -67,30 +61,38 @@
 ---@field cd fun(path: string)
 ---Cancel all in-flight agent work and drop streaming preview.
 ---@field cancel fun()
----Cancel the given agent. Returns 'Success' or 'Not Found'.
----@field cancel_agent fun(agent_id: integer): string
----Cancel a finished or running agent and free its slot. History stays rendered. Returns 'Success' or 'Not Found'.
----@field close_agent fun(agent_id: integer): string
 ---Retry the main agent's last turn.
 ---@field retry fun()
 ---Compact the main agent now when idle, or before its next turn while running.
 ---@field compact fun()
 ---Push a chat entry into the chat log.
 ---@field message_chat fun(role: string, text: string)
----Queue a user message for the given agent.
----@field message_agent fun(agent_id: integer, text: string)
 ---Send a user message to the main agent (queued if running, restarted if idle), or start a general agent if none exists.
 ---@field prompt fun(text: string)
----Reserve a free slot and enqueue a spawn or fork into it.
----@field spawn_agent fun(args: BlitzSpawnArgs): integer|nil
 ---Open a multiple-choice selection (same widget as the ask tool) and return at once. The callback runs with the picked option text and its 1-based index when the user chooses, with (message, nil) for the custom message row when allow_message is on, and with (nil, nil) when canceled.
 ---@field select fun(request: BlitzSelectRequest, func: fun(choice: string?, index: integer?))
----Block until the referenced agent reaches a terminal state.
----@field await_agent fun(agent_id: integer): integer
----Return the awaited agent's last assistant text.
----@field await_agent_result fun(agent_id: integer): string|nil
 ---Attach a screenshot/image to the current input.
 ---@field attach_screenshot fun(data: string, media_type?: string)
+
+---@class BlitzSpawnArgs
+---@field parent_id? integer
+---@field prompt string
+---@field agent_type? integer
+---@field fork? boolean
+
+---@class BlitzAgent
+---Reserve a free slot and enqueue a spawn or fork into it.
+---@field spawn fun(args: BlitzSpawnArgs): integer|nil
+---Queue a user message for the given agent.
+---@field message fun(agent_id: integer, text: string)
+---Block until the referenced agent reaches a terminal state.
+---@field await fun(agent_id: integer): integer
+---Return the awaited agent's last assistant text.
+---@field result fun(agent_id: integer): string|nil
+---Cancel the given agent. Returns 'Success' or 'Not Found'.
+---@field cancel fun(agent_id: integer): string
+---Cancel a finished or running agent and free its slot. History stays rendered. Returns 'Success' or 'Not Found'.
+---@field close fun(agent_id: integer): string
 
 ---@class BlitzCmp
 ---Select the next completion row, like <Tab>. No-op when the popup is closed.
@@ -260,19 +262,19 @@
 ---Register a listener for when a tool approval parks for a decision.
 ---The event carries the ticket; fetch details with
 ---blitz.permissions.get and decide with blitz.permissions.resolve.
----Unresolved tickets fall back to the TUI. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
+---Unresolved tickets fall back to the TUI.The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field permission_requested fun(func: fun(ev: BlitzPermissionRequestEvent))
 ---Install the system-reminder injection hook. Runs for every agent step
 ---before the reminder is built, in the main Lua VM on the calling thread.
 ---Return a string to append it to the agent's <system-reminder> block,
 ---nil for nothing. Last registration wins. Never call
----blitz.cmd.await_agent inside the hook.
+---blitz.agent.await inside the hook.
 ---@field inject fun(hook: fun(agent_id: integer): string)
 ---Install the permission hook. Runs on every tool approval request
 ---before the approval-mode check, in the main Lua VM on the main
 ---thread. Return a BlitzPermissionDecision table, or nil for the
 ---normal flow. Last registration wins. Never call
----blitz.cmd.await_agent inside the hook.
+---blitz.agent.await inside the hook.
 ---@field approve fun(hook: fun(payload: BlitzPermissionPayload): BlitzPermissionDecision)
 ---Remove the approve and inject hooks.
 ---@field clear fun()
@@ -440,6 +442,7 @@
 ---@field json BlitzJson
 ---@field base64 BlitzBase64
 ---@field cmd BlitzCmd
+---@field agent BlitzAgent
 ---@field cmp BlitzCmp
 ---@field draw BlitzDraw
 ---@field tools BlitzToolDef

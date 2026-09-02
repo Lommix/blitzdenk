@@ -458,6 +458,7 @@ pub const Blitz = LuaType{
             .{ .name = "json", .ty = BlitzJson },
             .{ .name = "base64", .ty = BlitzBase64 },
             .{ .name = "cmd", .ty = BlitzCmd },
+            .{ .name = "agent", .ty = BlitzAgent },
             .{ .name = "cmp", .ty = BlitzCmp },
             .{ .name = "draw", .ty = BlitzDraw },
             .{ .name = "tools", .ty = BlitzToolDef },
@@ -1319,7 +1320,7 @@ pub const BlitzHooks = LuaType{
                 \\before the reminder is built, in the main Lua VM on the calling thread.
                 \\Return a string to append it to the agent's <system-reminder> block,
                 \\nil for nothing. Last registration wins. Never call
-                \\blitz.cmd.await_agent inside the hook.
+                \\blitz.agent.await inside the hook.
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "hook", .ty = LuaType{ .function = .{
@@ -1344,7 +1345,7 @@ pub const BlitzHooks = LuaType{
                 \\before the approval-mode check, in the main Lua VM on the main
                 \\thread. Return a BlitzPermissionDecision table, or nil for the
                 \\normal flow. Last registration wins. Never call
-                \\blitz.cmd.await_agent inside the hook.
+                \\blitz.agent.await inside the hook.
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "hook", .ty = LuaType{ .function = .{
@@ -2045,36 +2046,6 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
-        .name = "cancel_agent",
-        .desc = "Cancel the given agent. Returns 'Success' or 'Not Found'.",
-        .ty = LuaType{ .function = .{
-            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
-            .ret = &LuaString,
-            .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
-                    if (a.registry.get(agent_id) == null) return "Not Found";
-                    try a.cmd_queue.append(a.io, .{ .cancel_agent = agent_id });
-                    return "Success";
-                }
-            }).lua_fn, "cmd.cancel_agent"),
-        } },
-    },
-    .{
-        .name = "close_agent",
-        .desc = "Cancel a finished or running agent and free its slot. History stays rendered. Returns 'Success' or 'Not Found'.",
-        .ty = LuaType{ .function = .{
-            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
-            .ret = &LuaString,
-            .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
-                    if (a.registry.get(agent_id) == null) return "Not Found";
-                    try a.cmd_queue.append(a.io, .{ .close_agent = agent_id });
-                    return "Success";
-                }
-            }).lua_fn, "cmd.close_agent"),
-        } },
-    },
-    .{
         .name = "retry",
         .desc = "Retry the main agent's last turn.",
         .ty = LuaType{ .function = .{
@@ -2123,22 +2094,6 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
-        .name = "message_agent",
-        .desc = "Queue a user message for the given agent.",
-        .ty = LuaType{ .function = .{
-            .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "text", .ty = LuaType.string } },
-            .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId, text: []const u8) !void {
-                    const parts = [_]r.sdk.Part{.{ .text = text }};
-                    try a.cmd_queue.append(a.io, .{ .queue_agent_message = .{
-                        .agent_id = agent_id,
-                        .parts = &parts,
-                    } });
-                }
-            }).lua_fn, "cmd.message_agent"),
-        } },
-    },
-    .{
         .name = "prompt",
         .desc = "Send a user message to the main agent (queued if running, restarted if idle), or start a general agent if none exists.",
         .ty = LuaType{ .function = .{
@@ -2168,77 +2123,6 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                     }
                 }
             }).lua_fn, "cmd.prompt"),
-        } },
-    },
-    .{
-        .name = "spawn_agent",
-        .desc = "Reserve a free slot and enqueue a spawn or fork into it.",
-        .ty = LuaType{ .function = .{
-            .args = &.{.{ .name = "args", .ty = SpawnAgentArgsDef }},
-            .fn_ptr = (struct {
-                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
-                    const state = L.?;
-                    const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "cmd.spawn_agent: app not initialized");
-                        return 0;
-                    };
-                    const vm = fromState(state) orelse {
-                        _ = c.luaL_error(state, "cmd.spawn_agent: no active lua vm");
-                        return 0;
-                    };
-
-                    const SpawnArgs = struct {
-                        parent_id: ?r.AgentId = null,
-                        prompt: []const u8,
-                        agent_type: ?u32 = null,
-                        fork: ?bool = null,
-                    };
-
-                    const spawn = switch (readAnyValueAlloc(SpawnArgs, state, "cmd.spawn_agent", 1, vm.luaArena())) {
-                        .ok => |v| v,
-                        .err => |msg| {
-                            _ = c.luaL_error(state, "%s", msg.ptr);
-                            return 0;
-                        },
-                    };
-
-                    if ((spawn.fork orelse false) and spawn.parent_id == null) {
-                        _ = c.luaL_error(state, "cmd.spawn_agent: fork=true requires parent_id");
-                        return 0;
-                    }
-
-                    var args: r.cmd.Command.SpawnArgs = .{
-                        .agent_id = .{ .index = 0, .generation = 0 },
-                        .parent_id = spawn.parent_id,
-                        .prompt = &.{},
-                        .fork = spawn.fork orelse false,
-                    };
-                    if (spawn.agent_type) |t| {
-                        if (t > std.math.maxInt(u8)) {
-                            _ = c.luaL_error(state, "cmd.spawn_agent: agent_type out of range");
-                            return 0;
-                        }
-                        args.agent_type = @intCast(t);
-                    }
-                    const parts = [_]r.sdk.Part{.{ .text = spawn.prompt }};
-                    args.prompt = &parts;
-
-                    const id = a.registry.reserve() orelse {
-                        c.lua_pushnil(state);
-                        return 1;
-                    };
-                    args.agent_id = id;
-
-                    a.cmd_queue.append(a.io, .{ .spawn_agent = args }) catch {
-                        a.registry.releaseReservation(id);
-                        c.lua_pushnil(state);
-                        return 1;
-                    };
-                    pushAgentId(state, id);
-                    return 1;
-                }
-            }).lua_fn,
-            .ret = &AgentIdOrNilDef,
         } },
     },
     .{
@@ -2317,7 +2201,113 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
-        .name = "await_agent",
+        .name = "attach_screenshot",
+        .desc = "Attach a screenshot/image to the current input.",
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "data", .ty = LuaType.string }, .{ .name = "media_type", .ty = LuaType.string, .optional = true } },
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(state: *c.lua_State, a: *r.app.App, data: []const u8, media_type: ?[]const u8) !void {
+                    if (try isToolVm(state)) return;
+                    try a.cmd_queue.append(a.io, .{ .attach_screenshot = .{
+                        .media_type = media_type orelse "image/png",
+                        .data = data,
+                    } });
+                }
+            }).lua_fn, "cmd.attach_screenshot"),
+        } },
+    },
+} } };
+
+const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
+    .{
+        .name = "spawn",
+        .desc = "Reserve a free slot and enqueue a spawn or fork into it.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "args", .ty = SpawnAgentArgsDef }},
+            .fn_ptr = (struct {
+                fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
+                    const state = L.?;
+                    const a = getAppFromRegistry(state) orelse {
+                        _ = c.luaL_error(state, "agent.spawn: app not initialized");
+                        return 0;
+                    };
+                    const vm = fromState(state) orelse {
+                        _ = c.luaL_error(state, "agent.spawn: no active lua vm");
+                        return 0;
+                    };
+
+                    const SpawnArgs = struct {
+                        parent_id: ?r.AgentId = null,
+                        prompt: []const u8,
+                        agent_type: ?u32 = null,
+                        fork: ?bool = null,
+                    };
+
+                    const spawn = switch (readAnyValueAlloc(SpawnArgs, state, "agent.spawn", 1, vm.luaArena())) {
+                        .ok => |v| v,
+                        .err => |msg| {
+                            _ = c.luaL_error(state, "%s", msg.ptr);
+                            return 0;
+                        },
+                    };
+
+                    if ((spawn.fork orelse false) and spawn.parent_id == null) {
+                        _ = c.luaL_error(state, "agent.spawn: fork=true requires parent_id");
+                        return 0;
+                    }
+
+                    var args: r.cmd.Command.SpawnArgs = .{
+                        .agent_id = .{ .index = 0, .generation = 0 },
+                        .parent_id = spawn.parent_id,
+                        .prompt = &.{},
+                        .fork = spawn.fork orelse false,
+                    };
+                    if (spawn.agent_type) |t| {
+                        if (t > std.math.maxInt(u8)) {
+                            _ = c.luaL_error(state, "agent.spawn: agent_type out of range");
+                            return 0;
+                        }
+                        args.agent_type = @intCast(t);
+                    }
+                    const parts = [_]r.sdk.Part{.{ .text = spawn.prompt }};
+                    args.prompt = &parts;
+
+                    const id = a.registry.reserve() orelse {
+                        c.lua_pushnil(state);
+                        return 1;
+                    };
+                    args.agent_id = id;
+
+                    a.cmd_queue.append(a.io, .{ .spawn_agent = args }) catch {
+                        a.registry.releaseReservation(id);
+                        c.lua_pushnil(state);
+                        return 1;
+                    };
+                    pushAgentId(state, id);
+                    return 1;
+                }
+            }).lua_fn,
+            .ret = &AgentIdOrNilDef,
+        } },
+    },
+    .{
+        .name = "message",
+        .desc = "Queue a user message for the given agent.",
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "text", .ty = LuaType.string } },
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId, text: []const u8) !void {
+                    const parts = [_]r.sdk.Part{.{ .text = text }};
+                    try a.cmd_queue.append(a.io, .{ .queue_agent_message = .{
+                        .agent_id = agent_id,
+                        .parts = &parts,
+                    } });
+                }
+            }).lua_fn, "agent.message"),
+        } },
+    },
+    .{
+        .name = "await",
         .desc = "Block until the referenced agent reaches a terminal state.",
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
@@ -2326,14 +2316,14 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
                     const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "cmd.await_agent: app not initialized");
+                        _ = c.luaL_error(state, "agent.await: app not initialized");
                         return 0;
                     };
                     const vm = fromState(state) orelse {
-                        _ = c.luaL_error(state, "cmd.await_agent: no active lua vm");
+                        _ = c.luaL_error(state, "agent.await: no active lua vm");
                         return 0;
                     };
-                    const id = readAgentIdArg(state, "cmd.await_agent", 1);
+                    const id = readAgentIdArg(state, "agent.await", 1);
                     const io = a.io;
                     if (a.registry.state(id) == null) {
                         c.lua_pushinteger(state, AWAIT_INVALID);
@@ -2358,7 +2348,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                     }
 
                     if (vm.main_thread_id != 0 and std.Thread.getCurrentId() != vm.main_thread_id) {
-                        _ = c.luaL_error(state, "cmd.await_agent: cannot be called from the agent thread");
+                        _ = c.luaL_error(state, "agent.await: cannot be called from the agent thread");
                         return 0;
                     }
                     vm.vm_mu.unlock(io);
@@ -2386,7 +2376,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
-        .name = "await_agent_result",
+        .name = "result",
         .desc = "Return the awaited agent's last assistant text.",
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
@@ -2395,16 +2385,16 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
                     const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "cmd.await_agent_result: app not initialized");
+                        _ = c.luaL_error(state, "agent.result: app not initialized");
                         return 0;
                     };
-                    const id = readAgentIdArg(state, "cmd.await_agent_result", 1);
+                    const id = readAgentIdArg(state, "agent.result", 1);
                     const agent = a.registry.get(id) orelse {
-                        _ = c.luaL_error(state, "cmd.await_agent_result: agent not found");
+                        _ = c.luaL_error(state, "agent.result: agent not found");
                         return 0;
                     };
                     if (agent.history().len == 0) {
-                        _ = c.luaL_error(state, "cmd.await_agent_result: agent has no chat entries");
+                        _ = c.luaL_error(state, "agent.result: agent has no chat entries");
                         return 0;
                     }
 
@@ -2432,19 +2422,33 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
-        .name = "attach_screenshot",
-        .desc = "Attach a screenshot/image to the current input.",
+        .name = "cancel",
+        .desc = "Cancel the given agent. Returns 'Success' or 'Not Found'.",
         .ty = LuaType{ .function = .{
-            .args = &.{ .{ .name = "data", .ty = LuaType.string }, .{ .name = "media_type", .ty = LuaType.string, .optional = true } },
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &LuaString,
             .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(state: *c.lua_State, a: *r.app.App, data: []const u8, media_type: ?[]const u8) !void {
-                    if (try isToolVm(state)) return;
-                    try a.cmd_queue.append(a.io, .{ .attach_screenshot = .{
-                        .media_type = media_type orelse "image/png",
-                        .data = data,
-                    } });
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
+                    if (a.registry.get(agent_id) == null) return "Not Found";
+                    try a.cmd_queue.append(a.io, .{ .cancel_agent = agent_id });
+                    return "Success";
                 }
-            }).lua_fn, "cmd.attach_screenshot"),
+            }).lua_fn, "agent.cancel"),
+        } },
+    },
+    .{
+        .name = "close",
+        .desc = "Cancel a finished or running agent and free its slot. History stays rendered. Returns 'Success' or 'Not Found'.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &LuaString,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
+                    if (a.registry.get(agent_id) == null) return "Not Found";
+                    try a.cmd_queue.append(a.io, .{ .close_agent = agent_id });
+                    return "Success";
+                }
+            }).lua_fn, "agent.close"),
         } },
     },
 } } };
@@ -4149,7 +4153,7 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
 
     // Reading shared app config/factory state must be serialized against
     // hot-reload, which mutates it under lua_vm.vm_mu. The sandbox vm_mu is
-    // held for the whole call so a top-level blitz.cmd.await_agent in the
+    // held for the whole call so a top-level blitz.agent.await in the
     // config unlocks a locked mutex. Release main before the pcall so the
     // tool body itself still runs in parallel.
     vm.vm_mu.lockUncancelable(ctx.io);
@@ -4930,7 +4934,12 @@ test "LuaType defines recursive Lua globals" {
     try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "write_tempfile"));
     c.lua_pop(state, 1);
     try std.testing.expectEqual(c.LUA_TTABLE, c.lua_getfield(state, -1, "cmd"));
-    try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "await_agent"));
+    try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "reset_session"));
+    c.lua_pop(state, 1);
+    try std.testing.expectEqual(c.LUA_TNIL, c.lua_getfield(state, -1, "await_agent"));
+    c.lua_pop(state, 2);
+    try std.testing.expectEqual(c.LUA_TTABLE, c.lua_getfield(state, -1, "agent"));
+    try std.testing.expectEqual(c.LUA_TFUNCTION, c.lua_getfield(state, -1, "await"));
 }
 
 test "base64 Lua API round-trips binary strings" {

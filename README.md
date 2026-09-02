@@ -20,6 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 - Lua hot reload: Agents can code tools and debug them at the same time.
 - Version management: run `blitz update` on new releases.
 - Sessions management per project: `blitz continue <?session_id>` resumes, `blitz sessions` list all
+- Render custom widgets from Lua
 
 ## Defaults
 
