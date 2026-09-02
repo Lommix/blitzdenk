@@ -3521,7 +3521,6 @@ pub const LuaVm = struct {
 
     /// Call blitz.status_bar_render() and copy its returned string into `dest`.
     /// Caller must hold vm_mu. Returns null when the hook is missing, errors,
-    /// or returns a non-string value.
     pub fn renderStatusBar(self: *LuaVm, dest: []u8) ?[]const u8 {
         const L = self.L;
         const top = c.lua_gettop(L);
@@ -3552,8 +3551,6 @@ pub const LuaVm = struct {
     }
 
     /// Call blitz.hooks.approve hook for `perm`. Caller must hold vm_mu.
-    /// Returns the decision, or null for fallback: no hook or a nil return.
-    /// A malformed decision table denies with a fixed reason.
     fn runPermissionHook(self: *LuaVm, perm: *r.permissions.Request) ?r.permissions.State {
         const L = self.L;
         const top = c.lua_gettop(L);
@@ -3568,7 +3565,9 @@ pub const LuaVm = struct {
         const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
         if (status != 0) {
             self.popError(.action);
-            const msg = std.fmt.allocPrint(std.heap.page_allocator, "permission hook error: {s}", .{self.getLastError()}) catch
+            const detail = errorBody(self.getLastError());
+            hookLog(.err, "permission hook error: {s}", .{self.getLastError()});
+            const msg = std.fmt.allocPrint(std.heap.page_allocator, "permission hook error: {s}", .{detail}) catch
                 return .{ .message = "permission hook error" };
             return .{ .message = msg };
         }
@@ -3577,16 +3576,7 @@ pub const LuaVm = struct {
         return permissionDecisionFromLua(L, perm.payload) orelse return .{ .message = "permission hook returned an unusable value" };
     }
 
-    /// Convert a BlitzPermissionDecision table on top of the stack. Lua shape:
-    /// `{ approved = bool, msg = string?, select = integer? }`. Returns null
-    /// only for a malformed table (caller denies with a fixed reason); null is
-    /// the fallback-to-TUI signal and must not double as an error path. The
-    /// deny reason is page-allocated process-lifetime; nothing frees it,
-    /// denials are rare. `select` is 1-based, validated against the live
-    /// option count (out of range denies), and ignored on non-ask payloads or
-    /// when `approved` is true. Ask payloads resolve fully here: select picks
-    /// the option, approval picks the recommended option, denial denies — no
-    /// `.message` leaks into the ask tool's answer channel.
+    /// Convert a BlitzPermissionDecision table on top of the stack
     fn permissionDecisionFromLua(L: *c.lua_State, payload: r.permissions.Payload) ?r.permissions.State {
         if (c.lua_type(L, -1) != c.LUA_TTABLE) return null;
 
@@ -4157,6 +4147,15 @@ fn failedResult(call: ToolCall, msg: []const u8) ToolResult {
     return .{ .content = msg, .is_error = true };
 }
 
+fn errorBody(msg: []const u8) []const u8 {
+    const separator = std.mem.indexOf(u8, msg, ": ") orelse return msg;
+    var cursor = separator;
+    while (cursor > 0 and std.ascii.isDigit(msg[cursor - 1])) cursor -= 1;
+    if (cursor > 0 and msg[cursor - 1] == '-') cursor -= 1;
+    if (cursor == 0 or cursor == separator or msg[cursor - 1] != ':') return msg;
+    return msg[separator + 2 ..];
+}
+
 fn loadToolConfig(vm: *LuaVm, a: *r.app.App) !void {
     if (a.lua_config_dir) |dir| {
         const inject = try std.fmt.allocPrint(vm.luaArena(), "package.path = \"{s}?.lua;\" .. package.path", .{dir});
@@ -4243,7 +4242,8 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
 
     loadToolConfig(vm, app_ptr) catch {
         const msg = vm.getLastError();
-        const owned = r.util.sanitizeUtf8(ctx.alloc, if (msg.len > 0) msg else "failed to load lua tool config") catch "failed to load lua tool config";
+        hookLog(.err, "tool config load failed: {s}", .{msg});
+        const owned = r.util.sanitizeUtf8(ctx.alloc, if (msg.len > 0) errorBody(msg) else "failed to load lua tool config") catch "failed to load lua tool config";
         return failedResult(call, owned);
     };
 
@@ -4273,7 +4273,8 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
         var err_len: usize = 0;
         const err_ptr = c.lua_tolstring(L, -1, &err_len);
         const err_view = if (err_ptr != null) err_ptr[0..err_len] else "lua error";
-        const owned = r.util.sanitizeUtf8(ctx.alloc, err_view) catch "lua error";
+        hookLog(.err, "tool {s} error: {s}", .{ call.name, err_view });
+        const owned = r.util.sanitizeUtf8(ctx.alloc, errorBody(err_view)) catch "lua error";
         c.lua_pop(L, 1);
         return failedResult(call, owned);
     }
@@ -5349,6 +5350,36 @@ test "permission queue snapshots, resolves, and rejects stale tickets" {
         \\assert(blitz.permissions.resolve(9, { approved = true }) == true)
     );
     try std.testing.expectEqual(r.permissions.State.denied, req.state);
+}
+
+test "errorBody removes the chunk position that Lua prepends to errors" {
+    try std.testing.expectEqualStrings(
+        "todo #99 not found",
+        errorBody("/home/user/.config/blitzdenk/todo.lua:90: todo #99 not found"),
+    );
+    try std.testing.expectEqualStrings("bad", errorBody("x.lua:1: bad"));
+    try std.testing.expectEqualStrings("boom", errorBody("./todo.lua:99: boom"));
+    try std.testing.expectEqualStrings("boom", errorBody("/home/lua/todo.lua:236: boom"));
+    try std.testing.expectEqualStrings("not a number", errorBody("[C]:-1: not a number"));
+    try std.testing.expectEqualStrings("", errorBody("probe.lua:7: "));
+    try std.testing.expectEqualStrings("no position here", errorBody("no position here"));
+    try std.testing.expectEqualStrings("config: 5 bad", errorBody("config: 5 bad"));
+    try std.testing.expectEqualStrings("b.lua:2: boom", errorBody("a.lua:1: b.lua:2: boom"));
+}
+
+test "errorBody cleans a real Lua error raised inside a chunk file" {
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+
+    try vm.exec(
+        \\local ok, err = pcall(assert(load([[error("todo #99 not found")]], "@todo.lua")))
+        \\probe_error = err
+    );
+
+    const raw = try readGlobalString(vm, "probe_error");
+    defer std.testing.allocator.free(raw);
+    try std.testing.expectEqualStrings("todo.lua:1: todo #99 not found", raw);
+    try std.testing.expectEqualStrings("todo #99 not found", errorBody(raw));
 }
 
 test "permission hook error fails closed" {
