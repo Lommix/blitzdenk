@@ -58,7 +58,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     r.setToolStatus(ctx, call, w.finish()) catch {};
 
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
-    if (args.old_string.len == 0) return r.errResult(call, "oldText is empty");
+    if (args.old_string.len == 0) return r.errResult(call, "old_string is empty");
 
     const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
@@ -260,23 +260,23 @@ fn denormalizeLineEndings(alloc: std.mem.Allocator, s: []const u8, crlf: bool) !
 /// near-match line so the agent can correct without blind retries.
 fn diagnoseMismatch(alloc: std.mem.Allocator, file_content: []const u8, oldText: []const u8) []const u8 {
     const preview_len = @min(oldText.len, 80);
-    const head = std.fmt.allocPrint(alloc, "oldText not found in file. Preview: \"{s}\"", .{oldText[0..preview_len]}) catch return "oldText not found";
+    const head = std.fmt.allocPrint(alloc, "old_string not found in file. Your old_string: \"{s}\"", .{oldText[0..preview_len]}) catch return "old_string not found";
 
     // Detect line-number prefix copied from read-tool output.
     // Read tool emits `<spaces>N\t<content>`. If oldText starts with that pattern,
     // the agent likely pasted display output verbatim.
     if (looksLikeLineNumberPrefix(oldText)) {
-        return std.fmt.allocPrint(alloc, "{s}. HINT: oldText starts with a line-number prefix (`<spaces>N<TAB>`) from the read tool's display format. Strip the prefix from every line — the file does not contain those characters.", .{head}) catch head;
+        return std.fmt.allocPrint(alloc, "{s}. HINT: old_string starts with a line-number prefix (`<spaces>N<TAB>`) from the read tool's display format. Strip the prefix from every line — the file does not contain those characters.", .{head}) catch head;
     }
 
     // Detect CRLF mismatch.
     const file_has_crlf = std.mem.indexOf(u8, file_content, "\r\n") != null;
     const old_has_crlf = std.mem.indexOf(u8, oldText, "\r\n") != null;
     if (file_has_crlf and !old_has_crlf and std.mem.indexOf(u8, oldText, "\n") != null) {
-        return std.fmt.allocPrint(alloc, "{s}. HINT: file uses CRLF line endings but oldText uses LF.", .{head}) catch head;
+        return std.fmt.allocPrint(alloc, "{s}. HINT: file uses CRLF line endings but old_string uses LF.", .{head}) catch head;
     }
     if (!file_has_crlf and old_has_crlf) {
-        return std.fmt.allocPrint(alloc, "{s}. HINT: oldText uses CRLF line endings but file uses LF. Use \\n only.", .{head}) catch head;
+        return std.fmt.allocPrint(alloc, "{s}. HINT: old_string uses CRLF line endings but file uses LF. Use \\n only.", .{head}) catch head;
     }
 
     // Trailing-newline mismatch: oldText ends in \n but matches EOF region without final newline.

@@ -280,6 +280,7 @@ pub const App = struct {
     permission_ticket_next: u64 = 0,
     selection_queue: Locked(std.ArrayList(*r.selection.Selection)),
     tool_status_entries: Locked(ToolStatusStore) = .{},
+    pending_diffs: Locked(std.ArrayList(r.permissions.ToolDiff)) = .{},
     //-----------------
     active_permission: ?*r.permissions.Request = null,
     active_selection: ?*r.selection.Selection = null,
@@ -607,6 +608,7 @@ pub const App = struct {
         if (self.mcp_load) |*task| task.deinit();
         self.mcp_load = null;
         self.dropStreamingPreview();
+        self.clearPendingDiffs();
         self.cancelPermissions(null);
         self.registry.cancelAll();
         r.artifact.cleanup(self.exec_pool);
@@ -1377,6 +1379,7 @@ pub const App = struct {
     }
 
     pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+        app.drainPendingDiffs();
         refreshLuaStatusBar(app);
         refreshLuaWidgets(app, area, buf);
         renderCore(app, area, buf);
@@ -2065,27 +2068,54 @@ pub const App = struct {
         self.dropStreamingPreview();
     }
 
-    pub fn persist_permission_to_history(
-        self: *App,
-        perm: *const r.permissions.Request,
-    ) !void {
+    pub fn persistDiffToHistory(self: *App, diff: r.permissions.ToolDiff) !void {
+        try self.flushSdkPreview();
+        const alloc = self.sessionAlloc();
+        var parts = try alloc.alloc(r.app.ChatPart, 1);
+        parts[0] = try diffChatPart(alloc, diff);
+        try self.appendChatEntry(alloc, .{
+            .role = .agent,
+            .parts = parts,
+        });
+    }
 
-        // skip sub agent diffs
-        if (perm.agent_id != self.main_agent_id) return;
+    pub fn queueDiffToHistory(self: *App, diff: r.permissions.ToolDiff) !void {
+        const g = self.pending_diffs.lock(self.io);
+        defer g.unlock();
+        const path = try self.gpa.dupe(u8, diff.path);
+        errdefer self.gpa.free(path);
+        const before: ?[]const u8 = if (diff.before) |b| try self.gpa.dupe(u8, b) else null;
+        errdefer if (before) |b| self.gpa.free(b);
+        const after = try self.gpa.dupe(u8, diff.after);
+        errdefer self.gpa.free(after);
+        try g.ptr.append(self.gpa, .{ .path = path, .before = before, .after = after });
+    }
 
-        switch (perm.payload) {
-            .diff => |diff| {
-                try self.flushSdkPreview();
-                const alloc = self.sessionAlloc();
-                var parts = try alloc.alloc(r.app.ChatPart, 1);
-                parts[0] = try diffChatPart(alloc, diff);
-                try self.appendChatEntry(alloc, .{
-                    .role = .agent,
-                    .parts = parts,
-                });
-            },
-            else => {},
+    pub fn drainPendingDiffs(self: *App) void {
+        const g = self.pending_diffs.lock(self.io);
+        const items = g.ptr.toOwnedSlice(self.gpa) catch {
+            g.unlock();
+            return;
+        };
+        g.unlock();
+        for (items) |d| {
+            self.persistDiffToHistory(d) catch {};
+            self.gpa.free(d.path);
+            if (d.before) |b| self.gpa.free(b);
+            self.gpa.free(d.after);
         }
+        self.gpa.free(items);
+    }
+
+    pub fn clearPendingDiffs(self: *App) void {
+        const g = self.pending_diffs.lock(self.io);
+        defer g.unlock();
+        for (g.ptr.items) |d| {
+            self.gpa.free(d.path);
+            if (d.before) |b| self.gpa.free(b);
+            self.gpa.free(d.after);
+        }
+        g.ptr.clearRetainingCapacity();
     }
 };
 
@@ -4269,10 +4299,7 @@ test "persisted diff owns path" {
 
     const path = try std.testing.allocator.dupe(u8, "demo.txt");
     defer std.testing.allocator.free(path);
-    try app.persist_permission_to_history(&.{
-        .agent_id = .{ .index = 0, .generation = 0 },
-        .payload = .{ .diff = .{ .path = path, .before = null, .after = "content" } },
-    });
+    try app.persistDiffToHistory(.{ .path = path, .before = null, .after = "content" });
 
     @memset(path, 'x');
     try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);

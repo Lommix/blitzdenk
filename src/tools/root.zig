@@ -108,6 +108,9 @@ pub fn writeToolChangedStatus(
     w.styled(.{ .fg = app.theme.muted }, rel_path);
 
     setToolStatus(ctx, call, w.finish()) catch {};
+
+    if (app.main_agent_id != ctx.base.self_id) return;
+    app.queueDiffToHistory(.{ .path = path, .before = before, .after = after }) catch {};
 }
 
 pub fn setToolChild(ctx: ToolContext, call: ToolCall, child_id: r.AgentId) void {
@@ -154,7 +157,7 @@ pub fn atomicWriteViaExec(ctx: ToolContext, resolved: []const u8, content: []con
     const qtmp = std.fmt.allocPrint(alloc, "{s}.$$.blitztmp", .{qdest}) catch return null;
     const command = std.fmt.allocPrint(
         alloc,
-        "mkdir -p {[qdir]s} && cat > {[qtmp]s} && {{ chmod --reference={[qdest]s} {[qtmp]s} 2>/dev/null; mv -f {[qtmp]s} {[qdest]s}; }}",
+        "mkdir -p {[qdir]s} && {{ [ ! -d {[qdest]s} ] || {{ echo \"write failed: destination is a directory\" >&2; exit 1; }}; }} && cat > {[qtmp]s} && {{ chmod --reference={[qdest]s} {[qtmp]s} 2>/dev/null; mv -f {[qtmp]s} {[qdest]s}; }}",
         .{ .qdir = qdir, .qtmp = qtmp, .qdest = qdest },
     ) catch return null;
     return ctx.base.exec_pool.runAndWait(.{
@@ -213,20 +216,30 @@ pub fn truncateOutputToOwnedSpill(
     const total_lines = countLines(output);
     if (output.len <= max_bytes and total_lines <= max_lines) return ensureValidUtf8(alloc, output);
 
-    const tail = output[collectLinesBack(output, max_bytes, max_lines)..];
+    const cut = collectLinesBack(output, max_bytes, max_lines);
+    const tail = output[cut.start..];
     const kept = countLines(tail);
+
+    var cap_buf: [64]u8 = undefined;
+    const kb = @divTrunc(max_bytes, 1024);
+    const cap_text = if (cut.byte_bound and cut.line_bound)
+        std.fmt.bufPrint(&cap_buf, "{d}-line and {d}KB caps", .{ max_lines, kb }) catch "caps"
+    else if (cut.byte_bound)
+        std.fmt.bufPrint(&cap_buf, "{d}KB cap", .{kb}) catch "cap"
+    else
+        std.fmt.bufPrint(&cap_buf, "{d}-line cap", .{max_lines}) catch "cap";
 
     const notice = if (spill_locator) |path|
         std.fmt.allocPrint(
             alloc,
-            "[Truncated: kept tail {d} of {d} lines ({d}KB cap). Full result saved at: {s} — call read with offset/limit to page through it.]",
-            .{ kept, total_lines, @divTrunc(max_bytes, 1024), path },
+            "[Truncated: kept tail {d} of {d} lines ({s}). Full result saved at: {s} — call read with offset/limit to page through it.]",
+            .{ kept, total_lines, cap_text, path },
         ) catch return output
     else
         std.fmt.allocPrint(
             alloc,
-            "[Truncated: kept tail {d} of {d} lines ({d}KB cap)]",
-            .{ kept, total_lines, @divTrunc(max_bytes, 1024) },
+            "[Truncated: kept tail {d} of {d} lines ({s})]",
+            .{ kept, total_lines, cap_text },
         ) catch return output;
     defer alloc.free(notice);
 
@@ -254,11 +267,15 @@ pub fn writeSpillFile(pool: *@import("exec").CmdPool, alloc: std.mem.Allocator, 
 
 /// Collect trailing lines from the end of `output`: the last `max_lines`
 /// lines (matching `countLines` semantics), byte-clamped to `max_bytes` from
-/// the end. Returns the codepoint-floor boundary of the tail start.
-fn collectLinesBack(output: []const u8, max_bytes: usize, max_lines: usize) usize {
+/// the end, then advanced to a line boundary. `byte_bound` reports whether
+/// the byte clamp actually cut the kept tail.
+const TailCut = struct { start: usize, line_bound: bool, byte_bound: bool };
+
+fn collectLinesBack(output: []const u8, max_bytes: usize, max_lines: usize) TailCut {
     const total = countLines(output);
+    const line_bound = total > max_lines;
     var line_start: usize = 0;
-    if (total > max_lines) {
+    if (line_bound) {
         const target_line = total - max_lines; // 0-based index of first kept line
         var line_idx: usize = 0;
         var i: usize = 0;
@@ -269,9 +286,18 @@ fn collectLinesBack(output: []const u8, max_bytes: usize, max_lines: usize) usiz
             }
         }
     }
-    if (output.len - line_start > max_bytes)
-        return utf8Floor(output, output.len - max_bytes);
-    return line_start;
+    if (output.len - line_start <= max_bytes)
+        return .{ .start = line_start, .line_bound = line_bound, .byte_bound = false };
+    var tail_start = utf8Floor(output, output.len - max_bytes);
+    if (tail_start == 0 or output[tail_start - 1] != '\n') {
+        if (std.mem.indexOfScalarPos(u8, output, tail_start, '\n')) |nl| {
+            tail_start = nl + 1;
+        } else {
+            tail_start = output.len;
+        }
+    }
+    if (tail_start < line_start) tail_start = line_start;
+    return .{ .start = tail_start, .line_bound = line_bound, .byte_bound = true };
 }
 
 /// Walk end back so it never splits a multi-byte UTF-8 sequence.
@@ -361,8 +387,39 @@ test "collectLinesBack is codepoint-safe at the byte boundary" {
     const testing = std.testing;
     // "é" is c3 a9; cutting at a byte count that lands mid-sequence must floor.
     const in = "ab\xc3\xa9cd\nef\xc3\xa9gh\n";
-    const tail_start = collectLinesBack(in, 4, 100);
-    try testing.expect(std.unicode.utf8ValidateSlice(in[tail_start..]));
+    const cut = collectLinesBack(in, 4, 100);
+    try testing.expect(std.unicode.utf8ValidateSlice(in[cut.start..]));
+}
+
+test "collectLinesBack handles a cut inside the first codepoint" {
+    const testing = std.testing;
+    const in = "\xc3\xa9x";
+    const cut = collectLinesBack(in, 2, 100);
+    try testing.expect(cut.byte_bound);
+    try testing.expect(std.unicode.utf8ValidateSlice(in[cut.start..]));
+}
+
+test "truncateOutputToOwned notice names the cap that fired" {
+    const testing = std.testing;
+    const line_only = "A\nB\nC\nD\nE\n";
+    const out = truncateOutputToOwned(testing.allocator, line_only, MAX_DISPLAY_BYTES, 2);
+    defer if (out.ptr != line_only.ptr) testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "2-line cap") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "KB cap") == null);
+
+    const bytes_only = "x" ** 5000;
+    const out2 = truncateOutputToOwned(testing.allocator, bytes_only, 4096, MAX_DISPLAY_LINES);
+    defer if (out2.ptr != bytes_only.ptr) testing.allocator.free(out2);
+    try testing.expect(std.mem.indexOf(u8, out2, "4KB cap") != null);
+    try testing.expect(std.mem.indexOf(u8, out2, "-line cap") == null);
+}
+
+test "collectLinesBack skips a partial line at the byte boundary" {
+    const testing = std.testing;
+    const in = "xxxxxxxxxx\nBB\n";
+    const cut = collectLinesBack(in, 5, 100);
+    try testing.expect(cut.start == 0 or in[cut.start - 1] == '\n');
+    try testing.expectEqualStrings("BB\n", in[cut.start..]);
 }
 
 test "truncateOutputToOwned does not split multi-byte utf8" {

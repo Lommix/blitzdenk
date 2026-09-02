@@ -231,6 +231,15 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     }
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    if (app.main_agent_id == ctx.base.self_id) {
+        for (previews.items, patch.commands) |p, cmd| {
+            app.queueDiffToHistory(.{
+                .path = commandPath(cmd),
+                .before = p.before,
+                .after = p.after orelse "",
+            }) catch {};
+        }
+    }
     var status_buf: [r.STATUS_BUF]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&status_buf);
     w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "patch ");

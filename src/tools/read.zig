@@ -84,19 +84,63 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-    // Read with cat -n for line numbering, sliced by offset/limit.
     const start_line: u64 = if (args.offset) |o| (if (o > 0) o else 1) else 1;
     const max_lines: u64 = if (args.limit) |l| l else r.MAX_DISPLAY_LINES;
-    const command = std.fmt.allocPrint(ctx.alloc, "cat -n '{s}' | tail -n +{d} | head -n {d}", .{
-        resolved, start_line, max_lines,
-    }) catch return r.errResult(call, "out of memory");
+    var start_buf: [24]u8 = undefined;
+    var max_buf: [24]u8 = undefined;
+    const start_str = std.fmt.bufPrint(&start_buf, "{d}", .{start_line}) catch return r.errResult(call, "out of memory");
+    const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{max_lines}) catch return r.errResult(call, "out of memory");
 
-    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "/bin/sh", "-c", command } }) catch
-        return r.errResult(call, "failed to read file");
+    const read_res = ctx.base.exec_pool.runAndWait(.{
+        .argv = &.{
+            "/bin/sh",
+            "-c",
+            \\if [ ! -e "$1" ]; then echo "MISS:$1"; exit 0; fi
+            \\if [ ! -f "$1" ]; then echo "NOTFILE:$1"; exit 0; fi
+            \\if [ ! -r "$1" ]; then echo "NOREAD:$1"; exit 0; fi
+            \\total=$(wc -l < "$1")
+            \\[ -n "$(tail -c 1 "$1")" ] && total=$((total + 1))
+            \\if [ "$total" -eq 0 ]; then echo "EMPTY:"; exit 0; fi
+            \\if [ "$total" -lt "$2" ]; then echo "OFFSET:$total"; exit 0; fi
+            \\cat -n -- "$1" | tail -n +"$2" | head -n "$3"
+            ,
+            "read",
+            resolved,
+            start_str,
+            max_str,
+        },
+    }) catch return r.errResult(call, "failed to read file");
     defer ctx.base.exec_pool.alloc.free(read_res.stdout);
     defer ctx.base.exec_pool.alloc.free(read_res.stderr);
 
+    if (read_res.ty != .success) return r.errResult(call, "failed to read file");
     const out = read_res.toOwned(ctx.alloc) catch return r.errResult(call, "oom");
+    if (std.mem.startsWith(u8, out, "MISS:")) {
+        ctx.alloc.free(out);
+        return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "file not found: {s}", .{args.file_path}) catch "file not found");
+    }
+    if (std.mem.startsWith(u8, out, "NOTFILE:")) {
+        ctx.alloc.free(out);
+        return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "not a regular file: {s}", .{args.file_path}) catch "not a regular file");
+    }
+    if (std.mem.startsWith(u8, out, "NOREAD:")) {
+        ctx.alloc.free(out);
+        return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "file is not readable: {s}", .{args.file_path}) catch "file is not readable");
+    }
+    if (std.mem.startsWith(u8, out, "EMPTY:")) {
+        ctx.alloc.free(out);
+        return r.okResult(call, "(empty file)");
+    }
+    if (std.mem.startsWith(u8, out, "OFFSET:")) {
+        const total = std.mem.trim(u8, out["OFFSET:".len..], " \t\r\n");
+        const msg = std.fmt.allocPrint(
+            ctx.alloc,
+            "offset {d} is past the end of file ({s} lines)",
+            .{ start_line, total },
+        ) catch "offset past end of file";
+        ctx.alloc.free(out);
+        return r.errResult(call, msg);
+    }
     if (looksBinary(out)) {
         ctx.alloc.free(out);
         return r.errResult(call, "binary file (NUL byte or invalid UTF-8); use view_image for images, or bash with xxd/strings/base64 to inspect");

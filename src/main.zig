@@ -730,10 +730,6 @@ pub fn run(
                         break :decision null;
                     };
 
-                    if (decided != null) {
-                        try app.persist_permission_to_history(next);
-                    }
-
                     g = app.permission_queue.lock(io);
                     if (decided) |d| {
                         next.state = d;
@@ -1128,10 +1124,7 @@ pub fn run(
 
                                     // Generic 3-option (yes / no / enter message)
                                     switch (ps.selected) {
-                                        0 => {
-                                            try app.persist_permission_to_history(entry);
-                                            app.resolveActivePermission(.approved);
-                                        },
+                                        0 => app.resolveActivePermission(.approved),
                                         1 => app.resolveActivePermission(.denied),
                                         2 => {
                                             app.enterPermMessage();
@@ -1451,6 +1444,7 @@ test "free text survives curated row detours" {
 
 /// Journal materializes lazily in appendCheckpoint; do not gate on file_name.
 fn checkpoint(app: *App, store: *session_store.Store) void {
+    app.drainPendingDiffs();
     const agent = app.mainAgent() orelse return;
 
     var arena = std.heap.ArenaAllocator.init(app.gpa);
@@ -1512,6 +1506,7 @@ fn runHeadless(app: *App, io: std.Io, prompt: []const u8) !void {
         std.debug.print("Error: no agent response\n", .{});
         std.process.exit(1);
     }
+    app.drainPendingDiffs();
     printHeadlessFooter(app, io);
 }
 
