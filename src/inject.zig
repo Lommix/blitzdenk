@@ -164,7 +164,7 @@ fn inject_lua_reload_notice(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.
     const generation = app.lua_reload_generation.load(.acquire);
     if (generation == agent.lua_reload_generation_seen) return;
     agent.lua_reload_generation_seen = generation;
-    try w.writeAll("[LUA SANDBOX RELOADED]\n");
+    try w.writeAll("[LUA VM RELOADED]\n");
 }
 
 fn agentHasBashTool(agent: *const r.agent.Agent) bool {

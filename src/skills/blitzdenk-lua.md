@@ -11,6 +11,24 @@ Workflow customization lives in Lua through the global `blitz` table.
 project-local customization. All Lua files hot reload: edit a tool or command,
 then call it and confirm the behavior in the running session.
 
+## Your own runtime
+
+The config is not somebody else's setup. The Lua files you edit are the
+sandbox you run in. A save goes live in this session within a second, and the
+next step carries a `[LUA VM RELOADED]` reminder plus a refreshed tool list.
+
+- A tool you register is your hand. List it in an agent tool set, wait for the
+  reload, then call it yourself.
+- A command or keybind belongs to the user. You cannot type `/name`. To use
+  that behavior yourself, call the same Lua from a tool, hook, or spawned
+  agent.
+- The `[LUA VM RELOADED]` reminder means your last edits are live.
+
+Smoke test what you build, in the same session. Write the Lua, let the reload
+land, call the new tool, read the result, fix, repeat. Never end a tooling
+task by telling the user to try it, and never move tool logic into a command
+so someone else can exercise it.
+
 ## Read meta.lua first
 
 `~/.config/blitzdenk/meta.lua` is the source of truth for every `blitz.*`
