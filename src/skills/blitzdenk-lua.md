@@ -160,6 +160,24 @@ continues the same conversation. Free a slot with `blitz.agent.close`.
 frees its slot; the old conversation stays rendered, the new agent replaces it
 in the chat.
 
+`blitz.list_agents()` returns one table per occupied slot, running and
+finished. Fields: `agent_id`, `name`, `task`, `state`, `ctx`,
+`context_tokens`, `context_limit`, `model`, `main`, `background`, `parent`,
+`tps`, `queued`. `state` is one display string: `running`, `thinking`,
+`writing`, `calling`, `processing`, `retrying`, `compacting`, `idle`,
+`complete`, `canceled`, or `failed`. `ctx` is the context fill in percent.
+`parent` is the parent's agent id, nil on roots. The task description is set
+at spawn time: the agent tool fills it from its `description` argument, the
+same string shown in the tool status line, and `blitz.agent.spawn` takes it
+as `task = "..."`.
+
+```lua
+local agents = blitz.list_agents()
+for _, a in ipairs(agents) do
+    print(string.format("%s %s %d%% %s", a.name, a.state, a.ctx, a.task))
+end
+```
+
 ## Commands
 
 ```lua

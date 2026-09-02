@@ -40,6 +40,7 @@ pub const Activity = enum { idle, processing, thinking, writing, calling, retryi
 pub const Identity = struct {
     type_idx: u8 = 0,
     name: []const u8 = "",
+    task_description: []const u8 = "",
     parent: ?u32 = null,
     depth: u16 = 0,
     cwd: []const u8 = "",
@@ -74,6 +75,7 @@ pub const Agent = struct {
     flags: Flags = .{},
     type_idx: u8,
     name: []const u8,
+    task_description: []const u8,
     parent: ?u32,
     depth: u16,
     background: bool = false,
@@ -119,6 +121,7 @@ pub const Agent = struct {
         var metadata = std.heap.ArenaAllocator.init(alloc);
         errdefer metadata.deinit();
         const name = try metadata.allocator().dupe(u8, options.identity.name);
+        const task_description = try metadata.allocator().dupe(u8, options.identity.task_description);
         const cwd = try metadata.allocator().dupe(u8, options.identity.cwd);
         return .{
             .alloc = alloc,
@@ -131,6 +134,7 @@ pub const Agent = struct {
             .state_arena = .init(alloc),
             .type_idx = options.identity.type_idx,
             .name = name,
+            .task_description = task_description,
             .parent = options.identity.parent,
             .depth = options.identity.depth,
             .cwd = cwd,
@@ -146,6 +150,7 @@ pub const Agent = struct {
             .identity = .{
                 .type_idx = self.type_idx,
                 .name = self.name,
+                .task_description = self.task_description,
                 .parent = parent,
                 .depth = self.depth + 1,
                 .cwd = self.cwd,

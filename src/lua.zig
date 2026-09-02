@@ -437,6 +437,7 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "prompt", .ty = LuaType.string },
     .{ .name = "agent_type", .ty = LuaType.integer, .optional = true },
     .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
+    .{ .name = "task", .ty = LuaType.string, .optional = true, .desc = "short task description shown in agent listings" },
 } } };
 const SelectRequestDef = LuaType{ .table_def = .{ .name = "BlitzSelectRequest", .fields = &.{
     .{ .name = "header", .ty = LuaType.string, .desc = "very short label shown as a chip" },
@@ -552,6 +553,80 @@ pub const Blitz = LuaType{
                     return a.main_agent_id;
                 }
             }).lua_fn, "get_main_agent") } } },
+            .{ .name = "list_agents", .desc = "Snapshot every occupied agent slot, running and finished, as a list of tables: agent_id, name, task, state, ctx, model, and counters.", .ty = LuaType{ .function = .{
+                .ret = &LuaTable,
+                .fn_ptr = LuaFnBind((struct {
+                    const AgentRow = struct {
+                        agent_id: r.AgentId,
+                        name: []const u8,
+                        task: []const u8,
+                        state: []const u8,
+                        ctx: u8,
+                        context_tokens: u64,
+                        context_limit: u64,
+                        model: []const u8,
+                        main: bool,
+                        background: bool,
+                        parent: ?r.AgentId,
+                        tps: f32,
+                        queued: u32,
+                    };
+
+                    fn stateLabel(slot_state: r.agent_registry.SlotState, agent: *const r.agent.Agent) []const u8 {
+                        return switch (slot_state) {
+                            .complete => "complete",
+                            .failed => "failed",
+                            .active => switch (agent.status) {
+                                .compacting => "compacting",
+                                .retrying => "retrying",
+                                .complete => "complete",
+                                .failed => "failed",
+                                .canceled => "canceled",
+                                .idle => "idle",
+                                .running => switch (agent.activity) {
+                                    .idle => "running",
+                                    .processing => "processing",
+                                    .thinking => "thinking",
+                                    .writing => "writing",
+                                    .calling => "calling",
+                                    .retrying => "retrying",
+                                },
+                            },
+                            .free, .reserved => "",
+                        };
+                    }
+
+                    fn lua_fn(state: *c.lua_State, a: *r.app.App) ![]AgentRow {
+                        const arena = fromState(state).?.luaArena();
+                        const rows = try arena.alloc(AgentRow, r.agent_registry.max_agents);
+                        var count: usize = 0;
+                        for (&a.registry.slots, 0..) |*slot, index| {
+                            const slot_state = slot.state.load(.acquire);
+                            if (slot_state == .free or slot_state == .reserved) continue;
+                            const agent = if (slot.agent) |*ag| ag else continue;
+                            const id = r.AgentId{ .index = @intCast(index), .generation = slot.generation };
+                            const parent: ?r.AgentId = if (agent.parent) |p| r.AgentId.unpack(p) else null;
+                            rows[count] = .{
+                                .agent_id = id,
+                                .name = agent.name,
+                                .task = agent.task_description,
+                                .state = stateLabel(slot_state, agent),
+                                .ctx = agent.contextPercent(),
+                                .context_tokens = agent.context_tokens,
+                                .context_limit = agent.context_limit,
+                                .model = agent.model.languageModel().modelId(),
+                                .main = if (a.main_agent_id) |main| main.pack() == id.pack() else false,
+                                .background = agent.background,
+                                .parent = parent,
+                                .tps = agent.tokens_per_second,
+                                .queued = @intCast(agent.queued_messages.items.len),
+                            };
+                            count += 1;
+                        }
+                        return rows[0..count];
+                    }
+                }).lua_fn, "list_agents"),
+            } } },
             .{
                 .name = "exit_loop",
                 .desc = "Exit the agent loop with a message.",
@@ -2241,6 +2316,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         prompt: []const u8,
                         agent_type: ?u32 = null,
                         fork: ?bool = null,
+                        task: []const u8 = "",
                     };
 
                     const spawn = switch (readAnyValueAlloc(SpawnArgs, state, "agent.spawn", 1, vm.luaArena())) {
@@ -2261,6 +2337,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         .parent_id = spawn.parent_id,
                         .prompt = &.{},
                         .fork = spawn.fork orelse false,
+                        .task = spawn.task,
                     };
                     if (spawn.agent_type) |t| {
                         if (t > std.math.maxInt(u8)) {
@@ -5336,4 +5413,78 @@ test "permission hook clear and no handler fall back" {
     );
     try std.testing.expect(vm.permissionHookDecision(&req) == null);
     try std.testing.expectEqual(c.LUA_NOREF, vm.inject_fn);
+}
+
+test "list_agents snapshots occupied slots" {
+    var app_state = permissionTestApp();
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app_state.registry = &registry;
+
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{
+        .name = "scout",
+        .task_description = "list the agents",
+        .cwd = "/tmp",
+    } });
+    agent.context_tokens = 4000;
+    agent.context_limit = 10_000;
+    agent.status = .running;
+    agent.activity = .thinking;
+    agent.background = true;
+    app_state.main_agent_id = id;
+
+    const child_id = registry.reserve().?;
+    const child = try registry.activate(child_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{
+        .name = "worker",
+        .task_description = "child task",
+        .parent = id.pack(),
+        .depth = 1,
+        .cwd = "/tmp",
+    } });
+    child.status = .complete;
+    try child.queueMessages(&.{.{ .role = .user, .content = &.{.{ .text = "x" }} }});
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    const script = try std.fmt.allocPrint(std.testing.allocator,
+        \\local list = blitz.list_agents()
+        \\assert(#list == 2)
+        \\local root = list[1]
+        \\local child = list[2]
+        \\assert(type(root.agent_id) == "number")
+        \\assert(root.name == "scout")
+        \\assert(root.task == "list the agents")
+        \\assert(root.state == "thinking")
+        \\assert(root.ctx == 40)
+        \\assert(root.context_tokens == 4000)
+        \\assert(root.context_limit == 10000)
+        \\assert(root.model == "model")
+        \\assert(root.main == true)
+        \\assert(root.background == true)
+        \\assert(root.parent == nil)
+        \\assert(root.queued == 0)
+        \\assert(root.tps == 0)
+        \\assert(child.name == "worker")
+        \\assert(child.task == "child task")
+        \\assert(child.state == "complete")
+        \\assert(child.main == false)
+        \\assert(child.background == false)
+        \\assert(child.queued == 1)
+        \\assert(child.parent == {d})
+    , .{id.pack()});
+    defer std.testing.allocator.free(script);
+    try vm.exec(script);
 }

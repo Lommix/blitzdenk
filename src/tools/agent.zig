@@ -116,6 +116,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
             .prompt = parts,
             .cwd = cwd,
             .background = true,
+            .task = args.description,
         },
     }) catch {
         ctx.base.registry.releaseReservation(child_id);

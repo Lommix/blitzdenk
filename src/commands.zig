@@ -103,6 +103,7 @@ pub const Command = union(enum) {
         chat_entry: ?ChatEntry = null,
         cwd: []const u8 = "",
         background: bool = false,
+        task: []const u8 = "",
     };
 
     pub const CustomCmd = struct {
@@ -301,6 +302,7 @@ pub const Command = union(enum) {
                     try app.registry.activate(arg.agent_id, model_config.?, .{ .identity = .{
                         .type_idx = arg.agent_type,
                         .name = app.context_factory.agentName(@enumFromInt(arg.agent_type)),
+                        .task_description = arg.task,
                         .parent = if (arg.parent_id) |id| id.pack() else null,
                         .depth = if (arg.parent_id) |id| app.registry.get(id).?.depth + 1 else 0,
                         .cwd = cwd,

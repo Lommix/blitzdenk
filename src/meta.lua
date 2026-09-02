@@ -79,6 +79,8 @@
 ---@field prompt string
 ---@field agent_type? integer
 ---@field fork? boolean
+---short task description shown in agent listings
+---@field task? string
 
 ---@class BlitzAgent
 ---Reserve a free slot and enqueue a spawn or fork into it.
@@ -464,6 +466,8 @@
 ---@field add_tool fun(agent_type: integer, tool_name: string)
 ---Return the main agent, if a session is running.
 ---@field get_main_agent fun(): integer|nil
+---Snapshot every occupied agent slot, running and finished, as a list of tables: agent_id, name, task, state, ctx, model, and counters.
+---@field list_agents fun(): table
 ---Exit the agent loop with a message.
 ---@field exit_loop fun(content?: string): BlitzToolResult
 ---Register a provider.
