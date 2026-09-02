@@ -332,6 +332,15 @@ pub const App = struct {
     lua_status_bar_enabled: bool = false,
     lua_status_bar_cache: [512]u8 = undefined,
     lua_status_bar_cache_len: usize = 0,
+    widget_error_msgs: [r.lua.MAX_LUA_WIDGETS][r.lua.WIDGET_ERROR_CAP]u8 = @splat(@splat(0)),
+    widget_error_lens: [r.lua.MAX_LUA_WIDGETS]usize = @splat(0),
+    widget_layout_cache: WidgetLayout = .{},
+    widget_layout_valid: bool = false,
+    widget_frame_panels: [r.lua.MAX_LUA_WIDGETS]WidgetPanelSlot = @splat(.{}),
+    widget_frame_panels_len: usize = 0,
+    widget_frame_input_area: r.tui.Rect = .{},
+    widget_frame_progress_h: u16 = 0,
+    lua_redraw: std.atomic.Value(bool) = .init(false),
     lua_inject_hooks_enabled: std.atomic.Value(bool) = .init(false),
     mcp_manager: r.mcp.Manager,
     mcp_load: ?r.mcp.LoadTask = null,
@@ -1369,34 +1378,48 @@ pub const App = struct {
 
     pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
         refreshLuaStatusBar(app);
+        refreshLuaWidgets(app, area, buf);
+        renderCore(app, area, buf);
+        drawLuaPanels(app, buf);
+        renderCompletionPopup(app, app.arena_frame.allocator(), app.widget_frame_input_area, app.widget_frame_progress_h, buf);
+    }
+
+    fn renderCore(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
         app.mu.lockUncancelable(app.io);
         defer app.mu.unlock(app.io);
         _ = app.arena_frame.reset(.free_all);
         const frame_alloc = app.arena_frame.allocator();
 
+        var widget_layout_fallback = WidgetLayout{ .area = area, .main = area };
+        const cache_matches_area = app.widget_layout_valid and
+            app.widget_layout_cache.area.width == area.width and
+            app.widget_layout_cache.area.height == area.height;
+        const wl: *const WidgetLayout = if (cache_matches_area) &app.widget_layout_cache else &widget_layout_fallback;
+        const main_area = wl.main;
+
         const input_height: u16 = blk: {
             switch (app.input_mode) {
                 .text, .passphrase => {
-                    const inner_w = area.width -| 5; // 2 left + 2 right padding + ❯ prompt
+                    const inner_w = main_area.width -| 5; // 2 left + 2 right padding + ❯ prompt
                     const rows: u16 = @intCast(@min(@max(inputWrapPosition(app, frame_alloc, inner_w, false).total, 1), @as(usize, std.math.maxInt(u16))));
                     break :blk @min(rows +| 3, 9); // input rows + status + 2 padding
                 },
                 .perm_message => break :blk 8, // 5-row input box + status + 2 padding
                 .wizard => break :blk 18,
-                .session_picker => |*picker| break :blk @intCast(@min(6 + @max(picker.rows.len, 1), area.height -| 1)),
+                .session_picker => |*picker| break :blk @intCast(@min(6 + @max(picker.rows.len, 1), main_area.height -| 1)),
                 .perm_select => {
                     if (app.active_permission) |entry| {
                         if (entry.payload == .ask) {
-                            break :blk askPermissionInputHeight(entry.payload.ask, area.width, area.height);
+                            break :blk askPermissionInputHeight(entry.payload.ask, main_area.width, main_area.height);
                         }
                         if (entry.payload == .call) {
-                            const rows = text_utils.wrappedRowCount(entry.payload.call.description, area.width -| 7);
-                            break :blk @min(8 +| rows, area.height -| 1);
+                            const rows = text_utils.wrappedRowCount(entry.payload.call.description, main_area.width -| 7);
+                            break :blk @min(8 +| rows, main_area.height -| 1);
                         }
                         break :blk 9;
                     }
                     const sel = app.active_selection orelse break :blk 9;
-                    break :blk askPermissionInputHeight(sel.ask, area.width, area.height);
+                    break :blk askPermissionInputHeight(sel.ask, main_area.width, main_area.height);
                 },
             }
         };
@@ -1406,7 +1429,7 @@ pub const App = struct {
         // line lives inside the input footer: the main-agent status on the top
         // row, the statusbar on the row above the bottom padding.
         const _combined_area, _ =
-            r.tui.Col(area, .{
+            r.tui.Col(main_area, .{
                 r.tui.Constr.fill, // chat + status
                 r.tui.Constr{ .fixed = input_height }, // input + status footer
             });
@@ -1418,16 +1441,26 @@ pub const App = struct {
                 r.tui.Constr.fill,
             });
 
+        const progress_line: ?r.tui.Line = mainProgressLine(app, frame_alloc);
+        const progress_h: u16 = if (progress_line != null) 1 else 0;
+        const footer_h: u16 = input_height +| progress_h;
+        const panels_visible =
+            (_chat_status_area.height -| progress_h -| wl.panels_total_height) >= WIDGET_MIN_CHAT_ROWS and
+            (wl.panels_total_height +| footer_h) <= main_area.height;
+        const between_h: u16 = if (panels_visible) wl.between_total_height else 0;
+        const below_h: u16 = if (panels_visible) wl.below_total_height else 0;
+
         // Build the content first so the viewport only renders as much as needed.
         const is_welcome = app.chat_entries.items.len == 0 and !app.isMainAgentCompacting();
         var welcome_p: ?r.tui.Paragraph = null;
         var chat_stack: ?ChatStack = null;
         var content_end_h: usize = 0;
 
-        const progress_line: ?r.tui.Line = mainProgressLine(app, frame_alloc);
-        const progress_h: u16 = if (progress_line != null) 1 else 0;
-        const footer_h: u16 = input_height +| progress_h;
-        const chat_h: u16 = _chat_status_area.height -| progress_h;
+        const chat_h: u16 = blk: {
+            const viewport_h = _chat_status_area.height -| progress_h -| between_h;
+            const pinned_h = (main_area.y +| main_area.height) -| footer_h -| below_h -| between_h -| _chat_status_area.y;
+            break :blk @min(viewport_h, pinned_h);
+        };
 
         if (is_welcome) {
             var wp = r.tui.Paragraph{
@@ -1446,28 +1479,38 @@ pub const App = struct {
 
         // Input sits right after the chat content; once content fills the
         // viewport it pins to the bottom and stays sticky. The footer includes
-        // the main-agent status row on top of the input widget.
-        const max_footer_y: u16 = (area.y +| area.height) -| footer_h;
+        // the main-agent status row on top of the input widget. Between panels
+        // push the floating footer past the chat content, below panels reserve
+        // rows under the pinned footer.
+        const max_footer_y: u16 = (main_area.y +| main_area.height) -| footer_h -| below_h;
         const content_cap: u16 = @intCast(@min(content_end_h, @as(usize, chat_h)));
         const footer_y: u16 = @min(
-            _chat_status_area.y +| content_cap,
+            _chat_status_area.y +| content_cap +| between_h,
             max_footer_y,
         );
         const _input_area: r.tui.Rect = .{
-            .x = area.x,
+            .x = main_area.x,
             .y = footer_y,
-            .width = area.width,
+            .width = main_area.width,
             .height = footer_h,
         };
 
+        app.widget_frame_input_area = _input_area;
+        app.widget_frame_progress_h = progress_h;
+        app.widget_frame_panels_len = 0;
+        if (panels_visible) {
+            anchorWidgetPanels(wl, footer_y, footer_h, &app.widget_frame_panels);
+            app.widget_frame_panels_len = wl.panels_len;
+        }
+
         // Paint the background only over the used region; the rest stays
         // terminal default so unused viewport space is not rendered.
-        const used_bottom: u16 = @min(footer_y +| footer_h, area.y +| area.height);
+        const used_bottom: u16 = @min(footer_y +| footer_h +| below_h, main_area.y +| main_area.height);
         buf.fill(.{
-            .x = area.x,
-            .y = area.y,
-            .width = area.width,
-            .height = used_bottom -| area.y,
+            .x = main_area.x,
+            .y = main_area.y,
+            .width = main_area.width,
+            .height = used_bottom -| main_area.y,
         }, .{ .style = .{ .bg = app.theme.overlay } });
 
         renderLuaError(app, frame_alloc, _lua_error_area, buf) catch |err| {
@@ -1497,9 +1540,13 @@ pub const App = struct {
         // progress, the input content, and the statusbar.
         renderInputWidget(app, frame_alloc, _input_area, progress_h, progress_line, buf);
 
+        renderWidgetErrors(app, wl, buf);
+
         // Notifications
         renderNotifications(app, frame_alloc, area, buf);
+    }
 
+    fn renderCompletionPopup(app: *App, frame_alloc: std.mem.Allocator, input_area: r.tui.Rect, progress_h: u16, buf: *r.tui.Buffer) void {
         if (app.input_mode == .text and app.input_mode.text.completion_open) {
             const completions = activeCompletions(app, frame_alloc, app.input_buffer.items, app.input_cursor);
             if (completions.len > 0) {
@@ -1535,9 +1582,9 @@ pub const App = struct {
                         .padding = .{ .left = 1 },
                     };
                     const input_rect: r.tui.Rect = .{
-                        .x = _input_area.x +| 2,
-                        .y = _input_area.y +| 1 +| progress_h,
-                        .width = _input_area.width -| 4,
+                        .x = input_area.x +| 2,
+                        .y = input_area.y +| 1 +| progress_h,
+                        .width = input_area.width -| 4,
                         .height = 1,
                     };
                     const text_origin = anchor_para.inner(input_rect);
@@ -3088,6 +3135,159 @@ fn refreshLuaStatusBar(app: *App) void {
     }
 }
 
+pub const WIDGET_MIN_MAIN_COLS: u16 = 40;
+pub const WIDGET_MIN_CHAT_ROWS: u16 = 6;
+
+pub const WidgetPanelSlot = struct {
+    rect: r.tui.Rect = .{},
+    height: u16 = 0,
+    entry_index: usize = 0,
+    place: r.lua.WidgetPlace = .between,
+};
+
+pub const WidgetLayout = struct {
+    area: r.tui.Rect = .{},
+    left: ?r.tui.Rect = null,
+    right: ?r.tui.Rect = null,
+    left_index: usize = 0,
+    right_index: usize = 0,
+    panels: [r.lua.MAX_LUA_WIDGETS]WidgetPanelSlot = @splat(.{}),
+    panels_len: usize = 0,
+    between_total_height: u16 = 0,
+    below_total_height: u16 = 0,
+    panels_total_height: u16 = 0,
+    main: r.tui.Rect = .{},
+};
+
+pub fn computeWidgetLayout(vm: *r.lua.LuaVm, area: r.tui.Rect) WidgetLayout {
+    var out = WidgetLayout{ .area = area };
+    var left_w: u16 = 0;
+    var right_w: u16 = 0;
+
+    for (vm.widget_entries[0..vm.widget_count], 0..) |*entry, i| {
+        if (!entry.alive or entry.hidden) continue;
+        switch (entry.kind) {
+            .sidebar => {
+                const w = @min(entry.size, area.width);
+                if (entry.side == .left) {
+                    left_w = w;
+                    out.left_index = i;
+                } else {
+                    right_w = w;
+                    out.right_index = i;
+                }
+            },
+            .panel => {
+                const h = @min(entry.size, area.height);
+                if (entry.place == .below) out.below_total_height +|= h else out.between_total_height +|= h;
+            },
+        }
+    }
+
+    if (area.width -| left_w -| right_w < WIDGET_MIN_MAIN_COLS) right_w = 0;
+    if (area.width -| left_w -| right_w < WIDGET_MIN_MAIN_COLS) left_w = 0;
+
+    const main_w = area.width -| left_w -| right_w;
+    if (left_w > 0) out.left = .{ .x = area.x, .y = area.y, .width = left_w, .height = area.height };
+    if (right_w > 0) out.right = .{
+        .x = area.x +| left_w +| main_w,
+        .y = area.y,
+        .width = right_w,
+        .height = area.height,
+    };
+    out.main = .{ .x = area.x +| left_w, .y = area.y, .width = main_w, .height = area.height };
+
+    for (vm.widget_entries[0..vm.widget_count], 0..) |*entry, i| {
+        if (!entry.alive or entry.hidden or entry.kind != .panel) continue;
+        const h = @min(entry.size, area.height);
+        out.panels[out.panels_len] = .{
+            .rect = .{ .x = out.main.x, .y = 0, .width = main_w, .height = h },
+            .height = h,
+            .entry_index = i,
+            .place = entry.place,
+        };
+        out.panels_len += 1;
+    }
+    out.panels_total_height = out.between_total_height +| out.below_total_height;
+    return out;
+}
+
+pub fn anchorWidgetPanels(wl: *const WidgetLayout, footer_y: u16, footer_h: u16, out: *[r.lua.MAX_LUA_WIDGETS]WidgetPanelSlot) void {
+    var between_y = footer_y -| wl.between_total_height;
+    var below_y = footer_y +| footer_h;
+    for (wl.panels[0..wl.panels_len], 0..) |slot, i| {
+        out[i] = slot;
+        if (slot.place == .below) {
+            out[i].rect.y = below_y;
+            below_y +|= slot.height;
+        } else {
+            out[i].rect.y = between_y;
+            between_y +|= slot.height;
+        }
+    }
+}
+
+fn drawLuaWidget(app: *App, vm: *r.lua.LuaVm, entry_index: usize, rect: r.tui.Rect, buf: *r.tui.Buffer) void {
+    const entry = &vm.widget_entries[entry_index];
+    if (!entry.alive or entry.hidden) return;
+    const err_len = r.lua.invokeWidgetRender(vm, entry, rect, buf, &app.theme, &app.widget_error_msgs[entry_index]);
+    app.widget_error_lens[entry_index] = err_len;
+}
+
+fn refreshLuaWidgets(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+    const vm = app.lua_vm;
+    if (vm.widget_count == 0) {
+        app.widget_layout_valid = false;
+        return;
+    }
+    for (&app.widget_error_lens) |*l| l.* = 0;
+    if (!vm.vm_mu.tryLock()) return;
+    defer vm.vm_mu.unlock(app.io);
+
+    const wl = computeWidgetLayout(vm, area);
+    app.widget_layout_cache = wl;
+    app.widget_layout_valid = true;
+    const bg_cell = r.tui.Cell{ .style = .{ .bg = app.theme.overlay } };
+
+    if (wl.left) |rect| {
+        buf.fill(rect, bg_cell);
+        drawLuaWidget(app, vm, wl.left_index, rect, buf);
+    }
+    if (wl.right) |rect| {
+        buf.fill(rect, bg_cell);
+        drawLuaWidget(app, vm, wl.right_index, rect, buf);
+    }
+}
+
+fn drawLuaPanels(app: *App, buf: *r.tui.Buffer) void {
+    if (app.widget_frame_panels_len == 0) return;
+    const vm = app.lua_vm;
+    if (!vm.vm_mu.tryLock()) return;
+    defer vm.vm_mu.unlock(app.io);
+    for (app.widget_frame_panels[0..app.widget_frame_panels_len]) |slot| {
+        drawLuaWidget(app, vm, slot.entry_index, slot.rect, buf);
+        drawWidgetError(app, slot.entry_index, slot.rect, buf);
+    }
+}
+
+fn drawWidgetError(app: *App, entry_index: usize, rect: r.tui.Rect, buf: *r.tui.Buffer) void {
+    const err_len = app.widget_error_lens[entry_index];
+    if (err_len == 0) return;
+    const msg = app.widget_error_msgs[entry_index][0..err_len];
+    var line_it = std.mem.splitScalar(u8, msg, '\n');
+    var row: u16 = 0;
+    while (line_it.next()) |line_text| {
+        if (row >= rect.height) break;
+        buf.setStringMax(rect.x, rect.y +| row, line_text, .{ .fg = app.theme.err }, rect.width);
+        row += 1;
+    }
+}
+
+fn renderWidgetErrors(app: *App, wl: *const WidgetLayout, buf: *r.tui.Buffer) void {
+    if (wl.left) |rect| drawWidgetError(app, wl.left_index, rect, buf);
+    if (wl.right) |rect| drawWidgetError(app, wl.right_index, rect, buf);
+}
+
 fn blendTo(from: r.tui.Color, to: r.tui.Color, t: f64) r.tui.Color {
     if (t >= 1) return to;
     const a = from.toRgb();
@@ -3869,6 +4069,57 @@ fn formatTokenCount(dest: []u8, count: u64) []const u8 {
         const m = @as(f64, @floatFromInt(count)) / 1_000_000.0;
         return std.fmt.bufPrint(dest, "{d:.1}M", .{m}) catch "0M";
     }
+}
+
+test "widget layout reserves sidebars and hides them on narrow terminals" {
+    const vm = try r.lua.LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.widget_entries[0] = .{ .kind = .sidebar, .side = .left, .size = 10 };
+    vm.widget_entries[1] = .{ .kind = .sidebar, .side = .right, .size = 6 };
+    vm.widget_count = 2;
+
+    const wide = computeWidgetLayout(vm, .{ .width = 100, .height = 30 });
+    try std.testing.expectEqual(@as(u16, 10), wide.left.?.width);
+    try std.testing.expectEqual(@as(u16, 6), wide.right.?.width);
+    try std.testing.expectEqual(@as(u16, 100 - 10 - 6), wide.main.width);
+    try std.testing.expectEqual(@as(u16, 10), wide.main.x);
+
+    const narrow = computeWidgetLayout(vm, .{ .width = 50, .height = 30 });
+    try std.testing.expect(narrow.left != null);
+    try std.testing.expectEqual(@as(?r.tui.Rect, null), narrow.right);
+    try std.testing.expectEqual(@as(u16, 50 - 10), narrow.main.width);
+
+    const tiny = computeWidgetLayout(vm, .{ .width = 44, .height = 30 });
+    try std.testing.expectEqual(@as(?r.tui.Rect, null), tiny.left);
+    try std.testing.expectEqual(@as(?r.tui.Rect, null), tiny.right);
+    try std.testing.expectEqual(@as(u16, 44), tiny.main.width);
+}
+
+test "widget layout stacks panels by place block in registration order" {
+    const vm = try r.lua.LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.widget_entries[0] = .{ .kind = .sidebar, .side = .left, .size = 10 };
+    vm.widget_entries[1] = .{ .kind = .panel, .size = 8 };
+    vm.widget_entries[2] = .{ .kind = .panel, .size = 4, .place = .below };
+    vm.widget_entries[3] = .{ .kind = .panel, .size = 2 };
+    vm.widget_count = 4;
+
+    const wl = computeWidgetLayout(vm, .{ .width = 100, .height = 30 });
+    try std.testing.expectEqual(@as(usize, 3), wl.panels_len);
+    try std.testing.expectEqual(@as(u16, 10), wl.between_total_height);
+    try std.testing.expectEqual(@as(u16, 4), wl.below_total_height);
+    try std.testing.expectEqual(@as(u16, 14), wl.panels_total_height);
+    try std.testing.expectEqual(@as(u16, 10), wl.panels[0].rect.x);
+    try std.testing.expectEqual(@as(u16, 90), wl.panels[0].rect.width);
+
+    var anchored: [r.lua.MAX_LUA_WIDGETS]WidgetPanelSlot = @splat(.{});
+    anchorWidgetPanels(&wl, 20, 6, &anchored);
+    try std.testing.expectEqual(@as(u16, 10), anchored[0].rect.y);
+    try std.testing.expectEqual(@as(u16, 8), anchored[0].rect.height);
+    try std.testing.expectEqual(@as(u16, 26), anchored[1].rect.y);
+    try std.testing.expectEqual(@as(u16, 4), anchored[1].rect.height);
+    try std.testing.expectEqual(@as(u16, 18), anchored[2].rect.y);
+    try std.testing.expectEqual(@as(u16, 2), anchored[2].rect.height);
 }
 
 test "myers diff - single line change" {

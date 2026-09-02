@@ -428,6 +428,50 @@ end
 
 The status bar renders ansi color tags.
 
+## Drawing
+
+`blitz.draw` reserves screen regions and paints them from Lua.
+
+```lua
+local sb = blitz.draw.sidebar({
+    side = "left",
+    width = 24,
+    render = function(w, h, buf)
+        buf.box(0, 0, w, h, "muted")
+        buf.set_color(1, 1, "sessions", "#A50000")
+        buf.set(1, 2, "active")
+    end,
+})
+
+local panel = blitz.draw.panel({
+    height = 8,
+    place = "between",
+    render = function(w, h, buf)
+        buf.fill(0, 0, w, h, "overlay_dark")
+        buf.set(0, 0, "context")
+    end,
+})
+```
+
+A sidebar spans the full terminal height on its side. A panel attaches to the
+input widget and follows it: `place = "between"` (default) sits it directly
+above the input, `place = "below"` directly under it.
+
+Coordinates are widget-relative, (0,0) top-left. Writes outside the widget
+rect clip silently. Colors are `#RRGGBB` hex or theme names (`text`, `muted`,
+`info`, `err`, ...). `set` writes theme text color, `set_color` a given
+foreground, `fill` a solid background, `rect` a one cell background outline,
+`box` a unicode line border.
+
+Render callbacks run on every drawn frame, up to 60fps while agents run or
+before the first prompt is sent. Afterwards the app draws only on input, so
+animations call `blitz.draw.redraw()` to force frames. Keep the callback pure
+drawing: no awaits, no long work, or frames drop.
+
+Both calls return a handle with `show()`, `hide()`, `remove()` and
+`set_size(cells)`. One sidebar per side: a second `sidebar` call on the same
+side replaces the first and its handle goes dead.
+
 ## Skills
 
 Skills are markdown files discovered from three ranked layers: project

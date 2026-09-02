@@ -100,6 +100,67 @@
 ---Insert the selected completion, like <C-y>. No-op when the popup is closed.
 ---@field accept fun()
 
+---@class BlitzWidgetBuf
+---visible widget width in cells, shrinks when clipped
+---@field width integer
+---visible widget height in cells, shrinks when clipped
+---@field height integer
+---write text at widget-relative coords, clipped to the widget rect, theme text color
+---@field set fun(x: integer, y: integer, text: string)
+---write text with a foreground color
+---@field set_color fun(x: integer, y: integer, text: string, color: string)
+---solid background fill
+---@field fill fun(x: integer, y: integer, w: integer, h: integer, color: string)
+---one cell thick background outline
+---@field rect fun(x: integer, y: integer, w: integer, h: integer, color: string)
+---unicode line border in foreground color
+---@field box fun(x: integer, y: integer, w: integer, h: integer, color: string)
+
+---@class BlitzSidebarDef
+---'left' (default) or 'right'
+---@field side? string
+---columns
+---@field width integer
+---draw callback, runs on every drawn frame
+---@field render fun(width: integer, height: integer, buf: BlitzWidgetBuf)
+
+---@class BlitzWidgetHandle
+---make the widget visible again
+---@field show fun()
+---hide the widget, its space returns to the layout
+---@field hide fun()
+---unregister the widget permanently
+---@field remove fun()
+---set width (sidebar) or height (panel) in cells
+---@field set_size fun(size: integer)
+
+---@class BlitzPanelDef
+---rows
+---@field height integer
+---'between' (default) pins the panel between chat and input, 'below' pins it under the input
+---@field place? string
+---draw callback, runs on every drawn frame
+---@field render fun(width: integer, height: integer, buf: BlitzWidgetBuf)
+
+---@class BlitzDraw
+---Reserve a full height sidebar column and draw into it from Lua.
+---side is 'left' (default) or 'right', width is cells. A second add on
+---the same side replaces the first. The sidebar hides automatically
+---while the main column would drop below 40 columns. render runs on
+---every drawn frame with widget-relative dimensions and a BlitzWidgetBuf.
+---Colors are '#RRGGBB' hex or theme names (bg, muted, text, info, ...).
+---@field sidebar fun(def: BlitzSidebarDef): BlitzWidgetHandle
+---Reserve a horizontal panel and draw into it from Lua.
+---height is cells. Panels of the same place stack bottom up in
+---registration order, the first registered panel sits on top of its block.
+---place 'between' (default) pins the panel between chat and input,
+---place 'below' pins it under the input widget. All panels hide
+---automatically while the chat viewport would drop below 6 rows. render
+---runs on every drawn frame with widget-relative dimensions and a BlitzWidgetBuf.
+---@field panel fun(def: BlitzPanelDef): BlitzWidgetHandle
+---Request a UI redraw on the next loop tick. Call from animations to force frames while the app is idle.
+---@field redraw fun()
+
 ---@class BlitzToolDef
 ---@field BASH string
 ---@field READ string
@@ -380,6 +441,7 @@
 ---@field base64 BlitzBase64
 ---@field cmd BlitzCmd
 ---@field cmp BlitzCmp
+---@field draw BlitzDraw
 ---@field tools BlitzToolDef
 ---@field hooks BlitzHooks
 ---@field permissions BlitzPermissions

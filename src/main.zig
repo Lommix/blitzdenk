@@ -695,6 +695,8 @@ pub fn run(
             if (error_fading or error_fade_pending) app.dirty = true;
             error_fade_pending = error_fading;
 
+            if (app.lua_redraw.swap(false, .acq_rel)) app.dirty = true;
+
             if (app.dirty or app.main_agent_id == null) {
                 try term.drawWith(&app, App.render);
                 app.frame_count +%= 1;
