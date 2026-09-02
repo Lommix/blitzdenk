@@ -49,9 +49,14 @@ pub const Registry = struct {
     model_usage: std.StringArrayHashMapUnmanaged(sdk.Usage) = .{},
     pending_mutex: std.Io.Mutex = .{ .state = .init(.unlocked) },
     pending: std.ArrayListUnmanaged(agent_mod.Agent) = .empty,
+    cache_key_buf: [40]u8 = undefined,
+    cache_key_len: usize = 0,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io) Registry {
-        return .{ .alloc = alloc, .io = io };
+        var self = Registry{ .alloc = alloc, .io = io };
+        const key = std.fmt.bufPrint(&self.cache_key_buf, "blitz-{d}", .{std.c.getpid()}) catch "";
+        self.cache_key_len = key.len;
+        return self;
     }
 
     pub fn deinit(self: *Registry) void {
@@ -231,11 +236,13 @@ pub const Registry = struct {
         return true;
     }
 
-    pub fn run(self: *Registry, id: AgentId, options: sdk.GenerateOptions) !void {
+    pub fn run(self: *Registry, id: AgentId, options_in: sdk.GenerateOptions) !void {
         const slot = self.slotFor(id) orelse return error.AgentNotFound;
         const agent = if (slot.agent) |*value| value else return error.AgentNotFound;
         if (slot.state.load(.acquire) != .active) slot.event.reset();
         agent.reported_task_done = false;
+        var options = options_in;
+        if (options.cache_key == null) options.cache_key = self.cache_key_buf[0..self.cache_key_len];
         try agent.start(options);
         slot.state.store(.active, .release);
     }

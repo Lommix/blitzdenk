@@ -234,6 +234,8 @@ fn buildRequest(
     try s.beginObject();
     try s.objectField("model");
     try s.write(chat.model_id);
+    try s.objectField("prompt_cache_key");
+    try s.write(params.cache_key orelse chat.model_id);
 
     if (params.system.len > 0) {
         try s.objectField("instructions");
@@ -692,6 +694,7 @@ test "function continuation and structured output request" {
     }, false, false);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"function_call\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"prompt_cache_key\":\"gpt-test\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"function_call_output\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"format\":{\"type\":\"json_schema\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":false") != null);

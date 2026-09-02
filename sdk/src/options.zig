@@ -204,6 +204,7 @@ pub const GenerateOptions = struct {
     provider_options: ?std.json.Value = null,
     prompt_caching: bool = false,
     cache_ttl: ?[]const u8 = null,
+    cache_key: ?[]const u8 = null,
 
     schema_name: []const u8 = "response",
     explicit_schema: ?[]const u8 = null,

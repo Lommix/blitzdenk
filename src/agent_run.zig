@@ -265,6 +265,12 @@ pub const RunTask = struct {
 
     fn onStep(ctx: ?*anyopaque, step: sdk.options.StepInfo) void {
         const self: *RunTask = @ptrCast(@alignCast(ctx.?));
+        if (!builtin.is_test) log.info("step {d}: in={d} cached={d} out={d}", .{
+            step.number,
+            step.usage.input_tokens + step.usage.cache_read_tokens,
+            step.usage.cache_read_tokens,
+            step.usage.output_tokens,
+        });
         self.queue.appendStep(step) catch |err| {
             log.err("dropped step event step={d} calls={d} results={d}: {s}", .{ step.number, step.tool_calls.len, step.tool_results.len, @errorName(err) });
         };
@@ -403,6 +409,7 @@ fn cloneOptions(alloc: std.mem.Allocator, value: sdk.GenerateOptions) !sdk.Gener
     cloned.headers = headers;
     cloned.provider_options = if (value.provider_options) |options| try cloneJson(alloc, options) else null;
     cloned.cache_ttl = if (value.cache_ttl) |ttl| try alloc.dupe(u8, ttl) else null;
+    cloned.cache_key = if (value.cache_key) |key| try alloc.dupe(u8, key) else null;
     cloned.schema_name = try alloc.dupe(u8, value.schema_name);
     cloned.explicit_schema = if (value.explicit_schema) |schema| try alloc.dupe(u8, schema) else null;
     return cloned;

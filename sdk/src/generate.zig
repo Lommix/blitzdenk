@@ -154,6 +154,7 @@ fn run(
             .provider_options = opts.provider_options,
             .prompt_caching = opts.prompt_caching,
             .cache_ttl = opts.cache_ttl,
+            .cache_key = opts.cache_key,
             .tool_choice = opts.tool_choice,
             .response_format = if (opts.explicit_schema) |value| .{
                 .name = opts.schema_name,

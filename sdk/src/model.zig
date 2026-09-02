@@ -18,6 +18,7 @@ pub const GenerateParams = struct {
     provider_options: ?std.json.Value = null,
     prompt_caching: bool = false,
     cache_ttl: ?[]const u8 = null,
+    cache_key: ?[]const u8 = null,
     tool_choice: options.ToolChoice = .auto,
     response_format: ?types.ResponseFormat = null,
     timeout_ms: ?u64 = null,
