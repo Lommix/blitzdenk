@@ -315,6 +315,7 @@ const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields
     .{ .name = "url", .ty = LuaType.string, .desc = "the endpoint url" },
     .{ .name = "key_envar", .ty = LuaType.string, .optional = true, .desc = "the ENVAR holding the api key (not the key itself!)" },
     .{ .name = "key", .ty = LuaType.string, .optional = true, .desc = "stored api key; the envar wins when both are set" },
+    .{ .name = "session_key_header", .ty = LuaType.string, .optional = true, .desc = "header name for the session cache key; empty = disabled" },
     .{ .name = "temperature", .ty = LuaType.number, .optional = true },
     .{ .name = "max_tokens", .ty = LuaType.integer, .optional = true },
     .{ .name = "max_completion_tokens", .ty = LuaType.integer, .optional = true },
@@ -655,6 +656,7 @@ pub const Blitz = LuaType{
                                 url: []const u8,
                                 key_envar: ?[]const u8 = null,
                                 key: ?[]const u8 = null,
+                                session_key_header: ?[]const u8 = null,
                                 temperature: ?f32 = null,
                                 max_tokens: ?u32 = null,
                                 max_completion_tokens: ?u32 = null,
@@ -672,6 +674,7 @@ pub const Blitz = LuaType{
                                 if (try isToolVm(state)) return @enumFromInt(0);
                                 const slot = a.config.reserveProvider(args.url, args.key_envar orelse "", args.key orelse "") orelse return error.MaxProviderReached;
                                 slot.rate_limit = args.rate_limit orelse 0;
+                                if (args.session_key_header) |header| if (!slot.setSessionKeyHeader(header)) return error.SessionHeaderTooLong;
 
                                 const ptype: r.models.Kind = blk: {
                                     if (std.mem.eql(u8, args.type, "openai")) break :blk .openai;

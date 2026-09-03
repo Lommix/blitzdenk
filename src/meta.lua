@@ -338,6 +338,8 @@
 ---@field key_envar? string
 ---stored api key; the envar wins when both are set
 ---@field key? string
+---header name for the session cache key; empty = disabled
+---@field session_key_header? string
 ---@field temperature? number
 ---@field max_tokens? integer
 ---@field max_completion_tokens? integer

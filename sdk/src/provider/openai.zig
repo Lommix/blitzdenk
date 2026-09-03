@@ -15,6 +15,7 @@ pub const Options = struct {
     env: auth.Env = .{},
     rate_limit: u32 = 0,
     replay_reasoning: bool = false,
+    session_key_header: []const u8 = "",
 };
 
 pub const Chat = struct {
@@ -24,6 +25,7 @@ pub const Chat = struct {
     extra_headers: []const std.http.Header,
     rate_limit: u32,
     replay_reasoning: bool,
+    session_key_header: []const u8,
 
     pub fn init(alloc: std.mem.Allocator, model_id: []const u8, opts: Options) !Chat {
         const key = opts.api_key orelse auth.resolveKey(opts.env, api_key_env) orelse "";
@@ -34,6 +36,7 @@ pub const Chat = struct {
             .extra_headers = try auth.cloneHeaders(alloc, opts.headers),
             .rate_limit = opts.rate_limit,
             .replay_reasoning = opts.replay_reasoning,
+            .session_key_header = try alloc.dupe(u8, opts.session_key_header),
         };
     }
 
@@ -42,6 +45,7 @@ pub const Chat = struct {
         alloc.free(self.api_key);
         alloc.free(self.base_url);
         auth.freeHeaders(alloc, self.extra_headers);
+        alloc.free(self.session_key_header);
     }
 
     pub fn languageModel(self: *Chat) model.LanguageModel {
@@ -61,14 +65,32 @@ pub const Chat = struct {
         return self.model_id;
     }
 
-    fn authHeaders(self: *Chat, alloc: std.mem.Allocator, request_headers: []const std.http.Header) ![]std.http.Header {
+    fn authHeaders(self: *Chat, alloc: std.mem.Allocator, request_headers: []const std.http.Header, cache_key: ?[]const u8) ![]std.http.Header {
         const extra_count: usize = @intFromBool(self.api_key.len > 0);
-        const headers = try alloc.alloc(std.http.Header, extra_count + self.extra_headers.len + request_headers.len);
+        const session_count: usize = @intFromBool(self.session_key_header.len > 0 and cache_key != null and cache_key.?.len > 0);
+        const headers = try alloc.alloc(std.http.Header, extra_count + session_count + self.extra_headers.len + request_headers.len);
         var filled: usize = 0;
-        errdefer auth.freeHeaders(alloc, headers[0..filled]);
+        errdefer {
+            for (headers[0..filled]) |header| {
+                alloc.free(header.name);
+                alloc.free(header.value);
+            }
+            alloc.free(headers);
+        }
         if (self.api_key.len > 0) {
             headers[filled] = try auth.bearerHeader(alloc, self.api_key);
             filled += 1;
+        }
+        if (self.session_key_header.len > 0) {
+            if (cache_key) |key| {
+                if (key.len > 0) {
+                    const name = try alloc.dupe(u8, self.session_key_header);
+                    errdefer alloc.free(name);
+                    const value = try alloc.dupe(u8, key);
+                    headers[filled] = .{ .name = name, .value = value };
+                    filled += 1;
+                }
+            }
         }
         for (self.extra_headers) |header| {
             headers[filled] = .{
@@ -99,7 +121,7 @@ pub const Chat = struct {
 
         const body = try jsonx.buildChatRequest(alloc, self.model_id, params, false, self.replay_reasoning);
         defer alloc.free(body);
-        const headers = try self.authHeaders(alloc, params.headers);
+        const headers = try self.authHeaders(alloc, params.headers, params.cache_key);
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{self.base_url});
         defer alloc.free(url);
@@ -121,7 +143,7 @@ pub const Chat = struct {
         const self: *Chat = @ptrCast(@alignCast(ctx));
         const body = try jsonx.buildChatRequest(alloc, self.model_id, params, true, self.replay_reasoning);
         defer alloc.free(body);
-        const headers = try self.authHeaders(alloc, params.headers);
+        const headers = try self.authHeaders(alloc, params.headers, params.cache_key);
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{self.base_url});
         defer alloc.free(url);
@@ -157,7 +179,7 @@ pub const Chat = struct {
         try jsonx.writeProviderOptions(&s, params.provider_options);
         try s.endObject();
 
-        const headers = try self.authHeaders(alloc, params.headers);
+        const headers = try self.authHeaders(alloc, params.headers, null);
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/embeddings", .{self.base_url});
         defer alloc.free(url);
@@ -194,7 +216,7 @@ pub const Chat = struct {
         try jsonx.writeProviderOptions(&s, params.provider_options);
         try s.endObject();
 
-        const headers = try self.authHeaders(alloc, params.headers);
+        const headers = try self.authHeaders(alloc, params.headers, null);
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/images/generations", .{self.base_url});
         defer alloc.free(url);
@@ -801,4 +823,22 @@ test "stream keeps tagged reasoning across schema fields" {
     }
     try std.testing.expectEqualStrings("private tail", result.reasoning);
     try std.testing.expectEqualStrings("answer", result.text);
+}
+
+test "session header reaches the wire only when configured" {
+    var chat = try Chat.init(std.testing.allocator, "m", .{ .api_key = "k", .session_key_header = "X-Session-Id" });
+    defer chat.deinit(std.testing.allocator);
+    const headers = try chat.authHeaders(std.testing.allocator, &.{}, "blitz-1");
+    defer auth.freeHeaders(std.testing.allocator, headers);
+    var found = false;
+    for (headers) |header| {
+        if (std.mem.eql(u8, header.name, "X-Session-Id")) {
+            try std.testing.expectEqualStrings("blitz-1", header.value);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
+    const bare = try chat.authHeaders(std.testing.allocator, &.{}, null);
+    defer auth.freeHeaders(std.testing.allocator, bare);
+    for (bare) |header| try std.testing.expect(!std.mem.eql(u8, header.name, "X-Session-Id"));
 }

@@ -14,6 +14,7 @@ pub const Options = struct {
     headers: []const std.http.Header = &.{},
     env: auth.Env = .{},
     rate_limit: u32 = 0,
+    session_key_header: []const u8 = "",
 };
 
 pub const CompactResult = struct {
@@ -33,6 +34,7 @@ pub const Chat = struct {
     base_url: []const u8,
     extra_headers: []const std.http.Header,
     rate_limit: u32,
+    session_key_header: []const u8,
 
     pub fn init(alloc: std.mem.Allocator, model_id: []const u8, opts: Options) !Chat {
         const key = opts.api_key orelse auth.resolveKey(opts.env, api_key_env) orelse "";
@@ -42,6 +44,7 @@ pub const Chat = struct {
             .base_url = try alloc.dupe(u8, opts.base_url),
             .extra_headers = try auth.cloneHeaders(alloc, opts.headers),
             .rate_limit = opts.rate_limit,
+            .session_key_header = try alloc.dupe(u8, opts.session_key_header),
         };
     }
 
@@ -50,6 +53,7 @@ pub const Chat = struct {
         alloc.free(self.api_key);
         alloc.free(self.base_url);
         auth.freeHeaders(alloc, self.extra_headers);
+        alloc.free(self.session_key_header);
     }
 
     pub fn languageModel(self: *Chat) model.LanguageModel {
@@ -66,7 +70,7 @@ pub const Chat = struct {
     ) !CompactResult {
         const body = try buildRequest(alloc, self, params, false, true);
         defer alloc.free(body);
-        const headers = try self.authHeaders(alloc, params.headers);
+        const headers = try self.authHeaders(alloc, params.headers, params.cache_key);
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/responses/compact", .{self.base_url});
         defer alloc.free(url);
@@ -93,14 +97,32 @@ pub const Chat = struct {
         return self.model_id;
     }
 
-    fn authHeaders(self: *Chat, a: std.mem.Allocator, request_headers: []const std.http.Header) ![]std.http.Header {
+    fn authHeaders(self: *Chat, a: std.mem.Allocator, request_headers: []const std.http.Header, cache_key: ?[]const u8) ![]std.http.Header {
         const extra_count: usize = @intFromBool(self.api_key.len > 0);
-        const headers = try a.alloc(std.http.Header, extra_count + self.extra_headers.len + request_headers.len);
+        const session_count: usize = @intFromBool(self.session_key_header.len > 0 and cache_key != null and cache_key.?.len > 0);
+        const headers = try a.alloc(std.http.Header, extra_count + session_count + self.extra_headers.len + request_headers.len);
         var filled: usize = 0;
-        errdefer auth.freeHeaders(a, headers[0..filled]);
+        errdefer {
+            for (headers[0..filled]) |header| {
+                a.free(header.name);
+                a.free(header.value);
+            }
+            a.free(headers);
+        }
         if (self.api_key.len > 0) {
             headers[filled] = try auth.bearerHeader(a, self.api_key);
             filled += 1;
+        }
+        if (self.session_key_header.len > 0) {
+            if (cache_key) |key| {
+                if (key.len > 0) {
+                    const name = try a.dupe(u8, self.session_key_header);
+                    errdefer a.free(name);
+                    const value = try a.dupe(u8, key);
+                    headers[filled] = .{ .name = name, .value = value };
+                    filled += 1;
+                }
+            }
         }
         for (self.extra_headers) |header| {
             headers[filled] = .{
@@ -131,7 +153,7 @@ pub const Chat = struct {
 
         const body = try buildRequest(alloc, self, params, false, false);
         defer alloc.free(body);
-        const headers = try self.authHeaders(alloc, params.headers);
+        const headers = try self.authHeaders(alloc, params.headers, params.cache_key);
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/responses", .{self.base_url});
         defer alloc.free(url);
@@ -152,7 +174,7 @@ pub const Chat = struct {
         const self: *Chat = @ptrCast(@alignCast(ctx));
         const body = try buildRequest(alloc, self, params, true, false);
         defer alloc.free(body);
-        const headers = try self.authHeaders(alloc, params.headers);
+        const headers = try self.authHeaders(alloc, params.headers, params.cache_key);
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/responses", .{self.base_url});
         defer alloc.free(url);
@@ -683,6 +705,7 @@ test "function continuation and structured output request" {
         .base_url = "",
         .extra_headers = &.{},
         .rate_limit = 0,
+        .session_key_header = "",
     };
     const messages = [_]types.Message{
         .{ .role = .assistant, .content = &.{types.Part.toolCallPart("call_1", "weather", "{\"city\":\"Paris\"}")} },
@@ -703,7 +726,7 @@ test "function continuation and structured output request" {
 }
 
 test "compact requests omit response streaming fields" {
-    var chat = Chat{ .model_id = "gpt-test", .api_key = "", .base_url = "", .extra_headers = &.{}, .rate_limit = 0 };
+    var chat = Chat{ .model_id = "gpt-test", .api_key = "", .base_url = "", .extra_headers = &.{}, .rate_limit = 0, .session_key_header = "" };
     const body = try buildRequest(std.testing.allocator, &chat, .{}, false, true);
     defer std.testing.allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\"") == null);
@@ -731,6 +754,7 @@ test "canonical output items roundtrip" {
         .base_url = "",
         .extra_headers = &.{},
         .rate_limit = 0,
+        .session_key_header = "",
     };
     const messages = [_]types.Message{.{ .role = .assistant, .content = result.provider_parts }};
     const request = try buildRequest(std.testing.allocator, &chat, .{ .messages = &messages }, false, false);
@@ -771,7 +795,7 @@ test "request and stream filter invalid function calls" {
             types.Part.toolResultPart("call_ok", "read", "ok"),
         } },
     };
-    var chat = Chat{ .model_id = "gpt-test", .api_key = "", .base_url = "", .extra_headers = &.{}, .rate_limit = 0 };
+    var chat = Chat{ .model_id = "gpt-test", .api_key = "", .base_url = "", .extra_headers = &.{}, .rate_limit = 0, .session_key_header = "" };
     const request = try buildRequest(std.testing.allocator, &chat, .{ .messages = &messages }, false, false);
     defer std.testing.allocator.free(request);
     try std.testing.expect(std.mem.indexOf(u8, request, "call_ok") != null);

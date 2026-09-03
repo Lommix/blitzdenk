@@ -307,6 +307,7 @@ pub fn buildAgentApiConfig(
             .reasoning_effort = ag_cfg.effort,
             .rate_limit = provider.rate_limit,
             .replay_reasoning = model.replay_reasoning,
+            .session_key_header = provider.getSessionKeyHeader(),
         } };
     }
 

@@ -46,6 +46,7 @@ local novita = blitz.add_provider({
     url = "https://api.novita.ai/openai/v1",
     key_envar = "NOVITA_API_KEY",
     max_tokens = 32000,
+    session_key_header = "x-session-id",
 })
 
 local deepseek = blitz.add_model({

@@ -30,6 +30,7 @@ pub const CatalogEntry = struct {
     key_step: bool = true,
     url_step: bool = false,
     free_text_model_only: bool = false,
+    session_key_header: []const u8 = "",
     models: []const CatalogModel = &.{},
 };
 
@@ -67,6 +68,7 @@ pub const catalog = [_]CatalogEntry{
         .provider_type = "openai",
         .default_url = "https://openrouter.ai/api/v1",
         .key_envar = "OPENROUTER_API_KEY",
+        .session_key_header = "x-session-id",
         .models = &.{},
     },
     .{
@@ -90,10 +92,21 @@ pub const catalog = [_]CatalogEntry{
         },
     },
     .{
+        .name = "xAI",
+        .provider_type = "response",
+        .default_url = "https://api.x.ai/v1",
+        .key_envar = "XAI_API_KEY",
+        .session_key_header = "x-grok-conv-id",
+        .models = &.{
+            .{ .name = "grok-4.6", .vision = true, .replay_reasoning = true },
+        },
+    },
+    .{
         .name = "opencode go",
         .provider_type = "openai",
         .default_url = "https://opencode.ai/zen/go/v1",
         .key_envar = "OPENCODE_API_KEY",
+        .session_key_header = "x-opencode-session",
         .models = &.{
             .{ .name = "glm-5.3-flash", .vision = true, .replay_reasoning = true },
             .{ .name = "deepseek-v4-flash-vision-exp", .vision = true, .replay_reasoning = true },
@@ -286,6 +299,7 @@ pub const Wizard = struct {
             .model = w.model_buf[0..w.model_len],
             .vision = if (w.vision_override) |v| v else model.vision,
             .replay_reasoning = model.replay_reasoning,
+            .session_key_header = entry.session_key_header,
         };
     }
 };
@@ -298,6 +312,7 @@ pub const Selection = struct {
     model: []const u8,
     vision: bool,
     replay_reasoning: bool = false,
+    session_key_header: []const u8 = "",
 };
 
 pub fn nextStep(current: Step, entry: CatalogEntry, model: []const u8) Step {
@@ -339,6 +354,7 @@ pub fn renderProviderLua(allocator: std.mem.Allocator, selection: Selection) ![]
     if (!freeTextFieldIsSafe(selection.model)) return error.WizardTextUnsafe;
     if (!freeTextFieldIsSafe(selection.url)) return error.WizardTextUnsafe;
     if (!freeTextFieldIsSafe(selection.key)) return error.WizardTextUnsafe;
+    if (!freeTextFieldIsSafe(selection.session_key_header)) return error.WizardTextUnsafe;
     var out = std.Io.Writer.Allocating.init(allocator);
     defer out.deinit();
     const w = &out.writer;
@@ -348,6 +364,11 @@ pub fn renderProviderLua(allocator: std.mem.Allocator, selection: Selection) ![]
     try w.writeAll("\",\n\turl = \"");
     try w.writeAll(selection.url);
     try w.writeAll("\",\n");
+    if (selection.session_key_header.len > 0) {
+        try w.writeAll("\tsession_key_header = \"");
+        try w.writeAll(selection.session_key_header);
+        try w.writeAll("\",\n");
+    }
     if (selection.entry.key_envar.len > 0) {
         try w.writeAll("\t--key_envar = \"");
         try w.writeAll(selection.entry.key_envar);
@@ -380,6 +401,7 @@ pub fn skipProviderLua(allocator: std.mem.Allocator) ![]u8 {
         .model = SKIP_MODEL,
         .vision = true,
         .replay_reasoning = true,
+        .session_key_header = "x-opencode-session",
     });
 }
 
@@ -577,6 +599,60 @@ test "renderProviderLua anthropic with key and curated model" {
     try std.testing.expectEqualStrings(expected, rendered);
 }
 
+test "renderProviderLua omits session_key_header for direct providers" {
+    const rendered = try renderProviderLua(std.testing.allocator, .{
+        .entry = catalog[0],
+        .provider_type = catalog[0].provider_type,
+        .url = catalog[0].default_url,
+        .key = "sk-ant-secret",
+        .model = catalog[0].models[0].name,
+        .vision = true,
+    });
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "session_key_header") == null);
+}
+
+test "renderProviderLua emits gateway session headers" {
+    const openrouter = catalog[catalogIndex("OpenRouter")];
+    const router_rendered = try renderProviderLua(std.testing.allocator, .{
+        .entry = openrouter,
+        .provider_type = openrouter.provider_type,
+        .url = openrouter.default_url,
+        .key = "",
+        .model = "any-model",
+        .vision = false,
+        .session_key_header = openrouter.session_key_header,
+    });
+    defer std.testing.allocator.free(router_rendered);
+    try std.testing.expect(std.mem.indexOf(u8, router_rendered, "\tsession_key_header = \"x-session-id\",\n") != null);
+
+    const go = catalog[catalogIndex("opencode go")];
+    const go_rendered = try renderProviderLua(std.testing.allocator, .{
+        .entry = go,
+        .provider_type = go.provider_type,
+        .url = go.default_url,
+        .key = "",
+        .model = go.models[0].name,
+        .vision = true,
+        .session_key_header = go.session_key_header,
+    });
+    defer std.testing.allocator.free(go_rendered);
+    try std.testing.expect(std.mem.indexOf(u8, go_rendered, "\tsession_key_header = \"x-opencode-session\",\n") != null);
+
+    const xai = catalog[catalogIndex("xAI")];
+    const xai_rendered = try renderProviderLua(std.testing.allocator, .{
+        .entry = xai,
+        .provider_type = xai.provider_type,
+        .url = xai.default_url,
+        .key = "",
+        .model = "grok-4.6",
+        .vision = true,
+        .session_key_header = xai.session_key_header,
+    });
+    defer std.testing.allocator.free(xai_rendered);
+    try std.testing.expect(std.mem.indexOf(u8, xai_rendered, "\tsession_key_header = \"x-grok-conv-id\",\n") != null);
+}
+
 test "renderProviderLua ollama omits key lines and keeps url" {
     const ollama_idx = catalogIndex("Ollama");
     const rendered = try renderProviderLua(std.testing.allocator, .{
@@ -656,6 +732,7 @@ test "skip writer creates the default combo" {
 
     try std.testing.expect(std.mem.indexOf(u8, contents, "\ttype = \"openai\",\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\turl = \"https://opencode.ai/zen/go/v1\",\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\tsession_key_header = \"x-opencode-session\",\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\t--key_envar = \"OPENCODE_API_KEY\",\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\tkey = ") == null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\tname = \"deepseek-v4-flash-vision-exp\",\n") != null);

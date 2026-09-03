@@ -20,6 +20,8 @@ pub const Provider = struct {
     provider_config: models.ProviderOptions = .{ .openai = .{} },
     thinking_type_buf: [16]u8 = undefined,
     thinking_type_len: usize = 0,
+    session_key_header_buf: [128]u8 = undefined,
+    session_key_header_len: usize = 0,
     rate_limit: u32 = 0,
     active: bool = false,
 
@@ -52,6 +54,17 @@ pub const Provider = struct {
 
     pub fn getThinkingType(self: *const Provider) []const u8 {
         return self.thinking_type_buf[0..self.thinking_type_len];
+    }
+
+    pub fn setSessionKeyHeader(self: *Provider, value: []const u8) bool {
+        if (value.len > self.session_key_header_buf.len) return false;
+        @memcpy(self.session_key_header_buf[0..value.len], value);
+        self.session_key_header_len = value.len;
+        return true;
+    }
+
+    pub fn getSessionKeyHeader(self: *const Provider) []const u8 {
+        return self.session_key_header_buf[0..self.session_key_header_len];
     }
 };
 

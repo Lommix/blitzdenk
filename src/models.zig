@@ -75,6 +75,7 @@ pub const Config = struct {
     reasoning_effort: ?ReasoningEffort = null,
     rate_limit: u32 = 0,
     replay_reasoning: bool = false,
+    session_key_header: []const u8 = "",
     provider: ProviderOptions,
 };
 
@@ -91,22 +92,26 @@ pub const Model = union(Kind) {
                 .base_url = config.base_url,
                 .rate_limit = config.rate_limit,
                 .replay_reasoning = config.replay_reasoning,
+                .session_key_header = config.session_key_header,
             }) },
             .openai => .{ .openai = try sdk.openai.Chat.init(alloc, config.model, .{
                 .api_key = config.api_key,
                 .base_url = config.base_url,
                 .rate_limit = config.rate_limit,
                 .replay_reasoning = config.replay_reasoning,
+                .session_key_header = config.session_key_header,
             }) },
             .response => .{ .response = try sdk.responses.Chat.init(alloc, config.model, .{
                 .api_key = config.api_key,
                 .base_url = config.base_url,
                 .rate_limit = config.rate_limit,
+                .session_key_header = config.session_key_header,
             }) },
             .anthropic => .{ .anthropic = try sdk.anthropic.Chat.init(alloc, config.model, .{
                 .api_key = config.api_key,
                 .base_url = config.base_url,
                 .rate_limit = config.rate_limit,
+                .session_key_header = config.session_key_header,
             }) },
         };
     }
@@ -125,6 +130,7 @@ pub const Model = union(Kind) {
                 .headers = chat.extra_headers,
                 .rate_limit = chat.rate_limit,
                 .replay_reasoning = chat.replay_reasoning,
+                .session_key_header = chat.session_key_header,
             }) },
             .openai => |chat| .{ .openai = try sdk.openai.Chat.init(alloc, chat.model_id, .{
                 .api_key = chat.api_key,
@@ -132,18 +138,21 @@ pub const Model = union(Kind) {
                 .headers = chat.extra_headers,
                 .rate_limit = chat.rate_limit,
                 .replay_reasoning = chat.replay_reasoning,
+                .session_key_header = chat.session_key_header,
             }) },
             .response => |chat| .{ .response = try sdk.responses.Chat.init(alloc, chat.model_id, .{
                 .api_key = chat.api_key,
                 .base_url = chat.base_url,
                 .headers = chat.extra_headers,
                 .rate_limit = chat.rate_limit,
+                .session_key_header = chat.session_key_header,
             }) },
             .anthropic => |chat| .{ .anthropic = try sdk.anthropic.Chat.init(alloc, chat.model_id, .{
                 .api_key = chat.api_key,
                 .base_url = chat.base_url,
                 .headers = chat.extra_headers,
                 .rate_limit = chat.rate_limit,
+                .session_key_header = chat.session_key_header,
             }) },
         };
     }
