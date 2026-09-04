@@ -2532,6 +2532,34 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
             }).lua_fn, "agent.close"),
         } },
     },
+    .{
+        .name = "get_model",
+        .desc = "Return the model id the live agent currently runs on. Stays truthful while the agent type definition changes mid run.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &LuaString,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
+                    const agent = a.registry.get(agent_id) orelse return error.AgentNotFound;
+                    return agent.model.languageModel().modelId();
+                }
+            }).lua_fn, "agent.get_model"),
+        } },
+    },
+    .{
+        .name = "get_effort",
+        .desc = "Return the reasoning effort of the live agent as a tag string. Stays truthful while the agent type definition changes mid run.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &LuaString,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
+                    const agent = a.registry.get(agent_id) orelse return error.AgentNotFound;
+                    return @tagName(agent.reasoning_effort);
+                }
+            }).lua_fn, "agent.get_effort"),
+        } },
+    },
 } } };
 
 // ── Lua Tool Registry (per-VM, reached via registry lookup) ─────────
@@ -5522,4 +5550,107 @@ test "list_agents snapshots occupied slots" {
     , .{id.pack()});
     defer std.testing.allocator.free(script);
     try vm.exec(script);
+}
+
+test "agent.get_model and get_effort read the live agent" {
+    var app_state = permissionTestApp();
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app_state.registry = &registry;
+
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model-a",
+        .base_url = "https://example.com/v1",
+        .reasoning_effort = .low,
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{
+        .name = "scout",
+        .task_description = "probe",
+        .cwd = "/tmp",
+    } });
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    const script = try std.fmt.allocPrint(std.testing.allocator,
+        \\local id = {d}
+        \\assert(blitz.agent.get_model(id) == "model-a")
+        \\assert(blitz.agent.get_effort(id) == "low")
+        \\local ok = pcall(blitz.agent.get_model, id + 9999)
+        \\assert(not ok)
+    , .{id.pack()});
+    defer std.testing.allocator.free(script);
+    try vm.exec(script);
+
+    try agent.updateModel(.{
+        .api_key = "key",
+        .model = "model-b",
+        .base_url = "https://example.com/v1",
+        .reasoning_effort = .max,
+        .provider = .{ .openai = .{} },
+    });
+
+    const script_after = try std.fmt.allocPrint(std.testing.allocator,
+        \\local id = {d}
+        \\assert(blitz.agent.get_model(id) == "model-b")
+        \\assert(blitz.agent.get_effort(id) == "max")
+    , .{id.pack()});
+    defer std.testing.allocator.free(script_after);
+    try vm.exec(script_after);
+}
+
+test "agent.get_model and get_effort stay truthful while a run parks a swap" {
+    var app_state = permissionTestApp();
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app_state.registry = &registry;
+
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model-a",
+        .base_url = "https://example.com/v1",
+        .reasoning_effort = .low,
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{
+        .name = "scout",
+        .task_description = "probe",
+        .cwd = "/tmp",
+    } });
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    agent.compact_task = r.compact.Task.init(std.testing.allocator, std.testing.io, &agent.model, &.{}, &.{}, false);
+    try agent.updateModel(.{
+        .api_key = "key",
+        .model = "model-b",
+        .base_url = "https://example.com/v1",
+        .reasoning_effort = .max,
+        .provider = .{ .openai = .{} },
+    });
+
+    const script = try std.fmt.allocPrint(std.testing.allocator,
+        \\local id = {d}
+        \\assert(blitz.agent.get_model(id) == "model-a")
+        \\assert(blitz.agent.get_effort(id) == "low")
+    , .{id.pack()});
+    defer std.testing.allocator.free(script);
+    try vm.exec(script);
+
+    agent.compact_task.?.deinit();
+    agent.compact_task = null;
+    agent.applyPendingModel();
+
+    const script_after = try std.fmt.allocPrint(std.testing.allocator,
+        \\local id = {d}
+        \\assert(blitz.agent.get_model(id) == "model-b")
+        \\assert(blitz.agent.get_effort(id) == "max")
+    , .{id.pack()});
+    defer std.testing.allocator.free(script_after);
+    try vm.exec(script_after);
 }

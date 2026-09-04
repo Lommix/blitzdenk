@@ -95,6 +95,10 @@
 ---@field cancel fun(agent_id: integer): string
 ---Cancel a finished or running agent and free its slot. History stays rendered. Returns 'Success' or 'Not Found'.
 ---@field close fun(agent_id: integer): string
+---Return the model id the live agent currently runs on. Stays truthful while the agent type definition changes mid run.
+---@field get_model fun(agent_id: integer): string
+---Return the reasoning effort of the live agent as a tag string. Stays truthful while the agent type definition changes mid run.
+---@field get_effort fun(agent_id: integer): string
 
 ---@class BlitzCmp
 ---Select the next completion row, like <Tab>. No-op when the popup is closed.

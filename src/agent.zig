@@ -61,6 +61,8 @@ pub const Agent = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
     model: models.Model,
+    reasoning_effort: models.ReasoningEffort = .medium,
+    pending_effort: ?models.ReasoningEffort = null,
     metadata: std.heap.ArenaAllocator,
     tool_arena: std.heap.ArenaAllocator,
     error_arena: std.heap.ArenaAllocator,
@@ -114,7 +116,9 @@ pub const Agent = struct {
     pub fn init(alloc: std.mem.Allocator, io: std.Io, config: models.Config, options: InitOptions) !Agent {
         var model = try models.Model.init(alloc, config);
         errdefer model.deinit(alloc);
-        return initModel(alloc, io, model, options);
+        var agent = try initModel(alloc, io, model, options);
+        agent.reasoning_effort = config.reasoning_effort orelse agent.reasoning_effort;
+        return agent;
     }
 
     fn initModel(alloc: std.mem.Allocator, io: std.Io, model: models.Model, options: InitOptions) !Agent {
@@ -157,6 +161,7 @@ pub const Agent = struct {
             },
             .context_limit = self.context_limit,
         });
+        child.reasoning_effort = self.pending_effort orelse self.reasoning_effort;
         errdefer child.deinit();
         try child.setSystemPrompt(self.system_prompt);
         var prior_messages = self.history();
@@ -223,11 +228,14 @@ pub const Agent = struct {
 
     pub fn updateModel(self: *Agent, config: models.Config) !void {
         const replacement = try models.Model.init(self.alloc, config);
+        const effort = config.reasoning_effort orelse self.reasoning_effort;
         if (self.task != null or self.compact_task != null) {
             if (self.pending_model) |*stale| stale.deinit(self.alloc);
             self.pending_model = replacement;
+            self.pending_effort = effort;
             return;
         }
+        self.reasoning_effort = effort;
         self.installModel(replacement);
     }
 
@@ -242,6 +250,8 @@ pub const Agent = struct {
         if (self.task != null or self.compact_task != null) return;
         self.installModel(self.pending_model.?);
         self.pending_model = null;
+        if (self.pending_effort) |effort| self.reasoning_effort = effort;
+        self.pending_effort = null;
     }
 
     pub fn history(self: *const Agent) []const sdk.Message {
@@ -817,17 +827,21 @@ test "forced model update swaps idle agents and defers busy agents" {
         .api_key = "key",
         .model = "model-a",
         .base_url = "https://example.com/v1",
+        .reasoning_effort = .low,
         .provider = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
+    try std.testing.expectEqual(models.ReasoningEffort.low, agent.reasoning_effort);
 
     try agent.updateModel(.{
         .api_key = "key",
         .model = "model-b",
         .base_url = "https://example.com/v1",
+        .reasoning_effort = .medium,
         .provider = .{ .openai = .{} },
     });
     try std.testing.expectEqualStrings("model-b", agent.model.languageModel().modelId());
+    try std.testing.expectEqual(models.ReasoningEffort.medium, agent.reasoning_effort);
     try std.testing.expect(agent.pending_model == null);
 
     var fixture: u8 = 0;
@@ -837,9 +851,12 @@ test "forced model update swaps idle agents and defers busy agents" {
         .api_key = "key",
         .model = "model-c",
         .base_url = "https://example.com/v1",
+        .reasoning_effort = .max,
         .provider = .{ .openai = .{} },
     });
     try std.testing.expectEqualStrings("model-b", agent.model.languageModel().modelId());
+    try std.testing.expectEqual(models.ReasoningEffort.medium, agent.reasoning_effort);
+    try std.testing.expectEqual(models.ReasoningEffort.max, agent.pending_effort.?);
     try std.testing.expect(agent.pending_model != null);
 
     Fixture.release.store(true, .release);
@@ -847,7 +864,9 @@ test "forced model update swaps idle agents and defers busy agents" {
     while (agent.drain(2, &agent, Fixture.collect) != 0) {}
     try std.testing.expect(agent.reap());
     try std.testing.expectEqualStrings("model-c", agent.model.languageModel().modelId());
+    try std.testing.expectEqual(models.ReasoningEffort.max, agent.reasoning_effort);
     try std.testing.expect(agent.pending_model == null);
+    try std.testing.expect(agent.pending_effort == null);
     try std.testing.expect(agent.run_model == null);
 }
 
@@ -856,6 +875,7 @@ test "fork adopts a parked model update" {
         .api_key = "key",
         .model = "model-a",
         .base_url = "https://example.com/v1",
+        .reasoning_effort = .low,
         .provider = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
@@ -865,10 +885,12 @@ test "fork adopts a parked model update" {
         .base_url = "https://example.com/v1",
         .provider = .{ .openai = .{} },
     });
+    agent.pending_effort = .high;
 
     var child = try agent.fork(7);
     defer child.deinit();
     try std.testing.expectEqualStrings("model-b", child.model.languageModel().modelId());
+    try std.testing.expectEqual(models.ReasoningEffort.high, child.reasoning_effort);
 }
 
 test "prepare step merges queued messages and reminder" {

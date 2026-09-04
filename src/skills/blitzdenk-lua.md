@@ -197,6 +197,14 @@ for _, a in ipairs(agents) do
 end
 ```
 
+`blitz.agent.get_model(agent_id)` returns the model id the live agent runs on
+right now, `blitz.agent.get_effort(agent_id)` its reasoning effort tag. A
+`set_agent_model`/`set_agent_effort` with `force = true` rewrites the type
+definition and queues the swap on live agents of that type: idle agents adopt
+at once, a running agent keeps pumping data on its previous binding until the
+run ends. Type getters and the render can go stale mid run; the live read
+never does. Unknown agent ids raise an error.
+
 ## Commands
 
 ```lua
