@@ -1138,7 +1138,17 @@ pub fn run(
                                 .text => {
                                     _ = app.closeCompletion();
                                     if (app.input_buffer.items.len == 0) break;
-                                    const input = std.fmt.allocPrint(app.sessionAlloc(), "{f}", .{std.unicode.fmtUtf8(app.inputSlice())}) catch break;
+                                    var input: []const u8 = std.fmt.allocPrint(app.sessionAlloc(), "{f}", .{std.unicode.fmtUtf8(app.inputSlice())}) catch break;
+                                    if (app.lua_vm.vm_mu.tryLock()) {
+                                        defer app.lua_vm.vm_mu.unlock(io);
+                                        if (app.lua_vm.runPromptHook(app.sessionAlloc(), input)) |transformed| {
+                                            input = std.fmt.allocPrint(app.sessionAlloc(), "{f}", .{std.unicode.fmtUtf8(transformed)}) catch break;
+                                        }
+                                    } else break;
+                                    if (input.len == 0) {
+                                        app.setInput("");
+                                        break;
+                                    }
                                     var send_text: []const u8 = input;
                                     var chat_text: []const u8 = input;
 

@@ -108,6 +108,21 @@
 ---Insert the selected completion, like <C-y>. No-op when the popup is closed.
 ---@field accept fun()
 
+---@class BlitzInput
+---Return the raw text of the input box. Reads the live buffer, so it
+---runs on the main thread only: config, commands, keybinds, and the
+---prompt hook. Tool and listener VMs and off-thread hooks such as
+---inject error. A pasted image shows as its embedded URL.
+---@field get fun(): string
+---Replace the input box text. The cursor moves to the end and the
+---completion popup re-syncs. The change is queued and lands on the next
+---main-loop pass. Safe from config, commands, tools, and listeners.
+---@field set fun(text: string)
+---Insert text at the input cursor, like typed input. The change is
+---queued and lands on the next main-loop pass. Safe from config,
+---commands, tools, and listeners.
+---@field append fun(text: string)
+
 ---@class BlitzWidgetBuf
 ---visible widget width in cells, shrinks when clipped
 ---@field width integer
@@ -276,13 +291,19 @@
 ---nil for nothing. Last registration wins. Never call
 ---blitz.agent.await inside the hook.
 ---@field inject fun(hook: fun(agent_id: integer): string)
+---Install the typed-input hook. Runs on every Enter press with
+---text, in the main Lua VM on the main thread, before command
+---and skill dispatch. Return a string to replace the input, nil
+---to send it unchanged. Last registration wins. Never call
+---blitz.agent.await inside the hook.
+---@field prompt fun(hook: fun(text: string): string)
 ---Install the permission hook. Runs on every tool approval request
 ---before the approval-mode check, in the main Lua VM on the main
 ---thread. Return a BlitzPermissionDecision table, or nil for the
 ---normal flow. Last registration wins. Never call
 ---blitz.agent.await inside the hook.
 ---@field approve fun(hook: fun(payload: BlitzPermissionPayload): BlitzPermissionDecision)
----Remove the approve and inject hooks.
+---Remove the approve, inject, and prompt hooks.
 ---@field clear fun()
 
 ---@class BlitzPermissions
@@ -452,6 +473,7 @@
 ---@field cmd BlitzCmd
 ---@field agent BlitzAgent
 ---@field cmp BlitzCmp
+---@field input BlitzInput
 ---@field draw BlitzDraw
 ---@field tools BlitzToolDef
 ---@field hooks BlitzHooks

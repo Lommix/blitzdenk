@@ -462,6 +462,7 @@ pub const Blitz = LuaType{
             .{ .name = "cmd", .ty = BlitzCmd },
             .{ .name = "agent", .ty = BlitzAgent },
             .{ .name = "cmp", .ty = BlitzCmp },
+            .{ .name = "input", .ty = BlitzInput },
             .{ .name = "draw", .ty = BlitzDraw },
             .{ .name = "tools", .ty = BlitzToolDef },
             .{ .name = "hooks", .ty = BlitzHooks },
@@ -1418,6 +1419,31 @@ pub const BlitzHooks = LuaType{
                 } },
             },
             .{
+                .name = "prompt",
+                .desc =
+                \\Install the typed-input hook. Runs on every Enter press with
+                \\text, in the main Lua VM on the main thread, before command
+                \\and skill dispatch. Return a string to replace the input, nil
+                \\to send it unchanged. Last registration wins. Never call
+                \\blitz.agent.await inside the hook.
+                ,
+                .ty = LuaType{ .function = .{
+                    .args = &.{.{ .name = "hook", .ty = LuaType{ .function = .{
+                        .args = &.{.{ .name = "text", .ty = LuaType.string }},
+                        .ret = &LuaString,
+                    } } }},
+                    .fn_ptr = LuaFnBind((struct {
+                        fn t(state: *c.lua_State, a: *r.app.App, hook: LuaFnRef) !void {
+                            _ = a;
+                            if (try isToolVm(state)) return;
+                            const vm = fromState(state) orelse return error.NoLuaVm;
+                            if (vm.prompt_hook != c.LUA_NOREF) c.luaL_unref(state, c.LUA_REGISTRYINDEX, vm.prompt_hook);
+                            vm.prompt_hook = hook.idx;
+                        }
+                    }).t, "prompt"),
+                } },
+            },
+            .{
                 .name = "approve",
                 .desc =
                 \\Install the permission hook. Runs on every tool approval request
@@ -1443,7 +1469,7 @@ pub const BlitzHooks = LuaType{
             },
             .{
                 .name = "clear",
-                .desc = "Remove the approve and inject hooks.",
+                .desc = "Remove the approve, inject, and prompt hooks.",
                 .ty = LuaType{ .function = .{
                     .args = &.{},
                     .fn_ptr = LuaFnBind((struct {
@@ -1453,6 +1479,7 @@ pub const BlitzHooks = LuaType{
                             const vm = fromState(state) orelse return error.NoLuaVm;
                             vm.permission_hook = c.LUA_NOREF;
                             vm.inject_fn = c.LUA_NOREF;
+                            vm.prompt_hook = c.LUA_NOREF;
                         }
                     }).t, "clear"),
                 } },
@@ -1974,6 +2001,77 @@ const BlitzCmp = LuaType{ .table_def = .{ .name = "BlitzCmp", .fields = &.{
                     try a.cmd_queue.append(a.io, .completion_accept);
                 }
             }).lua_fn, "cmp.accept"),
+        } },
+    },
+} } };
+
+fn luaInputGet(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const a = getAppFromRegistry(state) orelse {
+        _ = c.luaL_error(state, "input.get: app not initialized");
+        return 0;
+    };
+    const vm = fromState(state) orelse {
+        _ = c.luaL_error(state, "input.get: no active lua vm");
+        return 0;
+    };
+    if (vm.is_tool_vm) {
+        _ = c.luaL_error(state, "input.get: not available in tool vms");
+        return 0;
+    }
+    if (vm.main_thread_id != 0 and std.Thread.getCurrentId() != vm.main_thread_id) {
+        _ = c.luaL_error(state, "input.get: only available on the main thread");
+        return 0;
+    }
+    _ = c.lua_pushlstring(state, a.input_buffer.items.ptr, a.input_buffer.items.len);
+    return 1;
+}
+
+const BlitzInput = LuaType{ .table_def = .{ .name = "BlitzInput", .fields = &.{
+    .{
+        .name = "get",
+        .desc =
+        \\Return the raw text of the input box. Reads the live buffer, so it
+        \\runs on the main thread only: config, commands, keybinds, and the
+        \\prompt hook. Tool and listener VMs and off-thread hooks such as
+        \\inject error. A pasted image shows as its embedded URL.
+        ,
+        .ty = LuaType{ .function = .{
+            .args = &.{},
+            .ret = &LuaString,
+            .fn_ptr = &luaInputGet,
+        } },
+    },
+    .{
+        .name = "set",
+        .desc =
+        \\Replace the input box text. The cursor moves to the end and the
+        \\completion popup re-syncs. The change is queued and lands on the next
+        \\main-loop pass. Safe from config, commands, tools, and listeners.
+        ,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "text", .ty = LuaType.string }},
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, text: []const u8) !void {
+                    try a.cmd_queue.append(a.io, .{ .input_set = text });
+                }
+            }).lua_fn, "input.set"),
+        } },
+    },
+    .{
+        .name = "append",
+        .desc =
+        \\Insert text at the input cursor, like typed input. The change is
+        \\queued and lands on the next main-loop pass. Safe from config,
+        \\commands, tools, and listeners.
+        ,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "text", .ty = LuaType.string }},
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App, text: []const u8) !void {
+                    try a.cmd_queue.append(a.io, .{ .input_append = text });
+                }
+            }).lua_fn, "input.append"),
         } },
     },
 } } };
@@ -3108,6 +3206,7 @@ pub const LuaVm = struct {
     /// blitz.hooks.approve() slot. One handler, last registration wins.
     permission_hook: c_int = c.LUA_NOREF,
     inject_fn: c_int = c.LUA_NOREF,
+    prompt_hook: c_int = c.LUA_NOREF,
 
     pub fn init(parent: Allocator) !*LuaVm {
         return create(parent, false);
@@ -3250,6 +3349,7 @@ pub const LuaVm = struct {
         self.stdout_buf.clearRetainingCapacity();
         self.permission_hook = c.LUA_NOREF;
         self.inject_fn = c.LUA_NOREF;
+        self.prompt_hook = c.LUA_NOREF;
         if (self.app) |a| {
             a.config.reset();
             a.default_context_limit = app.CONTEXT_LIMIT;
@@ -3682,6 +3782,31 @@ pub const LuaVm = struct {
         const status = c.lua_pcallk(L, 2, 0, 0, 0, null);
         if (status != 0) self.popError(.action);
         c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
+    }
+
+    /// Call blitz.hooks.prompt hook on typed input. Caller must hold vm_mu.
+    /// Returns a replacement string duped into `alloc`, or null to keep the
+    /// input unchanged.
+    pub fn runPromptHook(self: *LuaVm, alloc: Allocator, text: []const u8) ?[]const u8 {
+        if (self.prompt_hook == c.LUA_NOREF) return null;
+        const L = self.L;
+        const top = c.lua_gettop(L);
+        defer c.lua_settop(L, top);
+
+        _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, self.prompt_hook);
+        if (c.lua_type(L, -1) != c.LUA_TFUNCTION) return null;
+        _ = c.lua_pushlstring(L, text.ptr, text.len);
+
+        const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
+        if (status != 0) {
+            self.popError(.action);
+            hookLog(.err, "prompt hook error: {s}", .{self.getLastError()});
+            return null;
+        }
+        if (c.lua_type(L, -1) != c.LUA_TSTRING) return null;
+        var len: usize = 0;
+        const ptr = c.lua_tolstring(L, -1, &len) orelse return null;
+        return alloc.dupe(u8, ptr[0..len]) catch null;
     }
 
     pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, cancel_token: ?*r.sdk.CancellationToken) void {
@@ -5252,6 +5377,76 @@ test "permission hook approve deny and nil fallback" {
         .payload = .{ .call = .{ .description = "search" } },
     };
     try std.testing.expect(vm.permissionHookDecision(&other_req) == null);
+}
+
+test "prompt hook transforms typed input" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.hooks.prompt(function(text)
+        \\  if text == "hi" then return "hello " .. text end
+        \\  return nil
+        \\end)
+    );
+
+    const replaced = vm.runPromptHook(std.testing.allocator, "hi") orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    defer std.testing.allocator.free(replaced);
+    try std.testing.expectEqualStrings("hello hi", replaced);
+    try std.testing.expect(vm.runPromptHook(std.testing.allocator, "other") == null);
+}
+
+test "input bindings queue set append and read buffer" {
+    var app_state = permissionTestApp();
+    app_state.input_buffer = .empty;
+    app_state.cmd_queue = try r.cmd.CommandQueue.init(std.testing.allocator);
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try app_state.input_buffer.appendSlice(std.testing.allocator, "hello");
+    try vm.exec(
+        \\assert(blitz.input.get() == "hello")
+        \\blitz.input.set("new text")
+        \\blitz.input.append(" more")
+        \\assert(blitz.input.get() == "hello")
+    );
+
+    app_state.cmd_queue.arena.deinit();
+    app_state.input_buffer.deinit(std.testing.allocator);
+}
+
+test "input get rejects tool vms" {
+    var app_state = permissionTestApp();
+    app_state.input_buffer = .empty;
+    app_state.cmd_queue = try r.cmd.CommandQueue.init(std.testing.allocator);
+    const vm = try LuaVm.initTool(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    if (vm.exec("blitz.input.get()")) |_| {
+        return error.TestUnexpectedSuccess;
+    } else |_| {}
+
+    app_state.cmd_queue.arena.deinit();
+}
+
+test "hooks clear removes prompt hook" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.hooks.prompt(function(text) return text .. "!" end)
+        \\blitz.hooks.clear()
+    );
+    try std.testing.expect(vm.runPromptHook(std.testing.allocator, "hi") == null);
 }
 
 test "permission hook sees ask options and numeric choice" {

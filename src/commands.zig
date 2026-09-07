@@ -70,6 +70,8 @@ pub const Command = union(enum) {
     completion_next,
     completion_prev,
     completion_accept,
+    input_set: []const u8,
+    input_append: []const u8,
     cd: []const u8,
     compact,
     reload_mcp,
@@ -195,6 +197,8 @@ pub const Command = union(enum) {
             .completion_next => app.handleCompletion(.next),
             .completion_prev => app.handleCompletion(.prev),
             .completion_accept => app.handleCompletion(.accept),
+            .input_set => |text| app.setInput(text),
+            .input_append => |text| app.appendBytes(text),
             .queue_agent_message => |arg| {
                 const parts = try r.util.deepClone(@TypeOf(arg.parts), arg.parts, alloc);
                 const chat_entry = if (arg.chat_entry) |en| try r.util.deepClone(ChatEntry, en, alloc) else null;

@@ -1626,6 +1626,14 @@ pub const App = struct {
         return self.lua_vm.permissionHookDecision(perm);
     }
 
+    pub fn setInput(self: *App, text: []const u8) void {
+        self.input_buffer.clearRetainingCapacity();
+        self.input_buffer.appendSlice(self.sessionAlloc(), text) catch return;
+        self.input_cursor = @intCast(self.input_buffer.items.len);
+        self.input_scroll_offset = 0;
+        self.syncCompletion();
+    }
+
     pub fn appendBytes(self: *App, bytes: []const u8) void {
         if (self.input_cursor > self.input_buffer.items.len) {
             self.input_cursor = @intCast(self.input_buffer.items.len);

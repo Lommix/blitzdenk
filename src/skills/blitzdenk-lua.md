@@ -288,6 +288,32 @@ The completion popup answers to `blitz.cmp.next`, `blitz.cmp.prev`, and
 `<Tab>`/`<C-n>`, `<C-p>`, and `<C-y>`; a call is a no-op when the popup is
 closed. A custom `blitz.bind` on the same key wins over the default.
 
+## Input box
+
+`blitz.input` reads and writes the text input box.
+
+```lua
+blitz.bind("<C-g>", function()
+    blitz.input.set("TODO: ")
+end, "start a todo line")
+
+blitz.bind("<C-e>", function()
+    local t = blitz.input.get()
+    blitz.input.set(t .. "\n-- checked by me")
+end, "sign the input")
+```
+
+- `get()` returns the raw buffer text. A pasted image shows as its embedded
+  URL. It only runs on the main thread: config, commands, keybinds, and the
+  prompt hook. Tool VMs, listener VMs, and off-thread hooks such as inject
+  raise an error.
+- `set(text)` replaces the text. The cursor moves to the end.
+- `append(text)` inserts text at the cursor, like typed input.
+- `set` and `append` queue a command. The change lands on the next main-loop
+  pass. They are safe from config, commands, tools, and listeners.
+- Combine with the prompt hook: `blitz.hooks.prompt` rewrites the text on
+  Enter. `blitz.input` changes the box before Enter.
+
 ## Hooks
 
 Each event is one registration function under `blitz.hooks`. Calling it adds
@@ -329,6 +355,27 @@ Every payload is one table with the fields shown in `meta.lua` (`BlitzAgentEvent
 `BlitzAgentStartedEvent`, `BlitzAgentCreatedEvent`, `BlitzAgentFailedEvent`, `BlitzUserMessageEvent`);
 `session_reset` and `mcp_tools_reloaded` listeners take no argument. The full
 list with signatures lives in `BlitzHooks` in `meta.lua`.
+
+## Prompt hook
+
+`blitz.hooks.prompt(fn)` installs one hook that runs on typed input when you
+press Enter. It runs before command and skill dispatch, in the main Lua VM on
+the main thread. Return a string to replace the input. Return nil to send the
+input unchanged. Last registration wins; `blitz.hooks.clear()` removes it.
+
+```lua
+blitz.hooks.prompt(function(text)
+    if text == "go" then
+        return "Plan first, then execute: go"
+    end
+end)
+```
+
+The rewrite applies to the full pipeline. A hook can turn plain text into a
+`/command` or a skill call. Chat echo, history, and the model all see the new
+text. An empty string drops the input. Hook errors are logged and the input
+goes out unchanged. `blitz.cmd.prompt` and headless `--prompt` text bypass the
+hook. Never call `blitz.agent.await` inside the hook.
 
 ## Inject hook
 
