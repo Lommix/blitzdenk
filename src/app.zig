@@ -1412,7 +1412,7 @@ pub const App = struct {
                 .text, .passphrase => {
                     const inner_w = main_area.width -| 5; // 2 left + 2 right padding + ❯ prompt
                     const rows: u16 = @intCast(@min(@max(inputWrapPosition(app, frame_alloc, inner_w, false).total, 1), @as(usize, std.math.maxInt(u16))));
-                    break :blk @min(rows +| 3, 9); // input rows + status + 2 padding
+                    break :blk @min(rows +| 3, 23); // input rows + status + 2 padding
                 },
                 .perm_message => break :blk 8, // 5-row input box + status + 2 padding
                 .wizard => break :blk 18,
