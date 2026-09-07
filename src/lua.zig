@@ -103,14 +103,6 @@ pub fn LuaFnBind(
                         const Info = @typeInfo(eun.payload);
                         switch (Info) {
                             .void => return 0,
-                            .optional => {
-                                if (value) |inner| {
-                                    pushAny(state, inner);
-                                } else {
-                                    c.lua_pushnil(state);
-                                }
-                                return 1;
-                            },
                             .@"struct" => |str| {
                                 if (str.is_tuple) {
                                     inline for (value) |s| {
@@ -1557,8 +1549,7 @@ fn copyPermSnapshot(arena: std.mem.Allocator, req: *r.permissions.Request) !Perm
 
 fn pushPermSnapshot(L: *c.lua_State, snap: PermSnapshot) void {
     c.lua_createtable(L, 0, 9);
-    c.lua_pushinteger(L, @intCast(snap.ticket));
-    c.lua_setfield(L, -2, "ticket");
+    setFieldAny(L, -2, "ticket", snap.ticket);
     setPermissionFields(L, snap.agent_id, snap.call_id, snap.tool, snap.payload);
 }
 
@@ -2490,7 +2481,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                             c.luaL_unref(state, c.LUA_REGISTRYINDEX, cb.idx);
                         };
                     }
-                    pushAgentId(state, id);
+                    pushAny(state, id);
                     return 1;
                 }
             }).lua_fn,
@@ -3107,11 +3098,7 @@ fn pushEventPayload(L: *c.lua_State, event: r.events.AppEvent) c_int {
         .user_message_sent => |text| pushAny(L, .{ .text = text }),
         .agent_started => |payload| pushAny(L, .{ .id = payload.id, .fresh = payload.fresh }),
         .agent_complete, .agent_cancelled, .compaction_started, .compaction_complete => |id| pushAny(L, .{ .id = id }),
-        .permission_requested => |ticket| {
-            c.lua_createtable(L, 0, 1);
-            c.lua_pushinteger(L, @intCast(ticket));
-            c.lua_setfield(L, -2, "ticket");
-        },
+        .permission_requested => |ticket| pushAny(L, .{ .ticket = ticket }),
     }
     return 1;
 }
@@ -3802,16 +3789,8 @@ pub const LuaVm = struct {
             c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
             return;
         }
-        if (choice) |text| {
-            _ = c.lua_pushlstring(L, text.ptr, text.len);
-        } else {
-            c.lua_pushnil(L);
-        }
-        if (index) |i| {
-            c.lua_pushinteger(L, i);
-        } else {
-            c.lua_pushnil(L);
-        }
+        pushAny(L, choice);
+        pushAny(L, index);
         const status = c.lua_pcallk(L, 2, 0, 0, 0, null);
         if (status != 0) self.popError(.action);
         c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
@@ -3831,7 +3810,7 @@ pub const LuaVm = struct {
         defer c.lua_settop(L, top);
 
         _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, func_ref);
-        pushAgentId(L, r.AgentId.unpack(packed_id));
+        pushAny(L, r.AgentId.unpack(packed_id));
         c.lua_pushinteger(L, status);
         const call_status = c.lua_pcallk(L, 2, 0, 0, 0, null);
         if (call_status != 0) self.popError(.action);
@@ -3892,7 +3871,7 @@ pub const LuaVm = struct {
         defer c.lua_settop(L, top);
 
         _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, self.inject_fn);
-        pushAgentId(L, agent_id);
+        pushAny(L, agent_id);
         const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
         if (status != 0) {
             self.popError(.action);
@@ -4578,8 +4557,7 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
     setFieldAny(L, -2, "cwd", bridge.cwd);
     setFieldAny(L, -2, "vision", ctxVision(bridge));
 
-    pushAgentId(L, bridge.tool_ctx.base.self_id);
-    setFieldPushed(L, -2, "agent_id");
+    setFieldAny(L, -2, "agent_id", bridge.tool_ctx.base.self_id);
 
     _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, state_ref);
     setFieldPushed(L, -2, "state");
@@ -4766,10 +4744,6 @@ fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
 }
 
 /// Push AgentId as the packed integer.
-fn pushAgentId(L: *c.lua_State, id: r.AgentId) void {
-    c.lua_pushinteger(L, @intCast(id.pack()));
-}
-
 fn unrefSpawnCb(state: *c.lua_State, cb: ?LuaFnRef) void {
     if (cb) |ref| c.luaL_unref(state, c.LUA_REGISTRYINDEX, ref.idx);
 }
@@ -4788,57 +4762,24 @@ fn setPermissionFields(
     tool_name: []const u8,
     payload: r.permissions.Payload,
 ) void {
-    c.lua_pushinteger(L, @intCast(agent_id.pack()));
-    c.lua_setfield(L, -2, "agent_id");
-
-    if (call_id) |id| {
-        _ = c.lua_pushlstring(L, id.ptr, id.len);
-        c.lua_setfield(L, -2, "call_id");
-    }
-
-    _ = c.lua_pushlstring(L, tool_name.ptr, tool_name.len);
-    c.lua_setfield(L, -2, "tool");
+    setFieldAny(L, -2, "agent_id", agent_id);
+    setFieldAny(L, -2, "call_id", call_id);
+    setFieldAny(L, -2, "tool", tool_name);
+    setFieldAny(L, -2, "kind", @tagName(payload));
 
     switch (payload) {
-        .call => |call| {
-            pushTag(L, "call");
-            c.lua_setfield(L, -2, "kind");
-            _ = c.lua_pushlstring(L, call.description.ptr, call.description.len);
-            c.lua_setfield(L, -2, "description");
-        },
-        .diff => |diff| {
-            pushTag(L, "diff");
-            c.lua_setfield(L, -2, "kind");
-            _ = c.lua_pushlstring(L, diff.path.ptr, diff.path.len);
-            c.lua_setfield(L, -2, "path");
-        },
+        .call => |call| setFieldAny(L, -2, "description", call.description),
+        .diff => |diff| setFieldAny(L, -2, "path", diff.path),
         .ask => |ask| {
-            pushTag(L, "ask");
-            c.lua_setfield(L, -2, "kind");
-            _ = c.lua_pushlstring(L, ask.header.ptr, ask.header.len);
-            c.lua_setfield(L, -2, "header");
-            _ = c.lua_pushlstring(L, ask.question.ptr, ask.question.len);
-            c.lua_setfield(L, -2, "question");
-            c.lua_createtable(L, @intCast(ask.options.len), 0);
-            for (ask.options, 0..) |option, i| {
-                _ = c.lua_pushlstring(L, option.ptr, option.len);
-                c.lua_rawseti(L, -2, @intCast(i + 1));
-            }
-            c.lua_setfield(L, -2, "options");
+            setFieldAny(L, -2, "header", ask.header);
+            setFieldAny(L, -2, "question", ask.question);
+            setFieldAny(L, -2, "options", ask.options);
         },
         .plan => |plan| {
-            pushTag(L, "plan");
-            c.lua_setfield(L, -2, "kind");
-            _ = c.lua_pushlstring(L, plan.path.ptr, plan.path.len);
-            c.lua_setfield(L, -2, "path");
-            _ = c.lua_pushlstring(L, plan.plan_text.ptr, plan.plan_text.len);
-            c.lua_setfield(L, -2, "plan");
+            setFieldAny(L, -2, "path", plan.path);
+            setFieldAny(L, -2, "plan", plan.plan_text);
         },
     }
-}
-
-fn pushTag(L: *c.lua_State, tag: []const u8) void {
-    _ = c.lua_pushlstring(L, tag.ptr, tag.len);
 }
 
 /// Read AgentId from integer at `idx`. Reports a Lua error on shape mismatch.
