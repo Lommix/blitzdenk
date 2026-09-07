@@ -881,6 +881,12 @@ pub const App = struct {
         }
         if (agent.reported_task_done) return;
         agent.reported_task_done = true;
+        switch (agent.status) {
+            .complete => self.lua_vm.invokeSpawnCallback(self.io, agent_id.pack(), r.lua.AWAIT_COMPLETE),
+            .failed => self.lua_vm.invokeSpawnCallback(self.io, agent_id.pack(), r.lua.AWAIT_FAILED),
+            .canceled => self.lua_vm.invokeSpawnCallback(self.io, agent_id.pack(), r.lua.AWAIT_CANCELED),
+            else => {},
+        }
         if (agent.background) {
             try self.finishBackgroundAgent(agent_id, agent);
             return;
@@ -899,6 +905,7 @@ pub const App = struct {
         if (self.registry.get(id) == null) return;
         self.registry.cancel(id);
         if (self.registry.get(id)) |agent| agent.cancelAndWait();
+        self.lua_vm.invokeSpawnCallback(self.io, id.pack(), r.lua.AWAIT_CANCELED);
         self.registry.release(id);
     }
 
@@ -1875,7 +1882,7 @@ pub const App = struct {
     pub fn applyRunEvent(self: *App, agent_id: r.AgentId, event: r.agent_run.Event) !void {
         const alloc = self.sessionAlloc();
         const preview_alloc = self.arena_streaming_preview.allocator();
-        const is_main = if (self.main_agent_id) |id| id.pack() == agent_id.pack() else true;
+        const is_main = if (self.main_agent_id) |id| id.pack() == agent_id.pack() else if (self.registry.get(agent_id)) |agent| !agent.background else false;
         switch (event) {
             .text => |text| {
                 if (!is_main) return;
@@ -4565,11 +4572,11 @@ test "SDK run events preserve preview final rendering and usage" {
     app.sdk_preview_flushed = false;
     app.sdk_usage = .{};
     app.tool_status_entries = .{};
-    app.main_agent_id = null;
+    const agent_id = r.AgentId{ .index = 2, .generation = 4 };
+    app.main_agent_id = agent_id;
     app.event_bus = .{};
     app.dirty = false;
 
-    const agent_id = r.AgentId{ .index = 2, .generation = 4 };
     try app.applyRunEvent(agent_id, .{ .reasoning = "plan " });
     try app.applyRunEvent(agent_id, .{ .text = "answer" });
     try app.applyRunEvent(agent_id, .{ .tool = .{
@@ -4624,11 +4631,11 @@ test "SDK preview coalesces same-type deltas and keeps part order" {
     app.sdk_preview_flushed = false;
     app.sdk_usage = .{};
     app.tool_status_entries = .{};
-    app.main_agent_id = null;
+    const agent_id = r.AgentId{ .index = 1, .generation = 1 };
+    app.main_agent_id = agent_id;
     app.event_bus = .{};
     app.dirty = false;
 
-    const agent_id = r.AgentId{ .index = 1, .generation = 1 };
     try app.applyRunEvent(agent_id, .{ .reasoning = "plan " });
     try app.applyRunEvent(agent_id, .{ .reasoning = "more" });
     try app.applyRunEvent(agent_id, .{ .tool = .{
@@ -4654,6 +4661,47 @@ test "SDK preview coalesces same-type deltas and keeps part order" {
     try std.testing.expectEqualStrings("after", parts[2].thinking);
     try std.testing.expectEqualStrings("answer tail", parts[3].message);
     try std.testing.expectEqualStrings("call_2", parts[4].tool_call.call_id);
+}
+
+test "background agent stays silent without a main agent" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.arena_streaming_preview = .init(std.testing.allocator);
+    defer app.arena_streaming_preview.deinit();
+    app.arena_streaming_snapshot = .init(std.testing.allocator);
+    defer app.arena_streaming_snapshot.deinit();
+    app.chat_entries = .empty;
+    app.streaming_entry = null;
+    app.sdk_preview_parts = .empty;
+    app.sdk_preview_flushed = false;
+    app.sdk_usage = .{};
+    app.tool_status_entries = .{};
+    app.main_agent_id = null;
+    app.event_bus = .{};
+    app.dirty = false;
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app.registry = &registry;
+    const agent_id = registry.reserve().?;
+    const agent = try registry.activate(agent_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .name = "scout", .cwd = "/tmp" } });
+    agent.background = true;
+
+    try app.applyRunEvent(agent_id, .{ .text = "secret" });
+    try app.applyRunEvent(agent_id, .{ .reasoning = "hidden" });
+    try std.testing.expect(app.streaming_entry == null);
+    try std.testing.expectEqual(@as(usize, 0), app.sdk_preview_parts.items.len);
+
+    var result = r.sdk.TextResult{};
+    try app.applyRunEvent(agent_id, .{ .complete = &result });
+    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
 }
 
 test "subagent events preserve the main tool call preview" {
@@ -4706,6 +4754,9 @@ test "finished retained agents survive reaping and take queued messages" {
     var app: App = undefined;
     app.io = std.testing.io;
     app.gpa = std.testing.allocator;
+    const lua_vm = try r.lua.LuaVm.init(std.testing.allocator);
+    defer lua_vm.deinit();
+    app.lua_vm = lua_vm;
     app.arena_session = .init(std.testing.allocator);
     defer app.arena_session.deinit();
     app.arena_streaming_preview = .init(std.testing.allocator);

@@ -265,7 +265,10 @@ pub const Command = union(enum) {
                 try app.waitForMcpTools();
                 var model_config: ?r.models.Config = null;
                 if (!arg.fork) {
-                    if (app.registry.state(arg.agent_id) != .reserved) return;
+                    if (app.registry.state(arg.agent_id) != .reserved) {
+                        app.lua_vm.dropSpawnCallback(app.io, arg.agent_id.pack());
+                        return;
+                    }
                     switch (app.context_factory.buildAgentApiConfig(
                         @enumFromInt(arg.agent_type),
                         &app.config,
@@ -274,6 +277,7 @@ pub const Command = union(enum) {
                         .config => |config| model_config = config,
                         .diagnostic => |diagnostic| {
                             app.registry.releaseReservation(arg.agent_id);
+                            app.lua_vm.dropSpawnCallback(app.io, arg.agent_id.pack());
                             if (arg.chat_entry) |en| {
                                 const entry = try r.util.deepClone(ChatEntry, en, alloc);
                                 try app.appendChatEntry(alloc, entry);
@@ -289,6 +293,7 @@ pub const Command = union(enum) {
                 }
 
                 var constructed = false;
+                errdefer app.lua_vm.dropSpawnCallback(app.io, arg.agent_id.pack());
                 errdefer if (constructed)
                     app.registry.release(arg.agent_id)
                 else
@@ -319,7 +324,7 @@ pub const Command = union(enum) {
                     .agent_created = .{ .id = arg.agent_id, .name = app.context_factory.agentName(@enumFromInt(arg.agent_type)), .depth = agent.depth },
                 });
 
-                if (arg.parent_id == null) {
+                if (arg.parent_id == null and !arg.background) {
                     if (app.main_agent_id) |ag_id| app.detachMainAgent(ag_id);
                     app.main_agent_id = arg.agent_id;
                     app.registry.pin(arg.agent_id);
@@ -331,7 +336,7 @@ pub const Command = union(enum) {
                 }
 
                 try agent.setMessages(&.{.{ .role = .user, .content = arg.prompt }});
-                if (arg.parent_id == null) app.sdk_run_rendered_steps = 0;
+                if (arg.parent_id == null and !arg.background) app.sdk_run_rendered_steps = 0;
                 try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
                 app.event_bus.emit(app, .{ .agent_started = .{ .id = arg.agent_id, .fresh = true } });
                 app.running = true;

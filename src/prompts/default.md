@@ -2,7 +2,7 @@
 
 Write Self-documenting code. Names carry meaning. Never write comments in code.
 
-# ASD-STE100
+# Use ASD-STE100
 
 Simplified Technical English is a controlled writing standard.
 

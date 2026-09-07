@@ -438,7 +438,9 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "prompt", .ty = LuaType.string },
     .{ .name = "agent_type", .ty = LuaType.integer, .optional = true },
     .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
+    .{ .name = "background", .ty = LuaType.boolean, .optional = true, .desc = "run detached from the chat: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of chat entries. Use with on_complete to build silent subagents" },
     .{ .name = "task", .ty = LuaType.string, .optional = true, .desc = "short task description shown in agent listings" },
+    .{ .name = "on_complete", .ty = LuaType{ .raw = "fun(agent_id: integer, status: integer)" }, .optional = true, .desc = "runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside" },
 } } };
 const SelectRequestDef = LuaType{ .table_def = .{ .name = "BlitzSelectRequest", .fields = &.{
     .{ .name = "header", .ty = LuaType.string, .desc = "very short label shown as a chip" },
@@ -2398,7 +2400,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
 const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
     .{
         .name = "spawn",
-        .desc = "Reserve a free slot and enqueue a spawn or fork into it.",
+        .desc = "Reserve a free slot and enqueue a spawn or fork into it. Args take background to detach the agent from the chat and on_complete, a one-shot main-thread callback for the end of the spawned run.",
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "args", .ty = SpawnAgentArgsDef }},
             .fn_ptr = (struct {
@@ -2418,8 +2420,24 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         prompt: []const u8,
                         agent_type: ?u32 = null,
                         fork: ?bool = null,
-                        task: []const u8 = "",
+                        background: ?bool = null,
+                        task: ?[]const u8 = null,
+                        on_complete: ?LuaFnRef = null,
                     };
+
+                    if (c.lua_type(state, 1) == c.LUA_TTABLE) {
+                        _ = c.lua_getfield(state, 1, "on_complete");
+                        const oc_type = c.lua_type(state, -1);
+                        c.lua_pop(state, 1);
+                        if (oc_type == c.LUA_TFUNCTION and vm.is_tool_vm) {
+                            _ = c.luaL_error(state, "agent.spawn: on_complete needs the main vm, use blitz.hooks.agent_complete in listeners");
+                            return 0;
+                        }
+                        if (oc_type != c.LUA_TNIL and oc_type != c.LUA_TFUNCTION) {
+                            _ = c.luaL_error(state, "agent.spawn: on_complete must be a function");
+                            return 0;
+                        }
+                    }
 
                     const spawn = switch (readAnyValueAlloc(SpawnArgs, state, "agent.spawn", 1, vm.luaArena())) {
                         .ok => |v| v,
@@ -2430,6 +2448,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                     };
 
                     if ((spawn.fork orelse false) and spawn.parent_id == null) {
+                        unrefSpawnCb(state, spawn.on_complete);
                         _ = c.luaL_error(state, "agent.spawn: fork=true requires parent_id");
                         return 0;
                     }
@@ -2439,10 +2458,12 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         .parent_id = spawn.parent_id,
                         .prompt = &.{},
                         .fork = spawn.fork orelse false,
-                        .task = spawn.task,
+                        .background = spawn.background orelse false,
+                        .task = spawn.task orelse "",
                     };
                     if (spawn.agent_type) |t| {
                         if (t > std.math.maxInt(u8)) {
+                            unrefSpawnCb(state, spawn.on_complete);
                             _ = c.luaL_error(state, "agent.spawn: agent_type out of range");
                             return 0;
                         }
@@ -2452,6 +2473,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                     args.prompt = &parts;
 
                     const id = a.registry.reserve() orelse {
+                        unrefSpawnCb(state, spawn.on_complete);
                         c.lua_pushnil(state);
                         return 1;
                     };
@@ -2459,9 +2481,15 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
 
                     a.cmd_queue.append(a.io, .{ .spawn_agent = args }) catch {
                         a.registry.releaseReservation(id);
+                        unrefSpawnCb(state, spawn.on_complete);
                         c.lua_pushnil(state);
                         return 1;
                     };
+                    if (spawn.on_complete) |cb| {
+                        vm.spawn_callbacks.put(vm.parent, id.pack(), cb.idx) catch {
+                            c.luaL_unref(state, c.LUA_REGISTRYINDEX, cb.idx);
+                        };
+                    }
                     pushAgentId(state, id);
                     return 1;
                 }
@@ -3207,6 +3235,9 @@ pub const LuaVm = struct {
     permission_hook: c_int = c.LUA_NOREF,
     inject_fn: c_int = c.LUA_NOREF,
     prompt_hook: c_int = c.LUA_NOREF,
+    /// Packed agent id to registry ref of agent.spawn on_complete callbacks.
+    /// Main vm only, touched under vm_mu.
+    spawn_callbacks: std.AutoHashMapUnmanaged(u32, c_int) = .empty,
 
     pub fn init(parent: Allocator) !*LuaVm {
         return create(parent, false);
@@ -3279,6 +3310,7 @@ pub const LuaVm = struct {
 
     pub fn deinit(self: *LuaVm) void {
         c.lua_close(self.L);
+        self.spawn_callbacks.deinit(self.parent);
         self.arena_state.deinit();
         self.parent.destroy(self);
     }
@@ -3339,6 +3371,7 @@ pub const LuaVm = struct {
         self.bind_entries = .empty;
         self.command_entries = .empty;
         self.mcp_entries = .empty;
+        self.spawn_callbacks.clearRetainingCapacity();
         self.stdout_buf = .empty;
         self.prepareArenaLists() catch return error.LuaInitFailed;
         self.tool_entries.clearRetainingCapacity();
@@ -3782,6 +3815,35 @@ pub const LuaVm = struct {
         const status = c.lua_pcallk(L, 2, 0, 0, 0, null);
         if (status != 0) self.popError(.action);
         c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
+    }
+
+    /// Run and consume the agent.spawn on_complete callback of `packed_id`.
+    /// Main thread only: the main loop after a run ended, or agent teardown.
+    pub fn invokeSpawnCallback(self: *LuaVm, io: std.Io, packed_id: u32, status: c_int) void {
+        self.vm_mu.lockUncancelable(io);
+        defer self.vm_mu.unlock(io);
+
+        const func_ref = self.spawn_callbacks.get(packed_id) orelse return;
+        _ = self.spawn_callbacks.remove(packed_id);
+
+        const L = self.L;
+        const top = c.lua_gettop(L);
+        defer c.lua_settop(L, top);
+
+        _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, func_ref);
+        pushAgentId(L, r.AgentId.unpack(packed_id));
+        c.lua_pushinteger(L, status);
+        const call_status = c.lua_pcallk(L, 2, 0, 0, 0, null);
+        if (call_status != 0) self.popError(.action);
+        c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
+    }
+
+    pub fn dropSpawnCallback(self: *LuaVm, io: std.Io, packed_id: u32) void {
+        self.vm_mu.lockUncancelable(io);
+        defer self.vm_mu.unlock(io);
+        if (self.spawn_callbacks.fetchRemove(packed_id)) |kv| {
+            c.luaL_unref(self.L, c.LUA_REGISTRYINDEX, kv.value);
+        }
     }
 
     /// Call blitz.hooks.prompt hook on typed input. Caller must hold vm_mu.
@@ -4708,6 +4770,10 @@ fn pushAgentId(L: *c.lua_State, id: r.AgentId) void {
     c.lua_pushinteger(L, @intCast(id.pack()));
 }
 
+fn unrefSpawnCb(state: *c.lua_State, cb: ?LuaFnRef) void {
+    if (cb) |ref| c.luaL_unref(state, c.LUA_REGISTRYINDEX, ref.idx);
+}
+
 /// Push the hook payload table for a permission request. Strings point into
 /// registry-owned memory and stay valid for the duration of the hook call.
 fn pushPermissionPayload(L: *c.lua_State, perm: *r.permissions.Request) void {
@@ -5224,6 +5290,72 @@ fn readGlobalString(vm: *LuaVm, name: [*:0]const u8) ![]const u8 {
     var len: usize = 0;
     const ptr = c.lua_tolstring(vm.L, -1, &len) orelse return error.NotAString;
     return try std.testing.allocator.dupe(u8, ptr[0..len]);
+}
+
+test "spawn on_complete callback runs once with agent id and status" {
+    var app_state: r.app.App = undefined;
+    app_state.io = std.testing.io;
+    app_state.gpa = std.testing.allocator;
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app_state.registry = &registry;
+    app_state.cmd_queue = try r.cmd.CommandQueue.init(std.testing.allocator);
+    defer app_state.cmd_queue.deinit();
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    app_state.lua_vm = vm;
+    vm.setApp(&app_state);
+
+    vm.exec(
+        \\cb_id = 0
+        \\cb_status = 0
+        \\spawned = blitz.agent.spawn({
+        \\    prompt = "work",
+        \\    on_complete = function(id, status)
+        \\        cb_id = id
+        \\        cb_status = status
+        \\    end,
+        \\})
+    ) catch |e| {
+        if (!@import("builtin").is_test) return e;
+        std.debug.print("lua error: {s}\n", .{vm.getLastError()});
+        return e;
+    };
+    _ = c.lua_getglobal(vm.L, "spawned");
+    const packed_id: u32 = @intCast(c.lua_tointegerx(vm.L, -1, null));
+    c.lua_pop(vm.L, 1);
+    try std.testing.expectEqual(@as(usize, 1), vm.spawn_callbacks.count());
+    try std.testing.expect(vm.spawn_callbacks.get(packed_id) != null);
+
+    try std.testing.expectError(error.LuaExecFailed, vm.exec(
+        \\blitz.agent.spawn({ prompt = "work", on_complete = "not a function" })
+    ));
+
+    vm.invokeSpawnCallback(std.testing.io, packed_id, AWAIT_COMPLETE);
+    _ = c.lua_getglobal(vm.L, "cb_id");
+    try std.testing.expectEqual(packed_id, @as(u32, @intCast(c.lua_tointegerx(vm.L, -1, null))));
+    c.lua_pop(vm.L, 1);
+    _ = c.lua_getglobal(vm.L, "cb_status");
+    try std.testing.expectEqual(AWAIT_COMPLETE, c.lua_tointegerx(vm.L, -1, null));
+    c.lua_pop(vm.L, 1);
+    try std.testing.expectEqual(@as(usize, 0), vm.spawn_callbacks.count());
+
+    vm.invokeSpawnCallback(std.testing.io, packed_id, AWAIT_FAILED);
+    _ = c.lua_getglobal(vm.L, "cb_status");
+    try std.testing.expectEqual(AWAIT_COMPLETE, c.lua_tointegerx(vm.L, -1, null));
+    c.lua_pop(vm.L, 1);
+
+    try vm.exec(
+        \\quiet = blitz.agent.spawn({ prompt = "quiet", background = true })
+    );
+    _ = c.lua_getglobal(vm.L, "quiet");
+    const quiet_id: u32 = @intCast(c.lua_tointegerx(vm.L, -1, null));
+    c.lua_pop(vm.L, 1);
+    const queued = app_state.cmd_queue._data.items[1].spawn_agent;
+    try std.testing.expectEqual(quiet_id, queued.agent_id.pack());
+    try std.testing.expect(queued.background);
+    try std.testing.expect(queued.parent_id == null);
 }
 
 test "hook listeners run sandboxed by registration order" {

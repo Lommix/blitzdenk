@@ -172,12 +172,36 @@ local researcher = blitz.add_agent({
 An agent id is one packed integer; the agent tool result carries it as
 `agent_id: <int>`. `fork = true` in `blitz.agent.spawn` requires `parent_id`.
 
+`on_complete` in `blitz.agent.spawn` attaches a one-shot callback to the run.
+It fires once on the main thread when the run ends. Closing or replacing the
+agent before that fires `blitz.AWAIT_CANCELED` instead, and a Lua reload
+drops the callback.
+
+`background = true` detaches the agent from the chat. The agent never becomes
+the main agent, streams nothing into it, and writes its final output to a
+result file instead of chat entries. Combine it with `on_complete` to build a
+silent subagent: read the answer in the callback with
+`blitz.agent.result(id)`.
+
+```lua
+blitz.agent.spawn({
+    agent_type = researcher,
+    prompt = "Find the registry lock order.",
+    background = true,
+    on_complete = function(id, status)
+        if status == blitz.AWAIT_COMPLETE then
+            blitz.cmd.message_chat("agent", blitz.agent.result(id))
+        end
+    end,
+})
+```
+
 Slots are finite (128) and finished agents keep their slot. History stays
 readable, and `blitz.agent.message` on a finished agent starts a new turn that
 continues the same conversation. Free a slot with `blitz.agent.close`.
-`blitz.agent.spawn` without `parent_id` cancels the running main agent and
-frees its slot; the old conversation stays rendered, the new agent replaces it
-in the chat.
+`blitz.agent.spawn` without `parent_id` and without `background = true`
+cancels the running main agent and frees its slot; the old conversation stays
+rendered, the new agent replaces it in the chat.
 
 `blitz.list_agents()` returns one table per occupied slot, running and
 finished. Fields: `agent_id`, `name`, `task`, `state`, `ctx`,

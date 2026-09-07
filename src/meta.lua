@@ -79,11 +79,15 @@
 ---@field prompt string
 ---@field agent_type? integer
 ---@field fork? boolean
+---run detached from the chat: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of chat entries. Use with on_complete to build silent subagents
+---@field background? boolean
 ---short task description shown in agent listings
 ---@field task? string
+---runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside
+---@field on_complete? fun(agent_id: integer, status: integer)
 
 ---@class BlitzAgent
----Reserve a free slot and enqueue a spawn or fork into it.
+---Reserve a free slot and enqueue a spawn or fork into it. Args take background to detach the agent from the chat and on_complete, a one-shot main-thread callback for the end of the spawned run.
 ---@field spawn fun(args: BlitzSpawnArgs): integer|nil
 ---Queue a user message for the given agent.
 ---@field message fun(agent_id: integer, text: string)
