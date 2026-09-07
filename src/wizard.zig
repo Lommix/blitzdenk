@@ -88,7 +88,7 @@ pub const catalog = [_]CatalogEntry{
         .key_envar = "Z_AI_KEY",
         .models = &.{
             .{ .name = "glm-5.3-flash", .vision = true, .replay_reasoning = true },
-            .{ .name = "glm-5.3", .vision = true, .replay_reasoning = true },
+            .{ .name = "glm-5.3", .vision = false, .replay_reasoning = true },
         },
     },
     .{
