@@ -319,6 +319,11 @@ The completion popup answers to `blitz.cmp.next`, `blitz.cmp.prev`, and
 `<Tab>`/`<C-n>`, `<C-p>`, and `<C-y>`; a call is a no-op when the popup is
 closed. A custom `blitz.bind` on the same key wins over the default.
 
+Prompt history answers to `blitz.input.history_prev` and
+`blitz.input.history_next`. Each queues one action, the same as the default
+keys `<S-Up>` and `<S-Down>`. Both do nothing outside the text input or
+while an agent runs.
+
 ## Input box
 
 `blitz.input` reads and writes the text input box.
@@ -340,6 +345,9 @@ end, "sign the input")
   raise an error.
 - `set(text)` replaces the text. The cursor moves to the end.
 - `append(text)` inserts text at the cursor, like typed input.
+- `history_prev()` and `history_next()` walk the prompt history into the box,
+  like `<S-Up>` and `<S-Down>`. `history_next` past the newest entry clears
+  the box.
 - `set` and `append` queue a command. The change lands on the next main-loop
   pass. They are safe from config, commands, tools, and listeners.
 - Combine with the prompt hook: `blitz.hooks.prompt` rewrites the text on

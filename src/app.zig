@@ -1223,7 +1223,7 @@ pub const App = struct {
             if (agent.task != null) {
                 agent.markToolsDirty();
             } else {
-                try self.context_factory.refreshAgentTools(&self.config, agent, self.toolBase(.{ .index = @intCast(index), .generation = slot.generation }));
+                try self.context_factory.refreshAgentTools(agent, self.toolBase(.{ .index = @intCast(index), .generation = slot.generation }));
             }
         }
     }
@@ -1261,7 +1261,7 @@ pub const App = struct {
         self.lua_vm.vm_mu.lockUncancelable(self.io);
         defer self.lua_vm.vm_mu.unlock(self.io);
         const id = self.registry.idForAgent(agent) orelse return error.AgentNotFound;
-        try self.context_factory.refreshAgentToolsLive(&self.config, agent, self.toolBase(id));
+        try self.context_factory.refreshAgentToolsLive(agent, self.toolBase(id));
     }
 
     pub fn pushSystemMessage(self: *App, comptime fmt: []const u8, args: anytype) void {
@@ -1307,7 +1307,7 @@ pub const App = struct {
     }
 
     pub fn configureAgent(self: *const App, id: r.AgentId, agent: *r.agent.Agent) !void {
-        try self.context_factory.configureAgent(&self.config, agent, self.toolBase(id));
+        try self.context_factory.configureAgent(agent, self.toolBase(id));
         agent.context_limit = self.default_context_limit;
         agent.lua_reload_generation_seen = self.lua_reload_generation.load(.monotonic);
         agent.lifetime.reminder = buildReminderOpaque;
@@ -1688,8 +1688,19 @@ pub const App = struct {
     /// Ctrl+V handler. When the system clipboard holds an image, saves it to a
     /// temp file and embeds its `file://` URL (masked as `[Image]`) instead of
     /// inserting the raw paste text. Reports the outcome with a notification.
+    fn generalAgentVision(self: *App) bool {
+        for (&self.registry.slots) |*slot| {
+            const state = slot.state.load(.acquire);
+            if (state == .free or state == .reserved) continue;
+            const agent = &slot.agent.?;
+            if (agent.type_idx != @intFromEnum(r.ContextFactory.AgentType.general)) continue;
+            return agent.flags.vision;
+        }
+        return false;
+    }
+
     pub fn pasteImage(self: *App) void {
-        if (!self.context_factory.agentVision(&self.config, .general)) {
+        if (!self.generalAgentVision()) {
             self.notifications.append(self.gpa, "Current model does not support images", .{}) catch {};
             return;
         }
@@ -1712,7 +1723,7 @@ pub const App = struct {
     /// Terminal paste event handler. Pastes the clipboard image if one is
     /// present, otherwise appends the raw paste `text`.
     pub fn pasteImageOrText(self: *App, text: []const u8) void {
-        if (!self.context_factory.agentVision(&self.config, .general)) {
+        if (!self.generalAgentVision()) {
             self.appendPathRef(text);
             return;
         }
@@ -1758,20 +1769,23 @@ pub const App = struct {
         self.history_cursor = self.history.items.len;
     }
 
-    pub fn historyUp(self: *App) void {
-        if (self.history.items.len == 0) return;
-        if (self.history_cursor == 0) return;
+    pub fn historyUp(self: *App) bool {
+        if (self.input_mode != .text) return false;
+        if (self.history_cursor == 0) return true;
+        if (self.running) return true;
         self.history_cursor -= 1;
         const text = self.history.items[self.history_cursor].text;
         self.input_buffer.clearRetainingCapacity();
         self.input_buffer.appendSlice(self.sessionAlloc(), text) catch {};
         self.input_cursor = @intCast(self.input_buffer.items.len);
         self.syncCompletion();
+        return true;
     }
 
-    pub fn historyDown(self: *App) void {
-        if (self.history.items.len == 0) return;
-        if (self.history_cursor >= self.history.items.len) return;
+    pub fn historyDown(self: *App) bool {
+        if (self.input_mode != .text) return false;
+        if (self.history_cursor >= self.history.items.len) return true;
+        if (self.running) return true;
         self.history_cursor += 1;
         self.input_buffer.clearRetainingCapacity();
         if (self.history_cursor < self.history.items.len) {
@@ -1780,6 +1794,7 @@ pub const App = struct {
         }
         self.input_cursor = @intCast(self.input_buffer.items.len);
         self.syncCompletion();
+        return true;
     }
 
     pub fn undoLastTurn(self: *App) void {

@@ -76,6 +76,7 @@ pub const Config = struct {
     rate_limit: u32 = 0,
     replay_reasoning: bool = false,
     session_key_header: []const u8 = "",
+    vision: bool = false,
     provider: ProviderOptions,
 };
 

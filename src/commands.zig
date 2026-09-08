@@ -72,6 +72,8 @@ pub const Command = union(enum) {
     completion_accept,
     input_set: []const u8,
     input_append: []const u8,
+    history_prev,
+    history_next,
     cd: []const u8,
     compact,
     reload_mcp,
@@ -200,6 +202,8 @@ pub const Command = union(enum) {
             .completion_accept => app.handleCompletion(.accept),
             .input_set => |text| app.setInput(text),
             .input_append => |text| app.appendBytes(text),
+            .history_prev => _ = app.historyUp(),
+            .history_next => _ = app.historyDown(),
             .queue_agent_message => |arg| {
                 const parts = try r.util.deepClone(@TypeOf(arg.parts), arg.parts, alloc);
                 const chat_entry = if (arg.chat_entry) |en| try r.util.deepClone(ChatEntry, en, alloc) else null;
@@ -380,7 +384,7 @@ pub const Command = union(enum) {
                         if (agent.task != null) {
                             agent.markToolsDirty();
                         } else {
-                            try app.context_factory.refreshAgentTools(&app.config, agent, app.toolBase(id));
+                            try app.context_factory.refreshAgentTools(agent, app.toolBase(id));
                         }
                     }
                 }

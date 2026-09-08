@@ -128,6 +128,14 @@
 ---queued and lands on the next main-loop pass. Safe from config,
 ---commands, tools, and listeners.
 ---@field append fun(text: string)
+---Recall the previous prompt from history into the input box, like
+---<S-Up>. No-op at the oldest entry, while an agent runs, or outside
+---text input.
+---@field history_prev fun()
+---Move one entry forward in prompt history, like <S-Down>. Past the
+---newest entry the box clears. No-op while an agent runs or outside
+---text input.
+---@field history_next fun()
 
 ---@class BlitzWidgetBuf
 ---visible widget width in cells, shrinks when clipped

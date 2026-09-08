@@ -308,6 +308,7 @@ pub fn buildAgentApiConfig(
             .rate_limit = provider.rate_limit,
             .replay_reasoning = model.replay_reasoning,
             .session_key_header = provider.getSessionKeyHeader(),
+            .vision = model.vision,
         } };
     }
 
@@ -632,13 +633,12 @@ pub fn remove(self: *Self, tool_name: []const u8) void {
 
 pub fn configureAgent(
     self: *const Self,
-    cfg: *const r.config.BlitzdenkCfg,
     agent: *r.agent.Agent,
     base: r.tools.context.BaseContext,
 ) !void {
-    try self.refreshAgentTools(cfg, agent, base);
+    try self.refreshAgentTools(agent, base);
     const alloc = agent.state_arena.allocator();
-    const prompt = try self.build_system_prompt(alloc, cfg, @enumFromInt(agent.type_idx), agent.clean);
+    const prompt = try self.build_system_prompt(alloc, @enumFromInt(agent.type_idx), agent.clean, agent.flags.vision);
     try agent.setSystemPrompt(prompt);
 }
 
@@ -652,19 +652,19 @@ pub fn agentVision(self: *const Self, cfg: *const r.config.BlitzdenkCfg, agent_t
     return false;
 }
 
-pub fn refreshAgentTools(self: *const Self, cfg: *const r.config.BlitzdenkCfg, agent: *r.agent.Agent, base: r.tools.context.BaseContext) !void {
-    try self.refreshAgentToolsInternal(cfg, agent, base, false);
+pub fn refreshAgentTools(self: *const Self, agent: *r.agent.Agent, base: r.tools.context.BaseContext) !void {
+    try self.refreshAgentToolsInternal(agent, base, false);
 }
 
-pub fn refreshAgentToolsLive(self: *const Self, cfg: *const r.config.BlitzdenkCfg, agent: *r.agent.Agent, base: r.tools.context.BaseContext) !void {
-    try self.refreshAgentToolsInternal(cfg, agent, base, true);
+pub fn refreshAgentToolsLive(self: *const Self, agent: *r.agent.Agent, base: r.tools.context.BaseContext) !void {
+    try self.refreshAgentToolsInternal(agent, base, true);
 }
 
-fn refreshAgentToolsInternal(self: *const Self, cfg: *const r.config.BlitzdenkCfg, agent: *r.agent.Agent, base: r.tools.context.BaseContext, live: bool) !void {
+fn refreshAgentToolsInternal(self: *const Self, agent: *r.agent.Agent, base: r.tools.context.BaseContext, live: bool) !void {
     const alloc = agent.state_arena.allocator();
     var definitions: [MAX_AGENT_TOOLS]r.tools.Tool = undefined;
     var count: usize = 0;
-    const vision = self.agentVision(cfg, @enumFromInt(agent.type_idx));
+    const vision = agent.flags.vision;
     var it = self.iter(@enumFromInt(agent.type_idx));
     while (it.next()) |tool| {
         if (tool.def.requires_vision and !vision) continue;
@@ -814,15 +814,14 @@ pub fn deinit(self: *Self) void {
 pub fn build_system_prompt(
     self: *const Self,
     alloc: std.mem.Allocator,
-    cfg: *const r.config.BlitzdenkCfg,
     agent_type: AgentType,
     clean: bool,
+    vision: bool,
 ) ![]const u8 {
     var allocating = std.Io.Writer.Allocating.init(alloc);
     var w = &allocating.writer;
 
     const def = self.getAgent(agent_type) orelse return error.UnknownAgent;
-    const vision = self.agentVision(cfg, agent_type);
     _ = try w.write(def.prompt);
     try w.writeByte('\n');
 
@@ -922,7 +921,8 @@ pub fn build_system_prompt(
 pub fn precalcGeneralPromptSize(self: *Self, cfg: *const r.config.BlitzdenkCfg) void {
     var arena = std.heap.ArenaAllocator.init(self.alloc);
     defer arena.deinit();
-    const prompt = self.build_system_prompt(arena.allocator(), cfg, .general, false) catch {
+    const vision = self.agentVision(cfg, .general);
+    const prompt = self.build_system_prompt(arena.allocator(), .general, false, vision) catch {
         self.general_prompt_size = 0;
         return;
     };
@@ -1323,9 +1323,7 @@ test "system_prompt" {
     defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
-    var cfg: r.config.BlitzdenkCfg = .{};
-
-    const prompt = try factory.build_system_prompt(alloc, &cfg, .general, false);
+    const prompt = try factory.build_system_prompt(alloc, .general, false, true);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# Available tools:") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- read: Read file contents") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- bash: Execute a bash command") != null);
@@ -1333,18 +1331,18 @@ test "system_prompt" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- Use read to examine files instead of cat or sed.") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# User context (AGENTS.md):") != null);
 
-    const clean_prompt = try factory.build_system_prompt(alloc, &cfg, .general, true);
+    const clean_prompt = try factory.build_system_prompt(alloc, .general, true, true);
     try std.testing.expect(std.mem.indexOf(u8, clean_prompt, "# Available tools:") != null);
     try std.testing.expect(std.mem.indexOf(u8, clean_prompt, "# User context (AGENTS.md):") == null);
 
     try factory.setAgentTools(.general, &.{});
-    const toolless_prompt = try factory.build_system_prompt(alloc, &cfg, .general, false);
+    const toolless_prompt = try factory.build_system_prompt(alloc, .general, false, true);
     try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# Available tools:") == null);
     try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# Guidelines:") == null);
     try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# User context (AGENTS.md):") != null);
 }
 
-test "vision tools hidden from prompt and toolset for non-vision models" {
+test "vision tools gated by the agent model vision flag" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -1356,13 +1354,10 @@ test "vision tools hidden from prompt and toolset for non-vision models" {
     defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
-    var cfg: r.config.BlitzdenkCfg = .{};
-    cfg.model_count = 1;
-    cfg.models[0] = .{ .provider = @enumFromInt(0), .vision = false };
-    try factory.setAgentModel(&cfg, .general, @enumFromInt(0));
-
-    const blind = try factory.build_system_prompt(alloc, &cfg, .general, true);
+    const blind = try factory.build_system_prompt(alloc, .general, true, false);
     try std.testing.expect(std.mem.indexOf(u8, blind, "view_image") == null);
+    const sighted = try factory.build_system_prompt(alloc, .general, true, true);
+    try std.testing.expect(std.mem.indexOf(u8, sighted, "- view_image: Load an image into the context") != null);
 
     var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
     defer env.deinit();
@@ -1375,6 +1370,7 @@ test "vision tools hidden from prompt and toolset for non-vision models" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
+        .vision = false,
         .provider = .{ .openai = .{} },
     }, .{});
     const base: r.tools.context.BaseContext = .{
@@ -1384,13 +1380,24 @@ test "vision tools hidden from prompt and toolset for non-vision models" {
         .cwd = "/tmp",
     };
 
-    try factory.refreshAgentTools(&cfg, agent, base);
+    try factory.refreshAgentTools(agent, base);
     for (agent.tools) |tool| try std.testing.expect(!std.mem.eql(u8, tool.name, "view_image"));
 
-    cfg.models[0].vision = true;
-    const sighted = try factory.build_system_prompt(alloc, &cfg, .general, true);
-    try std.testing.expect(std.mem.indexOf(u8, sighted, "- view_image: Load an image into the context") != null);
-    try factory.refreshAgentTools(&cfg, agent, base);
+    var cfg: r.config.BlitzdenkCfg = .{};
+    cfg.model_count = 1;
+    cfg.models[0] = .{ .provider = @enumFromInt(0), .vision = true };
+    try factory.setAgentModel(&cfg, .general, @enumFromInt(0));
+    try factory.refreshAgentTools(agent, base);
+    for (agent.tools) |tool| try std.testing.expect(!std.mem.eql(u8, tool.name, "view_image"));
+
+    try agent.updateModel(.{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .vision = true,
+        .provider = .{ .openai = .{} },
+    });
+    try factory.refreshAgentTools(agent, base);
     var installed = false;
     for (agent.tools) |tool| installed = installed or std.mem.eql(u8, tool.name, "view_image");
     try std.testing.expect(installed);

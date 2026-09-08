@@ -56,6 +56,7 @@ pub const Flags = struct {
     cwd_seen: bool = false,
     cancel: bool = false,
     overflow_recovery: bool = false,
+    vision: bool = false,
 };
 
 pub const Agent = struct {
@@ -63,7 +64,6 @@ pub const Agent = struct {
     io: std.Io,
     model: models.Model,
     reasoning_effort: models.ReasoningEffort = .medium,
-    pending_effort: ?models.ReasoningEffort = null,
     metadata: std.heap.ArenaAllocator,
     tool_arena: std.heap.ArenaAllocator,
     error_arena: std.heap.ArenaAllocator,
@@ -114,12 +114,15 @@ pub const Agent = struct {
     resume_options: ?agent_run.OwnedOptions = null,
     run_model: ?sdk.LanguageModel = null,
     pending_model: ?models.Model = null,
+    pending_vision: ?bool = null,
+    pending_effort: ?models.ReasoningEffort = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, config: models.Config, options: InitOptions) !Agent {
         var model = try models.Model.init(alloc, config);
         errdefer model.deinit(alloc);
         var agent = try initModel(alloc, io, model, options);
         agent.reasoning_effort = config.reasoning_effort orelse agent.reasoning_effort;
+        agent.flags.vision = config.vision;
         return agent;
     }
 
@@ -166,6 +169,7 @@ pub const Agent = struct {
             .context_limit = self.context_limit,
         });
         child.reasoning_effort = self.pending_effort orelse self.reasoning_effort;
+        child.flags.vision = self.pending_vision orelse self.flags.vision;
         errdefer child.deinit();
         try child.setSystemPrompt(self.system_prompt);
         var prior_messages = self.history();
@@ -237,10 +241,13 @@ pub const Agent = struct {
             if (self.pending_model) |*stale| stale.deinit(self.alloc);
             self.pending_model = replacement;
             self.pending_effort = effort;
+            self.pending_vision = config.vision;
             return;
         }
         self.reasoning_effort = effort;
+        self.flags.vision = config.vision;
         self.installModel(replacement);
+        self.markToolsDirty();
     }
 
     fn installModel(self: *Agent, replacement: models.Model) void {
@@ -252,10 +259,13 @@ pub const Agent = struct {
     pub fn applyPendingModel(self: *Agent) void {
         if (self.pending_model == null) return;
         if (self.task != null or self.compact_task != null) return;
+        self.flags.vision = self.pending_vision.?;
+        self.pending_vision = null;
         self.installModel(self.pending_model.?);
         self.pending_model = null;
         if (self.pending_effort) |effort| self.reasoning_effort = effort;
         self.pending_effort = null;
+        self.markToolsDirty();
     }
 
     pub fn history(self: *const Agent) []const sdk.Message {

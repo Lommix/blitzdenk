@@ -2074,6 +2074,38 @@ const BlitzInput = LuaType{ .table_def = .{ .name = "BlitzInput", .fields = &.{
             }).lua_fn, "input.append"),
         } },
     },
+    .{
+        .name = "history_prev",
+        .desc =
+        \\Recall the previous prompt from history into the input box, like
+        \\<S-Up>. No-op at the oldest entry, while an agent runs, or outside
+        \\text input.
+        ,
+        .ty = LuaType{ .function = .{
+            .args = &.{},
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App) !void {
+                    try a.cmd_queue.append(a.io, .history_prev);
+                }
+            }).lua_fn, "input.history_prev"),
+        } },
+    },
+    .{
+        .name = "history_next",
+        .desc =
+        \\Move one entry forward in prompt history, like <S-Down>. Past the
+        \\newest entry the box clears. No-op while an agent runs or outside
+        \\text input.
+        ,
+        .ty = LuaType{ .function = .{
+            .args = &.{},
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App) !void {
+                    try a.cmd_queue.append(a.io, .history_next);
+                }
+            }).lua_fn, "input.history_next"),
+        } },
+    },
 } } };
 
 fn luaStateSet(L: ?*c.lua_State) callconv(.c) c_int {
@@ -4586,9 +4618,8 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
 
 fn ctxVision(bridge: *CtxBridge) bool {
     const base = &bridge.tool_ctx.base;
-    const app_ptr: *r.app.App = @ptrCast(@alignCast(base.app orelse return false));
     const agent = base.registry.get(base.self_id) orelse return false;
-    return app_ptr.context_factory.agentVision(&app_ptr.config, @enumFromInt(agent.type_idx));
+    return agent.flags.vision;
 }
 
 fn pushCallTable(alloc: Allocator, L: *c.lua_State, call: ToolCall) void {
@@ -5506,6 +5537,8 @@ test "input bindings queue set append and read buffer" {
         \\blitz.input.set("new text")
         \\blitz.input.append(" more")
         \\assert(blitz.input.get() == "hello")
+        \\blitz.input.history_prev()
+        \\blitz.input.history_next()
     );
 
     app_state.cmd_queue.arena.deinit();

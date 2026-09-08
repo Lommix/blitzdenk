@@ -951,6 +951,12 @@ pub fn run(
                                         continue;
                                     }
                                 },
+                                .history_prev => {
+                                    if (app.historyUp()) continue;
+                                },
+                                .history_next => {
+                                    if (app.historyDown()) continue;
+                                },
                                 .noop => {},
                                 .completion_next => {
                                     app.handleCompletion(.next);
@@ -1011,7 +1017,7 @@ pub fn run(
                                 }
                             },
                             .arrow_up => switch (app.input_mode) {
-                                .text => if (!app.running) app.historyUp(),
+                                .text => {},
                                 .perm_select => |*ps| {
                                     if (ps.selected > 0) ps.selected -= 1;
                                 },
@@ -1023,7 +1029,7 @@ pub fn run(
                                 .session_picker => {},
                             },
                             .arrow_down => switch (app.input_mode) {
-                                .text => if (!app.running) app.historyDown(),
+                                .text => {},
                                 .perm_select => |*ps| {
                                     const max_sel = app.permSelectMaxIndex();
                                     if (ps.selected < max_sel) ps.selected += 1;

@@ -13,6 +13,8 @@ pub const Action = union(enum) {
     cursor_right,
     cursor_up,
     cursor_down,
+    history_prev,
+    history_next,
     completion_next,
     completion_prev,
     completion_accept,
@@ -31,6 +33,8 @@ pub const KeyMap = struct {
         KeyBind{ .key = .{ .code = .arrow_right }, .action = .cursor_right },
         KeyBind{ .key = .{ .code = .arrow_up }, .action = .cursor_up },
         KeyBind{ .key = .{ .code = .arrow_down }, .action = .cursor_down },
+        KeyBind{ .key = .{ .mods = .{ .shift = true }, .code = .arrow_up }, .action = .history_prev },
+        KeyBind{ .key = .{ .mods = .{ .shift = true }, .code = .arrow_down }, .action = .history_next },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'u' } }, .action = .scroll_up },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'd' } }, .action = .scroll_down },
         KeyBind{ .key = .{ .mods = .{ .ctrl = true }, .code = .{ .char = 'c' } }, .action = .exit },
@@ -108,6 +112,8 @@ pub fn actionName(action: Action) []const u8 {
         .cursor_right => "right",
         .cursor_up => "up",
         .cursor_down => "down",
+        .history_prev => "hist prev",
+        .history_next => "hist next",
         .completion_next => "cmp next",
         .completion_prev => "cmp prev",
         .completion_accept => "cmp accept",
@@ -357,6 +363,14 @@ test "KeyMap defaults bind completion actions" {
     try std.testing.expectEqual(Action.completion_next, map.parse(.{ .mods = .{ .ctrl = true }, .code = .{ .char = 'n' } }).?);
     try std.testing.expectEqual(Action.completion_prev, map.parse(.{ .mods = .{ .ctrl = true }, .code = .{ .char = 'p' } }).?);
     try std.testing.expectEqual(Action.completion_accept, map.parse(.{ .mods = .{ .ctrl = true }, .code = .{ .char = 'y' } }).?);
+}
+
+test "KeyMap defaults bind prompt history to shift arrows" {
+    var map = KeyMap{};
+    try std.testing.expectEqual(Action.history_prev, map.parse(.{ .mods = .{ .shift = true }, .code = .arrow_up }).?);
+    try std.testing.expectEqual(Action.history_next, map.parse(.{ .mods = .{ .shift = true }, .code = .arrow_down }).?);
+    try std.testing.expectEqual(Action.cursor_up, map.parse(.{ .code = .arrow_up }).?);
+    try std.testing.expectEqual(Action.cursor_down, map.parse(.{ .code = .arrow_down }).?);
 }
 
 test "formatKey ctrl char" {
