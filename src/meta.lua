@@ -191,17 +191,29 @@
 ---@field redraw fun()
 
 ---@class BlitzToolDef
+---bash tool executes bash. SSH mode will execute this remote
 ---@field BASH string
+---reading text files
 ---@field READ string
+---view images, skipped, if vision flag on model is missing
 ---@field VIEW_IMAGE string
+---write new files
 ---@field WRITE string
+---default string replace edit
 ---@field EDIT string
+---patch DSL tool. Replaces edit and write. GPT loves it
 ---@field PATCH string
+---background agent tool
 ---@field AGENT string
+---multiple choice questions for the user
 ---@field ASK string
+---read only file search
 ---@field GLOB string
+---read only text serach
 ---@field GREP string
+---load a registered mcp tools into session
 ---@field START_MCP string
+---load a skill
 ---@field SKILL string
 
 ---@class BlitzAgentCreatedEvent

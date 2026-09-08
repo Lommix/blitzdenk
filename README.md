@@ -73,7 +73,3 @@ blitz.set_agent_model(blitz.AGENT_GENERAL, opencode_ds_flash, "high")
 
 Ask the agent, once the provider is set up. The `blitzdenk-lua.md` skill contains all information required.
 [or take a look at my configuration](https://github.com/Lommix/dotfiles/blob/master/config/blitzdenk/blitz.lua).
-
-## Contribution
-
-No issue no merge. Open source, restricted contribution. Simple bug fixes are welcome.
