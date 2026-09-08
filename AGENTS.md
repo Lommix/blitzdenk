@@ -50,5 +50,5 @@ Important modules:
 
 ## RULES
 
-- Keep the user space blitzdenk skill up to date (`src/skills/blitzdenk-lua.md`). Prose, direct, raw statements. No obvious facts that can re researched in the `meta.lua`
+- Keep the user space blitzdenk lua skill up to date (`src/skills/blitzdenk-lua.md`). Prose, direct, raw statements. No obvious facts that can re researched in the `meta.lua`. No Zig internal behavior, that's out of context
 - No comments and no Doc comments!

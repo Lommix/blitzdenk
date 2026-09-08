@@ -38,11 +38,13 @@ pub fn buildChatRequest(
         try s.write(params.system);
         try s.endObject();
     }
-    for (params.messages) |msg| {
+    var pending_images: std.ArrayList(types.Part) = .empty;
+    defer pending_images.deinit(a);
+    var run_has_output = false;
+    for (params.messages, 0..) |msg, i| {
         if (msg.role == .tool) {
-            var tool_image: ?types.Part = null;
             for (msg.parts()) |part| switch (part) {
-                .image => tool_image = part,
+                .image => try pending_images.append(a, part),
                 else => {},
             };
             for (msg.parts()) |part| {
@@ -51,21 +53,31 @@ pub fn buildChatRequest(
                     else => continue,
                 };
                 if (invalid_calls.contains(result.id)) continue;
+                run_has_output = true;
                 try s.beginObject();
                 try s.objectField("role");
                 try s.write("tool");
                 try s.objectField("tool_call_id");
                 try s.write(result.id);
                 try s.objectField("content");
-                if (tool_image) |image_part| {
-                    try s.beginArray();
-                    try writePart(&s, .{ .text = result.output });
-                    try writePart(&s, image_part);
-                    try s.endArray();
-                } else {
-                    try s.write(result.output);
-                }
+                try s.write(result.output);
                 try s.endObject();
+            }
+            const run_ends = i + 1 == params.messages.len or params.messages[i + 1].role != .tool;
+            if (run_ends) {
+                if (run_has_output and pending_images.items.len > 0) {
+                    try s.beginObject();
+                    try s.objectField("role");
+                    try s.write("user");
+                    try s.objectField("content");
+                    try s.beginArray();
+                    try writePart(&s, .{ .text = "Tool returned an image" });
+                    for (pending_images.items) |part| try writePart(&s, part);
+                    try s.endArray();
+                    try s.endObject();
+                }
+                pending_images.clearRetainingCapacity();
+                run_has_output = false;
             }
             continue;
         }
@@ -291,6 +303,12 @@ pub fn writeRaw(s: *std.json.Stringify, value: []const u8) !void {
     try s.beginWriteRaw();
     try s.writer.writeAll(value);
     s.endWriteRaw();
+}
+
+pub fn decodeDataUri(url: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, url, "data:")) return null;
+    const comma = std.mem.indexOfScalar(u8, url, ',') orelse return null;
+    return url[comma + 1 ..];
 }
 
 fn isValidJsonObject(a: std.mem.Allocator, value: []const u8) bool {
@@ -910,7 +928,7 @@ test "chat tool messages use OpenAI fields" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":false") != null);
 }
 
-test "chat tool messages carry image parts" {
+test "chat tool images ride a user message with string tool content" {
     const messages = [_]types.Message{
         .{ .role = .assistant, .content = &.{types.Part.toolCallPart("call_1", "view_image", "{\"file_path\":\"x.png\"}")} },
         .{ .role = .tool, .content = &.{
@@ -920,9 +938,45 @@ test "chat tool messages carry image parts" {
     };
     const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false, false);
     defer std.testing.allocator.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":[{\"type\":\"text\",\"text\":\"Loaded image\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"image_url\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "data:image/png;base64,aW1n") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const request_messages = parsed.value.object.get("messages").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), request_messages.len);
+    try std.testing.expectEqualStrings("tool", request_messages[1].object.get("role").?.string);
+    try std.testing.expectEqualStrings("Loaded image", request_messages[1].object.get("content").?.string);
+    try std.testing.expectEqualStrings("user", request_messages[2].object.get("role").?.string);
+    const parts = request_messages[2].object.get("content").?.array.items;
+    try std.testing.expectEqualStrings("text", parts[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("Tool returned an image", parts[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings("image_url", parts[1].object.get("type").?.string);
+    try std.testing.expectEqualStrings("data:image/png;base64,aW1n", parts[1].object.get("image_url").?.object.get("url").?.string);
+}
+
+test "chat tool images flush after the tool message run" {
+    const messages = [_]types.Message{
+        .{ .role = .assistant, .content = &.{
+            types.Part.toolCallPart("call_1", "view_image", "{\"file_path\":\"x.png\"}"),
+            types.Part.toolCallPart("call_2", "read", "{\"path\":\"src/main.zig\"}"),
+        } },
+        .{ .role = .tool, .content = &.{
+            types.Part.toolResultPart("call_1", "view_image", "Loaded image"),
+            types.Part.imagePart("data:image/png;base64,aW1n", "image/png"),
+        } },
+        .{ .role = .tool, .content = &.{types.Part.toolResultPart("call_2", "read", "data")} },
+    };
+    const body = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false, false);
+    defer std.testing.allocator.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const request_messages = parsed.value.object.get("messages").?.array.items;
+    try std.testing.expectEqual(@as(usize, 4), request_messages.len);
+    try std.testing.expectEqualStrings("tool", request_messages[1].object.get("role").?.string);
+    try std.testing.expectEqualStrings("call_1", request_messages[1].object.get("tool_call_id").?.string);
+    try std.testing.expectEqualStrings("tool", request_messages[2].object.get("role").?.string);
+    try std.testing.expectEqualStrings("call_2", request_messages[2].object.get("tool_call_id").?.string);
+    try std.testing.expectEqualStrings("user", request_messages[3].object.get("role").?.string);
+    const parts = request_messages[3].object.get("content").?.array.items;
+    try std.testing.expectEqualStrings("image_url", parts[1].object.get("type").?.string);
 }
 
 test "chat structured output and tool choice" {

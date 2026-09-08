@@ -397,10 +397,36 @@ fn writeContent(s: *std.json.Stringify, msg: types.Message, invalid_calls: *cons
                 if (cache and last == i) try writeCacheControl(s, ttl);
                 try s.endObject();
             },
+            .image => try writeImageBlock(s, part, cache and last == i, ttl),
             else => {},
         }
     }
     try s.endArray();
+}
+
+fn writeImageBlock(s: *std.json.Stringify, part: types.Part, cache: bool, ttl: ?[]const u8) !void {
+    const image = part.image;
+    try s.beginObject();
+    try s.objectField("type");
+    try s.write("image");
+    try s.objectField("source");
+    try s.beginObject();
+    if (jsonx.decodeDataUri(image.url)) |data| {
+        try s.objectField("type");
+        try s.write("base64");
+        try s.objectField("media_type");
+        try s.write(image.media_type);
+        try s.objectField("data");
+        try s.write(data);
+    } else {
+        try s.objectField("type");
+        try s.write("url");
+        try s.objectField("url");
+        try s.write(image.url);
+    }
+    try s.endObject();
+    if (cache) try writeCacheControl(s, ttl);
+    try s.endObject();
 }
 
 fn isJsonObject(a: std.mem.Allocator, value: []const u8) bool {
@@ -420,7 +446,7 @@ fn lastContentIndex(msg: types.Message, invalid_calls: *const std.StringHashMapU
         switch (msg.parts()[index]) {
             .tool_call => |call| if (!invalid_calls.contains(call.id)) return index,
             .tool_result => |result| if (!invalid_calls.contains(result.id)) return index,
-            .text, .reasoning => return index,
+            .text, .reasoning, .image => return index,
             else => {},
         }
     }
@@ -689,6 +715,28 @@ test "tool continuation and structured output request" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"tool_result\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"output_config\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":false") != null);
+}
+
+test "tool and user images become anthropic image blocks" {
+    const messages = [_]types.Message{
+        .{ .role = .tool, .content = &.{
+            types.Part.toolResultPart("toolu_1", "view_image", "Loaded image"),
+            types.Part.imagePart("data:image/png;base64,aW1n", "image/png"),
+        } },
+        .{ .role = .user, .content = &.{types.Part.imagePart("https://example.com/cat.png", "image/png")} },
+    };
+    const body = try buildRequest(std.testing.allocator, "claude-test", .{
+        .messages = &messages,
+        .prompt_caching = true,
+    }, false);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"tool_result\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"base64\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"media_type\":\"image/png\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"data\":\"aW1n\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"url\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "https://example.com/cat.png") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"cache_control\"") != null);
 }
 
 test "request filters malformed calls and preserves cache control" {

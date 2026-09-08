@@ -266,7 +266,10 @@ fn buildRequest(
 
     try s.objectField("input");
     try s.beginArray();
-    for (params.messages) |msg| {
+    var pending_images: std.ArrayList(types.Part) = .empty;
+    defer pending_images.deinit(a);
+    var run_has_output = false;
+    for (params.messages, 0..) |msg, i| {
         var replayed = false;
         for (msg.parts()) |part| {
             const value = switch (part) {
@@ -284,12 +287,17 @@ fn buildRequest(
         if (replayed) continue;
         if (msg.role == .system) continue;
         if (msg.role == .tool) {
+            for (msg.parts()) |part| switch (part) {
+                .image => try pending_images.append(a, part),
+                else => {},
+            };
             for (msg.parts()) |part| {
                 const result = switch (part) {
                     .tool_result => |result| result,
                     else => continue,
                 };
                 if (invalid_calls.contains(result.id)) continue;
+                run_has_output = true;
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("function_call_output");
@@ -299,14 +307,42 @@ fn buildRequest(
                 try s.write(result.output);
                 try s.endObject();
             }
+            const run_ends = i + 1 == params.messages.len or params.messages[i + 1].role != .tool;
+            if (run_ends) {
+                if (run_has_output) try writeImageUserMessage(&s, pending_images.items);
+                pending_images.clearRetainingCapacity();
+                run_has_output = false;
+            }
             continue;
         }
-        if (msg.text().len > 0) {
+        var image_count: usize = 0;
+        for (msg.parts()) |part| switch (part) {
+            .image => image_count += 1,
+            else => {},
+        };
+        if (msg.text().len > 0 or image_count > 0) {
             try s.beginObject();
             try s.objectField("role");
             try s.write(msg.role.string());
             try s.objectField("content");
-            try s.write(msg.text());
+            if (image_count == 0) {
+                try s.write(msg.text());
+            } else {
+                try s.beginArray();
+                if (msg.text().len > 0) {
+                    try s.beginObject();
+                    try s.objectField("type");
+                    try s.write("input_text");
+                    try s.objectField("text");
+                    try s.write(msg.text());
+                    try s.endObject();
+                }
+                for (msg.parts()) |part| switch (part) {
+                    .image => try writeInputImage(&s, part),
+                    else => {},
+                };
+                try s.endArray();
+            }
             try s.endObject();
         }
         if (msg.role == .assistant) {
@@ -416,6 +452,38 @@ fn buildRequest(
     }
     try s.endObject();
     return w.toOwnedSlice();
+}
+
+fn writeInputImage(s: *std.json.Stringify, part: types.Part) !void {
+    const image = part.image;
+    try s.beginObject();
+    try s.objectField("type");
+    try s.write("input_image");
+    try s.objectField("image_url");
+    try s.write(image.url);
+    if (image.detail.len > 0) {
+        try s.objectField("detail");
+        try s.write(image.detail);
+    }
+    try s.endObject();
+}
+
+fn writeImageUserMessage(s: *std.json.Stringify, images: []const types.Part) !void {
+    if (images.len == 0) return;
+    try s.beginObject();
+    try s.objectField("role");
+    try s.write("user");
+    try s.objectField("content");
+    try s.beginArray();
+    try s.beginObject();
+    try s.objectField("type");
+    try s.write("input_text");
+    try s.objectField("text");
+    try s.write("Tool returned an image");
+    try s.endObject();
+    for (images) |part| try writeInputImage(s, part);
+    try s.endArray();
+    try s.endObject();
 }
 
 fn parseResponse(a: std.mem.Allocator, body: []const u8) !*model.GenerateResult {
@@ -723,6 +791,52 @@ test "function continuation and structured output request" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"stream\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"store\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "reasoning.encrypted_content") != null);
+}
+
+test "tool and user images ride input_image parts" {
+    var chat = Chat{
+        .model_id = "gpt-test",
+        .api_key = "",
+        .base_url = "",
+        .extra_headers = &.{},
+        .rate_limit = 0,
+        .session_key_header = "",
+    };
+    const messages = [_]types.Message{
+        .{ .role = .assistant, .content = &.{
+            types.Part.toolCallPart("call_1", "view_image", "{\"file_path\":\"x.png\"}"),
+            types.Part.toolCallPart("call_2", "read", "{\"path\":\"src/main.zig\"}"),
+        } },
+        .{ .role = .tool, .content = &.{
+            types.Part.toolResultPart("call_1", "view_image", "Loaded image"),
+            types.Part.imagePart("data:image/png;base64,aW1n", "image/png"),
+        } },
+        .{ .role = .tool, .content = &.{types.Part.toolResultPart("call_2", "read", "data")} },
+        .{ .role = .user, .content = &.{
+            types.Part.textPart("what is this"),
+            types.Part.imagePart("data:image/jpeg;base64,aGVsbG8=", "image/jpeg"),
+        } },
+    };
+    const body = try buildRequest(std.testing.allocator, &chat, .{ .messages = &messages }, false, false);
+    defer std.testing.allocator.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, body, .{});
+    defer parsed.deinit();
+    const input = parsed.value.object.get("input").?.array.items;
+    try std.testing.expectEqual(@as(usize, 6), input.len);
+    try std.testing.expectEqualStrings("function_call_output", input[2].object.get("type").?.string);
+    try std.testing.expectEqualStrings("Loaded image", input[2].object.get("output").?.string);
+    try std.testing.expectEqualStrings("function_call_output", input[3].object.get("type").?.string);
+    try std.testing.expectEqualStrings("data", input[3].object.get("output").?.string);
+    try std.testing.expectEqualStrings("user", input[4].object.get("role").?.string);
+    const tool_parts = input[4].object.get("content").?.array.items;
+    try std.testing.expectEqualStrings("Tool returned an image", tool_parts[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings("input_image", tool_parts[1].object.get("type").?.string);
+    try std.testing.expectEqualStrings("data:image/png;base64,aW1n", tool_parts[1].object.get("image_url").?.string);
+    try std.testing.expectEqualStrings("user", input[5].object.get("role").?.string);
+    const user_parts = input[5].object.get("content").?.array.items;
+    try std.testing.expectEqualStrings("what is this", user_parts[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings("input_image", user_parts[1].object.get("type").?.string);
+    try std.testing.expectEqualStrings("data:image/jpeg;base64,aGVsbG8=", user_parts[1].object.get("image_url").?.string);
 }
 
 test "compact requests omit response streaming fields" {

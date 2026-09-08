@@ -153,6 +153,10 @@ Tool function rules:
 - Return `{ msg = "..." }`. Attach an image with
   `img = { media_type = "image/png", data = blitz.base64.encode(raw) }`.
   Set `exit_loop = true` to end the agent loop.
+- Every provider sends `msg` as tool result text. Images follow as user
+  content: a `user` message on `openai`/`ollama`/`response`, an image block in
+  the same user message on `anthropic`. Strict endpoints such as DeepSeek
+  reject images inside tool messages.
 
 For `ctx`, `call`, and result fields, read `BlitzCtx`, `BlitzCall`, and
 `BlitzToolResult` in `meta.lua`.
