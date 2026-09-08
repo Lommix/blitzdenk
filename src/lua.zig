@@ -392,6 +392,7 @@ const ToolDef = LuaType{ .table_def = .{ .name = "ToolDef", .fields = &.{
     .{ .name = "args", .ty = ToolArgsDef, .optional = true },
     .{ .name = "snippet", .ty = LuaType.string, .optional = true },
     .{ .name = "guidelines", .ty = LuaType.string, .optional = true },
+    .{ .name = "requires_vision", .ty = LuaType.boolean, .optional = true, .desc = "only offer the tool to agents whose model has vision" },
     .{ .name = "func", .ty = LuaType{ .raw_refs = .{
         .text = "fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult",
         .refs = &.{ CtxDef, CallDef, ToolResultDef },
@@ -495,6 +496,10 @@ pub const Blitz = LuaType{
                                 if (getStringField(state, def.idx, "guidelines", &entry.guidelines)) |len| {
                                     entry.guidelines_len = len;
                                 }
+                                entry.requires_vision = switch (readAnyFieldAlloc(?bool, state, "requires_vision", def.idx, null)) {
+                                    .ok => |value| value orelse false,
+                                    .err => false,
+                                };
 
                                 if (getStringField(state, def.idx, "schema", &entry.schema)) |len| {
                                     entry.schema_len = len;
@@ -2696,6 +2701,7 @@ const LuaToolEntry = struct {
     guidelines_len: usize = 0,
     schema: [2048]u8 = undefined,
     schema_len: usize = 0,
+    requires_vision: bool = false,
     func_ref: c_int = c.LUA_NOREF,
     state_ref: c_int = c.LUA_NOREF,
     L: ?*c.lua_State = null,
@@ -3437,6 +3443,7 @@ pub const LuaVm = struct {
                     .parameters_schema = entry.schemaSlice(),
                     .prompt_snippet = if (entry.snippet_len > 0) entry.snippetSlice() else null,
                     .prompt_guidelines = if (entry.guidelines_len > 0) entry.guidelinesSlice() else null,
+                    .requires_vision = entry.requires_vision,
                 },
                 .func = &luaToolTrampoline,
             };

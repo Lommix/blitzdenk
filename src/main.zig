@@ -598,7 +598,7 @@ pub fn run(
     for (lua_tools) |tool| {
         try context_factory.add(tool, .all);
     }
-    context_factory.precalcGeneralPromptSize();
+    context_factory.precalcGeneralPromptSize(&app.config);
 
     for (lua_binds) |bind| {
         try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn }, .description = bind.description });
@@ -853,7 +853,7 @@ pub fn run(
                         break :blk;
                     };
                     for (lua_tools) |tool| try context_factory.add(tool, .all);
-                    context_factory.precalcGeneralPromptSize();
+                    context_factory.precalcGeneralPromptSize(&app.config);
 
                     const reloaded_mcp_servers = app.lua_vm.getEnabledMcpServers(arena) catch |err| {
                         std.log.scoped(.mcp).err("failed to load MCP server defs {any}", .{err});

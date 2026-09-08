@@ -638,7 +638,7 @@ pub fn configureAgent(
 ) !void {
     try self.refreshAgentTools(cfg, agent, base);
     const alloc = agent.state_arena.allocator();
-    const prompt = try self.build_system_prompt(alloc, @enumFromInt(agent.type_idx), agent.clean);
+    const prompt = try self.build_system_prompt(alloc, cfg, @enumFromInt(agent.type_idx), agent.clean);
     try agent.setSystemPrompt(prompt);
 }
 
@@ -667,7 +667,7 @@ fn refreshAgentToolsInternal(self: *const Self, cfg: *const r.config.BlitzdenkCf
     const vision = self.agentVision(cfg, @enumFromInt(agent.type_idx));
     var it = self.iter(@enumFromInt(agent.type_idx));
     while (it.next()) |tool| {
-        if (std.mem.eql(u8, tool.def.name, r.tools.read.ViewImageTool.def.name) and !vision) continue;
+        if (tool.def.requires_vision and !vision) continue;
         if (std.mem.eql(u8, tool.def.name, r.tools.agent.AgentTool.def.name)) {
             var buf: [64]AgentMeta = undefined;
             var out = std.ArrayList(AgentMeta).initBuffer(&buf);
@@ -814,6 +814,7 @@ pub fn deinit(self: *Self) void {
 pub fn build_system_prompt(
     self: *const Self,
     alloc: std.mem.Allocator,
+    cfg: *const r.config.BlitzdenkCfg,
     agent_type: AgentType,
     clean: bool,
 ) ![]const u8 {
@@ -821,6 +822,7 @@ pub fn build_system_prompt(
     var w = &allocating.writer;
 
     const def = self.getAgent(agent_type) orelse return error.UnknownAgent;
+    const vision = self.agentVision(cfg, agent_type);
     _ = try w.write(def.prompt);
     try w.writeByte('\n');
 
@@ -828,6 +830,7 @@ pub fn build_system_prompt(
         var wrote_tools_header = false;
         for (0..def.tools.len) |i| {
             const tool = self.findLoaded(def.tools.nameAt(i)) orelse continue;
+            if (tool.def.requires_vision and !vision) continue;
             if (tool.def.prompt_snippet) |snippet| {
                 if (!wrote_tools_header) {
                     _ = try w.write(
@@ -844,6 +847,7 @@ pub fn build_system_prompt(
         var wrote_guidelines_header = false;
         for (0..def.tools.len) |i| {
             const tool = self.findLoaded(def.tools.nameAt(i)) orelse continue;
+            if (tool.def.requires_vision and !vision) continue;
             if (tool.def.prompt_guidelines) |guidelines| {
                 if (!wrote_guidelines_header) {
                     _ = try w.write(
@@ -915,10 +919,10 @@ pub fn build_system_prompt(
     return allocating.written();
 }
 
-pub fn precalcGeneralPromptSize(self: *Self) void {
+pub fn precalcGeneralPromptSize(self: *Self, cfg: *const r.config.BlitzdenkCfg) void {
     var arena = std.heap.ArenaAllocator.init(self.alloc);
     defer arena.deinit();
-    const prompt = self.build_system_prompt(arena.allocator(), .general, false) catch {
+    const prompt = self.build_system_prompt(arena.allocator(), cfg, .general, false) catch {
         self.general_prompt_size = 0;
         return;
     };
@@ -1319,7 +1323,9 @@ test "system_prompt" {
     defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
-    const prompt = try factory.build_system_prompt(alloc, .general, false);
+    var cfg: r.config.BlitzdenkCfg = .{};
+
+    const prompt = try factory.build_system_prompt(alloc, &cfg, .general, false);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# Available tools:") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- read: Read file contents") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- bash: Execute a bash command") != null);
@@ -1327,15 +1333,67 @@ test "system_prompt" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- Use read to examine files instead of cat or sed.") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# User context (AGENTS.md):") != null);
 
-    const clean_prompt = try factory.build_system_prompt(alloc, .general, true);
+    const clean_prompt = try factory.build_system_prompt(alloc, &cfg, .general, true);
     try std.testing.expect(std.mem.indexOf(u8, clean_prompt, "# Available tools:") != null);
     try std.testing.expect(std.mem.indexOf(u8, clean_prompt, "# User context (AGENTS.md):") == null);
 
     try factory.setAgentTools(.general, &.{});
-    const toolless_prompt = try factory.build_system_prompt(alloc, .general, false);
+    const toolless_prompt = try factory.build_system_prompt(alloc, &cfg, .general, false);
     try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# Available tools:") == null);
     try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# Guidelines:") == null);
     try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# User context (AGENTS.md):") != null);
+}
+
+test "vision tools hidden from prompt and toolset for non-vision models" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const io = std.testing.io_instance;
+    const home_dir = io.environ.process_environ.getPosix("HOME") orelse "/root";
+
+    var factory = try Self.init(alloc, std.testing.io, home_dir, "/");
+    defer factory.capability_arena.deinit();
+    defer factory.prompt_arena.deinit();
+
+    var cfg: r.config.BlitzdenkCfg = .{};
+    cfg.model_count = 1;
+    cfg.models[0] = .{ .provider = @enumFromInt(0), .vision = false };
+    try factory.setAgentModel(&cfg, .general, @enumFromInt(0));
+
+    const blind = try factory.build_system_prompt(alloc, &cfg, .general, true);
+    try std.testing.expect(std.mem.indexOf(u8, blind, "view_image") == null);
+
+    var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
+    defer env.deinit();
+    var exec_pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &env);
+    defer exec_pool.deinit();
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    const base: r.tools.context.BaseContext = .{
+        .registry = &registry,
+        .exec_pool = &exec_pool,
+        .self_id = id,
+        .cwd = "/tmp",
+    };
+
+    try factory.refreshAgentTools(&cfg, agent, base);
+    for (agent.tools) |tool| try std.testing.expect(!std.mem.eql(u8, tool.name, "view_image"));
+
+    cfg.models[0].vision = true;
+    const sighted = try factory.build_system_prompt(alloc, &cfg, .general, true);
+    try std.testing.expect(std.mem.indexOf(u8, sighted, "- view_image: Load an image into the context") != null);
+    try factory.refreshAgentTools(&cfg, agent, base);
+    var installed = false;
+    for (agent.tools) |tool| installed = installed or std.mem.eql(u8, tool.name, "view_image");
+    try std.testing.expect(installed);
 }
 
 test "precalcGeneralPromptSize measures the general system prompt" {
@@ -1350,6 +1408,7 @@ test "precalcGeneralPromptSize measures the general system prompt" {
     defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
-    factory.precalcGeneralPromptSize();
+    var cfg: r.config.BlitzdenkCfg = .{};
+    factory.precalcGeneralPromptSize(&cfg);
     try std.testing.expect(factory.general_prompt_size > 0);
 }

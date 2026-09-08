@@ -31,6 +31,7 @@ pub const ViewImageTool = r.Tool{
         .name = "view_image",
         .description = "Load an image from a local path or HTTP(S) URL into the context (PNG, JPEG, GIF, WebP)",
         .prompt_snippet = "Load an image into the context",
+        .requires_vision = true,
         .parameters_schema =
         \\{
         \\  "type": "object",

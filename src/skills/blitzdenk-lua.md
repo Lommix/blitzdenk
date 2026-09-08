@@ -62,7 +62,8 @@ blitz.set_agent_effort(blitz.AGENT_GENERAL, "max")
 ```
 
 `add_provider` and `add_model` return integer handles. `vision` gates the
-`view_image` tool and image pasting. Set `replay_reasoning` on chat models that
+`view_image` tool, image pasting and every tool marked `requires_vision`. Set
+`replay_reasoning` on chat models that
 return reasoning but reject replayed history without that field (DeepSeek, GLM).
 Every agent needs a bound model; unbound agents fail to spawn. Bind with
 `blitz.set_agent_model(agent_type, handle)` or `model = handle` in

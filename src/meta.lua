@@ -191,7 +191,7 @@
 ---@field redraw fun()
 
 ---@class BlitzToolDef
----bash tool executes bash. SSH mode will execute this remote
+---execute bash scripts
 ---@field BASH string
 ---reading text files
 ---@field READ string
@@ -367,6 +367,8 @@
 ---@field args? table<string, BlitzArgDef>
 ---@field snippet? string
 ---@field guidelines? string
+---only offer the tool to agents whose model has vision
+---@field requires_vision? boolean
 ---@field func fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult
 
 ---@class BlitzThinking
