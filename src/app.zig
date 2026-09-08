@@ -1852,7 +1852,7 @@ pub const App = struct {
             if (agent.type_idx != @intFromEnum(r.ContextFactory.AgentType.general)) continue;
             return agent.flags.vision;
         }
-        return false;
+        return self.context_factory.agentVision(&self.config, .general);
     }
 
     pub fn pasteImage(self: *App) void {
