@@ -106,6 +106,7 @@ pub const Command = union(enum) {
         cwd: []const u8 = "",
         background: bool = false,
         task: []const u8 = "",
+        clean: bool = false,
     };
 
     pub const CustomCmd = struct {
@@ -315,6 +316,7 @@ pub const Command = union(enum) {
                         .parent = if (arg.parent_id) |id| id.pack() else null,
                         .depth = if (arg.parent_id) |id| app.registry.get(id).?.depth + 1 else 0,
                         .cwd = cwd,
+                        .clean = arg.clean,
                     }, .context_limit = app.default_context_limit });
                 constructed = true;
                 agent.background = arg.background;

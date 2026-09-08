@@ -44,6 +44,7 @@ pub const Identity = struct {
     parent: ?u32 = null,
     depth: u16 = 0,
     cwd: []const u8 = "",
+    clean: bool = false,
 };
 
 pub const InitOptions = struct {
@@ -81,6 +82,7 @@ pub const Agent = struct {
     parent: ?u32,
     depth: u16,
     background: bool = false,
+    clean: bool = false,
     /// reap() report consumed; survives until the next run restarts the agent
     reported_task_done: bool = false,
     cwd: []const u8,
@@ -142,6 +144,7 @@ pub const Agent = struct {
             .parent = options.identity.parent,
             .depth = options.identity.depth,
             .cwd = cwd,
+            .clean = options.identity.clean,
             .context_limit = options.context_limit,
         };
     }
@@ -158,6 +161,7 @@ pub const Agent = struct {
                 .parent = parent,
                 .depth = self.depth + 1,
                 .cwd = self.cwd,
+                .clean = self.clean,
             },
             .context_limit = self.context_limit,
         });
@@ -877,7 +881,7 @@ test "fork adopts a parked model update" {
         .base_url = "https://example.com/v1",
         .reasoning_effort = .low,
         .provider = .{ .openai = .{} },
-    }, .{});
+    }, .{ .identity = .{ .clean = true } });
     defer agent.deinit();
     agent.pending_model = try models.Model.init(std.testing.allocator, .{
         .api_key = "key",
@@ -891,6 +895,8 @@ test "fork adopts a parked model update" {
     defer child.deinit();
     try std.testing.expectEqualStrings("model-b", child.model.languageModel().modelId());
     try std.testing.expectEqual(models.ReasoningEffort.high, child.reasoning_effort);
+    try std.testing.expect(agent.clean);
+    try std.testing.expect(child.clean);
 }
 
 test "prepare step merges queued messages and reminder" {

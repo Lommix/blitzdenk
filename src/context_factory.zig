@@ -638,7 +638,7 @@ pub fn configureAgent(
 ) !void {
     try self.refreshAgentTools(cfg, agent, base);
     const alloc = agent.state_arena.allocator();
-    const prompt = try self.build_system_prompt(alloc, @enumFromInt(agent.type_idx));
+    const prompt = try self.build_system_prompt(alloc, @enumFromInt(agent.type_idx), agent.clean);
     try agent.setSystemPrompt(prompt);
 }
 
@@ -749,6 +749,11 @@ fn agentHasTool(self: *const Self, agent_type: AgentType, name: []const u8) bool
     return false;
 }
 
+fn agentHasTools(self: *const Self, agent_type: AgentType) bool {
+    var it = self.iter(agent_type);
+    return it.next() != null;
+}
+
 pub fn build_toolset(self: *Self, agent_type: AgentType, out: *ToolSet) !void {
     out.len = 0;
     var it = self.iter(agent_type);
@@ -810,6 +815,7 @@ pub fn build_system_prompt(
     self: *const Self,
     alloc: std.mem.Allocator,
     agent_type: AgentType,
+    clean: bool,
 ) ![]const u8 {
     var allocating = std.Io.Writer.Allocating.init(alloc);
     var w = &allocating.writer;
@@ -818,57 +824,61 @@ pub fn build_system_prompt(
     _ = try w.write(def.prompt);
     try w.writeByte('\n');
 
-    var wrote_tools_header = false;
-    for (0..def.tools.len) |i| {
-        const tool = self.findLoaded(def.tools.nameAt(i)) orelse continue;
-        if (tool.def.prompt_snippet) |snippet| {
-            if (!wrote_tools_header) {
-                _ = try w.write(
-                    \\
-                    \\# Available tools:
-                    \\
-                );
-                wrote_tools_header = true;
+    if (self.agentHasTools(agent_type)) {
+        var wrote_tools_header = false;
+        for (0..def.tools.len) |i| {
+            const tool = self.findLoaded(def.tools.nameAt(i)) orelse continue;
+            if (tool.def.prompt_snippet) |snippet| {
+                if (!wrote_tools_header) {
+                    _ = try w.write(
+                        \\
+                        \\# Available tools:
+                        \\
+                    );
+                    wrote_tools_header = true;
+                }
+                try w.print("- {s}: {s}\n", .{ tool.def.name, snippet });
             }
-            try w.print("- {s}: {s}\n", .{ tool.def.name, snippet });
         }
-    }
 
-    var wrote_guidelines_header = false;
-    for (0..def.tools.len) |i| {
-        const tool = self.findLoaded(def.tools.nameAt(i)) orelse continue;
-        if (tool.def.prompt_guidelines) |guidelines| {
-            if (!wrote_guidelines_header) {
-                _ = try w.write(
-                    \\
-                    \\# Guidelines:
-                    \\
-                );
-                wrote_guidelines_header = true;
+        var wrote_guidelines_header = false;
+        for (0..def.tools.len) |i| {
+            const tool = self.findLoaded(def.tools.nameAt(i)) orelse continue;
+            if (tool.def.prompt_guidelines) |guidelines| {
+                if (!wrote_guidelines_header) {
+                    _ = try w.write(
+                        \\
+                        \\# Guidelines:
+                        \\
+                    );
+                    wrote_guidelines_header = true;
+                }
+                try w.print("- {s}\n", .{guidelines});
             }
-            try w.print("- {s}\n", .{guidelines});
+        }
+
+        if (self.agentHasTool(agent_type, r.tools.skill.SkillTool.def.name)) {
+            try w.writeAll(
+                \\
+                \\# Skills:
+                \\Call the `skill` tool when the task matches a skill's trigger rules.
+                \\
+            );
+        }
+
+        if (self.available_mcp_count > 0 and self.agentHasTool(agent_type, r.tools.start.StartMcpTool.def.name)) {
+            try w.writeAll(
+                \\
+                \\# Available mcp:
+                \\
+            );
+            for (self.available_mcp_names[0..self.available_mcp_count]) |name| {
+                try w.print("- name: \"{s}\"\n", .{name});
+            }
         }
     }
 
-    if (self.agentHasTool(agent_type, r.tools.skill.SkillTool.def.name)) {
-        try w.writeAll(
-            \\
-            \\# Skills:
-            \\Call the `skill` tool when the task matches a skill's trigger rules.
-            \\
-        );
-    }
-
-    if (self.available_mcp_count > 0 and self.agentHasTool(agent_type, r.tools.start.StartMcpTool.def.name)) {
-        try w.writeAll(
-            \\
-            \\# Available mcp:
-            \\
-        );
-        for (self.available_mcp_names[0..self.available_mcp_count]) |name| {
-            try w.print("- name: \"{s}\"\n", .{name});
-        }
-    }
+    if (clean) return allocating.written();
 
     _ = try w.write(
         \\
@@ -908,7 +918,7 @@ pub fn build_system_prompt(
 pub fn precalcGeneralPromptSize(self: *Self) void {
     var arena = std.heap.ArenaAllocator.init(self.alloc);
     defer arena.deinit();
-    const prompt = self.build_system_prompt(arena.allocator(), .general) catch {
+    const prompt = self.build_system_prompt(arena.allocator(), .general, false) catch {
         self.general_prompt_size = 0;
         return;
     };
@@ -1309,12 +1319,23 @@ test "system_prompt" {
     defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
-    const prompt = try factory.build_system_prompt(alloc, .general);
+    const prompt = try factory.build_system_prompt(alloc, .general, false);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# Available tools:") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- read: Read file contents") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- bash: Execute a bash command") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# Guidelines:") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- Use read to examine files instead of cat or sed.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "# User context (AGENTS.md):") != null);
+
+    const clean_prompt = try factory.build_system_prompt(alloc, .general, true);
+    try std.testing.expect(std.mem.indexOf(u8, clean_prompt, "# Available tools:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, clean_prompt, "# User context (AGENTS.md):") == null);
+
+    try factory.setAgentTools(.general, &.{});
+    const toolless_prompt = try factory.build_system_prompt(alloc, .general, false);
+    try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# Available tools:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# Guidelines:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# User context (AGENTS.md):") != null);
 }
 
 test "precalcGeneralPromptSize measures the general system prompt" {

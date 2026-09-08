@@ -18,7 +18,8 @@ pub const AgentTool = r.Tool{
         \\      "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
         \\      "prompt": {"type": "string", "description": "The task for the agent to perform"},
         \\      "agent_type": {"type": "string", "enum": {AGENT_LIST}, "description": "The type of specialized agent to use for this task"},
-        \\      "cwd": {"type": "string", "description": "The working directoy of the agent. Defaults to current"}
+        \\      "cwd": {"type": "string", "description": "The working directoy of the agent. Defaults to current"},
+        \\      "clean": {"type": "boolean", "description": "Bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections. Defaults to false"}
         \\  },
         \\  "required": ["description","prompt","agent_type"]
         \\}
@@ -76,6 +77,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         prompt: []const u8,
         agent_type: []const u8,
         cwd: ?[]const u8 = null,
+        clean: bool = false,
     };
 
     const parsed = std.json.parseFromSlice(
@@ -117,6 +119,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
             .cwd = cwd,
             .background = true,
             .task = args.description,
+            .clean = args.clean,
         },
     }) catch {
         ctx.base.registry.releaseReservation(child_id);

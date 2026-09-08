@@ -4432,6 +4432,22 @@ fn undoTestAgent(app: *App) !*r.agent.Agent {
     return agent;
 }
 
+test "clean agents get no system reminder" {
+    var app = undoTestApp();
+    app.lua_inject_hooks_enabled.store(false, .release);
+    app.injection_hooks = .{};
+    const agent = try undoTestAgent(&app);
+    defer undoTestTeardown(&app);
+
+    agent.clean = true;
+    const clean_reminder = try App.buildReminderOpaque(&app, agent);
+    try std.testing.expectEqual(null, clean_reminder);
+
+    agent.clean = false;
+    const reminder = try App.buildReminderOpaque(&app, agent);
+    try std.testing.expect(reminder != null);
+}
+
 test "undoLastTurn pops the last turn into the input" {
     var app = undoTestApp();
     const agent = try undoTestAgent(&app);

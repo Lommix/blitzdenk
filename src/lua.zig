@@ -432,6 +432,7 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
     .{ .name = "background", .ty = LuaType.boolean, .optional = true, .desc = "run detached from the chat: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of chat entries. Use with on_complete to build silent subagents" },
     .{ .name = "task", .ty = LuaType.string, .optional = true, .desc = "short task description shown in agent listings" },
+    .{ .name = "clean", .ty = LuaType.boolean, .optional = true, .desc = "bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections, so the blitz.hooks.inject hook never runs for it; ignored on fork, a fork inherits the parent" },
     .{ .name = "on_complete", .ty = LuaType{ .raw = "fun(agent_id: integer, status: integer)" }, .optional = true, .desc = "runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside" },
 } } };
 const SelectRequestDef = LuaType{ .table_def = .{ .name = "BlitzSelectRequest", .fields = &.{
@@ -1394,7 +1395,8 @@ pub const BlitzHooks = LuaType{
                 \\before the reminder is built, in the main Lua VM on the calling thread.
                 \\Return a string to append it to the agent's <system-reminder> block,
                 \\nil for nothing. Last registration wins. Never call
-                \\blitz.agent.await inside the hook.
+                \\blitz.agent.await inside the hook. Clean agents get no reminder at all,
+                \\so the hook never runs for them.
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "hook", .ty = LuaType{ .function = .{
@@ -2413,6 +2415,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         fork: ?bool = null,
                         background: ?bool = null,
                         task: ?[]const u8 = null,
+                        clean: ?bool = null,
                         on_complete: ?LuaFnRef = null,
                     };
 
@@ -2451,6 +2454,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         .fork = spawn.fork orelse false,
                         .background = spawn.background orelse false,
                         .task = spawn.task orelse "",
+                        .clean = spawn.clean orelse false,
                     };
                     if (spawn.agent_type) |t| {
                         if (t > std.math.maxInt(u8)) {
@@ -5297,6 +5301,13 @@ test "spawn on_complete callback runs once with agent id and status" {
     try std.testing.expectEqual(quiet_id, queued.agent_id.pack());
     try std.testing.expect(queued.background);
     try std.testing.expect(queued.parent_id == null);
+    try std.testing.expect(!queued.clean);
+
+    try vm.exec(
+        \\pure = blitz.agent.spawn({ prompt = "pure", clean = true })
+    );
+    const queued_clean = app_state.cmd_queue._data.items[2].spawn_agent;
+    try std.testing.expect(queued_clean.clean);
 }
 
 test "hook listeners run sandboxed by registration order" {

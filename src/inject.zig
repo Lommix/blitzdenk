@@ -29,7 +29,9 @@ pub const InjectionsHooks = struct {
         self._hooks.deinit(alloc);
     }
 
-    pub fn build(self: *const Self, app: *r.app.App, agent: *r.agent.Agent) ![]const u8 {
+    pub fn build(self: *const Self, app: *r.app.App, agent: *r.agent.Agent) !?[]const u8 {
+        if (agent.clean) return null;
+
         const alloc = agent.injection_arena.allocator();
 
         var writer = std.Io.Writer.Allocating.init(alloc);

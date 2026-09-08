@@ -178,6 +178,7 @@ pub const SaveState = struct {
     /// entries belong to it; on apply both those entries and the chat_render
     /// tool_call stamps carrying this id are re-keyed to the fresh id.
     main_agent: ?u32 = null,
+    clean: bool = false,
     /// Rich per-call status lines (styled label + result flag + child link)
     /// so restored call blocks don't degrade to the plain tool name.
     /// `agent == null` entries belong to the main agent; child agents keep
@@ -221,6 +222,7 @@ pub fn buildSaveState(a: *app.App, agent: *const r.agent.Agent, alloc: std.mem.A
         .chat = out.items,
         .chat_render = a.chat_entries.items,
         .main_agent = if (a.main_agent_id) |main| main.pack() else null,
+        .clean = agent.clean,
         .tool_status = try encodeToolStatus(a, alloc),
     };
 }
@@ -296,6 +298,7 @@ pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
         .type_idx = @intFromEnum(r.ContextFactory.AgentType.general),
         .name = a.context_factory.agentName(.general),
         .cwd = a.cwd,
+        .clean = save.clean,
     }, .context_limit = a.default_context_limit });
     errdefer a.registry.release(id);
     try a.configureAgent(id, agent);

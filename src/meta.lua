@@ -83,6 +83,8 @@
 ---@field background? boolean
 ---short task description shown in agent listings
 ---@field task? string
+---bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections, so the blitz.hooks.inject hook never runs for it; ignored on fork, a fork inherits the parent
+---@field clean? boolean
 ---runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside
 ---@field on_complete? fun(agent_id: integer, status: integer)
 
@@ -293,7 +295,8 @@
 ---before the reminder is built, in the main Lua VM on the calling thread.
 ---Return a string to append it to the agent's <system-reminder> block,
 ---nil for nothing. Last registration wins. Never call
----blitz.agent.await inside the hook.
+---blitz.agent.await inside the hook. Clean agents get no reminder at all,
+---so the hook never runs for them.
 ---@field inject fun(hook: fun(agent_id: integer): string)
 ---Install the typed-input hook. Runs on every Enter press with
 ---text, in the main Lua VM on the main thread, before command

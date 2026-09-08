@@ -183,6 +183,12 @@ result file instead of chat entries. Combine it with `on_complete` to build a
 silent subagent: read the answer in the callback with
 `blitz.agent.result(id)`.
 
+`clean = true` in `blitz.agent.spawn`, or `clean` on the `agent` tool, builds a
+bare agent: no AGENTS.md files in the system prompt, and no `<system-reminder>`
+injection on any step, so `blitz.hooks.inject` never runs for it. A fork ignores
+the flag and inherits the parent's setting. A finished background child still
+queues its result notice into a clean parent.
+
 ```lua
 blitz.agent.spawn({
     agent_type = researcher,
@@ -407,7 +413,8 @@ hook. Never call `blitz.agent.await` inside the hook.
 right before the system reminder is built. Return a string to append it to
 that agent's `<system-reminder>` block. It runs in the main Lua VM with a
 brief lock. A nil return is skipped; errors are logged and the step continues.
-Last registration wins. Never call `blitz.agent.await` inside the hook.
+Last registration wins. Never call `blitz.agent.await` inside the hook. A clean
+agent builds no reminder at all, so the hook never runs for it.
 
 ```lua
 blitz.hooks.inject(function(agent_id)
