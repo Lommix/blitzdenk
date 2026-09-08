@@ -83,6 +83,25 @@ fn urlEnd(buffer: []const u8, start: usize) usize {
     return i;
 }
 
+pub fn fromDisplayPos(buffer: []const u8, display_pos: usize) usize {
+    var disp: usize = 0;
+    var i: usize = 0;
+    while (i < buffer.len) {
+        if (std.mem.indexOfPos(u8, buffer, i, PREFIX)) |start| {
+            if (display_pos <= disp + (start - i)) return i + (display_pos - disp);
+            disp += start - i;
+            const end = urlEnd(buffer, start);
+            if (display_pos < disp + TOKEN.len) return end;
+            disp += TOKEN.len;
+            i = end;
+            continue;
+        }
+        if (display_pos <= disp + (buffer.len - i)) return i + (display_pos - disp);
+        return buffer.len;
+    }
+    return buffer.len;
+}
+
 fn readMime(alloc: std.mem.Allocator, pool: *exec.CmdPool, argv: []const []const u8, ext: []const u8) !?ImageData {
     const res = pool.runAndWaitTimeout(.{ .argv = argv, .force_local = true }, 1500) catch return null;
     defer pool.alloc.free(res.stdout);
@@ -144,6 +163,25 @@ test "saveImage writes bytes and returns file URL" {
     const read = try tmp_dir.readFileAlloc(io, path[util.TMP_DIR.len + 1 ..], alloc, .limited(1024));
     defer alloc.free(read);
     try std.testing.expectEqualStrings(png, read);
+}
+
+test "fromDisplayPos inverts toDisplay cursor mapping" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const url1 = PREFIX ++ "1.png";
+    const url2 = PREFIX ++ "2.png";
+    const buffer = "ab " ++ url1 ++ " cd " ++ url2;
+    const s1: usize = 3;
+    const e1 = s1 + url1.len;
+    const s2 = e1 + 4;
+    const e2 = s2 + url2.len;
+
+    var b: usize = 0;
+    while (b <= buffer.len) : (b += 1) {
+        const d = try toDisplay(arena.allocator(), buffer, b);
+        const want = if (b > s1 and b <= e1) e1 else if (b > s2 and b <= e2) e2 else b;
+        try std.testing.expectEqual(want, fromDisplayPos(buffer, d.cursor));
+    }
 }
 
 test "findPasteAt hits inside and at the end of a pasted URL" {

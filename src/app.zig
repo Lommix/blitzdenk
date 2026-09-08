@@ -272,6 +272,7 @@ pub const App = struct {
     io: std.Io,
     input_buffer: std.ArrayList(u8) = .empty,
     input_cursor: u32 = 0,
+    input_desired_col: ?u32 = null,
     input_scroll_offset: u16 = 0,
     // ---------------
     // async interface
@@ -621,6 +622,7 @@ pub const App = struct {
         self.scroll_offset = 0;
         self.input_mode = .{ .text = .{} };
         self.input_cursor = 0;
+        self.input_desired_col = null;
         self.streaming_entry = null;
         self.sdk_preview_parts = .empty;
         self.sdk_preview_flushed = false;
@@ -1637,14 +1639,164 @@ pub const App = struct {
         self.input_buffer.clearRetainingCapacity();
         self.input_buffer.appendSlice(self.sessionAlloc(), text) catch return;
         self.input_cursor = @intCast(self.input_buffer.items.len);
+        self.input_desired_col = null;
         self.input_scroll_offset = 0;
         self.syncCompletion();
+    }
+
+    const VisualRow = struct { start: usize, end: usize, cols: usize };
+
+    fn appendWrappedPlainRows(
+        alloc: std.mem.Allocator,
+        line: []const u8,
+        width: usize,
+        base: usize,
+        out: *std.ArrayList(VisualRow),
+    ) !void {
+        var row_start: usize = base;
+        var col: usize = 0;
+        var has_content = false;
+        var pos: usize = 0;
+        while (pos < line.len) {
+            const is_space = line[pos] == ' ';
+            var run_end = pos + 1;
+            while (run_end < line.len and (line[run_end] == ' ') == is_space) run_end += 1;
+            const run_cols = std.unicode.utf8CountCodepoints(line[pos..run_end]) catch run_end - pos;
+
+            if (is_space) {
+                if (col > 0 and col + run_cols > width) {
+                    try out.append(alloc, .{ .start = row_start, .end = base + pos, .cols = col });
+                    row_start = base + run_end;
+                    col = 0;
+                    has_content = false;
+                } else {
+                    col += run_cols;
+                    has_content = true;
+                }
+                pos = run_end;
+                continue;
+            }
+            if (run_cols <= width) {
+                if (col + run_cols > width) {
+                    try out.append(alloc, .{ .start = row_start, .end = base + pos, .cols = col });
+                    row_start = base + pos;
+                    col = 0;
+                    has_content = false;
+                }
+                col += run_cols;
+                has_content = true;
+                pos = run_end;
+                continue;
+            }
+            var bi = pos;
+            while (bi < run_end) {
+                const remaining = width -| col;
+                var take_bytes: usize = 0;
+                var take_cols: usize = 0;
+                while (bi + take_bytes < run_end and take_cols < remaining) {
+                    const len = std.unicode.utf8ByteSequenceLength(line[bi + take_bytes]) catch 1;
+                    if (bi + take_bytes + len > run_end) break;
+                    take_bytes += len;
+                    take_cols += 1;
+                }
+                if (take_cols == 0) {
+                    try out.append(alloc, .{ .start = row_start, .end = base + bi, .cols = col });
+                    row_start = base + bi;
+                    col = 0;
+                    has_content = false;
+                    continue;
+                }
+                col += take_cols;
+                bi += take_bytes;
+                has_content = true;
+                if (col >= width and bi < run_end) {
+                    try out.append(alloc, .{ .start = row_start, .end = base + bi, .cols = col });
+                    row_start = base + bi;
+                    col = 0;
+                    has_content = false;
+                }
+            }
+            pos = run_end;
+        }
+        if (has_content or line.len == 0) {
+            try out.append(alloc, .{ .start = row_start, .end = base + line.len, .cols = col });
+        }
+    }
+
+    fn visualColAt(text: []const u8, row: VisualRow, pos: usize) usize {
+        if (pos <= row.start) return 0;
+        if (pos >= row.end) return row.cols;
+        return std.unicode.utf8CountCodepoints(text[row.start..pos]) catch pos - row.start;
+    }
+
+    pub fn moveCursorVertical(self: *App, delta: i32) void {
+        const buf = self.input_buffer.items;
+        if (self.input_cursor > buf.len) self.input_cursor = @intCast(buf.len);
+
+        const width: usize = self.widget_frame_input_area.width -| 5;
+        if (width == 0) return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        const display = self.displayInput(alloc);
+        const cursor = @min(display.cursor, display.text.len);
+
+        var rows: std.ArrayList(VisualRow) = .empty;
+        var it = std.mem.splitScalar(u8, display.text, '\n');
+        var consumed: usize = 0;
+        while (it.next()) |hard_line| {
+            appendWrappedPlainRows(alloc, hard_line, width, consumed, &rows) catch return;
+            consumed += hard_line.len + 1;
+        }
+        if (rows.items.len == 0) return;
+
+        var cur_row: usize = 0;
+        var cur_col: usize = 0;
+        for (rows.items, 0..) |row, i| {
+            if (cursor < row.end) {
+                cur_row = i;
+                cur_col = visualColAt(display.text, row, cursor);
+                break;
+            }
+            if (cursor == row.end and (i + 1 >= rows.items.len or rows.items[i + 1].start > cursor)) {
+                cur_row = i;
+                cur_col = row.cols;
+                break;
+            }
+        }
+
+        const desired: usize = self.input_desired_col orelse cur_col;
+        self.input_desired_col = @intCast(desired);
+
+        const target: usize = if (delta < 0) cur_row -| 1 else cur_row + 1;
+        if (delta < 0 and cur_row == 0) return;
+        if (target >= rows.items.len) return;
+
+        const row = rows.items[target];
+        const target_col = @min(desired, row.cols);
+        var pos: usize = row.start;
+        var cols_seen: usize = 0;
+        while (pos < row.end and cols_seen < target_col) {
+            const len = std.unicode.utf8ByteSequenceLength(display.text[pos]) catch 1;
+            pos = @min(pos + len, row.end);
+            cols_seen += 1;
+        }
+        if (pos == row.end and pos > row.start and
+            target + 1 < rows.items.len and rows.items[target + 1].start == pos)
+        {
+            pos -= 1;
+            while (pos > row.start and (display.text[pos] & 0xC0) == 0x80) pos -= 1;
+        }
+        self.input_cursor = @intCast(r.clipboard.fromDisplayPos(buf, pos));
     }
 
     pub fn appendBytes(self: *App, bytes: []const u8) void {
         if (self.input_cursor > self.input_buffer.items.len) {
             self.input_cursor = @intCast(self.input_buffer.items.len);
         }
+        self.input_desired_col = null;
         const idx = self.input_cursor;
         self.input_buffer.replaceRange(self.sessionAlloc(), idx, 0, bytes) catch return;
         self.input_cursor += @intCast(bytes.len);
@@ -1656,6 +1808,7 @@ pub const App = struct {
             self.input_cursor = @intCast(self.input_buffer.items.len);
         }
         if (self.input_cursor == 0) return;
+        self.input_desired_col = null;
 
         // Pasted image: deleting anywhere inside (or right after) the masked
         // `[Image]` token removes the whole link.
@@ -1778,6 +1931,7 @@ pub const App = struct {
         self.input_buffer.clearRetainingCapacity();
         self.input_buffer.appendSlice(self.sessionAlloc(), text) catch {};
         self.input_cursor = @intCast(self.input_buffer.items.len);
+        self.input_desired_col = null;
         self.syncCompletion();
         return true;
     }
@@ -1793,6 +1947,7 @@ pub const App = struct {
             self.input_buffer.appendSlice(self.sessionAlloc(), text) catch {};
         }
         self.input_cursor = @intCast(self.input_buffer.items.len);
+        self.input_desired_col = null;
         self.syncCompletion();
         return true;
     }
@@ -1828,6 +1983,7 @@ pub const App = struct {
             self.input_buffer.clearRetainingCapacity();
             self.input_buffer.appendSlice(alloc, text) catch return;
             self.input_cursor = @intCast(self.input_buffer.items.len);
+            self.input_desired_col = null;
         }
 
         if (self.textState()) |t| {
@@ -2672,6 +2828,7 @@ fn pathCompletions(app: *App, alloc: std.mem.Allocator) CompletionRows {
 }
 
 fn insertCompletionToken(self: *App, entry: []const u8) void {
+    self.input_desired_col = null;
     if (self.pathTokenActive()) {
         const tok = r.completion.tokenAt(self.input_buffer.items, self.input_cursor);
         self.input_buffer.replaceRange(self.sessionAlloc(), tok.start, tok.end - tok.start, entry) catch return;
@@ -5106,6 +5263,154 @@ test "inputWrapPosition reports rows above and column of token start" {
     try testing.expectEqual(@as(usize, 1), wrapped.row);
     try testing.expectEqual(@as(usize, 6), wrapped.col);
     try testing.expectEqual(@as(usize, 3), wrapped.total);
+}
+
+test "moveCursorVertical preserves column and clamps to line end" {
+    const testing = std.testing;
+    var app: App = undefined;
+    app.io = testing.io;
+    app.gpa = testing.allocator;
+    app.input_mode = .{ .text = .{} };
+    app.input_buffer = .empty;
+    app.input_desired_col = null;
+    app.widget_frame_input_area = .{ .width = 100, .height = 10 };
+
+    app.input_buffer.items = @constCast("abc\nxy\ndefghi");
+    app.input_cursor = 3;
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 6), app.input_cursor);
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 10), app.input_cursor);
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 10), app.input_cursor);
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 6), app.input_cursor);
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 3), app.input_cursor);
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 3), app.input_cursor);
+
+    app.input_cursor = 8;
+    app.input_desired_col = null;
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 5), app.input_cursor);
+
+    app.input_buffer.items = @constCast("abcd\ncé");
+    app.input_cursor = 2;
+    app.input_desired_col = null;
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 8), app.input_cursor);
+
+    app.input_buffer.items = @constCast("one");
+    app.input_cursor = 1;
+    app.input_desired_col = null;
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 1), app.input_cursor);
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 1), app.input_cursor);
+}
+
+test "moveCursorVertical moves by wrapped rows" {
+    const testing = std.testing;
+    var app: App = undefined;
+    app.io = testing.io;
+    app.gpa = testing.allocator;
+    app.input_mode = .{ .text = .{} };
+    app.input_buffer = .empty;
+    app.input_desired_col = null;
+    app.widget_frame_input_area = .{ .width = 11, .height = 10 };
+
+    app.input_buffer.items = @constCast("aaaa bbbb cccc dddd eeee ffff");
+    app.input_cursor = 30;
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 24), app.input_cursor);
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 19), app.input_cursor);
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 24), app.input_cursor);
+
+    app.input_cursor = 2;
+    app.input_desired_col = null;
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 7), app.input_cursor);
+
+    app.input_buffer.items = @constCast("aaaaaa bbb");
+    app.input_cursor = 2;
+    app.input_desired_col = null;
+    app.widget_frame_input_area = .{ .width = 9, .height = 10 };
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 6), app.input_cursor);
+
+    app.input_buffer.items = @constCast("aaaaaaaaaaaaaaaa");
+    app.input_cursor = 16;
+    app.input_desired_col = null;
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 11), app.input_cursor);
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 7), app.input_cursor);
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 3), app.input_cursor);
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 3), app.input_cursor);
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 7), app.input_cursor);
+
+    app.input_buffer.items = @constCast("ab\ncd");
+    app.input_cursor = 1;
+    app.input_desired_col = null;
+    app.widget_frame_input_area = .{ .width = 0, .height = 10 };
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 1), app.input_cursor);
+
+    app.input_buffer.items = @constCast("ab\n");
+    app.input_cursor = 3;
+    app.input_desired_col = null;
+    app.widget_frame_input_area = .{ .width = 100, .height = 10 };
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 3), app.input_cursor);
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 0), app.input_cursor);
+
+    app.input_buffer.items = @constCast("");
+    app.input_cursor = 0;
+    app.input_desired_col = null;
+    app.moveCursorVertical(-1);
+    try testing.expectEqual(@as(u32, 0), app.input_cursor);
+    app.moveCursorVertical(1);
+    try testing.expectEqual(@as(u32, 0), app.input_cursor);
+}
+
+test "appendWrappedPlainRows matches wrapLine row boundaries" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const cases = [_]struct { text: []const u8, width: usize }{
+        .{ .text = "aaaa bbbb cccc dddd", .width = 9 },
+        .{ .text = "aaaaaaaa bbb", .width = 4 },
+        .{ .text = "ab   cd", .width = 5 },
+        .{ .text = "héllo wörld foo", .width = 4 },
+        .{ .text = "   ", .width = 3 },
+        .{ .text = "a b c d e f g", .width = 1 },
+    };
+
+    for (cases) |case| {
+        var line: r.tui.Line = .{};
+        try line.pushText(a, case.text, .{});
+        var wrapped: std.ArrayList(r.tui.Line) = .empty;
+        try r.tui.wrapLine(a, &line, case.width, &wrapped);
+
+        var rows: std.ArrayList(App.VisualRow) = .empty;
+        try App.appendWrappedPlainRows(a, case.text, case.width, 0, &rows);
+
+        try testing.expectEqual(wrapped.items.len, rows.items.len);
+        for (wrapped.items, rows.items) |*w, row| {
+            var content: std.ArrayList(u8) = .empty;
+            for (w.spans.items) |span| try content.appendSlice(a, span.content);
+            try testing.expectEqualStrings(content.items, case.text[row.start..row.end]);
+        }
+    }
 }
 
 test "completion visibility rule" {

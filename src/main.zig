@@ -935,8 +935,12 @@ pub fn run(
                                     }
                                     continue;
                                 },
-                                .cursor_left => app.input_cursor -|= 1,
+                                .cursor_left => {
+                                    app.input_desired_col = null;
+                                    app.input_cursor -|= 1;
+                                },
                                 .cursor_right => {
+                                    app.input_desired_col = null;
                                     app.input_cursor = @min(app.input_cursor + 1, app.input_buffer.items.len);
                                 },
                                 .cursor_up => {
@@ -944,12 +948,14 @@ pub fn run(
                                         app.handleCompletion(.prev);
                                         continue;
                                     }
+                                    app.moveCursorVertical(-1);
                                 },
                                 .cursor_down => {
                                     if (app.completionIsOpen()) {
                                         app.handleCompletion(.next);
                                         continue;
                                     }
+                                    app.moveCursorVertical(1);
                                 },
                                 .history_prev => {
                                     if (app.historyUp()) continue;
@@ -1289,6 +1295,7 @@ pub fn run(
                                     if (input.len > 0 and input[0] == '/') {
                                         app.input_buffer.clearRetainingCapacity();
                                         app.input_cursor = 0;
+                                        app.input_desired_col = null;
                                     }
                                 },
                                 .passphrase => {
