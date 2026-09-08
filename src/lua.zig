@@ -3001,6 +3001,7 @@ fn readAnyValueAlloc(
                 if (c.lua_type(state, idx) != c.LUA_TSTRING) return .Err(name ++ " is not a string");
                 var len: usize = 0;
                 const sptr = c.lua_tolstring(state, idx, &len) orelse return .Err(name ++ ": failed string conversion");
+                if (allocator) |alloc| return .Ok(alloc.dupe(u8, sptr[0..len]) catch return .Err("oom"));
                 return .Ok(sptr[0..len]);
             }
             if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " must be table for allocation");
@@ -5201,9 +5202,81 @@ test "pushAny and readAnyValue handle arrays and slices" {
 
     const slice = readAnyValueAlloc([]const []const u8, state, "slice", -1, std.testing.allocator).ok;
     defer std.testing.allocator.free(slice);
+    defer for (slice) |value| std.testing.allocator.free(value);
     try std.testing.expectEqual(@as(usize, 2), slice.len);
     try std.testing.expectEqualStrings("ask", slice[0]);
     try std.testing.expectEqualStrings("read", slice[1]);
+}
+
+test "allocated Lua MCP arguments own strings after Lua closes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const expected: r.mcp.ServerConfig = .{
+        .name = "playwright",
+        .command = "npx",
+        .args = &.{ "-y", "@playwright/mcp@latest" },
+        .tools_prefix = "pw_",
+    };
+    const owned = blk: {
+        const state = c.luaL_newstate() orelse return error.LuaInitFailed;
+        defer c.lua_close(state);
+        pushAny(state, expected);
+        const borrowed = readAnyFieldAlloc([]const u8, state, "name", -1, null).ok;
+        const parsed = readAnyValueAlloc(r.mcp.ServerConfig, state, "server", -1, arena.allocator()).ok;
+        try std.testing.expect(parsed.name.ptr != borrowed.ptr);
+        break :blk parsed;
+    };
+    try std.testing.expectEqualStrings(expected.name, owned.name);
+    try std.testing.expectEqualStrings(expected.command, owned.command);
+    try std.testing.expectEqualStrings(expected.tools_prefix, owned.tools_prefix);
+    try std.testing.expectEqual(expected.args.len, owned.args.len);
+    for (expected.args, owned.args) |want, got| try std.testing.expectEqualStrings(want, got);
+}
+
+test "MCP registration survives garbage collection across repeated Lua reloads" {
+    const Fixture = struct {
+        fn allocate(_: ?*anyopaque, ptr: ?*anyopaque, osize: usize, nsize: usize) callconv(.c) ?*anyopaque {
+            if (nsize == 0) {
+                if (ptr) |p| @memset(@as([*]u8, @ptrCast(p))[0..osize], 0x85);
+            }
+            return luaAllocWith(&std.testing.allocator, ptr, osize, nsize);
+        }
+    };
+    var app_state: r.app.App = undefined;
+    app_state.io = std.testing.io;
+    app_state.gpa = std.testing.allocator;
+    app_state.config = .{};
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    app_state.lua_vm = vm;
+    vm.setApp(&app_state);
+
+    for (0..32) |_| {
+        try vm.reset();
+        c.lua_setallocf(vm.L, Fixture.allocate, null);
+        try vm.exec(
+            \\blitz.mcp.add({
+            \\    name = string.lower("PLAYWRIGHT"),
+            \\    command = string.lower("NPX"),
+            \\    args = { "-y", string.lower("@PLAYWRIGHT/MCP@LATEST") },
+            \\    tools_prefix = string.lower("PW_"),
+            \\})
+        );
+        try vm.exec(
+            \\collectgarbage("collect")
+            \\for i = 1, 1000 do local s = string.rep(tostring(i), 20) end
+            \\collectgarbage("collect")
+        );
+        try std.testing.expect(vm.enableMcp("playwright"));
+        const servers = try vm.getEnabledMcpServers(std.testing.allocator);
+        defer std.testing.allocator.free(servers);
+        try std.testing.expectEqual(@as(usize, 1), servers.len);
+        try std.testing.expectEqualStrings("playwright", servers[0].name);
+        try std.testing.expectEqualStrings("npx", servers[0].command);
+        try std.testing.expectEqualStrings("pw_", servers[0].tools_prefix);
+        try std.testing.expectEqualStrings("-y", servers[0].args[0]);
+        try std.testing.expectEqualStrings("@playwright/mcp@latest", servers[0].args[1]);
+    }
 }
 
 test "LuaType defines recursive Lua globals" {

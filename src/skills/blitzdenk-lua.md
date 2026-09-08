@@ -83,6 +83,7 @@ change provider and model.
 ## Tool sets
 
 `blitz.tools.*` holds the built-in tool name constants.
+Tool names must be nonempty UTF-8 strings.
 
 ```lua
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {

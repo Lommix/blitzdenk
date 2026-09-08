@@ -1198,9 +1198,12 @@ pub const App = struct {
             self.mcp_load = null;
         }
 
-        for (self.mcp_manager.registeredTools()) |entry| try self.context_factory.add(entry.tool, entry.flags);
-
-        try self.refreshLiveAgentTools();
+        {
+            self.lua_vm.vm_mu.lockUncancelable(self.io);
+            defer self.lua_vm.vm_mu.unlock(self.io);
+            for (self.mcp_manager.registeredTools()) |entry| try self.context_factory.add(entry.tool, entry.flags);
+            try self.refreshLiveAgentTools();
+        }
         self.event_bus.emit(self, .mcp_tools_reloaded);
         self.dirty = true;
     }

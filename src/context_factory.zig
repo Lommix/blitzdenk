@@ -607,7 +607,15 @@ pub fn resetDefs(self: *Self) void {
 }
 
 pub fn add(self: *Self, tool: r.tools.Tool, flags: ToolFlags) !void {
-    try self.loaded_tools.append(self.alloc, .{ .tool = tool, .flags = flags });
+    if (tool.def.name.len == 0 or !std.unicode.utf8ValidateSlice(tool.def.name)) return error.InvalidToolName;
+    const alloc = self.prompt_arena.allocator();
+    var owned = tool;
+    owned.def.name = try alloc.dupe(u8, tool.def.name);
+    owned.def.description = try alloc.dupe(u8, tool.def.description);
+    owned.def.parameters_schema = try alloc.dupe(u8, tool.def.parameters_schema);
+    owned.def.prompt_snippet = if (tool.def.prompt_snippet) |text| try alloc.dupe(u8, text) else null;
+    owned.def.prompt_guidelines = if (tool.def.prompt_guidelines) |text| try alloc.dupe(u8, text) else null;
+    try self.loaded_tools.append(self.alloc, .{ .tool = owned, .flags = flags });
 }
 
 pub fn setAvailableSystems(self: *Self, mcp_names: []const []const u8) !void {
@@ -1062,6 +1070,69 @@ test "agent defaults can be replaced with an empty tool list" {
     try factory.setAgentTools(.general, &.{});
     try factory.build_toolset(.general, &tools);
     try std.testing.expectEqual(@as(u32, 0), tools.len);
+}
+
+test "tool refresh keeps registered metadata after its source is reused" {
+    var factory = Self{
+        .alloc = std.testing.allocator,
+        .prompt_arena = .init(std.testing.allocator),
+        .io = std.testing.io,
+        .config_dir = null,
+        .skill_dir = null,
+    };
+    defer factory.prompt_arena.deinit();
+    defer factory.loaded_tools.deinit(std.testing.allocator);
+    factory.agents.set(.general, .{ .name = "general", .description = "", .prompt = "" });
+
+    var name = "pw_browser_close".*;
+    var description = "Close browser".*;
+    var schema = "{\"type\":\"object\"}".*;
+    var snippet = "Browser tools".*;
+    var guidelines = "Close when done".*;
+    var tool = r.tools.read.ReadTool;
+    tool.def = .{
+        .name = &name,
+        .description = &description,
+        .parameters_schema = &schema,
+        .prompt_snippet = &snippet,
+        .prompt_guidelines = &guidelines,
+    };
+    try factory.add(tool, .{ .allowed_agents = .initFull(), .add_to_agents = true });
+    @memset(&name, 0x85);
+    @memset(&description, 0x85);
+    @memset(&schema, 0x85);
+    @memset(&snippet, 0x85);
+    @memset(&guidelines, 0x85);
+
+    const stored = factory.findLoaded("pw_browser_close") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("Browser tools", stored.def.prompt_snippet.?);
+    try std.testing.expectEqualStrings("Close when done", stored.def.prompt_guidelines.?);
+
+    var agent = try r.agent.Agent.init(std.testing.allocator, std.testing.io, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    var pool: r.exec.CmdPool = undefined;
+    try factory.refreshAgentTools(&agent, .{
+        .registry = &registry,
+        .exec_pool = &pool,
+        .self_id = .{ .index = 0, .generation = 0 },
+        .cwd = "/tmp",
+    });
+    try std.testing.expectEqual(@as(usize, 1), agent.tools.len);
+    try std.testing.expectEqualStrings("pw_browser_close", agent.tools[0].name);
+    try std.testing.expectEqualStrings("Close browser", agent.tools[0].description);
+    try std.testing.expectEqualStrings("{\"type\":\"object\"}", agent.tools[0].input_schema);
+
+    try std.testing.expectError(error.InvalidToolName, factory.add(tool, .all));
+    tool.def.name = "";
+    try std.testing.expectError(error.InvalidToolName, factory.add(tool, .all));
+    try std.testing.expectEqual(@as(usize, 1), factory.loaded_tools.items.len);
 }
 
 test "remove deletes the matched loaded tool" {
