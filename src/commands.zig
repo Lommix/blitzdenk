@@ -1,7 +1,7 @@
 const std = @import("std");
 const r = @import("root.zig");
 const App = r.app.App;
-const ChatEntry = r.app.ChatEntry;
+const TimelineEntry = r.app.TimelineEntry;
 
 // thread safe command queue
 pub const CommandQueue = struct {
@@ -61,7 +61,7 @@ pub const Command = union(enum) {
     close_agent: r.AgentId,
     retry,
     push_notification: []const u8,
-    push_chat_entry: ChatEntry,
+    push_timeline_entry: TimelineEntry,
     spawn_agent: SpawnArgs,
     queue_agent_message: QueuedMessageArgs,
     scroll_to: usize,
@@ -104,7 +104,7 @@ pub const Command = union(enum) {
         prompt: []const r.sdk.Part,
         agent_type: u8 = @intFromEnum(r.ContextFactory.AgentType.general),
         fork: bool = false,
-        chat_entry: ?ChatEntry = null,
+        timeline_entry: ?TimelineEntry = null,
         cwd: []const u8 = "",
         background: bool = false,
         task: []const u8 = "",
@@ -120,7 +120,7 @@ pub const Command = union(enum) {
         agent_id: r.AgentId,
         parts: []const r.sdk.Part,
         /// optional display message for render
-        chat_entry: ?ChatEntry = null,
+        timeline_entry: ?TimelineEntry = null,
     };
 
     pub const ScreenshotArgs = struct {
@@ -206,9 +206,9 @@ pub const Command = union(enum) {
             .history_next => _ = app.historyDown(),
             .queue_agent_message => |arg| {
                 const parts = try r.util.deepClone(@TypeOf(arg.parts), arg.parts, alloc);
-                const chat_entry = if (arg.chat_entry) |en| try r.util.deepClone(ChatEntry, en, alloc) else null;
+                const timeline_entry = if (arg.timeline_entry) |en| try r.util.deepClone(TimelineEntry, en, alloc) else null;
                 if (app.streaming_entry != null) try app.flushSdkPreview();
-                if (chat_entry) |entry| try app.appendChatEntry(alloc, entry);
+                if (timeline_entry) |entry| try app.appendTimelineEntry(alloc, entry);
                 const agent = app.registry.get(arg.agent_id) orelse return;
                 try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
 
@@ -283,9 +283,9 @@ pub const Command = union(enum) {
                         .diagnostic => |diagnostic| {
                             app.registry.releaseReservation(arg.agent_id);
                             app.lua_vm.dropSpawnCallback(app.io, arg.agent_id.pack());
-                            if (arg.chat_entry) |en| {
-                                const entry = try r.util.deepClone(ChatEntry, en, alloc);
-                                try app.appendChatEntry(alloc, entry);
+                            if (arg.timeline_entry) |en| {
+                                const entry = try r.util.deepClone(TimelineEntry, en, alloc);
+                                try app.appendTimelineEntry(alloc, entry);
                             }
                             showProviderOnboarding(app, diagnostic);
                             app.running = app.registry.countActive() > 0;
@@ -336,9 +336,9 @@ pub const Command = union(enum) {
                     app.registry.pin(arg.agent_id);
                 }
 
-                if (arg.chat_entry) |en| {
-                    const entry = try r.util.deepClone(ChatEntry, en, alloc);
-                    try app.appendChatEntry(alloc, entry);
+                if (arg.timeline_entry) |en| {
+                    const entry = try r.util.deepClone(TimelineEntry, en, alloc);
+                    try app.appendTimelineEntry(alloc, entry);
                 }
 
                 try agent.setMessages(&.{.{ .role = .user, .content = arg.prompt }});
@@ -350,9 +350,9 @@ pub const Command = union(enum) {
             .push_notification => |msg| {
                 try app.notifications.append(app.gpa, "{s}", .{msg});
             },
-            .push_chat_entry => |en| {
-                const entry = try r.util.deepClone(ChatEntry, en, alloc);
-                try app.appendChatEntry(alloc, entry);
+            .push_timeline_entry => |en| {
+                const entry = try r.util.deepClone(TimelineEntry, en, alloc);
+                try app.appendTimelineEntry(alloc, entry);
             },
             .custom => |arg| {
                 try arg.func(arg.ptr, app);

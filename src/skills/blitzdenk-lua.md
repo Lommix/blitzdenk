@@ -183,10 +183,10 @@ It fires once on the main thread when the run ends. Closing or replacing the
 agent before that fires `blitz.AWAIT_CANCELED` instead, and a Lua reload
 drops the callback.
 
-`background = true` detaches the agent from the chat. The agent never becomes
-the main agent, streams nothing into it, and writes its final output to a
-result file instead of chat entries. Combine it with `on_complete` to build a
-silent subagent: read the answer in the callback with
+`background = true` detaches the agent from the timeline. The agent never
+becomes the main agent, streams nothing into it, and writes its final output to
+a result file instead of timeline entries. Combine it with `on_complete` to
+build a silent subagent: read the answer in the callback with
 `blitz.agent.result(id)`.
 
 `clean = true` in `blitz.agent.spawn`, or `clean` on the `agent` tool, builds a
@@ -202,7 +202,7 @@ blitz.agent.spawn({
     background = true,
     on_complete = function(id, status)
         if status == blitz.AWAIT_COMPLETE then
-            blitz.cmd.message_chat("agent", blitz.agent.result(id))
+            blitz.cmd.message_timeline("agent", blitz.agent.result(id))
         end
     end,
 })
@@ -213,7 +213,7 @@ readable, and `blitz.agent.message` on a finished agent starts a new turn that
 continues the same conversation. Free a slot with `blitz.agent.close`.
 `blitz.agent.spawn` without `parent_id` and without `background = true`
 cancels the running main agent and frees its slot; the old conversation stays
-rendered, the new agent replaces it in the chat.
+rendered, the new agent replaces it in the timeline.
 
 `blitz.list_agents()` returns one table per occupied slot, running and
 finished. Fields: `agent_id`, `name`, `task`, `state`, `ctx`,
@@ -250,7 +250,7 @@ blitz.add_command("plan", function(rem)
         agent_type = blitz.AGENT_GENERAL,
         prompt = "Plan, do not edit. Request:\n" .. rem,
     })
-    blitz.cmd.message_chat("user", "[PLAN]: " .. rem)
+    blitz.cmd.message_timeline("user", "[PLAN]: " .. rem)
 end, "plan a task without editing")
 ```
 
@@ -265,10 +265,10 @@ on, `BlitzCmd` in `meta.lua`). `blitz.agent` holds agent bindings (`spawn`,
 `meta.lua`).
 
 `blitz.cmd.prompt(text)` is the "say something" command: it echoes the text
-into the chat and sends it to the main agent, or starts a fresh general agent
-if none exists. Use it instead of `message_chat("user", ...)` (display only)
-or `get_main_agent()` + `blitz.agent.message` (queues silently, no chat
-echo).
+into the timeline and sends it to the main agent, or starts a fresh general
+agent if none exists. Use it instead of `message_timeline("user", ...)` (display
+only) or `get_main_agent()` + `blitz.agent.message` (queues silently, no
+timeline echo).
 
 ## Selection
 
@@ -289,7 +289,7 @@ blitz.add_command("effort", function()
     }, function(choice)
         if choice then
             blitz.set_agent_effort(blitz.AGENT_GENERAL, choice)
-            blitz.cmd.message_chat("system", "effort set to " .. choice)
+            blitz.cmd.message_timeline("system", "effort set to " .. choice)
         end
     end)
 end, "pick agent reasoning effort")
@@ -317,7 +317,7 @@ it the row falls back to `custom`.
 and `debug_log` booleans, `approval_mode` string (`"strict"`, `"default"`,
 `"yolo"`, `"smart"`). Fields you omit stay unchanged; `get_flags` returns all
 four, `approval_mode` as its tag name. `smart` behaves like `default` today.
-`show_diffs` is true by default; false hides diff blocks in the chat history.
+`show_diffs` is true by default; false hides diff blocks in the timeline.
 
 The completion popup answers to `blitz.cmp.next`, `blitz.cmp.prev`, and
 `blitz.cmp.accept`. Each queues one action, the same as the default keys
@@ -388,9 +388,9 @@ blitz.hooks.user_message_sent(function(ev)
         prompt = "Summarize in one line: " .. ev.text,
     })
     if blitz.agent.await(id) == blitz.AWAIT_COMPLETE then
-        blitz.cmd.message_chat("agent", blitz.agent.result(id))
+        blitz.cmd.message_timeline("agent", blitz.agent.result(id))
     else
-        blitz.cmd.message_chat("user", "helper agent failed")
+        blitz.cmd.message_timeline("user", "helper agent failed")
     end
 end)
 ```
@@ -416,8 +416,8 @@ end)
 ```
 
 The rewrite applies to the full pipeline. A hook can turn plain text into a
-`/command` or a skill call. Chat echo, history, and the model all see the new
-text. An empty string drops the input. Hook errors are logged and the input
+`/command` or a skill call. Timeline echo, history, and the model all see the
+new text. An empty string drops the input. Hook errors are logged and the input
 goes out unchanged. `blitz.cmd.prompt` and headless `--prompt` text bypass the
 hook. Never call `blitz.agent.await` inside the hook.
 
@@ -547,7 +547,7 @@ but `active` is false. Safe to call from config, tools, and listeners.
 ```lua
 local s = blitz.ssh.get_state()
 if s.active then
-    blitz.cmd.message_chat("system", "routing to " .. s.user .. "@" .. s.host)
+    blitz.cmd.message_timeline("system", "routing to " .. s.user .. "@" .. s.host)
 end
 ```
 

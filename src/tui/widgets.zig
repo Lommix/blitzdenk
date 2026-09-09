@@ -1204,7 +1204,7 @@ pub const Paragraph = struct {
 
     /// Render the paragraph at `area`. Writes are restricted to `clip` —
     /// useful when the logical footprint extends outside the visible region
-    /// (e.g. reverse-mode bottom-up stacking with chat scroll offset).
+    /// (e.g. reverse-mode bottom-up stacking with timeline scroll offset).
     pub fn render(
         self: *const Paragraph,
         scratch: std.mem.Allocator,

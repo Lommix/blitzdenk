@@ -173,9 +173,9 @@ fn encodeImage(image: anytype) !WireImage {
 
 pub const SaveState = struct {
     chat: []const WireMessage,
-    chat_render: []const app.ChatEntry,
+    timeline: []const app.TimelineEntry,
     /// Packed id of the main agent at save time. `tool_status.agent == null`
-    /// entries belong to it; on apply both those entries and the chat_render
+    /// entries belong to it; on apply both those entries and the timeline
     /// tool_call stamps carrying this id are re-keyed to the fresh id.
     main_agent: ?u32 = null,
     clean: bool = false,
@@ -220,7 +220,7 @@ pub fn buildSaveState(a: *app.App, agent: *const r.agent.Agent, alloc: std.mem.A
     }
     return .{
         .chat = out.items,
-        .chat_render = a.chat_entries.items,
+        .timeline = a.timeline.items,
         .main_agent = if (a.main_agent_id) |main| main.pack() else null,
         .clean = agent.clean,
         .tool_status = try encodeToolStatus(a, alloc),
@@ -284,7 +284,7 @@ fn isReminder(message: sdk.Message) bool {
 }
 
 /// Applies an already-parsed snapshot onto the app: rebuilds the main agent
-/// from `save.chat` and replays the rendered chat entries.
+/// from `save.chat` and replays the rendered timeline entries.
 pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
     const session_alloc = a.sessionAlloc();
 
@@ -309,10 +309,10 @@ pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
 
     // Re-key restored tool_call stamps: the main agent's id changed across
     // the save/load boundary, and the renderer looks statuses up by the id
-    // embedded in the chat entry. Child ids are kept as-is — the per-slot
+    // embedded in the timeline entry. Child ids are kept as-is — the per-slot
     // generation reset in setToolStatus/setToolChild makes their old-gen
     // lookups match again.
-    for (save.chat_render) |*entry| {
+    for (save.timeline) |*entry| {
         for (entry.parts) |*part| switch (part.*) {
             .tool_call => |*call| {
                 if (save.main_agent) |main| {
@@ -321,7 +321,7 @@ pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
             },
             else => {},
         };
-        try a.appendChatEntry(session_alloc, entry.*);
+        try a.appendTimelineEntry(session_alloc, entry.*);
     }
 
     // Restore rich call-block status, keyed to the fresh agent ids.
@@ -411,7 +411,7 @@ test "tool status roundtrips through WireToolStatus with re-keyed main agent" {
     // SaveState JSON roundtrip keeps all fields.
     const save = SaveState{
         .chat = &.{},
-        .chat_render = &.{},
+        .timeline = &.{},
         .tool_status = &.{
             .{ .call_id = "call_1", .ansi = ansi, .is_error = false },
             blk: {

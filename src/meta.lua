@@ -65,8 +65,8 @@
 ---@field retry fun()
 ---Compact the main agent now when idle, or before its next turn while running.
 ---@field compact fun()
----Push a chat entry into the chat log.
----@field message_chat fun(role: string, text: string)
+---Push an entry into the timeline.
+---@field message_timeline fun(role: string, text: string)
 ---Send a user message to the main agent (queued if running, restarted if idle), or start a general agent if none exists.
 ---@field prompt fun(text: string)
 ---Open a multiple-choice selection (same widget as the ask tool) and return at once. The callback runs with the picked option text and its 1-based index when the user chooses, with (message, nil) for the custom message row when allow_message is on, and with (nil, nil) when canceled.
@@ -79,7 +79,7 @@
 ---@field prompt string
 ---@field agent_type? integer
 ---@field fork? boolean
----run detached from the chat: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of chat entries. Use with on_complete to build silent subagents
+---run detached from the timeline: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of timeline entries. Use with on_complete to build silent subagents
 ---@field background? boolean
 ---short task description shown in agent listings
 ---@field task? string
@@ -89,7 +89,7 @@
 ---@field on_complete? fun(agent_id: integer, status: integer)
 
 ---@class BlitzAgent
----Reserve a free slot and enqueue a spawn or fork into it. Args take background to detach the agent from the chat and on_complete, a one-shot main-thread callback for the end of the spawned run.
+---Reserve a free slot and enqueue a spawn or fork into it. Args take background to detach the agent from the timeline and on_complete, a one-shot main-thread callback for the end of the spawned run.
 ---@field spawn fun(args: BlitzSpawnArgs): integer|nil
 ---Queue a user message for the given agent.
 ---@field message fun(agent_id: integer, text: string)
@@ -174,7 +174,7 @@
 ---@class BlitzPanelDef
 ---rows
 ---@field height integer
----'between' (default) pins the panel between chat and input, 'below' pins it under the input
+---'between' (default) pins the panel between timeline and input, 'below' pins it under the input
 ---@field place? string
 ---draw callback, runs on every drawn frame
 ---@field render fun(width: integer, height: integer, buf: BlitzWidgetBuf)
@@ -190,9 +190,9 @@
 ---Reserve a horizontal panel and draw into it from Lua.
 ---height is cells. Panels of the same place stack bottom up in
 ---registration order, the first registered panel sits on top of its block.
----place 'between' (default) pins the panel between chat and input,
+---place 'between' (default) pins the panel between timeline and input,
 ---place 'below' pins it under the input widget. All panels hide
----automatically while the chat viewport would drop below 6 rows. render
+---automatically while the timeline viewport would drop below 6 rows. render
 ---runs on every drawn frame with widget-relative dimensions and a BlitzWidgetBuf.
 ---@field panel fun(def: BlitzPanelDef): BlitzWidgetHandle
 ---Request a UI redraw on the next loop tick. Call from animations to force frames while the app is idle.
@@ -249,7 +249,7 @@
 ---@field err string
 
 ---@class BlitzUserMessageEvent
----chat text as typed
+---prompt text as typed
 ---@field text string
 
 ---@class BlitzPermissionRequestEvent

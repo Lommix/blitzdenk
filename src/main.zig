@@ -11,7 +11,7 @@ const r = @import("root.zig");
 const App = r.app.App;
 const BlitzdenkCfg = r.config.BlitzdenkCfg;
 
-const ChatEntry = r.app.ChatEntry;
+const TimelineEntry = r.app.TimelineEntry;
 const lua = r.lua;
 const reg = r.ContextFactory;
 const skills = r.skills;
@@ -706,7 +706,7 @@ pub fn run(
             // TODO: cleanup state
             if (app.running) app.dirty = true;
 
-            // Drain new agent messages from broadcast into chat_entries
+            // Drain new agent messages from broadcast into the timeline
             // app.drainBroadcast();
             // Mirror in-progress streaming message so TUI shows tokens as they arrive.
             {
@@ -1162,7 +1162,7 @@ pub fn run(
                                         break;
                                     }
                                     var send_text: []const u8 = input;
-                                    var chat_text: []const u8 = input;
+                                    var timeline_text: []const u8 = input;
 
                                     // -- user commands (processed even while a session is running)
                                     if (input[0] == '/') {
@@ -1226,7 +1226,7 @@ pub fn run(
                                                 break;
                                             };
                                             send_text = skills.skillSendText(app.sessionAlloc(), loaded.body, sc.prompt) catch break;
-                                            chat_text = skills.skillChatText(app.sessionAlloc(), entry.meta.name, sc.prompt) catch break;
+                                            timeline_text = skills.skillTimelineText(app.sessionAlloc(), entry.meta.name, sc.prompt) catch break;
                                         } else {
                                             break;
                                         }
@@ -1234,7 +1234,7 @@ pub fn run(
 
                                     if (app.running) {
                                         app.pushHistory(history_store_dir, input);
-                                        app.event_bus.emit(&app, .{ .user_message_sent = chat_text });
+                                        app.event_bus.emit(&app, .{ .user_message_sent = timeline_text });
                                         if (app.main_agent_id) |agent_id| {
                                             const alloc = app.sessionAlloc();
                                             const len: usize = if (app.screenshot_buf != null) 2 else 1;
@@ -1249,11 +1249,11 @@ pub fn run(
                                                 } };
                                             }
 
-                                            const chat_msg = try ChatEntry.userMessageSimple(alloc, .user, chat_text);
+                                            const entry = try TimelineEntry.userMessageSimple(alloc, .user, timeline_text);
                                             try app.cmd_queue.append(io, .{ .queue_agent_message = .{
                                                 .agent_id = agent_id,
                                                 .parts = parts,
-                                                .chat_entry = chat_msg,
+                                                .timeline_entry = entry,
                                             } });
                                         }
 
@@ -1278,7 +1278,7 @@ pub fn run(
 
                                     app.screenshot_buf = null;
 
-                                    try app.sendPrompt(io, parts, chat_text);
+                                    try app.sendPrompt(io, parts, timeline_text);
                                     app.input_buffer.clearRetainingCapacity();
                                 },
                                 .passphrase => {
@@ -1510,10 +1510,10 @@ fn runHeadless(app: *App, io: std.Io, prompt: []const u8) !void {
 
     const out = std.Io.File.stdout();
     var found = false;
-    var i = app.chat_entries.items.len;
+    var i = app.timeline.items.len;
     while (i > 0) {
         i -= 1;
-        const entry = app.chat_entries.items[i];
+        const entry = app.timeline.items[i];
         if (entry.role != .agent) continue;
         for (entry.parts) |part| switch (part) {
             .message, .plain_text => |m| {

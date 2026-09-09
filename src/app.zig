@@ -6,7 +6,7 @@ const log = std.log.scoped(.app);
 pub const CONTEXT_LIMIT = 124 * 1024;
 const COMMAND_COMPLETION_ROWS = 64;
 
-pub const ChatRole = enum { system, user, agent };
+pub const TimelineRole = enum { system, user, agent };
 
 pub const CommandCompletion = struct {
     text: []const u8,
@@ -18,7 +18,7 @@ const builtin_command_completions: []const CommandCompletion = &.{
 };
 
 pub const UiState = union(enum) {
-    chat,
+    timeline,
     password,
 };
 
@@ -100,7 +100,7 @@ pub const InputMode = union(enum) {
 
 pub const QueuedMessage = struct {
     agent_id: r.AgentId,
-    entry: ?ChatEntry = null,
+    entry: ?TimelineEntry = null,
     parts: []const r.sdk.Part,
 };
 
@@ -115,7 +115,7 @@ pub const MessageQueue = struct {
         self: *MessageQueue,
         alloc: std.mem.Allocator,
         agent_id: r.AgentId,
-        entry: ?ChatEntry,
+        entry: ?TimelineEntry,
         parts: []const r.sdk.Part,
     ) !void {
         try self.items.append(alloc, .{
@@ -313,8 +313,8 @@ pub const App = struct {
     dirty: bool = true,
     history: std.ArrayList(PromptEntry) = .empty,
     history_cursor: usize = 0,
-    chat_entries: std.ArrayList(ChatEntry) = .empty,
-    streaming_entry: ?ChatEntry = null,
+    timeline: std.ArrayList(TimelineEntry) = .empty,
+    streaming_entry: ?TimelineEntry = null,
     sdk_preview_parts: std.ArrayList(SdkPreviewPart) = .empty,
     sdk_preview_flushed: bool = false,
     sdk_run_rendered_steps: usize = 0,
@@ -326,7 +326,7 @@ pub const App = struct {
     current_plan_file: ?[]const u8 = null,
     passphrase_args_buf: [512]u8 = undefined,
     queued: MessageQueue = .{},
-    ui_state: UiState = .chat,
+    ui_state: UiState = .timeline,
     keymap: r.keys.KeyMap = .{},
     cmd_queue: r.cmd.CommandQueue,
     lua_vm: *r.lua.LuaVm,
@@ -638,7 +638,7 @@ pub const App = struct {
         // Backing storage just got freed — reset list headers to .empty so
         // stale ptr/capacity don't cause UB on next append.
         self.input_buffer = .empty;
-        self.chat_entries = .empty;
+        self.timeline = .empty;
         self.queued = .{};
         self.context_factory.resetLoadedTools() catch {};
         self.lua_vm.disableAllMcp();
@@ -900,7 +900,7 @@ pub const App = struct {
         }
     }
 
-    /// Stop and free the agent in `id` without touching its chat entries.
+    /// Stop and free the agent in `id` without touching its timeline entries.
     /// Used when a spawn replaces the main agent: the old conversation stays
     /// rendered, only the slot goes back to the pool.
     pub fn detachMainAgent(self: *App, id: r.AgentId) void {
@@ -1272,10 +1272,10 @@ pub const App = struct {
     pub fn pushSystemMessage(self: *App, comptime fmt: []const u8, args: anytype) void {
         const alloc = self.sessionAlloc();
         const text = std.fmt.allocPrint(alloc, fmt, args) catch return;
-        const parts = alloc.alloc(ChatPart, 1) catch return;
+        const parts = alloc.alloc(TimelinePart, 1) catch return;
         parts[0] = .{ .message = text };
 
-        self.appendChatEntry(alloc, .{
+        self.appendTimelineEntry(alloc, .{
             .role = .system,
             .parts = parts,
         }) catch return;
@@ -1439,18 +1439,19 @@ pub const App = struct {
             }
         };
 
-        // Chat fills the screen; input + status stick right after the chat
+        // Timeline fills the screen; input + status stick right after the
+        // timeline
         // content (or to the viewport bottom once it overflows). Each status
         // line lives inside the input footer: the main-agent status on the top
         // row, the statusbar on the row above the bottom padding.
         const _combined_area, _ =
             r.tui.Col(main_area, .{
-                r.tui.Constr.fill, // chat + status
+                r.tui.Constr.fill, // timeline + status
                 r.tui.Constr{ .fixed = input_height }, // input + status footer
             });
 
         const lua_error_height = luaErrorHeight(app, frame_alloc, _combined_area.width, _combined_area.height) catch 0;
-        const _lua_error_area, const _chat_status_area =
+        const _lua_error_area, const _timeline_status_area =
             r.tui.Col(_combined_area, .{
                 r.tui.Constr{ .fixed = lua_error_height },
                 r.tui.Constr.fill,
@@ -1460,20 +1461,20 @@ pub const App = struct {
         const progress_h: u16 = if (progress_line != null) 1 else 0;
         const footer_h: u16 = input_height +| progress_h;
         const panels_visible =
-            (_chat_status_area.height -| progress_h -| wl.panels_total_height) >= WIDGET_MIN_CHAT_ROWS and
+            (_timeline_status_area.height -| progress_h -| wl.panels_total_height) >= WIDGET_MIN_TIMELINE_ROWS and
             (wl.panels_total_height +| footer_h) <= main_area.height;
         const between_h: u16 = if (panels_visible) wl.between_total_height else 0;
         const below_h: u16 = if (panels_visible) wl.below_total_height else 0;
 
         // Build the content first so the viewport only renders as much as needed.
-        const is_welcome = app.chat_entries.items.len == 0 and !app.isMainAgentCompacting();
+        const is_welcome = app.timeline.items.len == 0 and !app.isMainAgentCompacting();
         var welcome_p: ?r.tui.Paragraph = null;
-        var chat_stack: ?ChatStack = null;
+        var timeline_stack: ?TimelineStack = null;
         var content_end_h: usize = 0;
 
-        const chat_h: u16 = blk: {
-            const viewport_h = _chat_status_area.height -| progress_h -| between_h;
-            const pinned_h = (main_area.y +| main_area.height) -| footer_h -| below_h -| between_h -| _chat_status_area.y;
+        const timeline_h: u16 = blk: {
+            const viewport_h = _timeline_status_area.height -| progress_h -| between_h;
+            const pinned_h = (main_area.y +| main_area.height) -| footer_h -| below_h -| between_h -| _timeline_status_area.y;
             break :blk @min(viewport_h, pinned_h);
         };
 
@@ -1482,25 +1483,25 @@ pub const App = struct {
                 .padding = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
             };
             r.dash.build_info(app, &wp.lines) catch {};
-            content_end_h = wp.totalHeightLong(_chat_status_area.width);
+            content_end_h = wp.totalHeightLong(_timeline_status_area.width);
             welcome_p = wp;
         } else {
-            chat_stack = buildChatStack(app, frame_alloc, _chat_status_area.width, chat_h) catch |err| blk: {
-                log.err("chat build failed with {any}", .{err});
+            timeline_stack = buildTimelineStack(app, frame_alloc, _timeline_status_area.width, timeline_h) catch |err| blk: {
+                log.err("timeline build failed with {any}", .{err});
                 break :blk null;
             };
-            if (chat_stack) |cs| content_end_h = cs.total -| cs.scroll_offset;
+            if (timeline_stack) |cs| content_end_h = cs.total -| cs.scroll_offset;
         }
 
-        // Input sits right after the chat content; once content fills the
+        // Input sits right after the timeline content; once content fills the
         // viewport it pins to the bottom and stays sticky. The footer includes
         // the main-agent status row on top of the input widget. Between panels
-        // push the floating footer past the chat content, below panels reserve
+        // push the floating footer past the timeline content, below panels reserve
         // rows under the pinned footer.
         const max_footer_y: u16 = (main_area.y +| main_area.height) -| footer_h -| below_h;
-        const content_cap: u16 = @intCast(@min(content_end_h, @as(usize, chat_h)));
+        const content_cap: u16 = @intCast(@min(content_end_h, @as(usize, timeline_h)));
         const footer_y: u16 = @min(
-            _chat_status_area.y +| content_cap +| between_h,
+            _timeline_status_area.y +| content_cap +| between_h,
             max_footer_y,
         );
         const _input_area: r.tui.Rect = .{
@@ -1532,23 +1533,23 @@ pub const App = struct {
             log.err("lua error render failed with {any}", .{err});
         };
 
-        const _chat_area: r.tui.Rect = .{
-            .x = _chat_status_area.x,
-            .y = _chat_status_area.y,
-            .width = _chat_status_area.width,
-            .height = chat_h,
+        const _timeline_area: r.tui.Rect = .{
+            .x = _timeline_status_area.x,
+            .y = _timeline_status_area.y,
+            .width = _timeline_status_area.width,
+            .height = timeline_h,
         };
 
         if (welcome_p) |wp| {
             const welcome_area: r.tui.Rect = .{
-                .x = _chat_area.x,
-                .y = _chat_area.y,
-                .width = _chat_area.width,
+                .x = _timeline_area.x,
+                .y = _timeline_area.y,
+                .width = _timeline_area.width,
                 .height = content_cap,
             };
             wp.renderSimple(frame_alloc, welcome_area, buf);
-        } else if (chat_stack) |cs| {
-            renderChatStack(app, cs, _chat_area, buf);
+        } else if (timeline_stack) |cs| {
+            renderTimelineStack(app, cs, _timeline_area, buf);
         }
 
         // Input/Permission: a single overlay_dark block hosting the main-agent
@@ -1958,15 +1959,15 @@ pub const App = struct {
     pub fn undoLastTurn(self: *App) void {
         if (self.input_mode != .text) return;
         if (self.running) return;
-        if (self.chat_entries.items.len == 0) return;
+        if (self.timeline.items.len == 0) return;
 
-        var start = self.chat_entries.items.len;
+        var start = self.timeline.items.len;
         while (start > 0) {
             start -= 1;
-            if (self.chat_entries.items[start].role == .user) break;
+            if (self.timeline.items[start].role == .user) break;
         }
-        if (self.chat_entries.items[start].role != .user) return;
-        const text = chatEntryUserText(self.chat_entries.items[start]) orelse return;
+        if (self.timeline.items[start].role != .user) return;
+        const text = timelineEntryUserText(self.timeline.items[start]) orelse return;
 
         const agent = self.mainAgent() orelse return;
         const history = agent.history();
@@ -1980,7 +1981,7 @@ pub const App = struct {
         const turn_start = cut orelse return;
         agent.setMessages(history[0..turn_start]) catch return;
 
-        self.chat_entries.shrinkRetainingCapacity(start);
+        self.timeline.shrinkRetainingCapacity(start);
         if (text.len > 0) {
             const alloc = self.sessionAlloc();
             self.input_buffer.clearRetainingCapacity();
@@ -2022,7 +2023,7 @@ pub const App = struct {
     pub fn popQueuedMessage(self: *App, agent_id: r.AgentId, alloc: std.mem.Allocator) ?[]const r.sdk.Part {
         const queued = self.queued.popFor(agent_id) orelse return null;
 
-        if (queued.entry) |entry| self.appendChatEntry(self.sessionAlloc(), entry) catch {};
+        if (queued.entry) |entry| self.appendTimelineEntry(self.sessionAlloc(), entry) catch {};
 
         const messages = r.agent_run.cloneMessages(alloc, &.{.{ .role = .user, .content = queued.parts }}) catch return null;
         return messages[0].content;
@@ -2114,9 +2115,9 @@ pub const App = struct {
                     try std.fmt.allocPrint(alloc, "Provider error (HTTP {d})\n{s}", .{ provider_error.status_code, body })
                 else
                     try std.fmt.allocPrint(alloc, "Provider error\n{s}", .{body});
-                const parts = try alloc.alloc(ChatPart, 1);
+                const parts = try alloc.alloc(TimelinePart, 1);
                 parts[0] = .{ .plain_text = message };
-                try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
+                try self.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
             },
             .complete => |result| {
                 self.event_bus.emit(self, .{ .agent_complete = agent_id });
@@ -2134,7 +2135,7 @@ pub const App = struct {
                     const message = result.messages[index];
                     if (message.role != .assistant) continue;
                     const parts = renderSdkParts(alloc, agent_id, message.parts()) orelse return;
-                    try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
+                    try self.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
                     return;
                 }
             },
@@ -2153,9 +2154,9 @@ pub const App = struct {
                 if (!is_main) return;
                 self.dropStreamingPreview();
                 if (canceled) return;
-                const parts = try alloc.alloc(ChatPart, 1);
+                const parts = try alloc.alloc(TimelinePart, 1);
                 parts[0] = .{ .plain_text = try std.fmt.allocPrint(alloc, "Agent failed: {s}", .{@errorName(err)}) };
-                try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
+                try self.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
             },
         }
         self.dirty = true;
@@ -2165,7 +2166,7 @@ pub const App = struct {
         self.streaming_entry = null;
         _ = self.arena_streaming_snapshot.reset(.free_all);
         const alloc = self.arena_streaming_snapshot.allocator();
-        var parts: std.ArrayList(ChatPart) = .empty;
+        var parts: std.ArrayList(TimelinePart) = .empty;
         for (self.sdk_preview_parts.items) |item| switch (item.kind) {
             .thinking => {
                 const trimmed = std.mem.trim(u8, item.text.items, " \t\r\n");
@@ -2190,8 +2191,8 @@ pub const App = struct {
         self.streaming_entry = .{ .role = .agent, .parts = try parts.toOwnedSlice(alloc) };
     }
 
-    pub fn appendChatEntry(self: *App, alloc: std.mem.Allocator, entry: ChatEntry) !void {
-        try self.chat_entries.append(alloc, entry);
+    pub fn appendTimelineEntry(self: *App, alloc: std.mem.Allocator, entry: TimelineEntry) !void {
+        try self.timeline.append(alloc, entry);
     }
 
     pub fn appendAgentHistory(self: *App, agent_id: r.AgentId, start: usize, skip: usize) !void {
@@ -2209,20 +2210,20 @@ pub const App = struct {
                 continue;
             }
             const parts = renderSdkParts(alloc, agent_id, message.parts()) orelse continue;
-            try self.appendChatEntry(alloc, .{ .role = .agent, .parts = parts });
+            try self.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
         }
     }
 
     /// Send a user prompt to the main agent: emit hook, queue messages, run.
     /// Shared by the TUI Enter handler and headless mode.
-    pub fn sendPrompt(self: *App, io: std.Io, parts: []const r.sdk.Part, chat_text: []const u8) !void {
+    pub fn sendPrompt(self: *App, io: std.Io, parts: []const r.sdk.Part, timeline_text: []const u8) !void {
         try self.waitForMcpTools();
         const alloc = self.sessionAlloc();
-        const chat_entry = try ChatEntry.userMessageSimple(alloc, .user, chat_text);
-        self.event_bus.emit(self, .{ .user_message_sent = chat_text });
+        const timeline_entry = try TimelineEntry.userMessageSimple(alloc, .user, timeline_text);
+        self.event_bus.emit(self, .{ .user_message_sent = timeline_text });
 
         if (self.main_agent_id) |id| {
-            try self.appendChatEntry(alloc, chat_entry);
+            try self.appendTimelineEntry(alloc, timeline_entry);
             const agent = self.registry.get(id).?;
             try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
             self.sdk_run_rendered_steps = 0;
@@ -2235,7 +2236,7 @@ pub const App = struct {
                     .agent_id = id,
                     .agent_type = @intFromEnum(r.ContextFactory.AgentType.general),
                     .prompt = parts,
-                    .chat_entry = chat_entry,
+                    .timeline_entry = timeline_entry,
                     .cwd = self.cwd,
                 },
             }) catch |err| {
@@ -2252,7 +2253,7 @@ pub const App = struct {
             return;
         };
         const alloc = self.sessionAlloc();
-        try self.appendChatEntry(alloc, try r.util.deepClone(ChatEntry, entry, alloc));
+        try self.appendTimelineEntry(alloc, try r.util.deepClone(TimelineEntry, entry, alloc));
         self.sdk_preview_flushed = true;
         self.dropStreamingPreview();
     }
@@ -2260,9 +2261,9 @@ pub const App = struct {
     pub fn persistDiffToHistory(self: *App, diff: r.permissions.ToolDiff) !void {
         try self.flushSdkPreview();
         const alloc = self.sessionAlloc();
-        var parts = try alloc.alloc(r.app.ChatPart, 1);
-        parts[0] = try diffChatPart(alloc, diff);
-        try self.appendChatEntry(alloc, .{
+        var parts = try alloc.alloc(r.app.TimelinePart, 1);
+        parts[0] = try diffTimelinePart(alloc, diff);
+        try self.appendTimelineEntry(alloc, .{
             .role = .agent,
             .parts = parts,
         });
@@ -2332,7 +2333,7 @@ pub fn emitDiffLines(out: *std.ArrayList(r.tui.DiffLine), snap: r.permissions.To
     }
 }
 
-fn diffChatPart(alloc: std.mem.Allocator, diff: r.permissions.ToolDiff) !ChatPart {
+fn diffTimelinePart(alloc: std.mem.Allocator, diff: r.permissions.ToolDiff) !TimelinePart {
     var lines = std.ArrayList(r.tui.DiffLine).empty;
     emitDiffLines(&lines, diff, alloc);
     return .{ .diff = .{
@@ -2443,11 +2444,11 @@ fn applyRegistryEvent(ctx: ?*anyopaque, event: r.agent_run.Event) void {
     };
 }
 
-pub const ChatEntry = struct {
-    role: ChatRole,
-    parts: []ChatPart,
+pub const TimelineEntry = struct {
+    role: TimelineRole,
+    parts: []TimelinePart,
 
-    pub fn free(self: *ChatEntry, alloc: std.mem.Allocator) void {
+    pub fn free(self: *TimelineEntry, alloc: std.mem.Allocator) void {
         for (self.parts) |part| {
             switch (part) {
                 .message => |slice| alloc.free(slice),
@@ -2467,14 +2468,14 @@ pub const ChatEntry = struct {
         alloc.free(self.parts);
     }
 
-    pub fn userMessageSimple(alloc: std.mem.Allocator, role: ChatRole, msg: []const u8) !ChatEntry {
-        var parts = try alloc.alloc(ChatPart, 1);
+    pub fn userMessageSimple(alloc: std.mem.Allocator, role: TimelineRole, msg: []const u8) !TimelineEntry {
+        var parts = try alloc.alloc(TimelinePart, 1);
         parts[0] = .{ .message = msg };
         return .{ .role = role, .parts = parts };
     }
 };
 
-pub const ChatPart = union(enum) {
+pub const TimelinePart = union(enum) {
     // TODO add time tracking
     thinking: []const u8,
     message: []const u8,
@@ -2494,7 +2495,7 @@ pub const ChatPart = union(enum) {
     };
 };
 
-fn chatEntryUserText(entry: ChatEntry) ?[]const u8 {
+fn timelineEntryUserText(entry: TimelineEntry) ?[]const u8 {
     for (entry.parts) |part| switch (part) {
         .message => |m| return m,
         .plain_text => |t| return t,
@@ -2519,8 +2520,8 @@ fn renderSdkParts(
     alloc: std.mem.Allocator,
     agent_id: r.AgentId,
     parts: []const r.sdk.Part,
-) ?[]ChatPart {
-    var out: std.ArrayList(ChatPart) = .empty;
+) ?[]TimelinePart {
+    var out: std.ArrayList(TimelinePart) = .empty;
     for (parts) |part| switch (part) {
         .text => |text| {
             const trimmed = std.mem.trim(u8, text, " \t\r\n");
@@ -3356,7 +3357,7 @@ fn refreshLuaStatusBar(app: *App) void {
 }
 
 pub const WIDGET_MIN_MAIN_COLS: u16 = 40;
-pub const WIDGET_MIN_CHAT_ROWS: u16 = 6;
+pub const WIDGET_MIN_TIMELINE_ROWS: u16 = 6;
 
 pub const WidgetPanelSlot = struct {
     rect: r.tui.Rect = .{},
@@ -3596,11 +3597,11 @@ fn appendToolGroup(
     out: *std.ArrayList(RenderParagraphItem),
     total: *usize,
     app: *App,
-    calls: *std.ArrayList(ChatPart.ToolCallEntry),
+    calls: *std.ArrayList(TimelinePart.ToolCallEntry),
     inner_w: u16,
 ) !void {
     if (calls.items.len == 0) return;
-    std.mem.reverse(ChatPart.ToolCallEntry, calls.items);
+    std.mem.reverse(TimelinePart.ToolCallEntry, calls.items);
     const para = try buildToolGroupParagraph(app, arena, calls.items, inner_w);
     try out.append(arena, para);
     total.* += para.h;
@@ -3608,15 +3609,15 @@ fn appendToolGroup(
     calls.clearRetainingCapacity();
 }
 
-/// Build one r.tui.Paragraph per ChatEntry. Allocations live in `arena`; do not
-/// deinit the result. All paragraphs use `reverse = true` so the chat-area
+/// Build one r.tui.Paragraph per TimelineEntry. Allocations live in `arena`; do not
+/// deinit the result. All paragraphs use `reverse = true` so the timeline-area
 /// caller can stack them bottom-up.
-fn buildChatEntryParagraph(
+fn buildTimelineEntryParagraph(
     arena: std.mem.Allocator,
     out: *std.ArrayList(RenderParagraphItem),
     total: *usize,
     app: *App,
-    entry: ChatEntry,
+    entry: TimelineEntry,
     inner_w: u16,
 ) !void {
     // var buf: [255]u8 = undefined;
@@ -3627,7 +3628,7 @@ fn buildChatEntryParagraph(
     var has_text = false;
 
     // Header last so it renders on top (stack is bottom-up)
-    var tool_call_list = std.ArrayList(ChatPart.ToolCallEntry).empty;
+    var tool_call_list = std.ArrayList(TimelinePart.ToolCallEntry).empty;
 
     for (0..entry.parts.len) |i| {
         const part = entry.parts[entry.parts.len - i - 1];
@@ -3701,7 +3702,7 @@ fn buildChatEntryParagraph(
 fn buildToolGroupParagraph(
     app: *App,
     arena: std.mem.Allocator,
-    calls: []const ChatPart.ToolCallEntry,
+    calls: []const TimelinePart.ToolCallEntry,
     inner_w: u16,
 ) !RenderParagraphItem {
     var p = r.tui.Paragraph{ .wrap = false };
@@ -3824,9 +3825,9 @@ fn buildToolGroupParagraph(
     };
 }
 
-/// Scan chat history for a tool_result with the given call_id. Source of
+/// Scan the conversation for a tool_result with the given call_id. Source of
 /// truth for "did this tool finish": `tool_call_done` is cleared right
-/// after commit, but the result lives on in the chat as a tool_result part.
+/// after commit, but the result lives on in the conversation as a tool_result part.
 fn findToolResult(agent: *r.agent.Agent, call_id: []const u8) ?r.sdk.ToolResult {
     var i = agent.history().len;
     while (i > 0) {
@@ -3846,7 +3847,7 @@ fn findToolResult(agent: *r.agent.Agent, call_id: []const u8) ?r.sdk.ToolResult 
     return null;
 }
 
-fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: ChatPart.DiffEntry) r.tui.Paragraph {
+fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: TimelinePart.DiffEntry) r.tui.Paragraph {
     const theme = app.theme;
     var p: r.tui.Paragraph = .{
         .border = .single,
@@ -3922,14 +3923,14 @@ fn appendMarkdownText(p: *r.tui.Paragraph, gpa: std.mem.Allocator, arena: std.me
     }
 }
 
-const ChatStack = struct {
+const TimelineStack = struct {
     items: std.ArrayList(RenderParagraphItem) = .empty,
     total: usize = 0,
     scroll_offset: usize = 0,
 };
 
-fn buildChatStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u16) !ChatStack {
-    var s = ChatStack{};
+fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u16) !TimelineStack {
+    var s = TimelineStack{};
     const maybe_agent: ?*r.agent.Agent = if (app.main_agent_id) |id| app.registry.get(id) else null;
 
     var scroll_offset_usize: usize = if (app.auto_scroll) 0 else app.scroll_offset;
@@ -3957,15 +3958,15 @@ fn buildChatStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u1
     }
 
     // build in reverse
-    var i = app.chat_entries.items.len;
+    var i = app.timeline.items.len;
 
     // TODO: Add propose preview
     // preview diff
     if (app.active_permission) |perm| {
         if (perm.payload == .diff) {
-            var parts = try alloc.alloc(ChatPart, 1);
-            parts[0] = try diffChatPart(alloc, perm.payload.diff);
-            try buildChatEntryParagraph(alloc, &s.items, &s.total, app, .{
+            var parts = try alloc.alloc(TimelinePart, 1);
+            parts[0] = try diffTimelinePart(alloc, perm.payload.diff);
+            try buildTimelineEntryParagraph(alloc, &s.items, &s.total, app, .{
                 .role = .agent,
                 .parts = parts,
             }, inner_w);
@@ -3973,16 +3974,16 @@ fn buildChatStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u1
     }
 
     if (app.streaming_entry) |entry| {
-        try buildChatEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w);
+        try buildTimelineEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w);
     }
 
     while (i > 0 and s.total < target) {
         i -= 1;
-        const entry = app.chat_entries.items[i];
+        const entry = app.timeline.items[i];
 
         if (maybe_agent == null and entry.role != .system) continue;
 
-        try buildChatEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w);
+        try buildTimelineEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w);
     }
 
     if (i == 0) {
@@ -3998,7 +3999,7 @@ fn buildChatStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u1
     return s;
 }
 
-fn renderChatStack(app: *App, s: ChatStack, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn renderTimelineStack(app: *App, s: TimelineStack, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     if (area.width == 0 or area.height == 0) return;
 
     const alloc = app.arena_frame.allocator();
@@ -4008,7 +4009,7 @@ fn renderChatStack(app: *App, s: ChatStack, area: r.tui.Rect, buf: *r.tui.Buffer
 
     // Render bottom-up. anchor_y is the row JUST BELOW the next paragraph's
     // bottom border. When the stack does not fill the area, anchor below the
-    // last visible row instead of the area bottom — keeps short chats top-aligned
+    // last visible row instead of the area bottom — keeps short timelines top-aligned
     // and lets paragraphs grow downward until they hit the input.
     const viewport_top: i128 = area.y;
     const viewport_bottom: i128 = @as(i128, area.y) + @as(i128, inner_h);
@@ -4473,14 +4474,14 @@ test "persisted diff owns path" {
     defer app.arena_streaming_preview.deinit();
     app.arena_streaming_snapshot = .init(std.testing.allocator);
     defer app.arena_streaming_snapshot.deinit();
-    app.chat_entries = .empty;
+    app.timeline = .empty;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
     app.main_agent_id = .{ .index = 0, .generation = 0 };
     app.event_bus = .{};
     app.dirty = false;
 
-    var preview_parts = [_]ChatPart{.{ .tool_call = .{
+    var preview_parts = [_]TimelinePart{.{ .tool_call = .{
         .agent_id = .{ .index = 0, .generation = 0 },
         .call_id = "call_1",
         .tool_name = "edit",
@@ -4492,16 +4493,16 @@ test "persisted diff owns path" {
     try app.persistDiffToHistory(.{ .path = path, .before = null, .after = "content" });
 
     @memset(path, 'x');
-    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
-    try std.testing.expectEqualStrings("call_1", app.chat_entries.items[0].parts[0].tool_call.call_id);
-    try std.testing.expectEqualStrings("demo.txt", app.chat_entries.items[1].parts[0].diff.path);
+    try std.testing.expectEqual(@as(usize, 2), app.timeline.items.len);
+    try std.testing.expectEqualStrings("call_1", app.timeline.items[0].parts[0].tool_call.call_id);
+    try std.testing.expectEqualStrings("demo.txt", app.timeline.items[1].parts[0].diff.path);
     try std.testing.expect(app.streaming_entry == null);
 
     const final_parts = [_]r.sdk.Part{r.sdk.Part.toolCallPart("call_1", "edit", "{}")};
     const messages = [_]r.sdk.Message{.{ .role = .assistant, .content = &final_parts }};
     var result = r.sdk.TextResult{ .messages = &messages };
     try app.applyRunEvent(.{ .index = 0, .generation = 0 }, .{ .complete = &result });
-    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 2), app.timeline.items.len);
 }
 
 test "renderSdkParts keeps streamed final parts together" {
@@ -4529,7 +4530,7 @@ test "checkpoint history appends only new assistant messages" {
     var app: App = undefined;
     app.arena_session = .init(std.testing.allocator);
     defer app.arena_session.deinit();
-    app.chat_entries = .empty;
+    app.timeline = .empty;
 
     const first_parts = [_]r.sdk.Part{r.sdk.Part.textPart("old")};
     const checkpoint_parts = [_]r.sdk.Part{
@@ -4544,16 +4545,16 @@ test "checkpoint history appends only new assistant messages" {
     };
 
     try app.appendSdkHistory(.{ .index = 0, .generation = 0 }, &messages, 1, 0);
-    try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
-    try std.testing.expectEqualStrings("kept", app.chat_entries.items[0].parts[0].message);
-    try std.testing.expectEqualStrings("call_1", app.chat_entries.items[0].parts[1].tool_call.call_id);
+    try std.testing.expectEqual(@as(usize, 1), app.timeline.items.len);
+    try std.testing.expectEqualStrings("kept", app.timeline.items[0].parts[0].message);
+    try std.testing.expectEqualStrings("call_1", app.timeline.items[0].parts[1].tool_call.call_id);
 }
 
 test "checkpoint history skips rendered assistant steps" {
     var app: App = undefined;
     app.arena_session = .init(std.testing.allocator);
     defer app.arena_session.deinit();
-    app.chat_entries = .empty;
+    app.timeline = .empty;
 
     const old_parts = [_]r.sdk.Part{r.sdk.Part.textPart("old")};
     const rendered_parts = [_]r.sdk.Part{r.sdk.Part.textPart("rendered")};
@@ -4566,15 +4567,15 @@ test "checkpoint history skips rendered assistant steps" {
     };
 
     try app.appendSdkHistory(.{ .index = 0, .generation = 0 }, &messages, 1, 1);
-    try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
-    try std.testing.expectEqualStrings("pending", app.chat_entries.items[0].parts[0].message);
+    try std.testing.expectEqual(@as(usize, 1), app.timeline.items.len);
+    try std.testing.expectEqualStrings("pending", app.timeline.items[0].parts[0].message);
 }
 
 fn undoTestApp() App {
     var app: App = undefined;
     app.io = std.testing.io;
     app.arena_session = .init(std.testing.allocator);
-    app.chat_entries = .empty;
+    app.timeline = .empty;
     app.input_buffer = .empty;
     app.input_cursor = 0;
     app.input_mode = .{ .text = .{} };
@@ -4635,13 +4636,13 @@ test "undoLastTurn pops the last turn into the input" {
     });
 
     const alloc = app.sessionAlloc();
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "hello"));
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "hi"));
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .system, "notice"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .user, "hello"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .agent, "hi"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .system, "notice"));
 
     app.undoLastTurn();
 
-    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), app.timeline.items.len);
     try std.testing.expectEqualStrings("hello", app.input_buffer.items);
     try std.testing.expectEqual(@as(usize, 1), agent.history().len);
     try std.testing.expectEqualStrings("old", agent.history()[0].text());
@@ -4659,12 +4660,12 @@ test "undoLastTurn removes tool calls together with their results" {
     });
 
     const alloc = app.sessionAlloc();
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "run it"));
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "done"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .user, "run it"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .agent, "done"));
 
     app.undoLastTurn();
 
-    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), app.timeline.items.len);
     try std.testing.expectEqual(@as(usize, 0), agent.history().len);
     try std.testing.expectEqualStrings("run it", app.input_buffer.items);
 }
@@ -4681,15 +4682,15 @@ test "undoLastTurn pops only the last of queued parallel turns" {
     });
 
     const alloc = app.sessionAlloc();
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "first"));
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "one"));
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "second"));
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "two"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .user, "first"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .agent, "one"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .user, "second"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .agent, "two"));
 
     app.undoLastTurn();
 
-    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
-    try std.testing.expectEqualStrings("first", app.chat_entries.items[0].parts[0].message);
+    try std.testing.expectEqual(@as(usize, 2), app.timeline.items.len);
+    try std.testing.expectEqualStrings("first", app.timeline.items[0].parts[0].message);
     try std.testing.expectEqual(@as(usize, 2), agent.history().len);
     try std.testing.expectEqualStrings("second", app.input_buffer.items);
 }
@@ -4706,12 +4707,12 @@ test "undoLastTurn ignores the compaction summary turn" {
     });
 
     const alloc = app.sessionAlloc();
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "run it"));
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "done"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .user, "run it"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .agent, "done"));
 
     app.undoLastTurn();
 
-    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), app.timeline.items.len);
     try std.testing.expectEqual(@as(usize, 1), agent.history().len);
     try std.testing.expectEqualStrings("old", agent.history()[0].text());
     try std.testing.expectEqualStrings("run it", app.input_buffer.items);
@@ -4724,12 +4725,12 @@ test "undoLastTurn does nothing without a user entry" {
     try agent.setMessages(&.{r.sdk.AssistantMessage("unsolicited")});
 
     const alloc = app.sessionAlloc();
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .system, "welcome"));
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .agent, "unsolicited"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .system, "welcome"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .agent, "unsolicited"));
 
     app.undoLastTurn();
 
-    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 2), app.timeline.items.len);
     try std.testing.expectEqual(@as(usize, 1), agent.history().len);
     try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
 }
@@ -4740,11 +4741,11 @@ test "undoLastTurn does not fire while running" {
     app.running = true;
 
     const alloc = app.sessionAlloc();
-    try app.appendChatEntry(alloc, try ChatEntry.userMessageSimple(alloc, .user, "hello"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .user, "hello"));
 
     app.undoLastTurn();
 
-    try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), app.timeline.items.len);
     try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
 }
 
@@ -4757,7 +4758,7 @@ test "SDK run events preserve preview final rendering and usage" {
     defer app.arena_streaming_preview.deinit();
     app.arena_streaming_snapshot = .init(std.testing.allocator);
     defer app.arena_streaming_snapshot.deinit();
-    app.chat_entries = .empty;
+    app.timeline = .empty;
     app.streaming_entry = null;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
@@ -4803,8 +4804,8 @@ test "SDK run events preserve preview final rendering and usage" {
     var result = r.sdk.TextResult{ .messages = &messages };
     try app.applyRunEvent(agent_id, .{ .complete = &result });
     try std.testing.expect(app.streaming_entry == null);
-    try std.testing.expectEqual(@as(usize, 1), app.chat_entries.items.len);
-    try std.testing.expectEqual(@as(usize, 3), app.chat_entries.items[0].parts.len);
+    try std.testing.expectEqual(@as(usize, 1), app.timeline.items.len);
+    try std.testing.expectEqual(@as(usize, 3), app.timeline.items[0].parts.len);
 }
 
 test "SDK preview coalesces same-type deltas and keeps part order" {
@@ -4816,7 +4817,7 @@ test "SDK preview coalesces same-type deltas and keeps part order" {
     defer app.arena_streaming_preview.deinit();
     app.arena_streaming_snapshot = .init(std.testing.allocator);
     defer app.arena_streaming_snapshot.deinit();
-    app.chat_entries = .empty;
+    app.timeline = .empty;
     app.streaming_entry = null;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
@@ -4863,7 +4864,7 @@ test "background agent stays silent without a main agent" {
     defer app.arena_streaming_preview.deinit();
     app.arena_streaming_snapshot = .init(std.testing.allocator);
     defer app.arena_streaming_snapshot.deinit();
-    app.chat_entries = .empty;
+    app.timeline = .empty;
     app.streaming_entry = null;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
@@ -4892,7 +4893,7 @@ test "background agent stays silent without a main agent" {
 
     var result = r.sdk.TextResult{};
     try app.applyRunEvent(agent_id, .{ .complete = &result });
-    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), app.timeline.items.len);
 }
 
 test "subagent events preserve the main tool call preview" {
@@ -4904,7 +4905,7 @@ test "subagent events preserve the main tool call preview" {
     defer app.arena_streaming_preview.deinit();
     app.arena_streaming_snapshot = .init(std.testing.allocator);
     defer app.arena_streaming_snapshot.deinit();
-    app.chat_entries = .empty;
+    app.timeline = .empty;
     app.streaming_entry = null;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
@@ -4954,7 +4955,7 @@ test "finished retained agents survive reaping and take queued messages" {
     defer app.arena_streaming_preview.deinit();
     app.arena_streaming_snapshot = .init(std.testing.allocator);
     defer app.arena_streaming_snapshot.deinit();
-    app.chat_entries = .empty;
+    app.timeline = .empty;
     app.streaming_entry = null;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
@@ -4989,7 +4990,7 @@ test "finished retained agents survive reaping and take queued messages" {
     try std.testing.expect(registry.get(child_id) != null);
     try std.testing.expect(child.reported_task_done);
     try app.handleReapedAgent(child_id);
-    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), app.timeline.items.len);
 
     try child.queueMessages(&.{r.sdk.UserMessage("next question")});
     try app.handleReapedAgent(child_id);
@@ -5003,7 +5004,7 @@ test "finished retained agents survive reaping and take queued messages" {
 
     app.detachMainAgent(child_id);
     try std.testing.expect(registry.state(child_id) == null);
-    try std.testing.expectEqual(@as(usize, 0), app.chat_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), app.timeline.items.len);
 }
 
 test "background agent result is written for read" {
@@ -5034,11 +5035,11 @@ test "background agent result is written for read" {
     try std.testing.expectEqualStrings("result done", content);
 }
 
-test "appendChatEntry preserves parts order" {
+test "appendTimelineEntry preserves parts order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var parts = [_]ChatPart{
+    var parts = [_]TimelinePart{
         .{ .tool_call = .{ .agent_id = .{ .index = 3, .generation = 7 }, .call_id = "call_1", .tool_name = "bash" } },
         .{ .message = "answer" },
         .{ .thinking = "think" },
@@ -5046,10 +5047,10 @@ test "appendChatEntry preserves parts order" {
     };
 
     var app: App = undefined;
-    app.chat_entries = .empty;
-    try app.appendChatEntry(arena.allocator(), .{ .role = .agent, .parts = &parts });
+    app.timeline = .empty;
+    try app.appendTimelineEntry(arena.allocator(), .{ .role = .agent, .parts = &parts });
 
-    const entry = app.chat_entries.items[0];
+    const entry = app.timeline.items[0];
     try std.testing.expectEqual(@as(usize, 4), entry.parts.len);
     try std.testing.expectEqualStrings("call_1", entry.parts[0].tool_call.call_id);
     try std.testing.expectEqualStrings("answer", entry.parts[1].message);
@@ -5065,18 +5066,18 @@ test "flushed preview precedes compact status" {
     defer app.arena_streaming_preview.deinit();
     app.arena_streaming_snapshot = .init(std.testing.allocator);
     defer app.arena_streaming_snapshot.deinit();
-    app.chat_entries = .empty;
+    app.timeline = .empty;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
-    var parts = [_]ChatPart{.{ .message = "latest agent output" }};
+    var parts = [_]TimelinePart{.{ .message = "latest agent output" }};
     app.streaming_entry = .{ .role = .agent, .parts = &parts };
 
     try app.flushSdkPreview();
     app.pushSystemMessage("compaction queued for the next turn", .{});
 
-    try std.testing.expectEqual(@as(usize, 2), app.chat_entries.items.len);
-    try std.testing.expectEqual(ChatRole.agent, app.chat_entries.items[0].role);
-    try std.testing.expectEqual(ChatRole.system, app.chat_entries.items[1].role);
+    try std.testing.expectEqual(@as(usize, 2), app.timeline.items.len);
+    try std.testing.expectEqual(TimelineRole.agent, app.timeline.items[0].role);
+    try std.testing.expectEqual(TimelineRole.system, app.timeline.items[1].role);
 }
 
 test "ToolStatusStore retains terminal tool result" {
@@ -5097,7 +5098,7 @@ test "tool group rail: nested list ends with exactly one corner" {
     app.io = std.testing.io;
     app.arena_session = .init(std.testing.allocator);
     defer app.arena_session.deinit();
-    app.chat_entries = .empty;
+    app.timeline = .empty;
     app.tool_status_entries = .{};
     app.dirty = false;
 

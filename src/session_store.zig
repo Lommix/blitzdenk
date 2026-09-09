@@ -531,7 +531,7 @@ test "create, checkpoint, load, resolve, gc roundtrip" {
     defer freeList(testing.allocator, entries_before);
     try testing.expectEqual(@as(usize, 0), entries_before.len);
 
-    const save = session.SaveState{ .chat = &.{}, .chat_render = &.{} };
+    const save = session.SaveState{ .chat = &.{}, .timeline = &.{} };
     try store.appendCheckpoint(save);
     try testing.expect(store.file_name != null);
     try store.appendCheckpoint(save);
@@ -587,7 +587,7 @@ test "torn tail and corrupt header fall back to last checkpoint" {
     const alloc = arena.allocator();
 
     // Torn tail: header + checkpoint + partial garbage line without '\n'.
-    const good_checkpoint = "{\"kind\":\"checkpoint\",\"ms\":1,\"save\":{\"chat\":[],\"chat_render\":[]}}";
+    const good_checkpoint = "{\"kind\":\"checkpoint\",\"ms\":1,\"save\":{\"chat\":[],\"timeline\":[]}}";
     {
         const body = try std.fmt.allocPrint(alloc, "{{\"kind\":\"header\",\"v\":1,\"id\":\"aaa\",\"created_ms\":0,\"cwd\":\"/x\"}}\n{s}\n{{\"kind\":\"chec", .{good_checkpoint});
         var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
@@ -628,7 +628,7 @@ test "torn tail and corrupt header fall back to last checkpoint" {
     var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
     defer store.deinit();
     try store.create("/tmp/project");
-    const empty = session.SaveState{ .chat = &.{}, .chat_render = &.{} };
+    const empty = session.SaveState{ .chat = &.{}, .timeline = &.{} };
     for (0..MAX_CHECKPOINTS + 1) |_| try store.appendCheckpoint(empty);
     try testing.expectEqual(@as(u32, 1), store.checkpoint_count);
     const stat = blk: {
@@ -683,7 +683,7 @@ test "create without checkpoint leaves no journal file" {
 test "pre-tool_status save file loads with empty tool_status" {
     const testing = std.testing;
     const json =
-        \\{"chat":[],"chat_render":[]}
+        \\{"chat":[],"timeline":[]}
     ;
     const parsed = try std.json.parseFromSlice(session.SaveState, testing.allocator, json, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
@@ -727,7 +727,7 @@ test "firstPrompt skips reminders and reports an empty prompt when no text exist
         .{ .role = .user, .parts = &.{.{ .text = "the   real\nprompt" }} },
         .{ .role = .agent, .parts = &.{.{ .text = "answer" }} },
     };
-    try store.appendCheckpoint(.{ .chat = &chat, .chat_render = &.{} });
+    try store.appendCheckpoint(.{ .chat = &chat, .timeline = &.{} });
     const id = store.file_name.?[0 .. store.file_name.?.len - NAME_EXTENSION.len];
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -737,7 +737,7 @@ test "firstPrompt skips reminders and reports an empty prompt when no text exist
     const only_tools = [_]session.WireMessage{
         .{ .role = .user, .parts = &.{.{ .tool_result = .{ .call_id = "c1", .name = "read", .content = "ok" } }} },
     };
-    try store.appendCheckpoint(.{ .chat = &only_tools, .chat_render = &.{} });
+    try store.appendCheckpoint(.{ .chat = &only_tools, .timeline = &.{} });
     const silent = store.file_name.?[0 .. store.file_name.?.len - NAME_EXTENSION.len];
     try testing.expectEqualStrings("", firstPrompt(arena.allocator(), io, base, silent));
 }
@@ -758,14 +758,14 @@ test "firstPrompt reads newest prompt from the tail; load scans backwards" {
     const first = [_]session.WireMessage{
         .{ .role = .user, .parts = &.{.{ .text = "first task" }} },
     };
-    try store.appendCheckpoint(.{ .chat = &first, .chat_render = &.{} });
+    try store.appendCheckpoint(.{ .chat = &first, .timeline = &.{} });
 
     const big_payload = "x" ** 9000;
     const second = [_]session.WireMessage{
         .{ .role = .user, .parts = &.{.{ .text = "second \"quoted\" task" }} },
         .{ .role = .agent, .parts = &.{.{ .text = big_payload }} },
     };
-    try store.appendCheckpoint(.{ .chat = &second, .chat_render = &.{} });
+    try store.appendCheckpoint(.{ .chat = &second, .timeline = &.{} });
 
     var id_buf: [64]u8 = undefined;
     const id = store.currentId(&id_buf).?;
@@ -798,7 +798,7 @@ test "legacy journal is flagged, still loadable, converts on next checkpoint" {
     var wb: [256]u8 = undefined;
     var w = file.writer(io, &wb);
     try w.interface.writeAll("{\"kind\":\"header\",\"v\":1,\"id\":\"ccc\",\"created_ms\":0,\"cwd\":\"/x\"}\n");
-    try w.interface.writeAll("{\"kind\":\"checkpoint\",\"ms\":9,\"save\":{\"chat\":[{\"role\":\"user\",\"parts\":[{\"text\":\"legacy   prompt\"}]}],\"chat_render\":[]}}\n");
+    try w.interface.writeAll("{\"kind\":\"checkpoint\",\"ms\":9,\"save\":{\"chat\":[{\"role\":\"user\",\"parts\":[{\"text\":\"legacy   prompt\"}]}],\"timeline\":[]}}\n");
     try w.interface.flush();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -815,6 +815,6 @@ test "legacy journal is flagged, still loadable, converts on next checkpoint" {
     const resumed = [_]session.WireMessage{
         .{ .role = .user, .parts = &.{.{ .text = "fresh prompt" }} },
     };
-    try store.appendCheckpoint(.{ .chat = &resumed, .chat_render = &.{} });
+    try store.appendCheckpoint(.{ .chat = &resumed, .timeline = &.{} });
     try testing.expectEqualStrings("fresh prompt", firstPrompt(alloc, io, base, "20250101-000000-cccc"));
 }

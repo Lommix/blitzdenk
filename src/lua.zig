@@ -209,7 +209,7 @@ const SidebarDef = LuaType{ .table_def = .{ .name = "BlitzSidebarDef", .fields =
 } } };
 const PanelDef = LuaType{ .table_def = .{ .name = "BlitzPanelDef", .fields = &.{
     .{ .name = "height", .ty = LuaInteger, .desc = "rows" },
-    .{ .name = "place", .ty = LuaString, .optional = true, .desc = "'between' (default) pins the panel between chat and input, 'below' pins it under the input" },
+    .{ .name = "place", .ty = LuaString, .optional = true, .desc = "'between' (default) pins the panel between timeline and input, 'below' pins it under the input" },
     .{ .name = "render", .ty = WidgetRenderFnDef, .desc = "draw callback, runs on every drawn frame" },
 } } };
 const BlitzDraw = LuaType{ .table_def = .{ .name = "BlitzDraw", .fields = &.{
@@ -235,9 +235,9 @@ const BlitzDraw = LuaType{ .table_def = .{ .name = "BlitzDraw", .fields = &.{
         \\Reserve a horizontal panel and draw into it from Lua.
         \\height is cells. Panels of the same place stack bottom up in
         \\registration order, the first registered panel sits on top of its block.
-        \\place 'between' (default) pins the panel between chat and input,
+        \\place 'between' (default) pins the panel between timeline and input,
         \\place 'below' pins it under the input widget. All panels hide
-        \\automatically while the chat viewport would drop below 6 rows. render
+        \\automatically while the timeline viewport would drop below 6 rows. render
         \\runs on every drawn frame with widget-relative dimensions and a BlitzWidgetBuf.
         ,
         .ty = LuaType{ .function = .{
@@ -431,7 +431,7 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "prompt", .ty = LuaType.string },
     .{ .name = "agent_type", .ty = LuaType.integer, .optional = true },
     .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
-    .{ .name = "background", .ty = LuaType.boolean, .optional = true, .desc = "run detached from the chat: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of chat entries. Use with on_complete to build silent subagents" },
+    .{ .name = "background", .ty = LuaType.boolean, .optional = true, .desc = "run detached from the timeline: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of timeline entries. Use with on_complete to build silent subagents" },
     .{ .name = "task", .ty = LuaType.string, .optional = true, .desc = "short task description shown in agent listings" },
     .{ .name = "clean", .ty = LuaType.boolean, .optional = true, .desc = "bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections, so the blitz.hooks.inject hook never runs for it; ignored on fork, a fork inherits the parent" },
     .{ .name = "on_complete", .ty = LuaType{ .raw = "fun(agent_id: integer, status: integer)" }, .optional = true, .desc = "runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside" },
@@ -1343,7 +1343,7 @@ const BlitzAgentFailedEvent = LuaType{ .table_def = .{
 const BlitzUserMessageEvent = LuaType{ .table_def = .{
     .name = "BlitzUserMessageEvent",
     .fields = &.{
-        .{ .name = "text", .desc = "chat text as typed", .ty = LuaType.string },
+        .{ .name = "text", .desc = "prompt text as typed", .ty = LuaType.string },
     },
 } };
 
@@ -2277,13 +2277,13 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         } },
     },
     .{
-        .name = "message_chat",
-        .desc = "Push a chat entry into the chat log.",
+        .name = "message_timeline",
+        .desc = "Push an entry into the timeline.",
         .ty = LuaType{ .function = .{
             .args = &.{ .{ .name = "role", .ty = LuaType.string }, .{ .name = "text", .ty = LuaType.string } },
             .fn_ptr = LuaFnBind((struct {
                 fn lua_fn(_: *c.lua_State, a: *r.app.App, role_str: []const u8, text: []const u8) !void {
-                    const role: r.app.ChatRole = if (std.mem.eql(u8, role_str, "system"))
+                    const role: r.app.TimelineRole = if (std.mem.eql(u8, role_str, "system"))
                         .system
                     else if (std.mem.eql(u8, role_str, "user"))
                         .user
@@ -2292,14 +2292,14 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                     else
                         return error.InvalidRole;
 
-                    var parts = try a.sessionAlloc().alloc(r.app.ChatPart, 1);
+                    var parts = try a.sessionAlloc().alloc(r.app.TimelinePart, 1);
                     parts[0] = .{ .message = text };
-                    try a.cmd_queue.append(a.io, .{ .push_chat_entry = .{
+                    try a.cmd_queue.append(a.io, .{ .push_timeline_entry = .{
                         .role = role,
                         .parts = parts,
                     } });
                 }
-            }).lua_fn, "cmd.message_chat"),
+            }).lua_fn, "cmd.message_timeline"),
         } },
     },
     .{
@@ -2310,12 +2310,12 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
             .fn_ptr = LuaFnBind((struct {
                 fn lua_fn(_: *c.lua_State, a: *r.app.App, text: []const u8) !void {
                     const parts = [_]r.sdk.Part{.{ .text = text }};
-                    const entry = try r.app.ChatEntry.userMessageSimple(a.sessionAlloc(), .user, text);
+                    const entry = try r.app.TimelineEntry.userMessageSimple(a.sessionAlloc(), .user, text);
                     if (a.main_agent_id) |id| {
                         try a.cmd_queue.append(a.io, .{ .queue_agent_message = .{
                             .agent_id = id,
                             .parts = &parts,
-                            .chat_entry = entry,
+                            .timeline_entry = entry,
                         } });
                     } else {
                         const id = a.registry.reserve() orelse return;
@@ -2323,7 +2323,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                             .agent_id = id,
                             .agent_type = @intFromEnum(r.ContextFactory.AgentType.general),
                             .prompt = &parts,
-                            .chat_entry = entry,
+                            .timeline_entry = entry,
                             .cwd = a.cwd,
                         } }) catch {
                             a.registry.releaseReservation(id);
@@ -2430,7 +2430,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
 const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
     .{
         .name = "spawn",
-        .desc = "Reserve a free slot and enqueue a spawn or fork into it. Args take background to detach the agent from the chat and on_complete, a one-shot main-thread callback for the end of the spawned run.",
+        .desc = "Reserve a free slot and enqueue a spawn or fork into it. Args take background to detach the agent from the timeline and on_complete, a one-shot main-thread callback for the end of the spawned run.",
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "args", .ty = SpawnAgentArgsDef }},
             .fn_ptr = (struct {
@@ -2633,7 +2633,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         return 0;
                     };
                     if (agent.history().len == 0) {
-                        _ = c.luaL_error(state, "agent.result: agent has no chat entries");
+                        _ = c.luaL_error(state, "agent.result: agent has no timeline entries");
                         return 0;
                     }
 
