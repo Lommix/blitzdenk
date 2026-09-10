@@ -103,7 +103,6 @@ pub const Command = union(enum) {
         agent_id: r.AgentId,
         prompt: []const r.sdk.Part,
         agent_type: u8 = @intFromEnum(r.ContextFactory.AgentType.general),
-        fork: bool = false,
         timeline_entry: ?TimelineEntry = null,
         cwd: []const u8 = "",
         background: bool = false,
@@ -268,34 +267,31 @@ pub const Command = union(enum) {
             },
             .spawn_agent => |arg| {
                 try app.waitForMcpTools();
-                var model_config: ?r.models.Config = null;
-                if (!arg.fork) {
-                    if (app.registry.state(arg.agent_id) != .reserved) {
-                        app.lua_vm.dropSpawnCallback(app.io, arg.agent_id.pack());
-                        return;
-                    }
-                    switch (app.context_factory.buildAgentApiConfig(
-                        @enumFromInt(arg.agent_type),
-                        &app.config,
-                        app.exec_pool.env,
-                    )) {
-                        .config => |config| model_config = config,
-                        .diagnostic => |diagnostic| {
-                            app.registry.releaseReservation(arg.agent_id);
-                            app.lua_vm.dropSpawnCallback(app.io, arg.agent_id.pack());
-                            if (arg.timeline_entry) |en| {
-                                const entry = try r.util.deepClone(TimelineEntry, en, alloc);
-                                try app.appendTimelineEntry(alloc, entry);
-                            }
-                            showProviderOnboarding(app, diagnostic);
-                            app.running = app.registry.countActive() > 0;
-                            app.auto_scroll = true;
-                            app.scroll_offset = 0;
-                            app.dirty = true;
-                            return;
-                        },
-                    }
+                if (app.registry.state(arg.agent_id) != .reserved) {
+                    app.lua_vm.dropSpawnCallback(app.io, arg.agent_id.pack());
+                    return;
                 }
+                const model_config = switch (app.context_factory.buildAgentApiConfig(
+                    @enumFromInt(arg.agent_type),
+                    &app.config,
+                    app.exec_pool.env,
+                )) {
+                    .config => |config| config,
+                    .diagnostic => |diagnostic| {
+                        app.registry.releaseReservation(arg.agent_id);
+                        app.lua_vm.dropSpawnCallback(app.io, arg.agent_id.pack());
+                        if (arg.timeline_entry) |en| {
+                            const entry = try r.util.deepClone(TimelineEntry, en, alloc);
+                            try app.appendTimelineEntry(alloc, entry);
+                        }
+                        showProviderOnboarding(app, diagnostic);
+                        app.running = app.registry.countActive() > 0;
+                        app.auto_scroll = true;
+                        app.scroll_offset = 0;
+                        app.dirty = true;
+                        return;
+                    },
+                };
 
                 var constructed = false;
                 errdefer app.lua_vm.dropSpawnCallback(app.io, arg.agent_id.pack());
@@ -310,18 +306,15 @@ pub const Command = union(enum) {
                     if (app.registry.get(parent_id)) |parent| parent.cwd else app.cwd
                 else
                     app.cwd;
-                const agent = if (arg.fork)
-                    try app.registry.activateFork(arg.agent_id, arg.parent_id.?)
-                else
-                    try app.registry.activate(arg.agent_id, model_config.?, .{ .identity = .{
-                        .type_idx = arg.agent_type,
-                        .name = app.context_factory.agentName(@enumFromInt(arg.agent_type)),
-                        .task_description = arg.task,
-                        .parent = if (arg.parent_id) |id| id.pack() else null,
-                        .depth = if (arg.parent_id) |id| app.registry.get(id).?.depth + 1 else 0,
-                        .cwd = cwd,
-                        .clean = arg.clean,
-                    }, .context_limit = app.default_context_limit });
+                const agent = try app.registry.activate(arg.agent_id, model_config, .{ .identity = .{
+                    .type_idx = arg.agent_type,
+                    .name = app.context_factory.agentName(@enumFromInt(arg.agent_type)),
+                    .task_description = arg.task,
+                    .parent = if (arg.parent_id) |id| id.pack() else null,
+                    .depth = if (arg.parent_id) |id| app.registry.get(id).?.depth + 1 else 0,
+                    .cwd = cwd,
+                    .clean = arg.clean,
+                }, .context_limit = app.default_context_limit });
                 constructed = true;
                 agent.background = arg.background;
                 try app.configureAgent(arg.agent_id, agent);
@@ -341,7 +334,6 @@ pub const Command = union(enum) {
                     try app.appendTimelineEntry(alloc, entry);
                 }
 
-                if (!arg.fork) try agent.setMessages(&.{});
                 try agent.queueMessages(&.{.{ .role = .user, .content = arg.prompt }});
                 if (arg.parent_id == null and !arg.background) app.sdk_run_rendered_steps = 0;
                 try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });

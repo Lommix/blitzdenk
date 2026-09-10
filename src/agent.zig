@@ -152,33 +152,6 @@ pub const Agent = struct {
         };
     }
 
-    pub fn fork(self: *const Agent, parent: u32) !Agent {
-        const model_source = if (self.pending_model) |*parked| parked else &self.model;
-        var model = try model_source.clone(self.alloc);
-        errdefer model.deinit(self.alloc);
-        var child = try initModel(self.alloc, self.io, model, .{
-            .identity = .{
-                .type_idx = self.type_idx,
-                .name = self.name,
-                .task_description = self.task_description,
-                .parent = parent,
-                .depth = self.depth + 1,
-                .cwd = self.cwd,
-                .clean = self.clean,
-            },
-            .context_limit = self.context_limit,
-        });
-        child.reasoning_effort = self.pending_effort orelse self.reasoning_effort;
-        child.flags.vision = self.pending_vision orelse self.flags.vision;
-        errdefer child.deinit();
-        try child.setSystemPrompt(self.system_prompt);
-        var prior_messages = self.history();
-        if (prior_messages.len > 0 and hasToolCall(prior_messages[prior_messages.len - 1])) prior_messages = prior_messages[0 .. prior_messages.len - 1];
-        try child.setMessages(prior_messages);
-        try child.setTools(self.tools);
-        return child;
-    }
-
     pub fn deinit(self: *Agent) void {
         if (self.resume_options) |*options| options.deinit();
         if (self.compact_task) |*task| task.deinit();
@@ -742,12 +715,6 @@ pub const Agent = struct {
 
 fn discardEvent(_: ?*anyopaque, _: agent_run.Event) void {}
 
-fn hasToolCall(message: sdk.Message) bool {
-    if (message.role != .assistant) return false;
-    for (message.parts()) |part| if (part == .tool_call) return true;
-    return false;
-}
-
 test "agent owns SDK state and adopts completed history" {
     const Fixture = struct {
         fn modelId(_: *anyopaque) []const u8 {
@@ -882,31 +849,6 @@ test "forced model update swaps idle agents and defers busy agents" {
     try std.testing.expect(agent.pending_model == null);
     try std.testing.expect(agent.pending_effort == null);
     try std.testing.expect(agent.run_model == null);
-}
-
-test "fork adopts a parked model update" {
-    var agent = try Agent.init(std.testing.allocator, std.testing.io, .{
-        .api_key = "key",
-        .model = "model-a",
-        .base_url = "https://example.com/v1",
-        .reasoning_effort = .low,
-        .provider = .{ .openai = .{} },
-    }, .{ .identity = .{ .clean = true } });
-    defer agent.deinit();
-    agent.pending_model = try models.Model.init(std.testing.allocator, .{
-        .api_key = "key",
-        .model = "model-b",
-        .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
-    });
-    agent.pending_effort = .high;
-
-    var child = try agent.fork(7);
-    defer child.deinit();
-    try std.testing.expectEqualStrings("model-b", child.model.languageModel().modelId());
-    try std.testing.expectEqual(models.ReasoningEffort.high, child.reasoning_effort);
-    try std.testing.expect(agent.clean);
-    try std.testing.expect(child.clean);
 }
 
 test "prepare step merges queued messages and reminder" {

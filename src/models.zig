@@ -123,41 +123,6 @@ pub const Model = union(Kind) {
         }
     }
 
-    pub fn clone(self: *const Model, alloc: std.mem.Allocator) !Model {
-        return switch (self.*) {
-            .ollama => |chat| .{ .ollama = try sdk.compat.Chat.init(alloc, chat.model_id, .{
-                .api_key = chat.api_key,
-                .base_url = chat.base_url,
-                .headers = chat.extra_headers,
-                .rate_limit = chat.rate_limit,
-                .replay_reasoning = chat.replay_reasoning,
-                .session_key_header = chat.session_key_header,
-            }) },
-            .openai => |chat| .{ .openai = try sdk.openai.Chat.init(alloc, chat.model_id, .{
-                .api_key = chat.api_key,
-                .base_url = chat.base_url,
-                .headers = chat.extra_headers,
-                .rate_limit = chat.rate_limit,
-                .replay_reasoning = chat.replay_reasoning,
-                .session_key_header = chat.session_key_header,
-            }) },
-            .response => |chat| .{ .response = try sdk.responses.Chat.init(alloc, chat.model_id, .{
-                .api_key = chat.api_key,
-                .base_url = chat.base_url,
-                .headers = chat.extra_headers,
-                .rate_limit = chat.rate_limit,
-                .session_key_header = chat.session_key_header,
-            }) },
-            .anthropic => |chat| .{ .anthropic = try sdk.anthropic.Chat.init(alloc, chat.model_id, .{
-                .api_key = chat.api_key,
-                .base_url = chat.base_url,
-                .headers = chat.extra_headers,
-                .rate_limit = chat.rate_limit,
-                .session_key_header = chat.session_key_header,
-            }) },
-        };
-    }
-
     pub fn languageModel(self: *Model) sdk.LanguageModel {
         return switch (self.*) {
             inline else => |*chat| chat.languageModel(),
@@ -175,12 +140,9 @@ test "models own sdk provider chats" {
     defer model.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("model", model.languageModel().modelId());
     try std.testing.expect(!model.openai.replay_reasoning);
-    var cloned = try model.clone(std.testing.allocator);
-    defer cloned.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("model", cloned.languageModel().modelId());
 }
 
-test "replay_reasoning reaches the sdk chat and survives clone" {
+test "replay_reasoning reaches the sdk chat" {
     for ([_]ProviderOptions{ .{ .openai = .{} }, .{ .ollama = .{} } }) |provider| {
         var model = try Model.init(std.testing.allocator, .{
             .api_key = "key",
@@ -194,11 +156,5 @@ test "replay_reasoning reaches the sdk chat and survives clone" {
             inline else => |*chat| chat.replay_reasoning,
         };
         try std.testing.expect(chat_replays);
-        var cloned = try model.clone(std.testing.allocator);
-        defer cloned.deinit(std.testing.allocator);
-        const clone_replays = switch (cloned) {
-            inline else => |*chat| chat.replay_reasoning,
-        };
-        try std.testing.expect(clone_replays);
     }
 }

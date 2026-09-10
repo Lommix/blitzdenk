@@ -74,8 +74,7 @@ Every agent needs a bound model; unbound agents fail to spawn. Bind with
 Pass `force = true` to either call to also swap the model on live agents of
 that type: `blitz.set_agent_model(agent_type, handle, true)`. Idle
 agents swap at once. An agent mid-run keeps its current model until that run
-ends, then adopts the new one. A fork made during that run starts on the new
-model. Without `force`, only new agents use the change.
+ends, then adopts the new one. Without `force`, only new agents use the change.
 
 The first-run wizard writes `~/.config/blitzdenk/provider.lua` and `blitz.lua`
 imports it with `pcall(require, "provider")`. Edit or delete that file to
@@ -177,7 +176,7 @@ local researcher = blitz.add_agent({
 ```
 
 An agent id is one packed integer; the agent tool result carries it as
-`agent_id: <int>`. `fork = true` in `blitz.agent.spawn` requires `parent_id`.
+`agent_id: <int>`.
 
 `on_complete` in `blitz.agent.spawn` attaches a one-shot callback to the run.
 It fires once on the main thread when the run ends. Closing or replacing the
@@ -192,9 +191,8 @@ build a silent subagent: read the answer in the callback with
 
 `clean = true` in `blitz.agent.spawn`, or `clean` on the `agent` tool, builds a
 bare agent: no AGENTS.md files in the system prompt, and no `<system-reminder>`
-injection on any step, so `blitz.hooks.inject` never runs for it. A fork ignores
-the flag and inherits the parent's setting. A finished background child still
-queues its result notice into a clean parent.
+injection on any step, so `blitz.hooks.inject` never runs for it. A finished
+background child still queues its result notice into a clean parent.
 
 `cwd` in `blitz.agent.spawn` sets the working directory of the child. A relative
 path resolves against the parent agent cwd.

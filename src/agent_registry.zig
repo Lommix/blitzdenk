@@ -155,28 +155,6 @@ pub const Registry = struct {
         return &slot.agent.?;
     }
 
-    pub fn fork(self: *Registry, parent_id: AgentId) !AgentId {
-        const parent = self.get(parent_id) orelse return error.AgentNotFound;
-        const id = self.reserve() orelse return error.RegistryFull;
-        errdefer self.releaseReservation(id);
-        const slot = self.reservedSlot(id).?;
-        var child = try parent.fork(parent_id.pack());
-        errdefer child.deinit();
-        slot.agent = child;
-        slot.state.store(.active, .release);
-        return id;
-    }
-
-    pub fn activateFork(self: *Registry, id: AgentId, parent_id: AgentId) !*agent_mod.Agent {
-        const parent = self.get(parent_id) orelse return error.AgentNotFound;
-        const slot = self.reservedSlot(id) orelse return error.InvalidReservation;
-        var child = try parent.fork(parent_id.pack());
-        errdefer child.deinit();
-        slot.agent = child;
-        slot.state.store(.active, .release);
-        return &slot.agent.?;
-    }
-
     pub fn releaseReservation(self: *Registry, id: AgentId) void {
         const slot = self.slotFor(id) orelse return;
         if (slot.state.cmpxchgStrong(.reserved, .free, .acq_rel, .monotonic) == null) slot.event.set(self.io);
@@ -546,36 +524,6 @@ test "starting a reserved agent preserves an existing waiter" {
     }
     try std.testing.expectEqual(SlotState.complete, try waiting.await(io));
     registry.release(id);
-}
-
-test "registry owns and forks SDK agents" {
-    var registry = Registry.init(std.testing.allocator, std.testing.io);
-    defer registry.deinit();
-    const id = registry.reserve().?;
-    const parent = try registry.activate(id, .{
-        .api_key = "key",
-        .model = "model",
-        .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
-    }, .{ .identity = .{ .name = "parent", .cwd = "/tmp" } });
-    try parent.setMessages(&.{sdk.UserMessage("hello")});
-    try parent.setTools(&.{.{ .name = "read" }});
-    const child_id = try registry.fork(id);
-    const child = registry.get(child_id).?;
-    try std.testing.expectEqual(id.pack(), child.parent.?);
-    try std.testing.expectEqual(@as(u16, 1), child.depth);
-    try std.testing.expectEqualStrings("hello", child.history()[0].text());
-    try std.testing.expectEqualStrings("read", child.tools[0].name);
-    parent.usage = .{ .input_tokens = 5, .output_tokens = 2, .total_tokens = 7 };
-    registry.release(id);
-    try std.testing.expect(registry.get(id) == null);
-    try std.testing.expect(registry.get(child_id) != null);
-    try std.testing.expectEqual(@as(u64, 7), registry.usage().total_tokens);
-    const by_model = try registry.usageByModel(std.testing.allocator);
-    defer std.testing.allocator.free(by_model);
-    try std.testing.expectEqual(@as(usize, 1), by_model.len);
-    try std.testing.expectEqualStrings("model", by_model[0].model);
-    try std.testing.expectEqual(@as(u64, 7), by_model[0].usage.total_tokens);
 }
 
 test "usageByModel includes live unaccounted slot usage" {

@@ -80,18 +80,17 @@
 ---@field agent_type? integer
 ---working directory of the spawned agent; a relative path resolves against the parent agent cwd
 ---@field cwd? string
----@field fork? boolean
 ---run detached from the timeline: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of timeline entries. Use with on_complete to build silent subagents
 ---@field background? boolean
 ---short task description shown in agent listings
 ---@field task? string
----bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections, so the blitz.hooks.inject hook never runs for it; ignored on fork, a fork inherits the parent
+---bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections, so the blitz.hooks.inject hook never runs for it
 ---@field clean? boolean
 ---runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside
 ---@field on_complete? fun(agent_id: integer, status: integer)
 
 ---@class BlitzAgent
----Reserve a free slot and enqueue a spawn or fork into it. Args take background to detach the agent from the timeline and on_complete, a one-shot main-thread callback for the end of the spawned run.
+---Reserve a free slot and enqueue a spawn into it. Args take background to detach the agent from the timeline and on_complete, a one-shot main-thread callback for the end of the spawned run.
 ---@field spawn fun(args: BlitzSpawnArgs): integer|nil
 ---Queue a user message for the given agent.
 ---@field message fun(agent_id: integer, text: string)

@@ -456,10 +456,9 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "prompt", .ty = LuaType.string },
     .{ .name = "agent_type", .ty = LuaType.integer, .optional = true },
     .{ .name = "cwd", .ty = LuaType.string, .optional = true, .desc = "working directory of the spawned agent; a relative path resolves against the parent agent cwd" },
-    .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
     .{ .name = "background", .ty = LuaType.boolean, .optional = true, .desc = "run detached from the timeline: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of timeline entries. Use with on_complete to build silent subagents" },
     .{ .name = "task", .ty = LuaType.string, .optional = true, .desc = "short task description shown in agent listings" },
-    .{ .name = "clean", .ty = LuaType.boolean, .optional = true, .desc = "bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections, so the blitz.hooks.inject hook never runs for it; ignored on fork, a fork inherits the parent" },
+    .{ .name = "clean", .ty = LuaType.boolean, .optional = true, .desc = "bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections, so the blitz.hooks.inject hook never runs for it" },
     .{ .name = "on_complete", .ty = LuaType{ .raw = "fun(agent_id: integer, status: integer)" }, .optional = true, .desc = "runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside" },
 } } };
 const SelectRequestDef = LuaType{ .table_def = .{ .name = "BlitzSelectRequest", .fields = &.{
@@ -2518,7 +2517,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
 const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
     .{
         .name = "spawn",
-        .desc = "Reserve a free slot and enqueue a spawn or fork into it. Args take background to detach the agent from the timeline and on_complete, a one-shot main-thread callback for the end of the spawned run.",
+        .desc = "Reserve a free slot and enqueue a spawn into it. Args take background to detach the agent from the timeline and on_complete, a one-shot main-thread callback for the end of the spawned run.",
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "args", .ty = SpawnAgentArgsDef }},
             .fn_ptr = (struct {
@@ -2538,7 +2537,6 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         prompt: []const u8,
                         agent_type: ?u32 = null,
                         cwd: ?[]const u8 = null,
-                        fork: ?bool = null,
                         background: ?bool = null,
                         task: ?[]const u8 = null,
                         clean: ?bool = null,
@@ -2567,17 +2565,6 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         },
                     };
 
-                    if ((spawn.fork orelse false) and spawn.parent_id == null) {
-                        unrefSpawnCb(state, spawn.on_complete);
-                        _ = c.luaL_error(state, "agent.spawn: fork=true requires parent_id");
-                        return 0;
-                    }
-                    if ((spawn.fork orelse false) and spawn.cwd != null and spawn.cwd.?.len > 0) {
-                        unrefSpawnCb(state, spawn.on_complete);
-                        _ = c.luaL_error(state, "agent.spawn: fork=true cannot be combined with cwd");
-                        return 0;
-                    }
-
                     var resolved_cwd: []const u8 = "";
                     if (spawn.cwd) |raw_cwd| {
                         if (raw_cwd.len > 0) {
@@ -2598,7 +2585,6 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         .parent_id = spawn.parent_id,
                         .prompt = &.{},
                         .cwd = resolved_cwd,
-                        .fork = spawn.fork orelse false,
                         .background = spawn.background orelse false,
                         .task = spawn.task orelse "",
                         .clean = spawn.clean orelse false,
