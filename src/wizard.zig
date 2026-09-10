@@ -58,6 +58,7 @@ pub const catalog = [_]CatalogEntry{
         .default_url = "https://api.openai.com/v1",
         .key_envar = "OPENAI_API_KEY",
         .models = &.{
+            .{ .name = "gpt-6-astra", .vision = true },
             .{ .name = "gpt-5.6-sol", .vision = true },
             .{ .name = "gpt-5.6-luna", .vision = true },
             .{ .name = "gpt-5.6-terra", .vision = true },
@@ -109,7 +110,7 @@ pub const catalog = [_]CatalogEntry{
         .session_key_header = "x-opencode-session",
         .models = &.{
             .{ .name = "glm-5.3-flash", .vision = true, .replay_reasoning = true },
-            .{ .name = "deepseek-v4-flash-vision-exp", .vision = true, .replay_reasoning = true },
+            .{ .name = "deepseek-flash", .vision = true, .replay_reasoning = true },
             .{ .name = "qwen3.8-flash", .vision = true, .replay_reasoning = true },
         },
     },
