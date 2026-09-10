@@ -438,7 +438,8 @@ agent's `<system-reminder>` block, or nil to add nothing. `agent_type_id` is
 the type handle from `blitz.list_agent_types()`. It runs in the main Lua VM
 with a brief lock. Errors are logged and the step continues. Last registration
 wins. Never call `blitz.agent.await` inside the hook. A clean agent builds no
-reminder at all, so the hook never runs for it.
+reminder at all, so the hook never runs for it. The reminder precedes the user
+prompt.
 
 ```lua
 blitz.hooks.inject({

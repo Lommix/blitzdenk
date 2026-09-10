@@ -585,10 +585,10 @@ pub const Agent = struct {
             return .{ .messages = base, .replace = replace, .tools = refreshed_tools };
         }
         const alloc = self.injection_arena.allocator();
-        const combined = try alloc.alloc(sdk.Message, base.len + self.queued_messages.items.len + @intFromBool(reminder != null));
+        const combined = try alloc.alloc(sdk.Message, base.len + @intFromBool(reminder != null) + self.queued_messages.items.len);
         @memcpy(combined[0..base.len], base);
-        @memcpy(combined[base.len..][0..self.queued_messages.items.len], self.queued_messages.items);
-        if (reminder) |text| combined[combined.len - 1] = sdk.UserMessage(text);
+        if (reminder) |text| combined[base.len] = sdk.UserMessage(text);
+        @memcpy(combined[combined.len - self.queued_messages.items.len ..], self.queued_messages.items);
         self.queued_messages.clearRetainingCapacity();
         return .{ .messages = combined, .replace = replace, .tools = refreshed_tools };
     }
@@ -928,8 +928,8 @@ test "prepare step merges queued messages and reminder" {
 
     const prepared = try Agent.prepareStep(&agent, .{ .number = 1, .messages = &.{} });
     try std.testing.expectEqual(@as(usize, 2), prepared.messages.len);
-    try std.testing.expectEqualStrings("queued", prepared.messages[0].text());
-    try std.testing.expectEqualStrings("reminder", prepared.messages[1].text());
+    try std.testing.expectEqualStrings("reminder", prepared.messages[0].text());
+    try std.testing.expectEqualStrings("queued", prepared.messages[1].text());
 }
 
 test "agent adopts compacted SDK history and preserves durable tool state" {

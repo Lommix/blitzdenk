@@ -341,7 +341,8 @@ pub const Command = union(enum) {
                     try app.appendTimelineEntry(alloc, entry);
                 }
 
-                try agent.setMessages(&.{.{ .role = .user, .content = arg.prompt }});
+                if (!arg.fork) try agent.setMessages(&.{});
+                try agent.queueMessages(&.{.{ .role = .user, .content = arg.prompt }});
                 if (arg.parent_id == null and !arg.background) app.sdk_run_rendered_steps = 0;
                 try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
                 app.event_bus.emit(app, .{ .agent_started = .{ .id = arg.agent_id, .fresh = true } });
