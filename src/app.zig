@@ -3307,6 +3307,7 @@ fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rec
 }
 
 fn renderStatusBar(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+    if (app.input_mode == .wizard) return;
     const alloc = app.arena_frame.allocator();
     var line = statusBarLine(app, alloc) catch return;
     line.render(area.x, area.y, area.width, buf);
@@ -3349,6 +3350,7 @@ fn statusBarLine(app: *App, alloc: std.mem.Allocator) !r.tui.Line {
 
 fn refreshLuaStatusBar(app: *App) void {
     if (!app.lua_status_bar_enabled) return;
+    if (app.input_mode == .wizard) return;
     if (app.lua_vm.vm_mu.tryLock()) {
         defer app.lua_vm.vm_mu.unlock(app.io);
         if (app.lua_vm.renderStatusBar(&app.lua_status_bar_cache)) |status| {
