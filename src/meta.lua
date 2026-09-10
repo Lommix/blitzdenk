@@ -159,7 +159,7 @@
 ---columns
 ---@field width integer
 ---draw callback, runs on every drawn frame
----@field render fun(width: integer, height: integer, buf: BlitzWidgetBuf)
+---@field render fun(width: integer, height: integer, buf: BlitzWidgetBuf, frame: integer)
 
 ---@class BlitzWidgetHandle
 ---make the widget visible again
@@ -177,14 +177,15 @@
 ---'between' (default) pins the panel between timeline and input, 'below' pins it under the input
 ---@field place? string
 ---draw callback, runs on every drawn frame
----@field render fun(width: integer, height: integer, buf: BlitzWidgetBuf)
+---@field render fun(width: integer, height: integer, buf: BlitzWidgetBuf, frame: integer)
 
 ---@class BlitzDraw
 ---Reserve a full height sidebar column and draw into it from Lua.
 ---side is 'left' (default) or 'right', width is cells. A second add on
 ---the same side replaces the first. The sidebar hides automatically
 ---while the main column would drop below 40 columns. render runs on
----every drawn frame with widget-relative dimensions and a BlitzWidgetBuf.
+---every drawn frame with widget-relative dimensions, a BlitzWidgetBuf,
+---and the app frame counter (frame) for animations.
 ---Colors are '#RRGGBB' hex or theme names (bg, muted, text, info, ...).
 ---@field sidebar fun(def: BlitzSidebarDef): BlitzWidgetHandle
 ---Reserve a horizontal panel and draw into it from Lua.
@@ -193,7 +194,8 @@
 ---place 'between' (default) pins the panel between timeline and input,
 ---place 'below' pins it under the input widget. All panels hide
 ---automatically while the timeline viewport would drop below 6 rows. render
----runs on every drawn frame with widget-relative dimensions and a BlitzWidgetBuf.
+---runs on every drawn frame with widget-relative dimensions, a BlitzWidgetBuf,
+---and the app frame counter (frame) for animations.
 ---@field panel fun(def: BlitzPanelDef): BlitzWidgetHandle
 ---Request a UI redraw on the next loop tick. Call from animations to force frames while the app is idle.
 ---@field redraw fun()
@@ -379,6 +381,34 @@
 ---@field requires_vision? boolean
 ---@field func fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult
 
+---@class BlitzAgentRow
+---packed agent id
+---@field agent_id integer
+---agent type name
+---@field name string
+---task description set at spawn time
+---@field task string
+---running|thinking|writing|calling|processing|retrying|compacting|idle|complete|canceled|failed
+---@field state string
+---context fill in percent
+---@field ctx integer
+---tokens used in the context window
+---@field context_tokens integer
+---context window size in tokens
+---@field context_limit integer
+---model id the agent runs on
+---@field model string
+---true when this is the main agent
+---@field main boolean
+---true when the agent runs detached from the timeline
+---@field background boolean
+---parent agent id, nil on roots
+---@field parent integer|nil
+---output tokens per second, live while a run streams
+---@field tps number
+---messages waiting in the agent queue
+---@field queued integer
+
 ---@class BlitzThinking
 ---@field type string
 ---@field budget_tokens? integer
@@ -523,8 +553,8 @@
 ---@field add_tool fun(agent_type: integer, tool_name: string)
 ---Return the main agent, if a session is running.
 ---@field get_main_agent fun(): integer|nil
----Snapshot every occupied agent slot, running and finished, as a list of tables: agent_id, name, task, state, ctx, model, and counters.
----@field list_agents fun(): table
+---Snapshot every occupied agent slot, running and finished, as a list of BlitzAgentRow.
+---@field list_agents fun(): BlitzAgentRow[]
 ---Exit the agent loop with a message.
 ---@field exit_loop fun(content?: string): BlitzToolResult
 ---Register a provider.

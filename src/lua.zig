@@ -195,7 +195,7 @@ const WidgetBufDef = LuaType{ .table_def = .{ .name = "BlitzWidgetBuf", .fields 
     .{ .name = "rect", .ty = LuaType{ .raw = "fun(x: integer, y: integer, w: integer, h: integer, color: string)" }, .desc = "one cell thick background outline" },
     .{ .name = "box", .ty = LuaType{ .raw = "fun(x: integer, y: integer, w: integer, h: integer, color: string)" }, .desc = "unicode line border in foreground color" },
 } } };
-const WidgetRenderFnDef = LuaType{ .raw_refs = .{ .text = "fun(width: integer, height: integer, buf: BlitzWidgetBuf)", .refs = &.{WidgetBufDef} } };
+const WidgetRenderFnDef = LuaType{ .raw_refs = .{ .text = "fun(width: integer, height: integer, buf: BlitzWidgetBuf, frame: integer)", .refs = &.{WidgetBufDef} } };
 const WidgetHandleDef = LuaType{ .table_def = .{ .name = "BlitzWidgetHandle", .fields = &.{
     .{ .name = "show", .ty = LuaType{ .raw = "fun()" }, .desc = "make the widget visible again" },
     .{ .name = "hide", .ty = LuaType{ .raw = "fun()" }, .desc = "hide the widget, its space returns to the layout" },
@@ -220,7 +220,8 @@ const BlitzDraw = LuaType{ .table_def = .{ .name = "BlitzDraw", .fields = &.{
         \\side is 'left' (default) or 'right', width is cells. A second add on
         \\the same side replaces the first. The sidebar hides automatically
         \\while the main column would drop below 40 columns. render runs on
-        \\every drawn frame with widget-relative dimensions and a BlitzWidgetBuf.
+        \\every drawn frame with widget-relative dimensions, a BlitzWidgetBuf,
+        \\and the app frame counter (frame) for animations.
         \\Colors are '#RRGGBB' hex or theme names (bg, muted, text, info, ...).
         ,
         .ty = LuaType{ .function = .{
@@ -238,7 +239,8 @@ const BlitzDraw = LuaType{ .table_def = .{ .name = "BlitzDraw", .fields = &.{
         \\place 'between' (default) pins the panel between timeline and input,
         \\place 'below' pins it under the input widget. All panels hide
         \\automatically while the timeline viewport would drop below 6 rows. render
-        \\runs on every drawn frame with widget-relative dimensions and a BlitzWidgetBuf.
+        \\runs on every drawn frame with widget-relative dimensions, a BlitzWidgetBuf,
+        \\and the app frame counter (frame) for animations.
         ,
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "def", .ty = PanelDef }},
@@ -286,6 +288,22 @@ const TokenUsageDef = LuaType{ .table_def = .{ .name = "BlitzTokenUsage", .field
     .{ .name = "cache_creation", .ty = LuaType.integer },
     .{ .name = "cost", .ty = LuaType.number, .desc = "total lifetime cost in USD" },
 } } };
+const AgentRowDef = LuaType{ .table_def = .{ .name = "BlitzAgentRow", .fields = &.{
+    .{ .name = "agent_id", .ty = AgentIdDef, .desc = "packed agent id" },
+    .{ .name = "name", .ty = LuaType.string, .desc = "agent type name" },
+    .{ .name = "task", .ty = LuaType.string, .desc = "task description set at spawn time" },
+    .{ .name = "state", .ty = LuaType.string, .desc = "running|thinking|writing|calling|processing|retrying|compacting|idle|complete|canceled|failed" },
+    .{ .name = "ctx", .ty = LuaType.integer, .desc = "context fill in percent" },
+    .{ .name = "context_tokens", .ty = LuaType.integer, .desc = "tokens used in the context window" },
+    .{ .name = "context_limit", .ty = LuaType.integer, .desc = "context window size in tokens" },
+    .{ .name = "model", .ty = LuaType.string, .desc = "model id the agent runs on" },
+    .{ .name = "main", .ty = LuaType.boolean, .desc = "true when this is the main agent" },
+    .{ .name = "background", .ty = LuaType.boolean, .desc = "true when the agent runs detached from the timeline" },
+    .{ .name = "parent", .ty = AgentIdOrNilDef, .desc = "parent agent id, nil on roots" },
+    .{ .name = "tps", .ty = LuaType.number, .desc = "output tokens per second, live while a run streams" },
+    .{ .name = "queued", .ty = LuaType.integer, .desc = "messages waiting in the agent queue" },
+} } };
+const AgentRowListDef = LuaType{ .raw_refs = .{ .text = "BlitzAgentRow[]", .refs = &.{AgentRowDef} } };
 const ThinkingDef = LuaType{ .table_def = .{ .name = "BlitzThinking", .fields = &.{
     .{ .name = "type", .ty = LuaType.string },
     .{ .name = "budget_tokens", .ty = LuaType.integer, .optional = true },
@@ -555,8 +573,8 @@ pub const Blitz = LuaType{
                     return a.main_agent_id;
                 }
             }).lua_fn, "get_main_agent") } } },
-            .{ .name = "list_agents", .desc = "Snapshot every occupied agent slot, running and finished, as a list of tables: agent_id, name, task, state, ctx, model, and counters.", .ty = LuaType{ .function = .{
-                .ret = &LuaTable,
+            .{ .name = "list_agents", .desc = "Snapshot every occupied agent slot, running and finished, as a list of BlitzAgentRow.", .ty = LuaType{ .function = .{
+                .ret = &AgentRowListDef,
                 .fn_ptr = LuaFnBind((struct {
                     const AgentRow = struct {
                         agent_id: r.AgentId,
@@ -4147,6 +4165,7 @@ pub fn invokeWidgetRender(
     rect: tui.Rect,
     buf: *tui.Buffer,
     theme: *const app.Theme,
+    frame: usize,
     err_out: []u8,
 ) usize {
     if (rect.width == 0 or rect.height == 0) return 0;
@@ -4161,8 +4180,9 @@ pub fn invokeWidgetRender(
     c.lua_pushinteger(L, rect.height);
     var draw = LuaDrawCtx{ .buf = buf, .rect = rect, .theme = theme };
     pushWidgetBufTable(L, &draw);
+    c.lua_pushinteger(L, @intCast(frame));
 
-    const status = c.lua_pcallk(L, 3, 0, 0, 0, null);
+    const status = c.lua_pcallk(L, 4, 0, 0, 0, null);
     if (status != 0) {
         var len: usize = 0;
         const ptr = c.lua_tolstring(L, -1, &len);
@@ -5160,11 +5180,12 @@ test "widget render callback draws with clipping and captures errors" {
     vm.setApp(&app_state);
 
     try vm.exec(
-        \\blitz.draw.sidebar({ side = "left", width = 10, render = function(w, h, buf)
+        \\blitz.draw.sidebar({ side = "left", width = 10, render = function(w, h, buf, frame)
         \\    buf.set(0, 0, "Hello")
         \\    buf.set_color(0, 1, "nice", "#A50000")
         \\    buf.set(50, 50, "clipped away")
         \\    buf.box(0, 2, 8, 3, "info")
+        \\    buf.set(4, 5, "f" .. frame)
         \\end })
         \\blitz.draw.panel({ height = 8, render = function() error("boom") end })
         \\
@@ -5176,7 +5197,7 @@ test "widget render callback draws with clipping and captures errors" {
     var err_out: [WIDGET_ERROR_CAP]u8 = undefined;
     const rect = tui.Rect{ .x = 2, .y = 1, .width = 10, .height = 8 };
 
-    try std.testing.expectEqual(@as(usize, 0), invokeWidgetRender(vm, &vm.widget_entries[0], rect, &buf, &theme, &err_out));
+    try std.testing.expectEqual(@as(usize, 0), invokeWidgetRender(vm, &vm.widget_entries[0], rect, &buf, &theme, 7, &err_out));
     try std.testing.expectEqual(@as(u21, 'H'), buf.get(2, 1).char);
     try std.testing.expectEqual(@as(u21, 'o'), buf.get(6, 1).char);
     try std.testing.expectEqual(@as(u21, ' '), buf.get(7, 1).char);
@@ -5184,8 +5205,10 @@ test "widget render callback draws with clipping and captures errors" {
     try std.testing.expectEqual(@as(u21, 0x250C), buf.get(2, 3).char);
     try std.testing.expectEqual(@as(u21, 0x2500), buf.get(5, 3).char);
     try std.testing.expectEqual(@as(u21, 0x2518), buf.get(9, 5).char);
+    try std.testing.expectEqual(@as(u21, 'f'), buf.get(6, 6).char);
+    try std.testing.expectEqual(@as(u21, '7'), buf.get(7, 6).char);
 
-    const err_len = invokeWidgetRender(vm, &vm.widget_entries[1], rect, &buf, &theme, &err_out);
+    const err_len = invokeWidgetRender(vm, &vm.widget_entries[1], rect, &buf, &theme, 7, &err_out);
     try std.testing.expect(std.mem.endsWith(u8, err_out[0..err_len], "boom"));
 }
 
@@ -5891,6 +5914,7 @@ test "list_agents snapshots occupied slots" {
     agent.context_limit = 10_000;
     agent.status = .running;
     agent.activity = .thinking;
+    agent.tokens_per_second = 12.5;
     agent.background = true;
     app_state.main_agent_id = id;
 
@@ -5931,7 +5955,7 @@ test "list_agents snapshots occupied slots" {
         \\assert(root.background == true)
         \\assert(root.parent == nil)
         \\assert(root.queued == 0)
-        \\assert(root.tps == 0)
+        \\assert(root.tps == 12.5)
         \\assert(child.name == "worker")
         \\assert(child.task == "child task")
         \\assert(child.state == "complete")

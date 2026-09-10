@@ -610,6 +610,11 @@ before the first prompt is sent. Afterwards the app draws only on input, so
 animations call `blitz.draw.redraw()` to force frames. Keep the callback pure
 drawing: no awaits, no long work, or frames drop.
 
+The callback receives the app frame counter as fourth argument:
+`function(w, h, buf, frame)`. It counts up on every drawn frame and resets on
+session reset. Use it to drive animations, for example
+`string.sub("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", frame % 10 + 1, frame % 10 + 1)`.
+
 Both calls return a handle with `show()`, `hide()`, `remove()` and
 `set_size(cells)`. One sidebar per side: a second `sidebar` call on the same
 side replaces the first and its handle goes dead.

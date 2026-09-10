@@ -3451,7 +3451,7 @@ pub fn anchorWidgetPanels(wl: *const WidgetLayout, footer_y: u16, footer_h: u16,
 fn drawLuaWidget(app: *App, vm: *r.lua.LuaVm, entry_index: usize, rect: r.tui.Rect, buf: *r.tui.Buffer) void {
     const entry = &vm.widget_entries[entry_index];
     if (!entry.alive or entry.hidden) return;
-    const err_len = r.lua.invokeWidgetRender(vm, entry, rect, buf, &app.theme, &app.widget_error_msgs[entry_index]);
+    const err_len = r.lua.invokeWidgetRender(vm, entry, rect, buf, &app.theme, app.frame_count, &app.widget_error_msgs[entry_index]);
     app.widget_error_lens[entry_index] = err_len;
 }
 
