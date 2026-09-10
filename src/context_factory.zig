@@ -49,7 +49,6 @@ pub const general_default_tool_set = .{
     r.tools.bash.BashTool,
     r.tools.read.ReadTool,
     r.tools.read.ViewImageTool,
-    r.tools.agent.AgentTool,
     r.tools.patch.PatchTool,
     r.tools.ask.AskTool,
     r.tools.search.GlobTool,
@@ -142,11 +141,6 @@ pub const NewAgentDef = struct {
     in_agent_tool: bool = true,
     tools: []const []const u8 = &.{},
     model: ?AgentModelConfig = null,
-};
-
-pub const AgentMeta = struct {
-    name: []const u8 = "",
-    description: []const u8 = "",
 };
 
 pub const Flags = packed struct(u8) {
@@ -380,6 +374,15 @@ pub fn findAgentType(self: *const Self, name: []const u8) ?AgentType {
     return null;
 }
 
+pub fn agentSlotCount(self: *const Self) u32 {
+    return self.agent_counter;
+}
+
+pub fn agentTypeAt(self: *const Self, index: u32) ?*const AgentDef {
+    if (index >= self.agent_counter) return null;
+    return self.getAgent(@enumFromInt(@as(u6, @intCast(index))));
+}
+
 pub fn agentName(self: *const Self, agent_type: AgentType) []const u8 {
     return if (self.getAgent(agent_type)) |def| def.name else "UNKNOWN";
 }
@@ -595,7 +598,6 @@ pub fn resetDefs(self: *Self) void {
             r.tools.bash.BashTool.def.name,
             r.tools.read.ReadTool.def.name,
             r.tools.read.ViewImageTool.def.name,
-            r.tools.agent.AgentTool.def.name,
             r.tools.ask.AskTool.def.name,
             r.tools.start.StartMcpTool.def.name,
             r.tools.skill.SkillTool.def.name,
@@ -669,32 +671,12 @@ pub fn refreshAgentToolsLive(self: *const Self, agent: *r.agent.Agent, base: r.t
 }
 
 fn refreshAgentToolsInternal(self: *const Self, agent: *r.agent.Agent, base: r.tools.context.BaseContext, live: bool) !void {
-    const alloc = agent.state_arena.allocator();
     var definitions: [MAX_AGENT_TOOLS]r.tools.Tool = undefined;
     var count: usize = 0;
     const vision = agent.flags.vision;
     var it = self.iter(@enumFromInt(agent.type_idx));
     while (it.next()) |tool| {
         if (tool.def.requires_vision and !vision) continue;
-        if (std.mem.eql(u8, tool.def.name, r.tools.agent.AgentTool.def.name)) {
-            var buf: [64]AgentMeta = undefined;
-            var out = std.ArrayList(AgentMeta).initBuffer(&buf);
-
-            for (0..64) |i| {
-                const def = self.getAgent(@enumFromInt(i)) orelse continue;
-                if (!def.in_agent_tool) continue;
-                out.appendBounded(.{ .name = def.name, .description = def.description }) catch unreachable;
-            }
-
-            const def = try r.tools.agent.dynamic_def(alloc, out.items);
-
-            var dynamic = tool;
-            dynamic.def.description = def.desc;
-            dynamic.def.parameters_schema = def.schema;
-            definitions[count] = dynamic;
-            count += 1;
-            continue;
-        }
         definitions[count] = tool;
         count += 1;
     }

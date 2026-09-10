@@ -10,6 +10,7 @@ Workflow customization lives in Lua through the global `blitz` table.
 `~/.config/blitzdenk/blitz.lua` loads at startup. `./blitz.lua` adds
 project-local customization. All Lua files hot reload: edit a tool or command,
 then call it and confirm the behavior in the running session.
+Before editing your Lua files. Ensure you and the user agreed on if it's a project local change (./blitz.lua) or a global change (~/.config/blitzdenk/blitz.lua).
 
 ## Your own runtime
 
@@ -194,6 +195,19 @@ bare agent: no AGENTS.md files in the system prompt, and no `<system-reminder>`
 injection on any step, so `blitz.hooks.inject` never runs for it. A fork ignores
 the flag and inherits the parent's setting. A finished background child still
 queues its result notice into a clean parent.
+
+`cwd` in `blitz.agent.spawn` sets the working directory of the child. A relative
+path resolves against the parent agent cwd.
+
+`blitz.list_agent_types()` returns one row per configured type: `agent_type` is
+the handle `blitz.agent.spawn` takes, plus `name`, `description`, and
+`in_agent_tool`. Use it to map type names from tool arguments to handles.
+
+The `agent` tool itself is Lua, registered in the default `blitz.lua` with a
+static description and schema. The `<available_agents>` catalogue rides the
+system reminder like the skills catalogue: injected once per agent, refreshed
+when the type list changes. Types with `in_agent_tool = false` stay out of the
+catalogue.
 
 ```lua
 blitz.agent.spawn({

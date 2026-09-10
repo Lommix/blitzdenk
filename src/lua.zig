@@ -304,6 +304,13 @@ const AgentRowDef = LuaType{ .table_def = .{ .name = "BlitzAgentRow", .fields = 
     .{ .name = "queued", .ty = LuaType.integer, .desc = "messages waiting in the agent queue" },
 } } };
 const AgentRowListDef = LuaType{ .raw_refs = .{ .text = "BlitzAgentRow[]", .refs = &.{AgentRowDef} } };
+const AgentTypeRowDef = LuaType{ .table_def = .{ .name = "BlitzAgentTypeRow", .fields = &.{
+    .{ .name = "agent_type", .ty = LuaType.integer, .desc = "type handle for blitz.agent.spawn" },
+    .{ .name = "name", .ty = LuaType.string, .desc = "value the agent tool takes as agent_type" },
+    .{ .name = "description", .ty = LuaType.string },
+    .{ .name = "in_agent_tool", .ty = LuaType.boolean, .desc = "false keeps the type out of the agent tool list" },
+} } };
+const AgentTypeRowListDef = LuaType{ .raw_refs = .{ .text = "BlitzAgentTypeRow[]", .refs = &.{AgentTypeRowDef} } };
 const ThinkingDef = LuaType{ .table_def = .{ .name = "BlitzThinking", .fields = &.{
     .{ .name = "type", .ty = LuaType.string },
     .{ .name = "budget_tokens", .ty = LuaType.integer, .optional = true },
@@ -448,6 +455,7 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "parent_id", .ty = AgentIdDef, .optional = true },
     .{ .name = "prompt", .ty = LuaType.string },
     .{ .name = "agent_type", .ty = LuaType.integer, .optional = true },
+    .{ .name = "cwd", .ty = LuaType.string, .optional = true, .desc = "working directory of the spawned agent; a relative path resolves against the parent agent cwd" },
     .{ .name = "fork", .ty = LuaType.boolean, .optional = true },
     .{ .name = "background", .ty = LuaType.boolean, .optional = true, .desc = "run detached from the timeline: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of timeline entries. Use with on_complete to build silent subagents" },
     .{ .name = "task", .ty = LuaType.string, .optional = true, .desc = "short task description shown in agent listings" },
@@ -647,6 +655,36 @@ pub const Blitz = LuaType{
                         return rows[0..count];
                     }
                 }).lua_fn, "list_agents"),
+            } } },
+            .{ .name = "list_agent_types", .desc = "Snapshot every configured agent type as a list of BlitzAgentTypeRow, in slot order. Safe in tool vms while the config loads; agent types only change on reload.", .ty = LuaType{ .function = .{
+                .ret = &AgentTypeRowListDef,
+                .fn_ptr = LuaFnBind((struct {
+                    const Row = struct {
+                        agent_type: u32,
+                        name: []const u8,
+                        description: []const u8,
+                        in_agent_tool: bool,
+                    };
+
+                    threadlocal var rows: [64]Row = undefined;
+
+                    fn lua_fn(a: *r.app.App) ![]Row {
+                        var count: usize = 0;
+                        var i: u32 = 0;
+                        const total = a.context_factory.agentSlotCount();
+                        while (i < total) : (i += 1) {
+                            const def = a.context_factory.agentTypeAt(i) orelse continue;
+                            rows[count] = .{
+                                .agent_type = i,
+                                .name = def.name,
+                                .description = def.description,
+                                .in_agent_tool = def.in_agent_tool,
+                            };
+                            count += 1;
+                        }
+                        return rows[0..count];
+                    }
+                }).lua_fn, "list_agent_types"),
             } } },
             .{
                 .name = "exit_loop",
@@ -1316,7 +1354,6 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "WRITE", .desc = "write new files", .ty = LuaType.string, .value = .{ .string = tl.write.WriteTool.def.name } },
             .{ .name = "EDIT", .desc = "default string replace edit", .ty = LuaType.string, .value = .{ .string = tl.edit.EditTool.def.name } },
             .{ .name = "PATCH", .desc = "patch DSL tool. Replaces edit and write. GPT loves it", .ty = LuaType.string, .value = .{ .string = tl.patch.PatchTool.def.name } },
-            .{ .name = "AGENT", .desc = "background agent tool", .ty = LuaType.string, .value = .{ .string = tl.agent.AgentTool.def.name } },
             .{ .name = "ASK", .desc = "multiple choice questions for the user", .ty = LuaType.string, .value = .{ .string = tl.ask.AskTool.def.name } },
             .{ .name = "GLOB", .desc = "read only file search", .ty = LuaType.string, .value = .{ .string = tl.search.GlobTool.def.name } },
             .{ .name = "GREP", .desc = "read only text serach", .ty = LuaType.string, .value = .{ .string = tl.search.GrepTool.def.name } },
@@ -2467,6 +2504,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         parent_id: ?r.AgentId = null,
                         prompt: []const u8,
                         agent_type: ?u32 = null,
+                        cwd: ?[]const u8 = null,
                         fork: ?bool = null,
                         background: ?bool = null,
                         task: ?[]const u8 = null,
@@ -2501,11 +2539,32 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         _ = c.luaL_error(state, "agent.spawn: fork=true requires parent_id");
                         return 0;
                     }
+                    if ((spawn.fork orelse false) and spawn.cwd != null and spawn.cwd.?.len > 0) {
+                        unrefSpawnCb(state, spawn.on_complete);
+                        _ = c.luaL_error(state, "agent.spawn: fork=true cannot be combined with cwd");
+                        return 0;
+                    }
+
+                    var resolved_cwd: []const u8 = "";
+                    if (spawn.cwd) |raw_cwd| {
+                        if (raw_cwd.len > 0) {
+                            const base = if (spawn.parent_id) |pid|
+                                if (a.registry.get(pid)) |parent| parent.cwd else a.cwd
+                            else
+                                a.cwd;
+                            resolved_cwd = std.fs.path.resolve(vm.luaArena(), &.{ base, raw_cwd }) catch {
+                                unrefSpawnCb(state, spawn.on_complete);
+                                _ = c.luaL_error(state, "agent.spawn: invalid cwd");
+                                return 0;
+                            };
+                        }
+                    }
 
                     var args: r.cmd.Command.SpawnArgs = .{
                         .agent_id = .{ .index = 0, .generation = 0 },
                         .parent_id = spawn.parent_id,
                         .prompt = &.{},
+                        .cwd = resolved_cwd,
                         .fork = spawn.fork orelse false,
                         .background = spawn.background orelse false,
                         .task = spawn.task orelse "",
@@ -5371,6 +5430,32 @@ fn readGlobalString(vm: *LuaVm, name: [*:0]const u8) ![]const u8 {
     return try std.testing.allocator.dupe(u8, ptr[0..len]);
 }
 
+test "agent.spawn resolves cwd against the app cwd" {
+    var app_state: r.app.App = undefined;
+    app_state.io = std.testing.io;
+    app_state.gpa = std.testing.allocator;
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app_state.registry = &registry;
+    app_state.cmd_queue = try r.cmd.CommandQueue.init(std.testing.allocator);
+    defer app_state.cmd_queue.deinit();
+    app_state.cwd = "/home/x/proj";
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    app_state.lua_vm = vm;
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.agent.spawn({ prompt = "work", cwd = "sub/dir" })
+        \\blitz.agent.spawn({ prompt = "work", cwd = "/abs/path" })
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), app_state.cmd_queue._data.items.len);
+    try std.testing.expectEqualStrings("/home/x/proj/sub/dir", app_state.cmd_queue._data.items[0].spawn_agent.cwd);
+    try std.testing.expectEqualStrings("/abs/path", app_state.cmd_queue._data.items[1].spawn_agent.cwd);
+}
+
 test "spawn on_complete callback runs once with agent id and status" {
     var app_state: r.app.App = undefined;
     app_state.io = std.testing.io;
@@ -5966,6 +6051,42 @@ test "list_agents snapshots occupied slots" {
     , .{id.pack()});
     defer std.testing.allocator.free(script);
     try vm.exec(script);
+}
+
+test "list_agent_types snapshots configured types in slot order" {
+    var app_state = permissionTestApp();
+    var factory = r.ContextFactory{
+        .alloc = std.testing.allocator,
+        .prompt_arena = .init(std.testing.allocator),
+        .io = std.testing.io,
+        .config_dir = null,
+        .skill_dir = null,
+    };
+    defer factory.prompt_arena.deinit();
+    defer factory.loaded_tools.deinit(std.testing.allocator);
+    factory.agents.set(.general, .{ .name = "general", .description = "General purpose.", .prompt = "" });
+    _ = try factory.addAgent(&app_state.config, .{ .name = "researcher", .description = "Read-only research agent.", .prompt = "p" });
+    _ = try factory.addAgent(&app_state.config, .{ .name = "hidden", .description = "left out", .prompt = "p", .in_agent_tool = false });
+    app_state.context_factory = &factory;
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\local types = blitz.list_agent_types()
+        \\assert(#types == 3)
+        \\assert(types[1].agent_type == 0)
+        \\assert(types[1].name == "general")
+        \\assert(types[1].description == "General purpose.")
+        \\assert(types[1].in_agent_tool == true)
+        \\assert(types[2].agent_type == 3)
+        \\assert(types[2].name == "researcher")
+        \\assert(types[2].in_agent_tool == true)
+        \\assert(types[3].agent_type == 4)
+        \\assert(types[3].name == "hidden")
+        \\assert(types[3].in_agent_tool == false)
+    );
 }
 
 test "agent.get_model and get_effort read the live agent" {

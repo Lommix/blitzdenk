@@ -16,6 +16,7 @@ pub const InjectionsHooks = struct {
             &inject_datetime_information,
             &inject_cwd_information,
             &inject_available_skills,
+            &inject_available_agents,
             &inject_capability_catalog,
             &inject_lua_reload_notice,
         }) |cb| {
@@ -125,19 +126,46 @@ fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.A
     const serialized = try rows.toOwnedSlice();
     defer alloc.free(serialized);
 
+    try emitCatalog(w, "available_skills", count, serialized, &agent.skill_catalog_digest);
+}
+
+fn inject_available_agents(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    if (!agentHasAgentTool(agent)) return;
+
+    const factory = app.context_factory;
+    var rows = std.Io.Writer.Allocating.init(app.gpa);
+    var count: usize = 0;
+
+    var i: u32 = 0;
+    const total = factory.agentSlotCount();
+    while (i < total) : (i += 1) {
+        const def = factory.agentTypeAt(i) orelse continue;
+        if (!def.in_agent_tool) continue;
+        count += 1;
+        try rows.writer.print("- `{s}`: ", .{def.name});
+        try writeCatalogField(&rows.writer, def.description);
+        try rows.writer.writeByte('\n');
+    }
+
+    const serialized = try rows.toOwnedSlice();
+    defer app.gpa.free(serialized);
+
+    try emitCatalog(w, "available_agents", count, serialized, &agent.agent_catalog_digest);
+}
+
+fn emitCatalog(w: *std.Io.Writer, tag: []const u8, count: usize, serialized: []const u8, digest_slot: *?u64) !void {
     const digest = std.hash.Wyhash.hash(0, serialized);
-    if (agent.skill_catalog_digest) |last| {
+    if (digest_slot.*) |last| {
         if (last == digest) return;
     }
-    agent.skill_catalog_digest = digest;
-
-    try w.writeAll("<available_skills>\n");
+    try w.print("<{s}>\n", .{tag});
     if (count == 0) {
         try w.writeAll("(none)\n");
     } else {
         try w.writeAll(serialized);
     }
-    try w.writeAll("</available_skills>\n");
+    try w.print("</{s}>\n", .{tag});
+    digest_slot.* = digest;
 }
 
 fn inject_capability_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
@@ -176,6 +204,13 @@ fn agentHasBashTool(agent: *const r.agent.Agent) bool {
     return false;
 }
 
+fn agentHasAgentTool(agent: *const r.agent.Agent) bool {
+    for (agent.tools) |tool| {
+        if (std.mem.eql(u8, tool.name, "agent")) return true;
+    }
+    return false;
+}
+
 fn writeCatalogField(w: *std.Io.Writer, value: []const u8) !void {
     const truncated = truncateCatalog(value, 300);
     for (truncated) |c| {
@@ -194,4 +229,66 @@ fn truncateCatalog(value: []const u8, max: usize) []const u8 {
     var end = max;
     while (end > 0 and (value[end] & 0xC0) == 0x80) end -= 1;
     return value[0..end];
+}
+
+test "agent catalogue injects once per agent and refreshes on def change" {
+    const alloc = std.testing.allocator;
+
+    var factory = r.ContextFactory{
+        .alloc = alloc,
+        .prompt_arena = .init(alloc),
+        .io = std.testing.io,
+        .config_dir = null,
+        .skill_dir = null,
+    };
+    defer factory.prompt_arena.deinit();
+    defer factory.loaded_tools.deinit(alloc);
+    factory.agents.set(.general, .{ .name = "general", .description = "General purpose.", .prompt = "" });
+
+    var app_state: r.app.App = undefined;
+    app_state.io = std.testing.io;
+    app_state.gpa = alloc;
+    app_state.context_factory = &factory;
+
+    var agent = try r.agent.Agent.init(alloc, std.testing.io, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .context_limit = 1000 });
+    defer agent.deinit();
+    agent.tools = &.{.{ .name = "agent" }};
+
+    var w1 = std.Io.Writer.Allocating.init(alloc);
+    defer w1.deinit();
+    try inject_available_agents(&w1.writer, &app_state, &agent);
+    const first = try w1.toOwnedSlice();
+    defer alloc.free(first);
+
+    try std.testing.expect(std.mem.indexOf(u8, first, "<available_agents>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "- `general`: General purpose.") != null);
+
+    var w2 = std.Io.Writer.Allocating.init(alloc);
+    defer w2.deinit();
+    try inject_available_agents(&w2.writer, &app_state, &agent);
+    try std.testing.expectEqual(@as(usize, 0), w2.writer.buffered().len);
+
+    var cfg: r.config.BlitzdenkCfg = .{};
+    _ = try factory.addAgent(&cfg, .{ .name = "researcher", .description = "Read-only research agent.", .prompt = "p" });
+    _ = try factory.addAgent(&cfg, .{ .name = "hidden", .description = "left out", .prompt = "p", .in_agent_tool = false });
+
+    var w3 = std.Io.Writer.Allocating.init(alloc);
+    defer w3.deinit();
+    try inject_available_agents(&w3.writer, &app_state, &agent);
+    const third = try w3.toOwnedSlice();
+    defer alloc.free(third);
+
+    try std.testing.expect(std.mem.indexOf(u8, third, "- `researcher`: Read-only research agent.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, third, "`hidden`") == null);
+
+    agent.tools = &.{};
+    var w4 = std.Io.Writer.Allocating.init(alloc);
+    defer w4.deinit();
+    try inject_available_agents(&w4.writer, &app_state, &agent);
+    try std.testing.expectEqual(@as(usize, 0), w4.writer.buffered().len);
 }

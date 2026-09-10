@@ -78,6 +78,8 @@
 ---@field parent_id? integer
 ---@field prompt string
 ---@field agent_type? integer
+---working directory of the spawned agent; a relative path resolves against the parent agent cwd
+---@field cwd? string
 ---@field fork? boolean
 ---run detached from the timeline: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of timeline entries. Use with on_complete to build silent subagents
 ---@field background? boolean
@@ -213,8 +215,6 @@
 ---@field EDIT string
 ---patch DSL tool. Replaces edit and write. GPT loves it
 ---@field PATCH string
----background agent tool
----@field AGENT string
 ---multiple choice questions for the user
 ---@field ASK string
 ---read only file search
@@ -409,6 +409,15 @@
 ---messages waiting in the agent queue
 ---@field queued integer
 
+---@class BlitzAgentTypeRow
+---type handle for blitz.agent.spawn
+---@field agent_type integer
+---value the agent tool takes as agent_type
+---@field name string
+---@field description string
+---false keeps the type out of the agent tool list
+---@field in_agent_tool boolean
+
 ---@class BlitzThinking
 ---@field type string
 ---@field budget_tokens? integer
@@ -555,6 +564,8 @@
 ---@field get_main_agent fun(): integer|nil
 ---Snapshot every occupied agent slot, running and finished, as a list of BlitzAgentRow.
 ---@field list_agents fun(): BlitzAgentRow[]
+---Snapshot every configured agent type as a list of BlitzAgentTypeRow, in slot order. Safe in tool vms while the config loads; agent types only change on reload.
+---@field list_agent_types fun(): BlitzAgentTypeRow[]
 ---Exit the agent loop with a message.
 ---@field exit_loop fun(content?: string): BlitzToolResult
 ---Register a provider.

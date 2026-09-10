@@ -497,14 +497,16 @@ fn snapshotArg(state: ?*root.c.lua_State, arg_index: c_int, name: [:0]const u8, 
 
 const stubBlitzPrelude =
     \\blitz.AGENT_GENERAL = 1
+    \\registered_tools = {}
     \\blitz.set_compact_edge = function() end
     \\blitz.set_capabilities = function() end
-    \\blitz.register_tool = function() return "lua_repl" end
+    \\blitz.register_tool = function(def) registered_tools[#registered_tools + 1] = def return def.name end
     \\blitz.set_agent_tools = function() end
     \\blitz.add_command = function() end
     \\blitz.bind = function() end
     \\blitz.tools = setmetatable({}, { __index = function() return "tool" end })
     \\blitz.add_agent = function() return 2 end
+    \\blitz.list_agent_types = function() return { { agent_type = 1, name = "general", description = "", in_agent_tool = true } } end
     \\
 ;
 
@@ -948,6 +950,17 @@ test "default config loads without provider.lua and binds on require success" {
 
     try execTestLua(L, stubBlitzPrelude);
     try execTestLua(L, defaultConfigLua());
+
+    try execTestLua(L,
+        \\local agent_def = nil
+        \\for _, d in ipairs(registered_tools) do
+        \\  if d.name == "agent" then agent_def = d end
+        \\end
+        \\assert(agent_def, "agent tool not registered")
+        \\assert(type(agent_def.args) == "table", "agent args missing")
+        \\assert(agent_def.args.agent_type ~= nil, "agent args missing agent_type")
+        \\assert(agent_def.snippet == "Launch a subagent", "agent snippet missing")
+    );
 
     try std.testing.expectEqual(@as(i64, 0), tracker.model_handle);
     try std.testing.expectEqual(@as(i64, 0), tracker.bound_model);

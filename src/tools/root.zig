@@ -8,7 +8,6 @@ pub const ToolResult = r.sdk.ToolOutput;
 pub const bash = @import("bash.zig");
 pub const read = @import("read.zig");
 pub const ask = @import("ask.zig");
-pub const agent = @import("agent.zig");
 pub const edit = @import("edit.zig");
 pub const write = @import("write.zig");
 pub const reg = @import("../context_factory.zig");
