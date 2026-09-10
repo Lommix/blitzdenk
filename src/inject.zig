@@ -83,7 +83,7 @@ pub const InjectionsHooks = struct {
         if (app.lua_inject_hooks_enabled.load(.acquire)) {
             if (app.registry.idForAgent(agent)) |agent_id| {
                 var hook_w = std.Io.Writer.Allocating.init(alloc);
-                app.lua_vm.emitInjectHooks(&hook_w.writer, agent_id, if (agent.task) |*t| &t.cancellation else null);
+                app.lua_vm.emitInjectHooks(&hook_w.writer, agent_id, agent.type_idx, if (agent.task) |*t| &t.cancellation else null);
                 const hook_res = try hook_w.toOwnedSlice();
                 defer alloc.free(hook_res);
                 if (hook_res.len > 0) {

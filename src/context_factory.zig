@@ -731,7 +731,7 @@ pub fn iter(self: *const Self, agent_type: AgentType) ToolIter {
     return .{ .factory = self, .agent_type = agent_type };
 }
 
-fn agentHasTool(self: *const Self, agent_type: AgentType, name: []const u8) bool {
+pub fn agentHasTool(self: *const Self, agent_type: AgentType, name: []const u8) bool {
     var it = self.iter(agent_type);
     while (it.next()) |tool| {
         if (std.mem.eql(u8, tool.def.name, name)) return true;

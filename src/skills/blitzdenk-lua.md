@@ -433,8 +433,9 @@ hook. Never call `blitz.agent.await` inside the hook.
 
 `blitz.hooks.inject({ main_only = bool, func = fn, digest = bool })` installs
 one hook that runs on each agent step, right before the system reminder is
-built. `func(agent_id)` returns a string to append to that agent's
-`<system-reminder>` block, or nil to add nothing. It runs in the main Lua VM
+built. `func(agent_id, agent_type_id)` returns a string to append to that
+agent's `<system-reminder>` block, or nil to add nothing. `agent_type_id` is
+the type handle from `blitz.list_agent_types()`. It runs in the main Lua VM
 with a brief lock. Errors are logged and the step continues. Last registration
 wins. Never call `blitz.agent.await` inside the hook. A clean agent builds no
 reminder at all, so the hook never runs for it.
@@ -443,7 +444,7 @@ reminder at all, so the hook never runs for it.
 blitz.hooks.inject({
     main_only = true,
     digest = true,
-    func = function(agent_id)
+    func = function(agent_id, agent_type_id)
         return "[AGENTS] " .. #blitz.list_agents() .. " slots used\n"
     end,
 })

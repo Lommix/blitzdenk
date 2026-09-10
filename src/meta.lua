@@ -262,7 +262,7 @@
 ---run only for the main agent, default false
 ---@field main_only? boolean
 ---callback invoked on each agent step, returns the text to append
----@field func fun(agent_id: integer): string
+---@field func fun(agent_id: integer, agent_type_id: integer): string
 ---inject only when the returned text changes, default false
 ---@field digest? boolean
 
@@ -577,6 +577,8 @@
 ---@field list_agents fun(): BlitzAgentRow[]
 ---Snapshot every configured agent type as a list of BlitzAgentTypeRow, in slot order. Safe in tool vms while the config loads; agent types only change on reload.
 ---@field list_agent_types fun(): BlitzAgentTypeRow[]
+---Return true when the tool is in the effective tool set of an agent type. Counts listed tools and tools added to every agent.
+---@field has_tool fun(agent_type: integer, tool: string): boolean
 ---Exit the agent loop with a message.
 ---@field exit_loop fun(content?: string): BlitzToolResult
 ---Register a provider.

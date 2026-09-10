@@ -686,6 +686,16 @@ pub const Blitz = LuaType{
                     }
                 }).lua_fn, "list_agent_types"),
             } } },
+            .{ .name = "has_tool", .desc = "Return true when the tool is in the effective tool set of an agent type. Counts listed tools and tools added to every agent.", .ty = LuaType{ .function = .{
+                .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool", .ty = LuaType.string } },
+                .ret = &LuaBool,
+                .fn_ptr = LuaFnBind((struct {
+                    fn lua_fn(a: *r.app.App, agent_type_id: u32, tool: []const u8) !bool {
+                        const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
+                        return a.context_factory.agentHasTool(agent_type, tool);
+                    }
+                }).lua_fn, "has_tool"),
+            } } },
             .{
                 .name = "exit_loop",
                 .desc = "Exit the agent loop with a message.",
@@ -1574,7 +1584,10 @@ const BlitzPermissionRequestEvent = LuaType{ .table_def = .{ .name = "BlitzPermi
 const InjectHookDef = LuaType{ .table_def = .{ .name = "BlitzInjectHook", .fields = &.{
     .{ .name = "main_only", .ty = LuaType.boolean, .optional = true, .desc = "run only for the main agent, default false" },
     .{ .name = "func", .desc = "callback invoked on each agent step, returns the text to append", .ty = LuaType{ .function = .{
-        .args = &.{.{ .name = "agent_id", .ty = LuaType.integer }},
+        .args = &.{
+            .{ .name = "agent_id", .ty = LuaType.integer },
+            .{ .name = "agent_type_id", .ty = LuaType.integer, .desc = "agent type handle" },
+        },
         .ret = &LuaString,
     } } },
     .{ .name = "digest", .ty = LuaType.boolean, .optional = true, .desc = "inject only when the returned text changes, default false" },
@@ -4000,7 +4013,7 @@ pub const LuaVm = struct {
         self.inject_hook.last_digest = null;
     }
 
-    pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, cancel_token: ?*r.sdk.CancellationToken) void {
+    pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, agent_type: u8, cancel_token: ?*r.sdk.CancellationToken) void {
         const a = self.app orelse return;
         if (!a.lua_inject_hooks_enabled.load(.acquire)) return;
         self.vm_mu.lockUncancelable(a.io);
@@ -4024,7 +4037,8 @@ pub const LuaVm = struct {
 
         _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, self.inject_fn);
         pushAny(L, agent_id);
-        const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
+        pushAny(L, agent_type);
+        const status = c.lua_pcallk(L, 2, 1, 0, 0, null);
         if (status != 0) {
             self.popError(.action);
             return;
@@ -6029,24 +6043,24 @@ test "inject hook digest suppresses unchanged text" {
 
     var w1 = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer w1.deinit();
-    vm.emitInjectHooks(&w1.writer, id, null);
+    vm.emitInjectHooks(&w1.writer, id, 0, null);
     try std.testing.expectEqualStrings("one", w1.writer.buffered());
 
     var w2 = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer w2.deinit();
-    vm.emitInjectHooks(&w2.writer, id, null);
+    vm.emitInjectHooks(&w2.writer, id, 0, null);
     try std.testing.expectEqual(@as(usize, 0), w2.writer.buffered().len);
 
     vm.resetInjectDigest();
     var w2b = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer w2b.deinit();
-    vm.emitInjectHooks(&w2b.writer, id, null);
+    vm.emitInjectHooks(&w2b.writer, id, 0, null);
     try std.testing.expectEqualStrings("one", w2b.writer.buffered());
 
     try vm.exec("_G.inject_text = \"two\"");
     var w3 = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer w3.deinit();
-    vm.emitInjectHooks(&w3.writer, id, null);
+    vm.emitInjectHooks(&w3.writer, id, 0, null);
     try std.testing.expectEqualStrings("two", w3.writer.buffered());
 }
 
@@ -6066,19 +6080,39 @@ test "inject hook main_only skips other agents" {
 
     var w1 = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer w1.deinit();
-    vm.emitInjectHooks(&w1.writer, main_id, null);
+    vm.emitInjectHooks(&w1.writer, main_id, 0, null);
     try std.testing.expectEqualStrings("main\n", w1.writer.buffered());
 
     var w2 = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer w2.deinit();
-    vm.emitInjectHooks(&w2.writer, child_id, null);
+    vm.emitInjectHooks(&w2.writer, child_id, 0, null);
     try std.testing.expectEqual(@as(usize, 0), w2.writer.buffered().len);
 
     app_state.main_agent_id = null;
     var w3 = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer w3.deinit();
-    vm.emitInjectHooks(&w3.writer, main_id, null);
+    vm.emitInjectHooks(&w3.writer, main_id, 0, null);
     try std.testing.expectEqual(@as(usize, 0), w3.writer.buffered().len);
+}
+
+test "inject hook receives agent type" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.hooks.inject({ func = function(agent_id, agent_type_id)
+        \\    return "type:" .. tostring(agent_type_id)
+        \\end })
+    );
+
+    const id = r.AgentId{ .index = 0, .generation = 0 };
+
+    var w = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer w.deinit();
+    vm.emitInjectHooks(&w.writer, id, 3, null);
+    try std.testing.expectEqualStrings("type:3", w.writer.buffered());
 }
 
 test "list_agents snapshots occupied slots" {
@@ -6190,6 +6224,33 @@ test "list_agent_types snapshots configured types in slot order" {
         \\assert(types[3].name == "hidden")
         \\assert(types[3].in_agent_tool == false)
     );
+}
+
+test "has_tool reports the effective tool set of an agent type" {
+    var app_state = permissionTestApp();
+    var factory = r.ContextFactory{
+        .alloc = std.testing.allocator,
+        .prompt_arena = .init(std.testing.allocator),
+        .io = std.testing.io,
+        .config_dir = null,
+        .skill_dir = null,
+    };
+    defer factory.prompt_arena.deinit();
+    defer factory.loaded_tools.deinit(std.testing.allocator);
+    factory.agents.set(.general, .{ .name = "general", .description = "", .prompt = "" });
+    try factory.add(r.tools.read.ReadTool, .all);
+    try factory.setAgentTools(.general, &.{r.tools.read.ReadTool.def.name});
+    app_state.context_factory = &factory;
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\assert(blitz.has_tool(0, "read") == true)
+        \\assert(blitz.has_tool(0, "write") == false)
+    );
+    try std.testing.expectError(error.LuaExecFailed, vm.exec("blitz.has_tool(9999, \"read\")"));
 }
 
 test "agent.get_model and get_effort read the live agent" {
