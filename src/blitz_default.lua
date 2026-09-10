@@ -28,9 +28,8 @@ blitz.set_capabilities({
 ---------------------------------------------------------------------------------------------------
 --- Custom Lua tooling
 ---------------------------------------------------------------------------------------------------
-
---- let the agent change it's sandbox
-local lua_repl = blitz.register_tool({
+local Tools = {}
+Tools.lua_repl = blitz.register_tool({
 	name = "lua_repl",
 	description = "Execute arbitrary Lua code and return the result. Runs inside the blitzdenk Lua VM",
 	args = {
@@ -60,8 +59,7 @@ local lua_repl = blitz.register_tool({
 ---------------------------------------------------------------------------------------------------
 --- Custom Lua tooling: Subagents!
 ---------------------------------------------------------------------------------------------------
-
-local idle_tool = blitz.register_tool({
+Tools.idle_tool = blitz.register_tool({
 	name = "idle",
 	description = "End your turn. The next event or sub agent will wake you up.",
 	func = function(ctx, _)
@@ -70,7 +68,7 @@ local idle_tool = blitz.register_tool({
 	end,
 })
 
-local message_tool = blitz.register_tool({
+Tools.message_tool = blitz.register_tool({
 	name = "message_agent",
 	description = "send a message to another agent",
 	args = {
@@ -87,7 +85,7 @@ local message_tool = blitz.register_tool({
 	end,
 })
 
-local cancel_tool = blitz.register_tool({
+Tools.cancel_tool = blitz.register_tool({
 	name = "cancel_agent",
 	description = "abort a sub agent",
 	args = {
@@ -101,7 +99,7 @@ local cancel_tool = blitz.register_tool({
 	end,
 })
 
-local agent_tool = blitz.register_tool({
+Tools.agent_tool = blitz.register_tool({
 	name = "agent",
 	description = [[Launch a new background agent to handle a task autonomously. The tool returns immediately. When the agent finishes, you receive a result file path. Subagents will wake you up]],
 	args = {
@@ -185,9 +183,29 @@ local agent_tool = blitz.register_tool({
 })
 
 ---------------------------------------------------------------------------------------------------
+--- inject an agent catalogue into new sessions ( digest = reinject on change)
+---------------------------------------------------------------------------------------------------
+blitz.hooks.inject({
+	main_only = true,
+	digest = true,
+	func = function()
+		local rows = {}
+		for _, t in ipairs(blitz.list_agent_types()) do
+			if t.in_agent_tool then
+				rows[#rows + 1] = "- `" .. t.name .. "`: " .. t.description
+			end
+		end
+		local body = table.concat(rows, "\n")
+		if body == "" then
+			body = "(none)"
+		end
+		return "<available_agents>\n" .. body .. "\n</available_agents>\n"
+	end,
+})
+
+---------------------------------------------------------------------------------------------------
 --- Default Agent tool set overwrites
 ---------------------------------------------------------------------------------------------------
-
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.BASH,
 	blitz.tools.READ,
@@ -197,11 +215,11 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.SKILL,
 	blitz.tools.START_MCP,
 	blitz.tools.VIEW_IMAGE,
-	lua_repl,
-	cancel_tool,
-	message_tool,
-	idle_tool,
-	agent_tool,
+	Tools.lua_repl,
+	Tools.cancel_tool,
+	Tools.message_tool,
+	Tools.idle_tool,
+	Tools.agent_tool,
 	-- blitz.tools.PATCH, -- EDIT/WRITE alternative
 })
 

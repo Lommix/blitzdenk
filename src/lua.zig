@@ -1451,24 +1451,28 @@ pub const BlitzHooks = LuaType{
             .{
                 .name = "inject",
                 .desc =
-                \\Install the system-reminder injection hook. Runs for every agent step
-                \\before the reminder is built, in the main Lua VM on the calling thread.
-                \\Return a string to append it to the agent's <system-reminder> block,
-                \\nil for nothing. Last registration wins. Never call
-                \\blitz.agent.await inside the hook. Clean agents get no reminder at all,
-                \\so the hook never runs for them.
+                \\Install the system-reminder injection hook. Takes one
+                \\BlitzInjectHook table. func runs for every agent step before
+                \\the reminder is built, in the main Lua VM on the calling
+                \\thread. Return a string to append it to the agent's
+                \\<system-reminder> block, nil for nothing. main_only limits
+                \\func to the main agent. digest suppresses the text while it
+                \\matches the last injected text. Last registration wins. Never
+                \\call blitz.agent.await inside the hook. Clean agents get no
+                \\reminder at all, so the hook never runs for them.
                 ,
                 .ty = LuaType{ .function = .{
-                    .args = &.{.{ .name = "hook", .ty = LuaType{ .function = .{
-                        .args = &.{.{ .name = "agent_id", .ty = LuaType.integer }},
-                        .ret = &LuaString,
-                    } } }},
+                    .args = &.{.{ .name = "hook", .ty = InjectHookDef }},
                     .fn_ptr = LuaFnBind((struct {
-                        fn t(state: *c.lua_State, a: *r.app.App, hook: LuaFnRef) !void {
+                        fn t(state: *c.lua_State, a: *r.app.App, hook: InjectHookArgs) !void {
                             if (try isToolVm(state)) return;
                             const vm = fromState(state) orelse return error.NoLuaVm;
                             if (vm.inject_fn != c.LUA_NOREF) c.luaL_unref(state, c.LUA_REGISTRYINDEX, vm.inject_fn);
-                            vm.inject_fn = hook.idx;
+                            vm.inject_fn = hook.func.idx;
+                            vm.inject_hook = .{
+                                .main_only = hook.main_only orelse false,
+                                .digest = hook.digest orelse false,
+                            };
                             a.lua_inject_hooks_enabled.store(true, .release);
                         }
                     }).t, "inject"),
@@ -1535,6 +1539,7 @@ pub const BlitzHooks = LuaType{
                             const vm = fromState(state) orelse return error.NoLuaVm;
                             vm.permission_hook = c.LUA_NOREF;
                             vm.inject_fn = c.LUA_NOREF;
+                            vm.inject_hook = .{};
                             vm.prompt_hook = c.LUA_NOREF;
                         }
                     }).t, "clear"),
@@ -1565,6 +1570,21 @@ const PermissionPayloadDef = LuaType{ .table_def = .{ .name = "BlitzPermissionPa
 const BlitzPermissionRequestEvent = LuaType{ .table_def = .{ .name = "BlitzPermissionRequestEvent", .fields = &.{
     .{ .name = "ticket", .desc = "hand to blitz.permissions.resolve, or blitz.permissions.get for the full payload", .ty = LuaType.integer },
 } } };
+
+const InjectHookDef = LuaType{ .table_def = .{ .name = "BlitzInjectHook", .fields = &.{
+    .{ .name = "main_only", .ty = LuaType.boolean, .optional = true, .desc = "run only for the main agent, default false" },
+    .{ .name = "func", .desc = "callback invoked on each agent step, returns the text to append", .ty = LuaType{ .function = .{
+        .args = &.{.{ .name = "agent_id", .ty = LuaType.integer }},
+        .ret = &LuaString,
+    } } },
+    .{ .name = "digest", .ty = LuaType.boolean, .optional = true, .desc = "inject only when the returned text changes, default false" },
+} } };
+
+const InjectHookArgs = struct {
+    main_only: ?bool = null,
+    func: LuaFnRef,
+    digest: ?bool = null,
+};
 
 const PermSnapshot = struct {
     ticket: u64,
@@ -3341,6 +3361,7 @@ pub const LuaVm = struct {
     /// blitz.hooks.approve() slot. One handler, last registration wins.
     permission_hook: c_int = c.LUA_NOREF,
     inject_fn: c_int = c.LUA_NOREF,
+    inject_hook: r.inject.LuaInjectHook = .{},
     prompt_hook: c_int = c.LUA_NOREF,
     /// Packed agent id to registry ref of agent.spawn on_complete callbacks.
     /// Main vm only, touched under vm_mu.
@@ -3489,6 +3510,7 @@ pub const LuaVm = struct {
         self.stdout_buf.clearRetainingCapacity();
         self.permission_hook = c.LUA_NOREF;
         self.inject_fn = c.LUA_NOREF;
+        self.inject_hook = .{};
         self.prompt_hook = c.LUA_NOREF;
         if (self.app) |a| {
             a.config.reset();
@@ -3971,12 +3993,21 @@ pub const LuaVm = struct {
         return alloc.dupe(u8, ptr[0..len]) catch null;
     }
 
+    pub fn resetInjectDigest(self: *LuaVm) void {
+        const a = self.app orelse return;
+        self.vm_mu.lockUncancelable(a.io);
+        defer self.vm_mu.unlock(a.io);
+        self.inject_hook.last_digest = null;
+    }
+
     pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, cancel_token: ?*r.sdk.CancellationToken) void {
         const a = self.app orelse return;
         if (!a.lua_inject_hooks_enabled.load(.acquire)) return;
         self.vm_mu.lockUncancelable(a.io);
         defer self.vm_mu.unlock(a.io);
         if (self.inject_fn == c.LUA_NOREF) return;
+
+        if (!self.inject_hook.allows(a.main_agent_id, agent_id)) return;
 
         if (cancel_token) |token| {
             self.cancel_token = token;
@@ -4001,7 +4032,11 @@ pub const LuaVm = struct {
         if (c.lua_type(L, -1) != c.LUA_TSTRING) return;
         var len: usize = 0;
         const ptr = c.lua_tolstring(L, -1, &len) orelse return;
-        w.writeAll(ptr[0..len]) catch {};
+
+        if (!self.inject_hook.accepts(ptr[0..len])) return;
+
+        w.writeAll(ptr[0..len]) catch return;
+        self.inject_hook.remember(ptr[0..len]);
     }
 };
 
@@ -5641,6 +5676,7 @@ fn permissionTestApp() r.app.App {
     app_state.io = std.testing.io;
     app_state.gpa = std.testing.allocator;
     app_state.config = .{};
+    app_state.main_agent_id = null;
     return app_state;
 }
 
@@ -5971,11 +6007,78 @@ test "permission hook clear and no handler fall back" {
 
     try vm.exec(
         \\blitz.hooks.approve(function(p) return { approved = true } end)
-        \\blitz.hooks.inject(function(agent_id) return nil end)
+        \\blitz.hooks.inject({ func = function(agent_id) return nil end })
         \\blitz.hooks.clear()
     );
     try std.testing.expect(vm.permissionHookDecision(&req) == null);
     try std.testing.expectEqual(c.LUA_NOREF, vm.inject_fn);
+}
+
+test "inject hook digest suppresses unchanged text" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.hooks.inject({ func = function(agent_id) return _G.inject_text end, digest = true })
+        \\_G.inject_text = "one"
+    );
+
+    const id = r.AgentId{ .index = 0, .generation = 0 };
+
+    var w1 = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer w1.deinit();
+    vm.emitInjectHooks(&w1.writer, id, null);
+    try std.testing.expectEqualStrings("one", w1.writer.buffered());
+
+    var w2 = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer w2.deinit();
+    vm.emitInjectHooks(&w2.writer, id, null);
+    try std.testing.expectEqual(@as(usize, 0), w2.writer.buffered().len);
+
+    vm.resetInjectDigest();
+    var w2b = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer w2b.deinit();
+    vm.emitInjectHooks(&w2b.writer, id, null);
+    try std.testing.expectEqualStrings("one", w2b.writer.buffered());
+
+    try vm.exec("_G.inject_text = \"two\"");
+    var w3 = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer w3.deinit();
+    vm.emitInjectHooks(&w3.writer, id, null);
+    try std.testing.expectEqualStrings("two", w3.writer.buffered());
+}
+
+test "inject hook main_only skips other agents" {
+    var app_state = permissionTestApp();
+    app_state.main_agent_id = .{ .index = 1, .generation = 0 };
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.hooks.inject({ main_only = true, func = function(agent_id) return "main\n" end })
+    );
+
+    const main_id = r.AgentId{ .index = 1, .generation = 0 };
+    const child_id = r.AgentId{ .index = 2, .generation = 0 };
+
+    var w1 = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer w1.deinit();
+    vm.emitInjectHooks(&w1.writer, main_id, null);
+    try std.testing.expectEqualStrings("main\n", w1.writer.buffered());
+
+    var w2 = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer w2.deinit();
+    vm.emitInjectHooks(&w2.writer, child_id, null);
+    try std.testing.expectEqual(@as(usize, 0), w2.writer.buffered().len);
+
+    app_state.main_agent_id = null;
+    var w3 = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer w3.deinit();
+    vm.emitInjectHooks(&w3.writer, main_id, null);
+    try std.testing.expectEqual(@as(usize, 0), w3.writer.buffered().len);
 }
 
 test "list_agents snapshots occupied slots" {

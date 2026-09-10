@@ -258,6 +258,14 @@
 ---hand to blitz.permissions.resolve, or blitz.permissions.get for the full payload
 ---@field ticket integer
 
+---@class BlitzInjectHook
+---run only for the main agent, default false
+---@field main_only? boolean
+---callback invoked on each agent step, returns the text to append
+---@field func fun(agent_id: integer): string
+---inject only when the returned text changes, default false
+---@field digest? boolean
+
 ---@class BlitzPermissionPayload
 ---packed AgentId of the requesting agent
 ---@field agent_id integer
@@ -313,13 +321,16 @@
 ---blitz.permissions.get and decide with blitz.permissions.resolve.
 ---Unresolved tickets fall back to the TUI.The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field permission_requested fun(func: fun(ev: BlitzPermissionRequestEvent))
----Install the system-reminder injection hook. Runs for every agent step
----before the reminder is built, in the main Lua VM on the calling thread.
----Return a string to append it to the agent's <system-reminder> block,
----nil for nothing. Last registration wins. Never call
----blitz.agent.await inside the hook. Clean agents get no reminder at all,
----so the hook never runs for them.
----@field inject fun(hook: fun(agent_id: integer): string)
+---Install the system-reminder injection hook. Takes one
+---BlitzInjectHook table. func runs for every agent step before
+---the reminder is built, in the main Lua VM on the calling
+---thread. Return a string to append it to the agent's
+---<system-reminder> block, nil for nothing. main_only limits
+---func to the main agent. digest suppresses the text while it
+---matches the last injected text. Last registration wins. Never
+---call blitz.agent.await inside the hook. Clean agents get no
+---reminder at all, so the hook never runs for them.
+---@field inject fun(hook: BlitzInjectHook)
 ---Install the typed-input hook. Runs on every Enter press with
 ---text, in the main Lua VM on the main thread, before command
 ---and skill dispatch. Return a string to replace the input, nil

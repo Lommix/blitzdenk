@@ -506,7 +506,8 @@ const stubBlitzPrelude =
     \\blitz.bind = function() end
     \\blitz.tools = setmetatable({}, { __index = function() return "tool" end })
     \\blitz.add_agent = function() return 2 end
-    \\blitz.list_agent_types = function() return { { agent_type = 1, name = "general", description = "", in_agent_tool = true } } end
+    \\blitz.hooks = { inject = function(h) registered_inject = h end }
+    \\blitz.list_agent_types = function() return { { agent_type = 1, name = "general", description = "<a&b>", in_agent_tool = true } } end
     \\
 ;
 
@@ -976,6 +977,13 @@ test "default config loads without provider.lua and binds on require success" {
     try std.testing.expectEqual(@as(i64, 77), tracker.bound_model);
     try std.testing.expectEqual(@as(i64, 1), tracker.bound_agent);
     try std.testing.expectEqualStrings("high", tracker.bound_effort[0..tracker.bound_effort_len]);
+
+    try execTestLua(L,
+        \\assert(registered_inject, "inject hook not registered")
+        \\local expected = "<available_agents>\n- `general`: <a&b>\n</available_agents>\n"
+        \\local catalogue = registered_inject.func()
+        \\assert(catalogue == expected, "catalogue mismatch: " .. tostring(catalogue))
+    );
 }
 
 fn execTestLua(L: ?*root.c.lua_State, code: []const u8) !void {

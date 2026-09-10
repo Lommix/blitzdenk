@@ -89,7 +89,6 @@ pub const Agent = struct {
     system_prompt: []const u8 = "",
     skill_catalog_digest: ?u64 = null,
     capability_catalog_digest: ?u64 = null,
-    agent_catalog_digest: ?u64 = null,
     lua_reload_generation_seen: u64 = 0,
     usage: sdk.Usage = .{},
     context_tokens: u64 = 0,

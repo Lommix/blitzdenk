@@ -203,12 +203,6 @@ path resolves against the parent agent cwd.
 the handle `blitz.agent.spawn` takes, plus `name`, `description`, and
 `in_agent_tool`. Use it to map type names from tool arguments to handles.
 
-The `agent` tool itself is Lua, registered in the default `blitz.lua` with a
-static description and schema. The `<available_agents>` catalogue rides the
-system reminder like the skills catalogue: injected once per agent, refreshed
-when the type list changes. Types with `in_agent_tool = false` stay out of the
-catalogue.
-
 ```lua
 blitz.agent.spawn({
     agent_type = researcher,
@@ -437,19 +431,22 @@ hook. Never call `blitz.agent.await` inside the hook.
 
 ## Inject hook
 
-`blitz.hooks.inject(fn)` installs one hook that runs for every agent on each step,
-right before the system reminder is built. Return a string to append it to
-that agent's `<system-reminder>` block. It runs in the main Lua VM with a
-brief lock. A nil return is skipped; errors are logged and the step continues.
-Last registration wins. Never call `blitz.agent.await` inside the hook. A clean
-agent builds no reminder at all, so the hook never runs for it.
+`blitz.hooks.inject({ main_only = bool, func = fn, digest = bool })` installs
+one hook that runs on each agent step, right before the system reminder is
+built. `func(agent_id)` returns a string to append to that agent's
+`<system-reminder>` block, or nil to add nothing. It runs in the main Lua VM
+with a brief lock. Errors are logged and the step continues. Last registration
+wins. Never call `blitz.agent.await` inside the hook. A clean agent builds no
+reminder at all, so the hook never runs for it.
 
 ```lua
-blitz.hooks.inject(function(agent_id)
-    if agent_id == blitz.get_main_agent() then
-        return "[CUSTOM] main agent reminder\n"
-    end
-end)
+blitz.hooks.inject({
+    main_only = true,
+    digest = true,
+    func = function(agent_id)
+        return "[AGENTS] " .. #blitz.list_agents() .. " slots used\n"
+    end,
+})
 ```
 
 ## Permission hook
