@@ -263,6 +263,17 @@ pub const App = struct {
     session_run_started_ns: i128 = 0,
     scroll_offset: usize = 0,
     auto_scroll: bool = true,
+    scrollbar_dragging: bool = false,
+    scrollbar_grab: u16 = 0,
+    scrollbar_drag_max: usize = 0,
+    scrollbar_track: r.tui.Rect = .{},
+    scrollbar_max: usize = 0,
+    scrollbar_reserved: u16 = 0,
+    timeline_heights: std.ArrayList(TimelineEntryHeight) = .empty,
+    timeline_heights_width: u16 = 0,
+    timeline_heights_thinking: bool = false,
+    timeline_heights_diffs: bool = false,
+    timeline_heights_agent: bool = false,
     input_mode: InputMode = .{ .text = .{} },
     context_factory: *r.ContextFactory,
     theme: Theme = .default,
@@ -553,6 +564,61 @@ pub const App = struct {
         const g = self.tool_status_entries.lock(self.io);
         defer g.unlock();
         try g.ptr.setResult(self.sessionAlloc(), agent_id, call_id, is_error);
+    }
+
+    pub fn handleScrollbarMouse(self: *App, m: r.tui.Terminal.Mouse) bool {
+        if (m.button != .left) {
+            if (self.scrollbar_dragging and m.action != .move) self.scrollbar_dragging = false;
+            return false;
+        }
+        if (self.scrollbar_track.height == 0) {
+            self.scrollbar_dragging = false;
+            return false;
+        }
+        if (!self.scrollbar_dragging) {
+            if (m.action != .press) return false;
+            if (!self.scrollbar_track.contains(m.x, m.y)) return false;
+            const offset: usize = if (self.auto_scroll) 0 else self.scroll_offset;
+            const met = scrollbarMetrics(self.scrollbar_max, self.scrollbar_track.height, offset);
+            const nob_top = self.scrollbar_track.y + met.nob_top;
+            const on_nob = m.y >= nob_top and m.y < nob_top + met.nob_h;
+            self.scrollbar_grab = if (on_nob) m.y - nob_top else met.nob_h / 2;
+            self.scrollbar_drag_max = self.scrollbar_max;
+            self.scrollbar_dragging = true;
+            if (!on_nob) self.dragScrollbarTo(m.y);
+            return true;
+        }
+        switch (m.action) {
+            .press => {
+                if (!self.scrollbar_track.contains(m.x, m.y)) {
+                    self.scrollbar_dragging = false;
+                    return false;
+                }
+                return true;
+            },
+            .move => {
+                self.dragScrollbarTo(m.y);
+                return true;
+            },
+            .release => {
+                self.scrollbar_dragging = false;
+                return true;
+            },
+        }
+    }
+
+    fn dragScrollbarTo(self: *App, pointer_y: u16) void {
+        const max_offset = self.scrollbar_drag_max;
+        if (max_offset == 0) return;
+        const v: usize = self.scrollbar_track.height;
+        const nob_h: usize = scrollbarNobHeight(max_offset, self.scrollbar_track.height);
+        const span = @max(v -| nob_h, 1);
+        const rel_raw: isize = @as(isize, pointer_y) - @as(isize, self.scrollbar_track.y) - @as(isize, self.scrollbar_grab);
+        const rel: usize = @intCast(@min(@max(rel_raw, 0), @as(isize, @intCast(span))));
+        const offset = max_offset -| (rel * max_offset + span / 2) / span;
+        self.scroll_offset = offset;
+        self.auto_scroll = offset == 0;
+        self.dirty = true;
     }
 
     /// App-scoped allocator. Survives session resets.
@@ -1523,6 +1589,7 @@ pub const App = struct {
         var welcome_p: ?r.tui.Paragraph = null;
         var timeline_stack: ?TimelineStack = null;
         var content_end_h: usize = 0;
+        const scrollbar_reserved: u16 = app.scrollbar_reserved;
 
         const timeline_h: u16 = blk: {
             const viewport_h = _timeline_status_area.height -| progress_h -| between_h;
@@ -1538,12 +1605,14 @@ pub const App = struct {
             content_end_h = wp.totalHeightLong(_timeline_status_area.width);
             welcome_p = wp;
         } else {
-            timeline_stack = buildTimelineStack(app, frame_alloc, _timeline_status_area.width, timeline_h) catch |err| blk: {
+            timeline_stack = buildTimelineStack(app, frame_alloc, _timeline_status_area.width -| scrollbar_reserved, timeline_h) catch |err| blk: {
                 log.err("timeline build failed with {any}", .{err});
                 break :blk null;
             };
             if (timeline_stack) |cs| content_end_h = cs.total -| cs.scroll_offset;
         }
+        app.scrollbar_track = .{};
+        app.scrollbar_max = 0;
 
         // Input sits right after the timeline content; once content fills the
         // viewport it pins to the bottom and stays sticky. The footer includes
@@ -1601,7 +1670,17 @@ pub const App = struct {
             };
             wp.renderSimple(frame_alloc, welcome_area, buf);
         } else if (timeline_stack) |cs| {
-            renderTimelineStack(app, cs, _timeline_area, buf);
+            const content_area: r.tui.Rect = .{
+                .x = _timeline_area.x,
+                .y = _timeline_area.y,
+                .width = _timeline_area.width -| scrollbar_reserved,
+                .height = _timeline_area.height,
+            };
+            renderTimelineStack(app, cs, content_area, buf);
+            app.scrollbar_reserved = if (cs.overflow and _timeline_status_area.width > scrollbar_strip_width) scrollbar_strip_width else 0;
+            if (cs.overflow and scrollbar_reserved == scrollbar_strip_width) {
+                renderTimelineScrollbar(app, cs, content_area, buf);
+            }
         }
 
         // Input/Permission: a single overlay_dark block hosting the main-agent
@@ -3969,8 +4048,73 @@ fn appendMarkdownText(p: *r.tui.Paragraph, gpa: std.mem.Allocator, arena: std.me
 const TimelineStack = struct {
     items: std.ArrayList(RenderParagraphItem) = .empty,
     total: usize = 0,
+    full_total: usize = 0,
     scroll_offset: usize = 0,
+    overflow: bool = false,
 };
+
+const TimelineEntryHeight = struct { h: usize, bottom_tool: bool };
+
+fn timelineEntrySettled(app: *App, entry: TimelineEntry) bool {
+    for (entry.parts) |part| switch (part) {
+        .tool_call => |call| {
+            const agent = app.registry.get(call.agent_id) orelse return false;
+            if (findToolResult(agent, call.call_id) == null) return false;
+            var child_id: ?r.AgentId = null;
+            {
+                const statuses = app.tool_status_entries.lock(app.io);
+                defer statuses.unlock();
+                const status_agent = &statuses.ptr.agents[call.agent_id.index];
+                if (status_agent.generation == call.agent_id.generation) {
+                    if (status_agent.entries.getPtr(call.call_id)) |se| child_id = se.child_id;
+                }
+            }
+            if (child_id) |cid| {
+                const child = app.registry.get(cid) orelse continue;
+                if (child.activity != .idle) return false;
+            }
+        },
+        else => {},
+    };
+    return true;
+}
+
+fn timelineEntryHeights(app: *App, alloc: std.mem.Allocator, inner_w: u16) []const TimelineEntryHeight {
+    const maybe_agent: ?*r.agent.Agent = if (app.main_agent_id) |id| app.registry.get(id) else null;
+    const key_match = app.timeline_heights_thinking == app.flags.show_thinking and
+        app.timeline_heights_diffs == app.flags.show_diffs and
+        app.timeline_heights_agent == (maybe_agent != null);
+    if (app.timeline_heights_width != inner_w or !key_match or
+        app.timeline_heights.items.len > app.timeline.items.len)
+    {
+        app.timeline_heights.clearRetainingCapacity();
+        app.timeline_heights_width = inner_w;
+        app.timeline_heights_thinking = app.flags.show_thinking;
+        app.timeline_heights_diffs = app.flags.show_diffs;
+        app.timeline_heights_agent = maybe_agent != null;
+    }
+
+    while (app.timeline_heights.items.len < app.timeline.items.len) {
+        const idx = app.timeline_heights.items.len;
+        const entry = app.timeline.items[idx];
+        const chain_bottom_tool = app.timeline_heights.items.len > 0 and
+            app.timeline_heights.items[app.timeline_heights.items.len - 1].bottom_tool;
+        if (maybe_agent == null and entry.role != .system) {
+            app.timeline_heights.append(app.appAlloc(), .{ .h = 0, .bottom_tool = chain_bottom_tool }) catch break;
+            continue;
+        }
+        if (!timelineEntrySettled(app, entry)) break;
+
+        var scratch: std.ArrayList(RenderParagraphItem) = .empty;
+        var delta: usize = 0;
+        buildTimelineEntryParagraph(alloc, &scratch, &delta, app, entry, inner_w) catch break;
+        const top_tool = scratch.items.len > 0 and scratch.items[scratch.items.len - 1].is_tool_block;
+        if (chain_bottom_tool and top_tool) delta -|= 2;
+        const bottom_tool = scratch.items.len > 0 and scratch.items[0].is_tool_block;
+        app.timeline_heights.append(app.appAlloc(), .{ .h = delta, .bottom_tool = bottom_tool }) catch break;
+    }
+    return app.timeline_heights.items;
+}
 
 fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u16) !TimelineStack {
     var s = TimelineStack{};
@@ -4029,16 +4173,42 @@ fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h
         try buildTimelineEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w);
     }
 
-    if (i == 0) {
-        const max_scroll: usize = if (s.total > inner_h) @intCast(s.total - inner_h) else 0;
-        if (scroll_offset_usize > max_scroll) {
-            scroll_offset_usize = max_scroll;
-            app.scroll_offset = max_scroll;
-            if (max_scroll == 0) app.auto_scroll = true;
+    const heights = timelineEntryHeights(app, alloc, inner_w);
+    var hidden: usize = 0;
+    for (heights[0..@min(i, heights.len)]) |eh| hidden += eh.h;
+
+    var fresh_bottom_tool = heights.len > 0 and heights[heights.len - 1].bottom_tool;
+    var j = heights.len;
+    while (j < i) : (j += 1) {
+        const entry = app.timeline.items[j];
+        if (maybe_agent == null and entry.role != .system) continue;
+        var scratch: std.ArrayList(RenderParagraphItem) = .empty;
+        var delta: usize = 0;
+        buildTimelineEntryParagraph(alloc, &scratch, &delta, app, entry, inner_w) catch break;
+        const top_tool = scratch.items.len > 0 and scratch.items[scratch.items.len - 1].is_tool_block;
+        if (fresh_bottom_tool and top_tool) delta -|= 2;
+        if (scratch.items.len > 0) {
+            fresh_bottom_tool = scratch.items[0].is_tool_block;
         }
+        hidden += delta;
+    }
+    s.full_total = s.total +| hidden;
+
+    if (i > 0 and s.items.items.len > 0) {
+        const walked_top_tool = s.items.items[s.items.items.len - 1].is_tool_block;
+        const hidden_bottom_tool = if (i - 1 < heights.len) heights[i - 1].bottom_tool else fresh_bottom_tool;
+        if (walked_top_tool and hidden_bottom_tool) s.full_total -|= 2;
+    }
+
+    const max_scroll: usize = s.full_total -| inner_h;
+    if (scroll_offset_usize > max_scroll) {
+        scroll_offset_usize = max_scroll;
+        app.scroll_offset = max_scroll;
+        if (max_scroll == 0) app.auto_scroll = true;
     }
 
     s.scroll_offset = scroll_offset_usize;
+    s.overflow = s.full_total > inner_h;
     return s;
 }
 
@@ -4086,6 +4256,141 @@ fn renderTimelineStack(app: *App, s: TimelineStack, area: r.tui.Rect, buf: *r.tu
         };
         p.render(alloc, sub, area, buf);
     }
+}
+
+const scrollbar_strip_width: u16 = 3;
+
+const ScrollbarMetrics = struct { nob_top: u16, nob_h: u16 };
+
+fn scrollbarNobHeight(max_offset: usize, viewport: u16) u16 {
+    const v: usize = viewport;
+    if (v == 0) return 0;
+    const total = v +| max_offset;
+    return @intCast(@min(v, @max(@as(usize, 1), v * v / total)));
+}
+
+fn scrollbarMetrics(max_offset: usize, viewport: u16, offset: usize) ScrollbarMetrics {
+    const v: usize = viewport;
+    if (v == 0 or max_offset == 0) return .{ .nob_top = 0, .nob_h = 0 };
+    const nob_h: usize = scrollbarNobHeight(max_offset, viewport);
+    const span = v - nob_h;
+    const off = @min(offset, max_offset);
+    const nob_top = (max_offset - off) * span / max_offset;
+    return .{ .nob_top = @intCast(nob_top), .nob_h = @intCast(nob_h) };
+}
+
+test "timeline scrollbar draws only on overflow" {
+    var app: App = undefined;
+    app.theme = .default;
+    app.scrollbar_track = .{};
+    app.scrollbar_max = 0;
+    app.scrollbar_dragging = false;
+    app.scrollbar_drag_max = 0;
+    var buf = try r.tui.Buffer.init(std.testing.allocator, .{ .x = 0, .y = 0, .width = 20, .height = 10 });
+    defer buf.deinit();
+    const content_area: r.tui.Rect = .{ .x = 0, .y = 0, .width = 17, .height = 10 };
+
+    renderTimelineScrollbar(&app, .{ .total = 5, .full_total = 5, .overflow = false }, content_area, &buf);
+    try std.testing.expectEqual(@as(u16, 0), app.scrollbar_track.height);
+
+    renderTimelineScrollbar(&app, .{ .total = 10, .full_total = 20, .overflow = true }, content_area, &buf);
+    try std.testing.expectEqual(@as(u16, 3), app.scrollbar_track.width);
+    try std.testing.expectEqual(@as(u16, 10), app.scrollbar_track.height);
+    try std.testing.expectEqual(@as(usize, 10), app.scrollbar_max);
+    try std.testing.expectEqual(@as(u21, '█'), buf.get(18, 9).char);
+    try std.testing.expectEqual(@as(u21, '│'), buf.get(18, 4).char);
+    try std.testing.expectEqual(@as(u21, ' '), buf.get(17, 0).char);
+}
+
+test "scrollbar nob size shows the real timeline ratio" {
+    try std.testing.expectEqual(@as(u16, 14), scrollbarMetrics(74, 40, 0).nob_h);
+    try std.testing.expectEqual(@as(u16, 16), scrollbarMetrics(100, 50, 0).nob_h);
+    try std.testing.expectEqual(@as(u16, 26), scrollbarMetrics(74, 40, 0).nob_top);
+    try std.testing.expectEqual(@as(u16, 13), scrollbarMetrics(74, 40, 37).nob_top);
+    try std.testing.expectEqual(@as(u16, 0), scrollbarMetrics(74, 40, 74).nob_top);
+    try std.testing.expectEqual(@as(u16, 9), scrollbarMetrics(90, 10, 0).nob_top);
+    try std.testing.expectEqual(@as(u16, 1), scrollbarMetrics(1_000_000, 50, 0).nob_h);
+    try std.testing.expectEqual(@as(u16, 1), scrollbarMetrics(1_000_000, 9, 0).nob_h);
+}
+
+test "scrollbar drag holds the nob under the pointer" {
+    var app: App = undefined;
+    app.scrollbar_track = .{ .x = 40, .y = 5, .width = 3, .height = 40 };
+    app.scrollbar_max = 74;
+    app.scrollbar_drag_max = 0;
+    app.scrollbar_dragging = false;
+    app.scrollbar_grab = 0;
+    app.scroll_offset = 0;
+    app.auto_scroll = false;
+    app.dirty = false;
+
+    const met = scrollbarMetrics(app.scrollbar_max, 40, 0);
+    const press_y: u16 = app.scrollbar_track.y + met.nob_top;
+    try std.testing.expect(app.handleScrollbarMouse(.{ .button = .left, .action = .press, .x = 41, .y = press_y }));
+    try std.testing.expect(app.scrollbar_dragging);
+    try std.testing.expectEqual(app.scrollbar_max, app.scrollbar_drag_max);
+
+    for ([_]usize{ 50, 51, 74, 0 }) |offset| {
+        const met2 = scrollbarMetrics(app.scrollbar_drag_max, 40, offset);
+        const pointer_y: u16 = app.scrollbar_track.y + met2.nob_top + app.scrollbar_grab;
+        app.dragScrollbarTo(pointer_y);
+        const delta = @max(app.scroll_offset, offset) - @min(app.scroll_offset, offset);
+        try std.testing.expect(delta <= 1);
+        if (app.scroll_offset == 0) try std.testing.expect(app.auto_scroll);
+    }
+}
+
+test "scrollbar drag ends when the release is swallowed" {
+    var app: App = undefined;
+    app.scrollbar_track = .{ .x = 40, .y = 5, .width = 3, .height = 40 };
+    app.scrollbar_max = 74;
+    app.scrollbar_drag_max = 74;
+    app.scrollbar_dragging = true;
+    app.scrollbar_grab = 0;
+    app.scroll_offset = 0;
+    app.auto_scroll = false;
+    app.dirty = false;
+
+    try std.testing.expect(!app.handleScrollbarMouse(.{ .button = .right, .action = .release, .x = 41, .y = 20 }));
+    try std.testing.expect(!app.scrollbar_dragging);
+
+    app.scrollbar_dragging = true;
+    try std.testing.expect(!app.handleScrollbarMouse(.{ .button = .left, .action = .press, .x = 0, .y = 20 }));
+    try std.testing.expect(!app.scrollbar_dragging);
+
+    app.scrollbar_dragging = true;
+    try std.testing.expect(app.handleScrollbarMouse(.{ .button = .left, .action = .press, .x = 41, .y = 20 }));
+    try std.testing.expect(app.scrollbar_dragging);
+    try std.testing.expect(app.handleScrollbarMouse(.{ .button = .left, .action = .release, .x = 41, .y = 20 }));
+    try std.testing.expect(!app.scrollbar_dragging);
+}
+
+fn renderTimelineScrollbar(app: *App, cs: TimelineStack, content_area: r.tui.Rect, buf: *r.tui.Buffer) void {
+    const viewport: usize = content_area.height;
+    if (content_area.width == 0 or viewport == 0 or !cs.overflow) return;
+    const live_max = cs.full_total -| viewport;
+    const max_offset: usize = if (app.scrollbar_dragging) app.scrollbar_drag_max else live_max;
+    const met = scrollbarMetrics(max_offset, content_area.height, cs.scroll_offset);
+
+    const track_x = content_area.x + content_area.width + 1;
+    const track_style: r.tui.Style = .{ .fg = app.theme.muted, .modifier = .{ .dim = true } };
+    var row: u16 = 0;
+    while (row < content_area.height) : (row += 1) {
+        buf.set(track_x, content_area.y + row, .{ .char = '│', .style = track_style });
+    }
+    const nob_style: r.tui.Style = .{ .fg = app.theme.info, .modifier = .{ .bold = true } };
+    var nob_row: u16 = 0;
+    while (nob_row < met.nob_h) : (nob_row += 1) {
+        buf.set(track_x, content_area.y + met.nob_top + nob_row, .{ .char = '█', .style = nob_style });
+    }
+
+    app.scrollbar_track = .{
+        .x = content_area.x + content_area.width,
+        .y = content_area.y,
+        .width = scrollbar_strip_width,
+        .height = content_area.height,
+    };
+    app.scrollbar_max = live_max;
 }
 
 fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {

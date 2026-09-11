@@ -1323,11 +1323,13 @@ pub fn run(
                         .session_picker => {},
                     },
                     .mouse => |m| {
-                        const wheel = term.handleMouse(m);
-                        if (wheel < 0) {
-                            try app.cmd_queue.append(io, .{ .scroll_up = @intCast(-wheel) });
-                        } else if (wheel > 0) {
-                            try app.cmd_queue.append(io, .{ .scroll_down = @intCast(wheel) });
+                        if (!app.handleScrollbarMouse(m)) {
+                            const wheel = term.handleMouse(m);
+                            if (wheel < 0) {
+                                try app.cmd_queue.append(io, .{ .scroll_up = @intCast(-wheel) });
+                            } else if (wheel > 0) {
+                                try app.cmd_queue.append(io, .{ .scroll_down = @intCast(wheel) });
+                            }
                         }
                     },
                     .resize => {},
