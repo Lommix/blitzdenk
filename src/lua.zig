@@ -2682,8 +2682,8 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         .reserved, .active => {},
                     }
 
-                    if (vm.main_thread_id != 0 and std.Thread.getCurrentId() != vm.main_thread_id) {
-                        _ = c.luaL_error(state, "agent.await: cannot be called from the agent thread");
+                    if (vm.main_thread_id != 0) {
+                        _ = c.luaL_error(state, "agent.await: not available in the main vm");
                         return 0;
                     }
                     vm.vm_mu.unlock(io);

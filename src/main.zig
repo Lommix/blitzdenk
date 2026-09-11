@@ -27,7 +27,6 @@ pub const DEFAULT_CONFIG_PATH = r.defaults.CONFIG_DIR;
 pub const DEFAULT_CACHE_PATH = "cache.zon";
 pub const DEFAULT_LUA_CONFIG = "blitz.lua";
 const IO_THREAD_STACK_SIZE = 2 * 1024 * 1024;
-const IO_THREAD_LIMIT = 32;
 
 test {
     std.testing.refAllDecls(@This());
@@ -184,7 +183,7 @@ fn setupMarkerExistsAbsolute(alloc: std.mem.Allocator, io: std.Io, env: *const s
 pub fn main(init: std.process.Init) !void {
     var io_state = std.Io.Threaded.init(init.gpa, .{
         .stack_size = IO_THREAD_STACK_SIZE,
-        .async_limit = .limited(IO_THREAD_LIMIT),
+        .async_limit = .unlimited,
         .concurrent_limit = .unlimited,
         .argv0 = .init(init.minimal.args),
         .environ = init.minimal.environ,

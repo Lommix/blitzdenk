@@ -21,7 +21,7 @@ pub const CancellationToken = struct {
     }
 
     pub fn waitUntilCanceled(self: *CancellationToken, io: std.Io) void {
-        while (!self.isCancelled()) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch return;
+        self.event.wait(io) catch {};
     }
 };
 

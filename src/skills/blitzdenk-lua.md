@@ -378,7 +378,9 @@ each listener of the event runs in registration order. Config mutation
 a listener. Use `blitz.state.set/get` for data across calls. The event
 loop does not wait for listeners; a `blitz.agent.await` inside one listener
 delays only the listeners behind it. `blitz.agent.spawn` and
-`blitz.agent.await` work inside:
+`blitz.agent.await` run in listeners and tool vms. `blitz.agent.await`
+errors in the main vm: config, commands, keybinds, and the prompt hook. The
+main thread reaps agent state, so blocking it stalls every agent.
 
 A listener that spawns an agent retriggers `agent_created` and
 `agent_started`. Spawning from those two listeners loops without end.

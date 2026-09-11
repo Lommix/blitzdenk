@@ -197,7 +197,7 @@ blitz.hooks.inject({
 		end
 		local body = table.concat(rows, "\n")
 		if body == "" then
-			body = "(none)"
+			return ""
 		end
 		return "<available_agents>\n" .. body .. "\n</available_agents>\n"
 	end,

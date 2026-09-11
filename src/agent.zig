@@ -5,6 +5,8 @@ const agent_run = @import("agent_run.zig");
 const compact = @import("compact.zig");
 pub const state = @import("agent-state");
 
+const stream_timeout_ms: u64 = 15 * 60 * 1000;
+
 const PrepareHook = *const fn (?*anyopaque, sdk.options.PrepareStepInfo) anyerror!sdk.options.PrepareStepResult;
 const ToolCallHook = *const fn (?*anyopaque, sdk.options.ToolCallInfo) void;
 const StopHook = *const fn (?*anyopaque, sdk.options.StopInfo) bool;
@@ -306,6 +308,7 @@ pub const Agent = struct {
         self.tokens_per_second = 0;
         self.activity = .processing;
         var run_options = options;
+        if (run_options.timeout_ms == null) run_options.timeout_ms = stream_timeout_ms;
         if (run_options.system.len == 0) run_options.system = self.system_prompt;
         if (run_options.prompt.len > 0) {
             try self.appendHistory(&.{sdk.UserMessage(run_options.prompt)});
@@ -460,7 +463,7 @@ pub const Agent = struct {
         if (self.retry_count >= self.max_retries) return false;
         if (failure == error.Canceled) return true;
         if (self.contextNearLimit()) return false;
-        if (failure == error.NetworkError) return true;
+        if (failure == error.NetworkError or failure == error.Timeout) return true;
         if (failure != error.RateLimited and failure != error.ApiError) return false;
         const provider_error = self.last_provider_error orelse return false;
         return provider_error.is_retryable;
@@ -1278,6 +1281,7 @@ test "retry guard blocks auto retry near context limit" {
 
     agent.context_tokens = 100_000;
     try std.testing.expect(agent.willAutoRetry(error.NetworkError));
+    try std.testing.expect(agent.willAutoRetry(error.Timeout));
     try std.testing.expect(!agent.contextNearLimit());
 
     agent.last_provider_error = .{
