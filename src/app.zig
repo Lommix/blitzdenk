@@ -292,6 +292,7 @@ pub const App = struct {
     lua_inject_hooks_enabled: std.atomic.Value(bool) = .init(false),
     mcp_manager: r.mcp.Manager,
     mcp_load: ?r.mcp.LoadTask = null,
+    ssh_connect: ?r.ssh.SshConnectTask = null,
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
     injection_hooks: r.inject.InjectionsHooks = .{},
@@ -337,6 +338,7 @@ pub const App = struct {
         self.event_bus.joinPending(self.io);
         if (self.update_check) |*task| task.deinit();
         if (self.mcp_load) |*task| task.deinit();
+        if (self.ssh_connect) |*task| task.deinit();
         self.mcp_manager.deinit();
         self.lua_vm.deinit();
         self.lua_state.deinit(self.gpa);
@@ -554,6 +556,7 @@ pub const App = struct {
     pub fn reset(self: *App) void {
         if (self.mcp_load) |*task| task.deinit();
         self.mcp_load = null;
+        self.cancelSshConnect();
         self.dropStreamingPreview();
         self.clearPendingDiffs();
         self.cancelPermissions(null);
@@ -605,6 +608,7 @@ pub const App = struct {
 
     pub fn tick(self: *App) !void {
         try self.finishMcpLoad(false);
+        self.finishSshConnect();
         self.registry.flush();
         for (&self.registry.slots, 0..) |*slot, index| {
             const state = slot.state.load(.acquire);
@@ -1133,6 +1137,91 @@ pub const App = struct {
 
     pub fn waitForMcpTools(self: *App) !void {
         try self.finishMcpLoad(true);
+    }
+
+    pub fn cancelSshConnect(self: *App) void {
+        if (self.ssh_connect) |*task| task.deinit();
+        self.ssh_connect = null;
+    }
+
+    pub fn startSshConnect(self: *App, user: []const u8, host: []const u8, cwd: []const u8) void {
+        self.cancelSshConnect();
+        if (!self.initSshTask(user, host, cwd, false)) return;
+        self.toastSshConnecting(user, host);
+        self.ssh_connect.?.start();
+        self.dirty = true;
+    }
+
+    pub fn startSshUnlock(self: *App) void {
+        if (self.input_mode != .passphrase) return;
+        const pp = &self.input_mode.passphrase;
+        if (pp.len == 0) {
+            self.notifications.append(self.gpa, "SSH: empty passphrase, canceled", .{}) catch {};
+            self.returnToText();
+            return;
+        }
+        self.cancelSshConnect();
+        if (!self.initSshTask(pp.user, pp.host, pp.cwd, true)) {
+            self.returnToText();
+            return;
+        }
+        const task = &self.ssh_connect.?;
+        @memcpy(task.pass_buf[0..pp.len], pp.buf[0..pp.len]);
+        task.pass_len = pp.len;
+        self.returnToText();
+        self.toastSshConnecting(task.user(), task.host());
+        task.start();
+        self.dirty = true;
+    }
+
+    fn toastSshConnecting(self: *App, user: []const u8, host: []const u8) void {
+        self.notifications.append(self.gpa, "SSH: connecting to {s}@{s}", .{ user, host }) catch {};
+    }
+
+    fn initSshTask(self: *App, user: []const u8, host: []const u8, cwd: []const u8, unlock: bool) bool {
+        if (user.len > r.ssh.SshConnectTask.MAX_USER or host.len > r.ssh.SshConnectTask.MAX_HOST or cwd.len > r.ssh.SshConnectTask.MAX_CWD or
+            user.len + host.len + cwd.len > self.passphrase_args_buf.len)
+        {
+            self.notifications.append(self.gpa, "SSH: target too long", .{}) catch {};
+            return false;
+        }
+        self.ssh_connect = .{ .pool = self.exec_pool, .gpa = self.gpa, .unlock = unlock };
+        const task = &self.ssh_connect.?;
+        @memcpy(task.user_buf[0..user.len], user);
+        task.user_len = user.len;
+        @memcpy(task.host_buf[0..host.len], host);
+        task.host_len = host.len;
+        @memcpy(task.cwd_buf[0..cwd.len], cwd);
+        task.cwd_len = cwd.len;
+        return true;
+    }
+
+    fn finishSshConnect(self: *App) void {
+        const task = if (self.ssh_connect) |*task| task else return;
+        if (!task.isFinished()) return;
+        defer {
+            task.deinit();
+            self.ssh_connect = null;
+            self.dirty = true;
+        }
+        switch (task.outcome) {
+            .connected => {
+                self.exec_pool.setSsh(task.user(), task.host(), task.cwd()) catch {
+                    self.notifications.append(self.gpa, "SSH: failed: failed to allocate target", .{}) catch {};
+                    return;
+                };
+                if (task.home_len > 0) self.setRemoteHome(task.home());
+                self.notifications.append(self.gpa, "SSH mode enabled: {s}@{s}", .{ task.user(), task.host() }) catch {};
+            },
+            .need_pass => {
+                if (self.input_mode == .text) {
+                    self.enterPassphrase(task.user(), task.host(), task.cwd());
+                } else {
+                    self.notifications.append(self.gpa, "SSH: auth refused (retry /ssh for passphrase)", .{}) catch {};
+                }
+            },
+            .failed => self.notifications.append(self.gpa, "SSH: failed: {s}", .{r.ssh.truncateUtf8(task.reason(), 96)}) catch {},
+        }
     }
 
     fn finishMcpLoad(self: *App, wait: bool) !void {

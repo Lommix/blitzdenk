@@ -1180,10 +1180,11 @@ pub fn run(
                                         if (cmd) |c| {
                                             switch (c) {
                                                 .ssh => |args| {
-                                                    handleSshCommand(&app, app.exec_pool, gpa, args);
+                                                    app.startSshConnect(args.user, args.host, args.cwd);
                                                     app.input_buffer.clearRetainingCapacity();
                                                 },
                                                 .ssh_off => {
+                                                    app.cancelSshConnect();
                                                     app.exec_pool.clearSsh();
                                                     app.invalidatePathCompletions();
                                                     app.notifications.append(gpa, "SSH mode disabled", .{}) catch {};
@@ -1195,11 +1196,7 @@ pub fn run(
 
                                         if (reg.parseSshAliasCommand(input)) |alias| {
                                             if (app.context_factory.findSshAlias(alias)) |target| {
-                                                handleSshCommand(&app, app.exec_pool, gpa, .{
-                                                    .user = target.user,
-                                                    .host = target.host,
-                                                    .cwd = target.cwd,
-                                                });
+                                                app.startSshConnect(target.user, target.host, target.cwd);
                                             } else {
                                                 app.pushSystemMessage("unknown ssh alias: {s}", .{alias});
                                             }
@@ -1280,7 +1277,7 @@ pub fn run(
                                     app.input_buffer.clearRetainingCapacity();
                                 },
                                 .passphrase => {
-                                    handleSshUnlock(&app, app.exec_pool, gpa);
+                                    app.startSshUnlock();
                                 },
                                 .wizard => {
                                     handleWizardEnter(&app);
@@ -1297,7 +1294,7 @@ pub fn run(
                                     }
                                 },
                                 .passphrase => {
-                                    app.pushSystemMessage("ssh: passphrase entry canceled", .{});
+                                    app.notifications.append(gpa, "SSH: passphrase entry canceled", .{}) catch {};
                                     app.returnToText();
                                 },
                                 else => {},
@@ -1568,171 +1565,6 @@ fn recommendedOption(options: []const []const u8) u8 {
         .choice => |i| return i,
         else => unreachable,
     }
-}
-
-/// Probe `ssh -o BatchMode=yes user@host true`. On success → set SSH target
-/// and announce. On failure → open the passphrase modal so the user can
-/// unlock a key into ssh-agent and retry.
-fn handleSshCommand(
-    state: *App,
-    cmd_pool: *r.exec.CmdPool,
-    gpa: std.mem.Allocator,
-    args: AppCommand.SshArgs,
-) void {
-    if (sshProbe(cmd_pool, gpa, args.user, args.host)) {
-        cmd_pool.setSsh(args.user, args.host, args.cwd) catch {
-            state.pushSystemMessage("ssh: failed to allocate target", .{});
-            return;
-        };
-        probeRemoteHome(state, cmd_pool);
-        state.notifications.append(gpa, "SSH mode enabled: {s}@{s}", .{ args.user, args.host }) catch {};
-    } else {
-        state.enterPassphrase(args.user, args.host, args.cwd);
-    }
-}
-
-fn probeRemoteHome(state: *App, cmd_pool: *r.exec.CmdPool) void {
-    const res = cmd_pool.runAndWait(.{
-        .argv = &.{ "sh", "-lc", "echo $HOME" },
-    }) catch return;
-    defer cmd_pool.alloc.free(res.stdout);
-    defer cmd_pool.alloc.free(res.stderr);
-    if (res.ty != .success) return;
-    const home = std.mem.trim(u8, res.stdout, " \t\r\n");
-    if (home.len == 0 or home[0] != '/') return;
-    state.setRemoteHome(home);
-}
-
-/// Returns true iff a non-interactive ssh probe succeeds (key already loaded
-/// in agent). Returns false on any failure (auth, network, exit nonzero).
-fn sshProbe(cmd_pool: *r.exec.CmdPool, gpa: std.mem.Allocator, user: []const u8, host: []const u8) bool {
-    const target = std.fmt.allocPrint(gpa, "{s}@{s}", .{ user, host }) catch return false;
-    defer gpa.free(target);
-    const res = cmd_pool.runAndWait(.{
-        .argv = &.{ "ssh", "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no", "-o", "ConnectTimeout=5", target, "true" },
-        .force_local = true,
-    }) catch return false;
-    defer gpa.free(res.stdout);
-    defer gpa.free(res.stderr);
-    return res.ty == .success;
-}
-
-/// Called when user presses Enter inside the passphrase modal.
-/// 1. Write a transient SSH_ASKPASS helper script to a tempfile.
-/// 2. Run `setsid -w ssh-add` with env carrying the passphrase + SSH_ASKPASS.
-/// 3. On success, re-probe → setSsh → status. On failure → status with stderr.
-/// 4. Always zero passphrase + delete tempfile.
-fn handleSshUnlock(state: *App, cmd_pool: *r.exec.CmdPool, gpa: std.mem.Allocator) void {
-    const pp = &state.input_mode.passphrase;
-    const passphrase = pp.buf[0..pp.len];
-    const user = pp.user;
-    const host = pp.host;
-    const cwd = pp.cwd;
-
-    defer state.returnToText();
-
-    if (passphrase.len == 0) {
-        state.pushSystemMessage("ssh: empty passphrase, canceled", .{});
-        return;
-    }
-
-    // ssh-add talks to the agent over $SSH_AUTH_SOCK. Reuse an inherited
-    // agent if its socket is alive; otherwise spawn one we own (killed on exit).
-    const inherited = cmd_pool.env.get("SSH_AUTH_SOCK");
-    const sock = cmd_pool.ensureAgent(inherited) catch |err| {
-        state.pushSystemMessage("ssh: failed to start ssh-agent ({s})", .{@errorName(err)});
-        return;
-    };
-
-    // Write helper script to /tmp/blitz-askpass-<pid>.sh (mode 0700).
-    const pid = std.c.getpid();
-    const script_path = std.fmt.allocPrint(gpa, "/tmp/blitz-askpass-{d}.sh", .{pid}) catch {
-        state.pushSystemMessage("ssh: out of memory", .{});
-        return;
-    };
-    defer gpa.free(script_path);
-
-    const io = cmd_pool.io;
-    defer std.Io.Dir.deleteFileAbsolute(io, script_path) catch {};
-
-    const script = "#!/bin/sh\nprintf '%s' \"$BLITZ_PASSPHRASE\"\n";
-    {
-        const f = std.Io.Dir.createFileAbsolute(io, script_path, .{}) catch {
-            state.pushSystemMessage("ssh: failed to create askpass helper", .{});
-            return;
-        };
-        defer f.close(io);
-        std.Io.File.writeStreamingAll(f, io, script) catch {
-            state.pushSystemMessage("ssh: failed to write askpass helper", .{});
-            return;
-        };
-    }
-    // Make the helper executable. Best-effort; ssh-add may fall back to other
-    // discovery methods if this fails.
-    {
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        @memcpy(path_buf[0..script_path.len], script_path);
-        path_buf[script_path.len] = 0;
-        const z: [*:0]const u8 = @ptrCast(&path_buf);
-        _ = std.posix.system.chmod(z, 0o700);
-    }
-
-    // Build env with SSH_AUTH_SOCK (and other inherited vars), plus the overlay.
-    var env = std.process.Environ.Map.init(gpa);
-    var env_keep = false;
-    defer if (!env_keep) {
-        for (env.values()) |v| @memset(@constCast(v), 0);
-        env.deinit();
-    };
-
-    const inherit_keys = [_][]const u8{ "HOME", "USER", "PATH", "TERM", "LANG", "LC_ALL" };
-    for (inherit_keys) |k| {
-        if (cmd_pool.env.get(k)) |v| env.put(k, v) catch {};
-    }
-    env.put("SSH_AUTH_SOCK", sock) catch {};
-    env.put("SSH_ASKPASS", script_path) catch {};
-    env.put("SSH_ASKPASS_REQUIRE", "force") catch {};
-    env.put("DISPLAY", ":0") catch {};
-    env.put("BLITZ_PASSPHRASE", passphrase) catch {};
-
-    // Run ssh-add detached from any controlling tty so SSH_ASKPASS is used.
-    env_keep = true; // ownership transfers into runAndWait
-    const res = cmd_pool.runAndWait(.{
-        .argv = &.{"ssh-add"},
-        .env_overlay = env,
-        .force_local = true,
-    }) catch {
-        state.pushSystemMessage("ssh: ssh-add failed to spawn", .{});
-        // Pool consumed env; nothing to free here.
-        return;
-    };
-    defer gpa.free(res.stdout);
-    defer gpa.free(res.stderr);
-
-    // Zero the passphrase in the modal buffer ASAP.
-    @memset(pp.buf[0..pp.len], 0);
-
-    if (res.ty != .success) {
-        const trimmed = std.mem.trim(u8, res.stderr, " \t\r\n");
-        if (trimmed.len > 0) {
-            state.pushSystemMessage("ssh-add: {s}", .{trimmed});
-        } else {
-            state.pushSystemMessage("ssh-add: failed", .{});
-        }
-        return;
-    }
-
-    if (!sshProbe(cmd_pool, gpa, user, host)) {
-        state.pushSystemMessage("ssh: key unlocked but probe failed", .{});
-        return;
-    }
-
-    cmd_pool.setSsh(user, host, cwd) catch {
-        state.pushSystemMessage("ssh: failed to allocate target", .{});
-        return;
-    };
-    probeRemoteHome(state, cmd_pool);
-    state.notifications.append(gpa, "SSH mode enabled: {s}@{s}", .{ user, host }) catch {};
 }
 
 pub const AppCommand = union(enum) {

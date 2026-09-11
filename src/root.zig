@@ -12,6 +12,7 @@ pub const agent_registry = @import("agent_registry.zig");
 pub const agent_run = @import("agent_run.zig");
 pub const compact = @import("compact.zig");
 pub const exec = @import("exec");
+pub const ssh = @import("ssh.zig");
 pub const artifact = @import("artifact.zig");
 pub const permissions = @import("permissions");
 pub const selection = @import("selection.zig");
