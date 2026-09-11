@@ -3,6 +3,10 @@ const r = @import("root.zig");
 const text_utils = r.tui.text_utils;
 const log = std.log.scoped(.app);
 
+const ct = @cImport({
+    @cInclude("time.h");
+});
+
 pub const CONTEXT_LIMIT = 124 * 1024;
 const COMMAND_COMPLETION_ROWS = 64;
 
@@ -96,22 +100,28 @@ pub const InputMode = union(enum) {
 pub const Notifications = struct {
     list: [MAX_ENTRIES]Entry = @splat(.empty),
 
-    pub const Entry = union(enum) { empty, used: struct { msg: []const u8, alive: f32 } };
+    pub const Entry = union(enum) { empty, used: struct { msg: []const u8, alive: f32, sent_ms: i64 } };
     const MAX_ENTRIES = 16;
     pub const DISPLAY_SECONDS: f32 = 8.0;
+    pub const SLIDE_SECONDS: f32 = 0.25;
     pub const MAX_VISIBLE: usize = 4;
 
-    pub fn append(self: *Notifications, alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
-        switch (self.list[MAX_ENTRIES - 1]) {
-            .used => |en| {
-                alloc.free(en.msg);
-            },
+    pub fn append(self: *Notifications, alloc: std.mem.Allocator, sent_ms: i64, comptime fmt: []const u8, args: anytype) !void {
+        var end: usize = 0;
+        while (end < MAX_ENTRIES) : (end += 1) switch (self.list[end]) {
+            .empty => break,
             else => {},
+        };
+        if (end == MAX_ENTRIES) {
+            switch (self.list[0]) {
+                .used => |en| alloc.free(en.msg),
+                else => {},
+            }
+            std.mem.copyForwards(Entry, self.list[0 .. MAX_ENTRIES - 1], self.list[1..]);
+            end = MAX_ENTRIES - 1;
         }
-
-        std.mem.copyBackwards(Entry, self.list[1..], self.list[0 .. MAX_ENTRIES - 1]);
         const text = try std.fmt.allocPrint(alloc, fmt, args);
-        self.list[0] = .{ .used = .{ .msg = text, .alive = 0 } };
+        self.list[end] = .{ .used = .{ .msg = text, .alive = 0, .sent_ms = sent_ms } };
     }
 
     pub fn deinit(self: *Notifications, alloc: std.mem.Allocator) void {
@@ -133,6 +143,13 @@ pub const Notifications = struct {
     pub fn hasVisible(self: *const Notifications) bool {
         var it = self.iter();
         return it.next() != null;
+    }
+
+    pub fn visibleCount(self: *const Notifications) usize {
+        var n: usize = 0;
+        var it = self.iter();
+        while (it.next()) |_| n += 1;
+        return n;
     }
 
     pub fn iter(self: *const Notifications) Iterator {
@@ -640,7 +657,7 @@ pub const App = struct {
         }
     }
 
-    fn nowMillis(self: *App) i64 {
+    pub fn nowMillis(self: *App) i64 {
         const now = std.Io.Clock.Timestamp.now(self.io, .real);
         return @intCast(@divTrunc(now.raw.nanoseconds, std.time.ns_per_ms));
     }
@@ -1156,7 +1173,7 @@ pub const App = struct {
         if (self.input_mode != .passphrase) return;
         const pp = &self.input_mode.passphrase;
         if (pp.len == 0) {
-            self.notifications.append(self.gpa, "SSH: empty passphrase, canceled", .{}) catch {};
+            self.notifications.append(self.gpa, self.nowMillis(), "SSH: empty passphrase, canceled", .{}) catch {};
             self.returnToText();
             return;
         }
@@ -1175,14 +1192,14 @@ pub const App = struct {
     }
 
     fn toastSshConnecting(self: *App, user: []const u8, host: []const u8) void {
-        self.notifications.append(self.gpa, "SSH: connecting to {s}@{s}", .{ user, host }) catch {};
+        self.notifications.append(self.gpa, self.nowMillis(), "SSH: connecting to {s}@{s}", .{ user, host }) catch {};
     }
 
     fn initSshTask(self: *App, user: []const u8, host: []const u8, cwd: []const u8, unlock: bool) bool {
         if (user.len > r.ssh.SshConnectTask.MAX_USER or host.len > r.ssh.SshConnectTask.MAX_HOST or cwd.len > r.ssh.SshConnectTask.MAX_CWD or
             user.len + host.len + cwd.len > self.passphrase_args_buf.len)
         {
-            self.notifications.append(self.gpa, "SSH: target too long", .{}) catch {};
+            self.notifications.append(self.gpa, self.nowMillis(), "SSH: target too long", .{}) catch {};
             return false;
         }
         self.ssh_connect = .{ .pool = self.exec_pool, .gpa = self.gpa, .unlock = unlock };
@@ -1207,20 +1224,20 @@ pub const App = struct {
         switch (task.outcome) {
             .connected => {
                 self.exec_pool.setSsh(task.user(), task.host(), task.cwd()) catch {
-                    self.notifications.append(self.gpa, "SSH: failed: failed to allocate target", .{}) catch {};
+                    self.notifications.append(self.gpa, self.nowMillis(), "SSH: failed: failed to allocate target", .{}) catch {};
                     return;
                 };
                 if (task.home_len > 0) self.setRemoteHome(task.home());
-                self.notifications.append(self.gpa, "SSH mode enabled: {s}@{s}", .{ task.user(), task.host() }) catch {};
+                self.notifications.append(self.gpa, self.nowMillis(), "SSH mode enabled: {s}@{s}", .{ task.user(), task.host() }) catch {};
             },
             .need_pass => {
                 if (self.input_mode == .text) {
                     self.enterPassphrase(task.user(), task.host(), task.cwd());
                 } else {
-                    self.notifications.append(self.gpa, "SSH: auth refused (retry /ssh for passphrase)", .{}) catch {};
+                    self.notifications.append(self.gpa, self.nowMillis(), "SSH: auth refused (retry /ssh for passphrase)", .{}) catch {};
                 }
             },
-            .failed => self.notifications.append(self.gpa, "SSH: failed: {s}", .{r.ssh.truncateUtf8(task.reason(), 96)}) catch {},
+            .failed => self.notifications.append(self.gpa, self.nowMillis(), "SSH: failed: {s}", .{r.ssh.truncateUtf8(task.reason(), 96)}) catch {},
         }
     }
 
@@ -1338,7 +1355,7 @@ pub const App = struct {
             "Agent(s) without a bound model: {s}. Bind `model` per agent with `blitz.set_agent_model(AGENT_TYPE, model)` or `model =` in `blitz.add_agent`.",
             .{joined},
         );
-        self.notifications.append(self.gpa, "Agent(s) without a bound model: {s}", .{joined}) catch {};
+        self.notifications.append(self.gpa, self.nowMillis(), "Agent(s) without a bound model: {s}", .{joined}) catch {};
     }
 
     pub fn mainAgent(self: *const App) ?*r.agent.Agent {
@@ -1893,7 +1910,7 @@ pub const App = struct {
 
     pub fn pasteImage(self: *App) void {
         if (!self.generalAgentVision()) {
-            self.notifications.append(self.gpa, "Current model does not support images", .{}) catch {};
+            self.notifications.append(self.gpa, self.nowMillis(), "Current model does not support images", .{}) catch {};
             return;
         }
         const img = r.clipboard.readImage(self.sessionAlloc(), self.exec_pool) catch null;
@@ -1903,13 +1920,13 @@ pub const App = struct {
             if (url) |u| {
                 self.appendBytes(u);
                 self.dirty = true;
-                self.notifications.append(self.gpa, "Image pasted", .{}) catch {};
+                self.notifications.append(self.gpa, self.nowMillis(), "Image pasted", .{}) catch {};
                 return;
             }
-            self.notifications.append(self.gpa, "Failed to save clipboard image", .{}) catch {};
+            self.notifications.append(self.gpa, self.nowMillis(), "Failed to save clipboard image", .{}) catch {};
             return;
         }
-        self.notifications.append(self.gpa, "Clipboard holds no image", .{}) catch {};
+        self.notifications.append(self.gpa, self.nowMillis(), "Clipboard holds no image", .{}) catch {};
     }
 
     /// Terminal paste event handler. Pastes the clipboard image if one is
@@ -3265,22 +3282,37 @@ fn wizardAppendKeyValue(app: *App, arena: std.mem.Allocator, para: *r.tui.Paragr
     para.lines.append(arena, line) catch {};
 }
 
+fn notificationTime(sent_ms: i64, out: *[8]u8) []const u8 {
+    const seconds: std.c.time_t = @intCast(@divTrunc(sent_ms, std.time.ms_per_s));
+    var tm: ct.struct_tm = undefined;
+    if (ct.localtime_r(&seconds, &tm) == null) return out[0..0];
+    const hour: u32 = @intCast(tm.tm_hour);
+    const minute: u32 = @intCast(tm.tm_min);
+    const second: u32 = @intCast(tm.tm_sec);
+    return std.fmt.bufPrint(out, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hour, minute, second }) catch out[0..0];
+}
+
 fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const notif_w: u16 = @min(full_area.width / 3, 40);
     if (notif_w < 4) return;
 
+    var skip = app.notifications.visibleCount() -| Notifications.MAX_VISIBLE;
     var y = full_area.y;
     const max_y = full_area.y +| full_area.height;
     var rendered: usize = 0;
     var iter = app.notifications.iter();
     while (iter.next()) |entry| {
         if (rendered >= Notifications.MAX_VISIBLE or y >= max_y) break;
+        if (skip > 0) {
+            skip -= 1;
+            continue;
+        }
 
         switch (entry.*) {
             .used => |en| {
                 var para = r.tui.Paragraph{
                     .border = .single,
-                    .style = .{ .fg = app.theme.text, .bg = app.theme.overlay_dark },
+                    .style = .{ .fg = app.theme.muted, .bg = app.theme.overlay_dark },
                     .padding = .{ .left = 1, .right = 1, .top = 0, .bottom = 0 },
                 };
                 var l = r.tui.Line{};
@@ -3290,13 +3322,22 @@ fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rec
                 const total_h = para.totalHeight(notif_w);
                 if (total_h == 0) continue;
 
+                const slide_t = 1.0 - @min(en.alive / Notifications.SLIDE_SECONDS, 1.0);
+                const slide: u16 = @intFromFloat(slide_t * slide_t * @as(f32, @floatFromInt(notif_w)));
+
                 const area = r.tui.Rect{
-                    .x = full_area.x +| full_area.width -| notif_w,
+                    .x = full_area.x +| full_area.width -| notif_w +| slide,
                     .y = y,
                     .width = notif_w,
                     .height = @min(total_h, max_y -| y),
                 };
                 para.renderSimple(arena, area, buf);
+
+                if (area.width >= 10) {
+                    var time_buf: [8]u8 = undefined;
+                    const stamp = notificationTime(en.sent_ms, &time_buf);
+                    buf.setStringMax(area.x +| 1, area.y, stamp, .{ .fg = app.theme.info, .bg = app.theme.overlay_dark }, area.width -| 2);
+                }
 
                 y +|= total_h +| 1;
                 rendered += 1;
@@ -4279,6 +4320,43 @@ fn formatTokenCount(dest: []u8, count: u64) []const u8 {
         const m = @as(f64, @floatFromInt(count)) / 1_000_000.0;
         return std.fmt.bufPrint(dest, "{d:.1}M", .{m}) catch "0M";
     }
+}
+
+test "notifications order oldest first and hide expired" {
+    const a = std.testing.allocator;
+    var n = Notifications{};
+    defer n.deinit(a);
+
+    try n.append(a, 100, "one", .{});
+    try n.append(a, 200, "two", .{});
+    try n.append(a, 300, "three", .{});
+
+    var got: [3][]const u8 = undefined;
+    var i: usize = 0;
+    var it = n.iter();
+    while (it.next()) |en| : (i += 1) got[i] = en.used.msg;
+    try std.testing.expectEqual(@as(usize, 3), i);
+    try std.testing.expectEqualStrings("one", got[0]);
+    try std.testing.expectEqualStrings("two", got[1]);
+    try std.testing.expectEqualStrings("three", got[2]);
+
+    n.tick(Notifications.DISPLAY_SECONDS);
+    try std.testing.expectEqual(@as(usize, 0), n.visibleCount());
+
+    try n.append(a, 400, "four", .{});
+    var four_it = n.iter();
+    const four = four_it.next().?.used;
+    try std.testing.expectEqualStrings("four", four.msg);
+    try std.testing.expectEqual(@as(i64, 400), four.sent_ms);
+
+    var m = Notifications{};
+    defer m.deinit(a);
+    for (0..Notifications.MAX_ENTRIES + 2) |k| {
+        try m.append(a, @intCast(k), "m{d}", .{k});
+    }
+    try std.testing.expectEqual(@as(usize, Notifications.MAX_ENTRIES), m.visibleCount());
+    var oldest_it = m.iter();
+    try std.testing.expectEqualStrings("m2", oldest_it.next().?.used.msg);
 }
 
 test "widget layout reserves sidebars and hides them on narrow terminals" {

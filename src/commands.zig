@@ -341,7 +341,7 @@ pub const Command = union(enum) {
                 app.running = true;
             },
             .push_notification => |msg| {
-                try app.notifications.append(app.gpa, "{s}", .{msg});
+                try app.notifications.append(app.gpa, app.nowMillis(), "{s}", .{msg});
             },
             .push_timeline_entry => |en| {
                 const entry = try r.util.deepClone(TimelineEntry, en, alloc);
@@ -412,21 +412,21 @@ fn showProviderOnboarding(app: *App, diagnostic: r.ContextFactory.AgentConfigDia
                 "Agent `{s}` has no model bound. Bind a model per agent with `blitz.set_agent_model(AGENT_TYPE, model)` or `model =` in `blitz.add_agent`. Edit {s}.\n\n{s}",
                 .{ name, config_path, example },
             );
-            app.notifications.append(app.gpa, "Agent `{s}` has no model bound", .{name}) catch {};
+            app.notifications.append(app.gpa, app.nowMillis(), "Agent `{s}` has no model bound", .{name}) catch {};
         },
         .invalid_provider => {
             app.pushSystemMessage(
                 "The configured provider is invalid or inactive. Check its handle and model binding in {s}.\n\n{s}",
                 .{ config_path, example },
             );
-            app.notifications.append(app.gpa, "Configured provider is invalid or inactive", .{}) catch {};
+            app.notifications.append(app.gpa, app.nowMillis(), "Configured provider is invalid or inactive", .{}) catch {};
         },
         .missing_api_key => |name| {
             app.pushSystemMessage(
                 "Provider configuration is missing the required environment variable `{s}`. Set it in the environment that launches Blitzdenk. Configuration lives at {s}.\n\n{s}",
                 .{ name, config_path, example },
             );
-            app.notifications.append(app.gpa, "Missing required environment variable: {s}", .{name}) catch {};
+            app.notifications.append(app.gpa, app.nowMillis(), "Missing required environment variable: {s}", .{name}) catch {};
         },
     }
 }

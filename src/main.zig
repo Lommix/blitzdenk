@@ -1187,7 +1187,7 @@ pub fn run(
                                                     app.cancelSshConnect();
                                                     app.exec_pool.clearSsh();
                                                     app.invalidatePathCompletions();
-                                                    app.notifications.append(gpa, "SSH mode disabled", .{}) catch {};
+                                                    app.notifications.append(gpa, app.nowMillis(), "SSH mode disabled", .{}) catch {};
                                                     app.input_buffer.clearRetainingCapacity();
                                                 },
                                             }
@@ -1294,7 +1294,7 @@ pub fn run(
                                     }
                                 },
                                 .passphrase => {
-                                    app.notifications.append(gpa, "SSH: passphrase entry canceled", .{}) catch {};
+                                    app.notifications.append(gpa, app.nowMillis(), "SSH: passphrase entry canceled", .{}) catch {};
                                     app.returnToText();
                                 },
                                 else => {},
