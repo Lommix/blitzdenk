@@ -962,7 +962,6 @@ pub fn run(
                                 .history_next => {
                                     if (app.historyDown()) continue;
                                 },
-                                .noop => {},
                                 .completion_next => {
                                     app.handleCompletion(.next);
                                     continue;
@@ -1587,7 +1586,6 @@ fn handleSshCommand(
         };
         probeRemoteHome(state, cmd_pool);
         state.notifications.append(gpa, "SSH mode enabled: {s}@{s}", .{ args.user, args.host }) catch {};
-        state.remote_cwd = args.cwd;
     } else {
         state.enterPassphrase(args.user, args.host, args.cwd);
     }

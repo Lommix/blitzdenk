@@ -2,7 +2,6 @@ const std = @import("std");
 const tui = @import("tui/root.zig");
 
 pub const Action = union(enum) {
-    noop,
     exit,
     scroll_down,
     scroll_up,
@@ -101,7 +100,6 @@ pub fn formatKey(key: tui.Key, buf: []u8) []const u8 {
 
 pub fn actionName(action: Action) []const u8 {
     return switch (action) {
-        .noop => "noop",
         .exit => "quit",
         .scroll_up => "scroll up",
         .scroll_down => "scroll down",

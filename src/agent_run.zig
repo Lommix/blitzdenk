@@ -7,9 +7,7 @@ pub const ProviderError = struct {
     status_code: u16,
     response_body: []const u8,
     is_retryable: bool,
-    retry_after_ms: ?u64,
     will_retry: bool = false,
-    attempt: u32 = 0,
 };
 
 pub const ToolResultEvent = struct {
@@ -287,9 +285,7 @@ pub const RunTask = struct {
             .status_code = info.status_code,
             .response_body = info.response_body,
             .is_retryable = info.is_retryable,
-            .retry_after_ms = info.retry_after_ms,
             .will_retry = info.will_retry,
-            .attempt = info.attempt,
         } }) catch |err| {
             log.err("dropped provider error event status={d}: {s}", .{ info.status_code, @errorName(err) });
         };
@@ -357,9 +353,7 @@ fn cloneEvent(alloc: std.mem.Allocator, event: Event) !Event {
             .status_code = value.status_code,
             .response_body = try alloc.dupe(u8, value.response_body),
             .is_retryable = value.is_retryable,
-            .retry_after_ms = value.retry_after_ms,
             .will_retry = value.will_retry,
-            .attempt = value.attempt,
         } },
         .complete => |value| .{ .complete = value },
         .failed => |value| .{ .failed = value },

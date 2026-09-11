@@ -17,11 +17,6 @@ const builtin_command_completions: []const CommandCompletion = &.{
     .{ .text = "/ssh", .description = "connect user@host:cwd" },
 };
 
-pub const UiState = union(enum) {
-    timeline,
-    password,
-};
-
 pub const AppFlags = packed struct {
     show_thinking: bool = false,
     show_diffs: bool = true,
@@ -96,51 +91,6 @@ pub const InputMode = union(enum) {
         cwd: []const u8,
     };
     pub const Wizard = r.wizard.Wizard;
-};
-
-pub const QueuedMessage = struct {
-    agent_id: r.AgentId,
-    entry: ?TimelineEntry = null,
-    parts: []const r.sdk.Part,
-};
-
-pub const MessageQueue = struct {
-    items: std.ArrayList(QueuedMessage) = .empty,
-
-    fn sameAgent(a: r.AgentId, b: r.AgentId) bool {
-        return a.index == b.index and a.generation == b.generation;
-    }
-
-    pub fn push(
-        self: *MessageQueue,
-        alloc: std.mem.Allocator,
-        agent_id: r.AgentId,
-        entry: ?TimelineEntry,
-        parts: []const r.sdk.Part,
-    ) !void {
-        try self.items.append(alloc, .{
-            .agent_id = agent_id,
-            .entry = entry,
-            .parts = parts,
-        });
-    }
-
-    pub fn popFor(self: *MessageQueue, agent_id: r.AgentId) ?QueuedMessage {
-        for (self.items.items, 0..) |item, i| {
-            if (sameAgent(item.agent_id, agent_id)) {
-                return self.items.orderedRemove(i);
-            }
-        }
-        return null;
-    }
-
-    pub fn count(self: *const MessageQueue) usize {
-        return self.items.items.len;
-    }
-
-    pub fn clear(self: *MessageQueue) void {
-        self.items.items.len = 0;
-    }
 };
 
 pub const Notifications = struct {
@@ -305,7 +255,6 @@ pub const App = struct {
     lua_reload_requested: std.atomic.Value(bool) = .init(false),
     lua_reload_failed: std.atomic.Value(bool) = .init(false),
     lua_reload_generation: std.atomic.Value(u64) = .init(0),
-    remote_cwd: []const u8 = "/",
     flags: AppFlags = .{},
     default_context_limit: u32 = CONTEXT_LIMIT,
     last_unbound_warn: ?[]const u8 = null,
@@ -323,10 +272,7 @@ pub const App = struct {
     step_count: u32 = 0,
     compaction_indicator_active: bool = false,
     compaction_completion_seen_count: usize = 0,
-    current_plan_file: ?[]const u8 = null,
     passphrase_args_buf: [512]u8 = undefined,
-    queued: MessageQueue = .{},
-    ui_state: UiState = .timeline,
     keymap: r.keys.KeyMap = .{},
     cmd_queue: r.cmd.CommandQueue,
     lua_vm: *r.lua.LuaVm,
@@ -639,7 +585,6 @@ pub const App = struct {
         // stale ptr/capacity don't cause UB on next append.
         self.input_buffer = .empty;
         self.timeline = .empty;
-        self.queued = .{};
         self.context_factory.resetLoadedTools() catch {};
         self.lua_vm.disableAllMcp();
         self.lua_vm.resetInjectDigest();
@@ -2021,20 +1966,6 @@ pub const App = struct {
         self.history_cursor = self.history.items.len;
     }
 
-    pub fn popQueuedMessage(self: *App, agent_id: r.AgentId, alloc: std.mem.Allocator) ?[]const r.sdk.Part {
-        const queued = self.queued.popFor(agent_id) orelse return null;
-
-        if (queued.entry) |entry| self.appendTimelineEntry(self.sessionAlloc(), entry) catch {};
-
-        const messages = r.agent_run.cloneMessages(alloc, &.{.{ .role = .user, .content = queued.parts }}) catch return null;
-        return messages[0].content;
-    }
-
-    pub fn popQueuedMessageOpaque(ptr: *anyopaque, agent_id: r.AgentId, alloc: std.mem.Allocator) ?[]const r.sdk.Part {
-        const self: *App = @ptrCast(@alignCast(ptr));
-        return self.popQueuedMessage(agent_id, alloc);
-    }
-
     pub fn dropStreamingPreview(self: *App) void {
         self.streaming_entry = null;
         self.sdk_preview_parts = .empty;
@@ -2448,26 +2379,6 @@ fn applyRegistryEvent(ctx: ?*anyopaque, event: r.agent_run.Event) void {
 pub const TimelineEntry = struct {
     role: TimelineRole,
     parts: []TimelinePart,
-
-    pub fn free(self: *TimelineEntry, alloc: std.mem.Allocator) void {
-        for (self.parts) |part| {
-            switch (part) {
-                .message => |slice| alloc.free(slice),
-                .plain_text => |slice| alloc.free(slice),
-                .thinking => |slice| alloc.free(slice),
-                .tool_call => |call| {
-                    alloc.free(call.call_id);
-                    alloc.free(call.tool_name);
-                },
-                .diff => |diff| {
-                    alloc.free(diff.diff_lines);
-                    alloc.free(diff.path);
-                },
-            }
-        }
-
-        alloc.free(self.parts);
-    }
 
     pub fn userMessageSimple(alloc: std.mem.Allocator, role: TimelineRole, msg: []const u8) !TimelineEntry {
         var parts = try alloc.alloc(TimelinePart, 1);
@@ -3855,7 +3766,6 @@ fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: TimelinePart.DiffE
     var p: r.tui.Paragraph = .{
         .border = .single,
         .sides = .left_only,
-        .dynamic_border = false,
         .reverse = true,
         .style = .{ .bg = theme.diff_surface },
     };
@@ -4076,15 +3986,6 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
             return l;
         }
 
-        var queued_buf: [64]u8 = undefined;
-        const queued_count = app.queued.count();
-        const queued_suffix: []const u8 = if (queued_count == 0)
-            ""
-        else if (queued_count == 1)
-            "(1 message queued up)"
-        else
-            std.fmt.bufPrint(&queued_buf, "({d} queued messages up)", .{queued_count}) catch "(queued messages up)";
-
         l.pushSpanPrint(alloc, "{s} (", .{spinner_str}, info) catch {};
         l.pushSpanPrint(alloc, "{s}", .{dur}, hl) catch {};
         l.pushSpanPrint(alloc, ")", .{}, info) catch {};
@@ -4122,10 +4023,6 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
             pushGradientWave(&l, alloc, state_str, app.theme.text_hl, app.theme.info, app.frame_count);
         } else if (state_str.len > 0) {
             l.pushSpanPrint(alloc, "{s}", .{state_str}, hl) catch {};
-        }
-
-        if (queued_count > 0) {
-            l.pushSpanPrint(alloc, " {s}", .{queued_suffix}, info) catch {};
         }
     } else if (waiting and state == .complete) {
         pushGradientWave(&l, alloc, "waiting", app.theme.text_hl, app.theme.info, app.frame_count);

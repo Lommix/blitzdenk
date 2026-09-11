@@ -233,18 +233,6 @@ test "wrapped iter with zero width yields nothing" {
     try std.testing.expect(it.next() == null);
 }
 
-pub fn renderError(buf: *Buffer, last_error: ?anyerror, detail: ?[]const u8, x: u16, y: u16, width: u16, height: u16) void {
-    const err_text: []const u8 = if (last_error) |err| @errorName(err) else "unknown error";
-    var err_buf: [128]u8 = undefined;
-    const display = std.fmt.bufPrint(&err_buf, "Error: {s}", .{err_text}) catch "Error";
-    const rows = renderWrappedText(buf, display, x, y, width, @min(height, 2), 0, .{ .fg = .red });
-    if (detail) |body| {
-        if (body.len > 0 and height > rows + 1) {
-            _ = renderWrappedText(buf, body, x, y +| rows +| 1, width, height - rows - 1, 0, .{ .fg = .red });
-        }
-    }
-}
-
 pub fn spinnerDots(frame_count: usize) []const u8 {
     const frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
     return frames[(frame_count / 6) % frames.len];
@@ -252,20 +240,6 @@ pub fn spinnerDots(frame_count: usize) []const u8 {
 
 pub fn spinnerBar(frame_count: usize) []const u8 {
     const frames = [_][]const u8{ "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃", "▁" };
-    return frames[(frame_count / 6) % frames.len];
-}
-
-pub fn spinnerWave(frame_count: usize) []const u8 {
-    const frames = [_][]const u8{
-        "▁▂▄▆█▆▄▂▁▂",
-        "▂▄▆█▆▄▂▁▂▄",
-        "▄▆█▆▄▂▁▂▄▆",
-        "▆█▆▄▂▁▂▄▆█",
-        "█▆▄▂▁▂▄▆█▆",
-        "▆▄▂▁▂▄▆█▆▄",
-        "▄▂▁▂▄▆█▆▄▂",
-        "▂▁▂▄▆█▆▄▂▁",
-    };
     return frames[(frame_count / 6) % frames.len];
 }
 

@@ -135,31 +135,6 @@ pub const Terminal = struct {
         return getSize(self.stdout.handle);
     }
 
-    /// Draw a frame. Calls render_fn to populate the buffer, then flushes only changed cells.
-    pub fn draw(self: *Terminal, render_fn: *const fn (area: Rect, buf: *Buffer) void) !void {
-        // Check for resize
-        const rect = self.size();
-        if (rect.width == 0 or rect.height == 0) return;
-        if (rect.width != self.current.rect.width or rect.height != self.current.rect.height) {
-            try self.current.resize(rect);
-            try self.previous.resize(rect);
-            // Clear terminal so stale content from the old layout is removed
-            var clr_buf: [16]u8 = undefined;
-            var clr_w = self.stdout.writerStreaming(self.io, &clr_buf);
-            clr_w.interface.writeAll("\x1b[2J") catch {};
-            clr_w.interface.flush() catch {};
-        }
-
-        self.current.clear();
-        render_fn(rect, &self.current);
-        self.applySelectionHighlight(&self.current);
-        try self.flush();
-
-        // Swap: copy current into previous (length-safe in case of mid-frame resize)
-        const copy_len = @min(self.previous.cells.len, self.current.cells.len);
-        @memcpy(self.previous.cells[0..copy_len], self.current.cells[0..copy_len]);
-    }
-
     /// Draw with a context value (avoids needing globals).
     pub fn drawWith(self: *Terminal, ctx: anytype, comptime render_fn: fn (@TypeOf(ctx), Rect, *Buffer) void) !void {
         const rect = self.size();
@@ -386,7 +361,6 @@ pub const Terminal = struct {
         action: MouseAction,
         x: u16,
         y: u16,
-        mods: Modifiers = .{},
     };
 
     pub const Event = union(enum) {
@@ -418,11 +392,6 @@ pub const Terminal = struct {
         const cx = std.fmt.parseInt(u16, cx_s, 10) catch return null;
         const cy = std.fmt.parseInt(u16, cy_s, 10) catch return null;
 
-        const mods: Modifiers = .{
-            .shift = (cb & 0b0000_0100) != 0,
-            .alt = (cb & 0b0000_1000) != 0,
-            .ctrl = (cb & 0b0001_0000) != 0,
-        };
         const btn_bits = cb & 0b1100_0011;
         const motion = (cb & 0b0010_0000) != 0;
 
@@ -447,7 +416,6 @@ pub const Terminal = struct {
             .action = action,
             .x = if (cx > 0) cx - 1 else 0,
             .y = if (cy > 0) cy - 1 else 0,
-            .mods = mods,
         };
     }
 

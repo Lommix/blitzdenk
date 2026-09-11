@@ -188,8 +188,4 @@ pub const Cell = struct {
     pub fn eql(self: Cell, other: Cell) bool {
         return self.char == other.char and self.style.eql(other.style);
     }
-
-    pub fn reset(self: *Cell) void {
-        self.* = .{};
-    }
 };

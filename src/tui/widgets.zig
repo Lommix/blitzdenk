@@ -12,38 +12,6 @@ pub const Cell = cell.Cell;
 
 pub const TAB_WIDTH: u16 = 4;
 
-// ── Type-erased Widget (dynamic dispatch) ──
-
-pub const Widget = struct {
-    ptr: *const anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        render: *const fn (ptr: *const anyopaque, area: Rect, buf: *Buffer) void,
-        height: *const fn (ptr: *const anyopaque, width: u16) u16,
-    };
-
-    pub fn render(self: Widget, area: Rect, buf: *Buffer) void {
-        self.vtable.render(self.ptr, area, buf);
-    }
-
-    pub fn from(ptr: anytype) Widget {
-        const Ptr = @TypeOf(ptr);
-        const T = @typeInfo(Ptr).pointer.child;
-        return .{
-            .ptr = ptr,
-            .vtable = &.{
-                .render = &struct {
-                    fn call(p: *const anyopaque, area: Rect, buf: *Buffer) void {
-                        const self: *const T = @ptrCast(@alignCast(p));
-                        self.render(area, buf);
-                    }
-                }.call,
-            },
-        };
-    }
-};
-
 // ── Block ──
 
 pub const Borders = packed struct {
@@ -53,7 +21,6 @@ pub const Borders = packed struct {
     left: bool = true,
 
     pub const all: Borders = .{};
-    pub const none: Borders = .{ .top = false, .right = false, .bottom = false, .left = false };
 };
 
 fn decodeCp(comptime s: []const u8) u21 {
@@ -67,8 +34,6 @@ pub const BorderSet = struct {
     br: u21,
     h: u21,
     v: u21,
-    t_left: u21,
-    t_right: u21,
 
     pub const single: BorderSet = .{
         .tl = decodeCp(icon.box_tl_round),
@@ -77,32 +42,10 @@ pub const BorderSet = struct {
         .br = decodeCp(icon.box_br_round),
         .h = decodeCp(icon.box_h),
         .v = decodeCp(icon.box_v),
-        .t_left = decodeCp(icon.box_t_right),
-        .t_right = decodeCp(icon.box_t_left),
-    };
-
-    pub const double: BorderSet = .{
-        .tl = decodeCp(icon.double_box_tl),
-        .tr = decodeCp(icon.double_box_tr),
-        .bl = decodeCp(icon.double_box_bl),
-        .br = decodeCp(icon.double_box_br),
-        .h = decodeCp(icon.double_box_h),
-        .v = decodeCp(icon.double_box_v),
-        .t_left = decodeCp(icon.double_box_t_right),
-        .t_right = decodeCp(icon.double_box_t_left),
     };
 };
 
 pub const Block = struct {
-    pub const TitleAlign = enum {
-        left,
-        right,
-        center,
-    };
-
-    title: ?[]const u8 = null,
-    title_style: ?Style = .{},
-    title_align: TitleAlign = .center,
     style: Style = .{},
     border_style: Style = .{},
     borders: Borders = .all,
@@ -168,20 +111,6 @@ pub const Block = struct {
             buf.set(area.x, area.y +| area.height -| 1, .{ .char = set.bl, .style = bs });
         if (self.borders.bottom and self.borders.right)
             buf.set(area.x +| area.width -| 1, area.y +| area.height -| 1, .{ .char = set.br, .style = bs });
-
-        // Title
-        if (self.title) |title| {
-            if (self.borders.top and title.len > 0) {
-                const max_len = area.width -| 4; // leave room for borders + padding
-                const title_len = @min(title.len, max_len);
-                const start_x = switch (self.title_align) {
-                    .left => area.x +| 2,
-                    .right => area.x +| area.width -| 2 -| title_len,
-                    .center => area.x +| ((area.width -| title_len) / 2),
-                };
-                buf.setStringMax(start_x, area.y, title, self.title_style orelse bs, max_len);
-            }
-        }
     }
 };
 
@@ -360,7 +289,6 @@ fn applySgr(style: *Style, params: []const u8) void {
 /// A block of styled lines. Mutable builder.
 pub const Text = struct {
     lines: std.ArrayList(Line) = .empty,
-    style: Style = .{},
 
     /// Parse ANSI SGR escapes and newlines into styled lines. Style carries across newlines. Content is copied.
     pub fn fromAnsi(alloc: std.mem.Allocator, text: []const u8) !Text {
@@ -423,19 +351,6 @@ pub const Text = struct {
     pub fn deinit(self: *Text, alloc: std.mem.Allocator) void {
         for (self.lines.items) |*line| line.deinit(alloc);
         self.lines.deinit(alloc);
-    }
-
-    pub fn pushLine(self: *Text, alloc: std.mem.Allocator, line: Line) !void {
-        try self.lines.append(alloc, line);
-    }
-
-    pub fn render(self: *const Text, area: Rect, buf: *Buffer) void {
-        var y = area.y;
-        for (self.lines.items) |*line| {
-            if (y >= area.y +| area.height) break;
-            line.render(area.x, y, area.width, buf);
-            y += 1;
-        }
     }
 };
 
@@ -857,151 +772,6 @@ pub const DiffLine = struct {
     content: []const u8,
 };
 
-pub const Diff = struct {
-    lines: []const DiffLine,
-    scroll_offset: usize = 0,
-    gutter_width: u16 = 5,
-    pub fn render(self: *const Diff, area: Rect, buf: *Buffer) void {
-        if (area.height == 0 or area.width == 0) return;
-
-        const height: usize = area.height;
-        var row: usize = 0;
-        var idx = self.scroll_offset;
-
-        while (idx < self.lines.len and row < height) : ({
-            idx += 1;
-            row += 1;
-        }) {
-            const line = self.lines[idx];
-            const y = area.y +| @as(u16, @intCast(row));
-
-            // Style based on line kind
-            const style: Style = switch (line.kind) {
-                .deletion => .{ .fg = .white, .bg = .{ .rgb = .{ .r = 0x3D, .g = 0x01, .b = 0x00 } } },
-                .addition => .{ .fg = .white, .bg = .{ .rgb = .{ .r = 0x00, .g = 0x30, .b = 0x10 } } },
-                .context => .{},
-                .header => .{ .fg = .cyan, .modifier = .{ .bold = true } },
-            };
-
-            // Fill entire row background
-            var fx = area.x;
-            while (fx < area.x +| area.width) : (fx += 1) {
-                buf.set(fx, y, .{ .char = ' ', .style = style });
-            }
-
-            var x = area.x;
-
-            // Gutter: right-aligned line number
-            if (line.line_number) |num| {
-                var num_buf: [10]u8 = undefined;
-                const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{num}) catch "";
-                const gw: usize = self.gutter_width -| 1;
-                if (num_str.len <= gw) {
-                    const pad_x = x +| @as(u16, @intCast(gw - num_str.len));
-                    const gutter_style: Style = .{ .fg = .bright_black, .bg = style.bg };
-                    buf.setString(pad_x, y, num_str, gutter_style);
-                }
-            }
-            x +|= self.gutter_width;
-
-            // Prefix character
-            const prefix: u21 = switch (line.kind) {
-                .deletion => '-',
-                .addition => '+',
-                .context => ' ',
-                .header => '@',
-            };
-            buf.set(x, y, .{ .char = prefix, .style = style });
-            x +|= 1;
-
-            // Space after prefix
-            x +|= 1;
-
-            // Content (truncated to area width)
-            var ci: usize = 0;
-            while (ci < line.content.len) {
-                if (x >= area.x +| area.width) break;
-                const len = std.unicode.utf8ByteSequenceLength(line.content[ci]) catch break;
-                if (ci + len > line.content.len) break;
-                const cp = std.unicode.utf8Decode(line.content[ci..][0..len]) catch break;
-                buf.set(x, y, .{ .char = cp, .style = style });
-                x +|= 1;
-                ci += len;
-            }
-        }
-    }
-};
-
-// ── List ──
-pub const ListItem = struct {
-    content: Line,
-    style: Style = .{},
-};
-
-pub const List = struct {
-    items: []const ListItem,
-    style: Style = .{},
-    highlight_style: Style = .{ .modifier = .{ .reverse = true } },
-    highlight_symbol: []const u8 = "> ",
-    selected: ?usize = null,
-
-    pub fn render(self: *const List, area: Rect, buf: *Buffer) void {
-        if (area.height == 0 or area.width == 0) return;
-
-        // Calculate scroll offset to keep selected item visible
-        const height: usize = area.height;
-        var offset: usize = 0;
-        if (self.selected) |sel| {
-            if (sel >= height) {
-                offset = sel - height + 1;
-            }
-        }
-
-        var y = area.y;
-        var i = offset;
-        while (i < self.items.len and y < area.y +| area.height) : (i += 1) {
-            const item = self.items[i];
-            const is_selected = self.selected != null and self.selected.? == i;
-
-            const base_style = if (is_selected) self.highlight_style else if (item.style.fg != .reset or item.style.bg != .reset) item.style else self.style;
-
-            // Apply row background
-            var fill_x = area.x;
-            while (fill_x < area.x +| area.width) : (fill_x += 1) {
-                buf.set(fill_x, y, .{ .char = ' ', .style = base_style });
-            }
-
-            var x = area.x;
-
-            // Draw highlight symbol
-            if (is_selected) {
-                buf.setString(x, y, self.highlight_symbol, base_style);
-                x +|= @as(u16, @intCast(self.highlight_symbol.len));
-            } else {
-                x +|= @as(u16, @intCast(self.highlight_symbol.len));
-            }
-
-            // Draw item content
-            for (item.content.spans.items) |span| {
-                const style = if (is_selected) base_style else if (span.style.fg != .reset or span.style.bg != .reset) span.style else base_style;
-
-                var si: usize = 0;
-                while (si < span.content.len) {
-                    if (x >= area.x +| area.width) break;
-                    const len = std.unicode.utf8ByteSequenceLength(span.content[si]) catch break;
-                    if (si + len > span.content.len) break;
-                    const cp = std.unicode.utf8Decode(span.content[si..][0..len]) catch break;
-                    buf.set(x, y, .{ .char = cp, .style = style });
-                    x +|= 1;
-                    si += len;
-                }
-            }
-
-            y += 1;
-        }
-    }
-};
-
 // ── Input ──
 
 pub const Input = struct {
@@ -1076,10 +846,8 @@ pub const Padding = struct {
     }
 };
 
-pub const BorderKind = enum { none, single, double };
+pub const BorderKind = enum { none, single };
 pub const Paragraph = struct {
-    pub const empty = Paragraph{};
-
     /// Per-side toggle. Effective only when `border != .none`.
     pub const Sides = packed struct {
         top: bool = true,
@@ -1092,10 +860,6 @@ pub const Paragraph = struct {
         pub const left_only: Sides = .{ .top = false, .right = false, .bottom = false, .left = true };
     };
 
-    /// If true, vertical-edge glyphs on rows with visible text use T-junctions
-    /// (├/┤ for single, ╠/╣ for double); empty rows keep the plain vertical
-    /// glyph. Applies to whichever vertical sides are enabled.
-    dynamic_border: bool = false,
     border: BorderKind = .none,
     sides: Sides = .all,
     /// `style.fg` colors the border glyphs. `style.bg` fills the whole
@@ -1142,7 +906,6 @@ pub const Paragraph = struct {
         return switch (self.border) {
             .none => null,
             .single => BorderSet.single,
-            .double => BorderSet.double,
         };
     }
 
@@ -1284,8 +1047,7 @@ pub const Paragraph = struct {
             if (sides.bottom and sides.right and aw >= 2) setClipped(buf, clip, right_x, bottom_y, .{ .char = set.br, .style = bs });
 
             // Vertical edges across the full inter-border span (covers padding
-            // rows). Content rows below may overdraw with T-junctions when
-            // dynamic_border is on.
+            // rows).
             {
                 const v_top: i32 = ay + border_top_h;
                 const v_end: i32 = bottom_y - border_bottom_h + 1;
@@ -1296,9 +1058,7 @@ pub const Paragraph = struct {
                 }
             }
 
-            // Vertical edges + content rows. Each content row is paired with
-            // its left/right glyphs so dynamic_border can swap to T-junctions
-            // on rows with visible text. Layout is reverse or forward.
+            // Vertical edges + content rows. Layout is reverse or forward.
             if (self.reverse) {
                 const rows_count: i32 = @intCast(rows.len);
                 const skip: i32 = @intCast(@min(self.scroll_offset, rows.len));
@@ -1309,15 +1069,8 @@ pub const Paragraph = struct {
                     y -= 1;
                 }) {
                     const row = &rows[@intCast(i)];
-                    const content_visible = self.dynamic_border and rowHasVisibleContent(row);
-                    if (sides.left) {
-                        const g: u21 = if (content_visible) set.t_left else set.v;
-                        setClipped(buf, clip, left_x, y, .{ .char = g, .style = bs });
-                    }
-                    if (sides.right and aw >= 2) {
-                        const g: u21 = if (content_visible) set.t_right else set.v;
-                        setClipped(buf, clip, right_x, y, .{ .char = g, .style = bs });
-                    }
+                    if (sides.left) setClipped(buf, clip, left_x, y, .{ .char = set.v, .style = bs });
+                    if (sides.right and aw >= 2) setClipped(buf, clip, right_x, y, .{ .char = set.v, .style = bs });
                     renderRowClipped(row, content_x, y, inner_w, buf, clip, para_bg);
                 }
                 // Vertical glyphs above where rows ran out (pad up to content_top).
@@ -1333,15 +1086,8 @@ pub const Paragraph = struct {
                 const y_end: i32 = content_bottom + 1;
                 for (visible) |*row| {
                     if (y >= y_end) break;
-                    const content_visible = self.dynamic_border and rowHasVisibleContent(row);
-                    if (sides.left) {
-                        const g: u21 = if (content_visible) set.t_left else set.v;
-                        setClipped(buf, clip, left_x, y, .{ .char = g, .style = bs });
-                    }
-                    if (sides.right and aw >= 2) {
-                        const g: u21 = if (content_visible) set.t_right else set.v;
-                        setClipped(buf, clip, right_x, y, .{ .char = g, .style = bs });
-                    }
+                    if (sides.left) setClipped(buf, clip, left_x, y, .{ .char = set.v, .style = bs });
+                    if (sides.right and aw >= 2) setClipped(buf, clip, right_x, y, .{ .char = set.v, .style = bs });
                     renderRowClipped(row, content_x, y, inner_w, buf, clip, para_bg);
                     y += 1;
                 }
@@ -1764,35 +1510,6 @@ fn renderRowClipped(row: *const Line, x: i32, y: i32, max_width: u16, buf: *Buff
         }
     }
 }
-
-/// True if any span in `row` contains a printable codepoint (not space, tab,
-/// or control char).
-fn rowHasVisibleContent(row: *const Line) bool {
-    for (row.spans.items) |span| {
-        var i: usize = 0;
-        while (i < span.content.len) {
-            const len = std.unicode.utf8ByteSequenceLength(span.content[i]) catch return false;
-            if (i + len > span.content.len) return false;
-            const cp = std.unicode.utf8Decode(span.content[i..][0..len]) catch return false;
-            i += len;
-            if (cp == ' ' or cp == '\t') continue;
-            if (cp < 0x20 or cp == 0x7F) continue;
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Password popup
-/// ╭───────── PASSWORD ────────────╮
-/// │          ********             │
-/// ╰───────────────────────────────╯
-pub const PasswordInput = struct {
-    input_value: []const u8,
-    paragraph: Paragraph = .{
-        .border = .single,
-    },
-};
 
 test "input keeps overflowing text inside the box" {
     var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });

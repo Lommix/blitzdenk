@@ -68,7 +68,6 @@ pub const Agent = struct {
     reasoning_effort: models.ReasoningEffort = .medium,
     metadata: std.heap.ArenaAllocator,
     tool_arena: std.heap.ArenaAllocator,
-    error_arena: std.heap.ArenaAllocator,
     injection_arena: std.heap.ArenaAllocator,
     state_arena: std.heap.ArenaAllocator,
     injection_mutex: std.Io.Mutex = .init,
@@ -99,7 +98,7 @@ pub const Agent = struct {
     status: Status = .idle,
     activity: Activity = .idle,
     last_error: ?anyerror = null,
-    last_provider_error: ?agent_run.ProviderError = null,
+    last_provider_retryable: bool = false,
     retry_count: u32 = 0,
     max_retries: u32 = 10,
     retry_delay_ms: u64 = 10_000,
@@ -140,7 +139,6 @@ pub const Agent = struct {
             .model = model,
             .metadata = metadata,
             .tool_arena = std.heap.ArenaAllocator.init(alloc),
-            .error_arena = std.heap.ArenaAllocator.init(alloc),
             .injection_arena = std.heap.ArenaAllocator.init(alloc),
             .state_arena = .init(alloc),
             .type_idx = options.identity.type_idx,
@@ -163,7 +161,6 @@ pub const Agent = struct {
         self.model.deinit(self.alloc);
         self.state_arena.deinit();
         self.injection_arena.deinit();
-        self.error_arena.deinit();
         self.tool_arena.deinit();
         self.metadata.deinit();
         self.* = undefined;
@@ -298,9 +295,8 @@ pub const Agent = struct {
     pub fn startModel(self: *Agent, model: sdk.LanguageModel, options: sdk.GenerateOptions) !void {
         if (self.task != null) return error.RunInProgress;
         self.run_model = model;
-        _ = self.error_arena.reset(.free_all);
         self.last_error = null;
-        self.last_provider_error = null;
+        self.last_provider_retryable = false;
         self.stop_requested.store(false, .release);
         self.flags.cancel = false;
         self.retry_at_ns = 0;
@@ -370,16 +366,7 @@ pub const Agent = struct {
             },
             .provider_error => |provider_error| {
                 self.endStream();
-                _ = self.error_arena.reset(.free_all);
-                self.last_provider_error = null;
-                self.last_provider_error = .{
-                    .status_code = provider_error.status_code,
-                    .response_body = try self.error_arena.allocator().dupe(u8, provider_error.response_body),
-                    .is_retryable = provider_error.is_retryable,
-                    .retry_after_ms = provider_error.retry_after_ms,
-                    .will_retry = provider_error.will_retry,
-                    .attempt = provider_error.attempt,
-                };
+                self.last_provider_retryable = provider_error.is_retryable;
                 if (provider_error.will_retry) {
                     self.status = .retrying;
                     self.activity = .retrying;
@@ -422,7 +409,7 @@ pub const Agent = struct {
             self.messages = owned;
             self.status = .complete;
             self.last_error = null;
-            self.last_provider_error = null;
+            self.last_provider_retryable = false;
             self.retry_count = 0;
             self.retry_at_ns = 0;
             self.flags.overflow_recovery = false;
@@ -465,8 +452,7 @@ pub const Agent = struct {
         if (self.contextNearLimit()) return false;
         if (failure == error.NetworkError or failure == error.Timeout) return true;
         if (failure != error.RateLimited and failure != error.ApiError) return false;
-        const provider_error = self.last_provider_error orelse return false;
-        return provider_error.is_retryable;
+        return self.last_provider_retryable;
     }
 
     pub fn contextNearLimit(self: *const Agent) bool {
@@ -1284,12 +1270,7 @@ test "retry guard blocks auto retry near context limit" {
     try std.testing.expect(agent.willAutoRetry(error.Timeout));
     try std.testing.expect(!agent.contextNearLimit());
 
-    agent.last_provider_error = .{
-        .status_code = 429,
-        .response_body = "",
-        .is_retryable = true,
-        .retry_after_ms = null,
-    };
+    agent.last_provider_retryable = true;
     try std.testing.expect(agent.willAutoRetry(error.RateLimited));
 
     agent.context_tokens = 292_000;

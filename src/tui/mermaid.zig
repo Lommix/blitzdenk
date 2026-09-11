@@ -236,26 +236,12 @@ fn putText(c: *Canvas, x: isize, y: isize, text: []const u8, max_cols: isize, st
     }
 }
 
-fn putTextCentered(c: *Canvas, center_x: isize, y: isize, text: []const u8, style: Style) void {
-    const w = widthOf(text);
-    if (w == 0) return;
-    putText(c, center_x - @as(isize, @intCast(w / 2)), y, text, @intCast(w), style);
-}
-
 fn putTextPaddedH(c: *Canvas, x: isize, y: isize, text: []const u8, style: Style, line_ch: u21, line_style: Style) void {
     const w: isize = @intCast(widthOf(text));
     if (w == 0) return;
     putText(c, x, y, text, w, style);
     c.put(x - 1, y, line_ch, line_style);
     c.put(x + w, y, line_ch, line_style);
-}
-
-fn putTextCenteredPaddedV(c: *Canvas, center_x: isize, y: isize, text: []const u8, style: Style, line_ch: u21, line_style: Style) void {
-    const w: isize = @intCast(widthOf(text));
-    if (w == 0) return;
-    putText(c, center_x - @divTrunc(w, 2), y, text, w, style);
-    c.put(center_x, y - 1, line_ch, line_style);
-    c.put(center_x, y + 1, line_ch, line_style);
 }
 
 fn isLineJoint(ch: u21) bool {

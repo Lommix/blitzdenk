@@ -57,18 +57,6 @@ pub const Buffer = struct {
         }
     }
 
-    pub fn setStyle(self: *Buffer, rect: Rect, style: Style) void {
-        var y = rect.y;
-        while (y < rect.y +| rect.height) : (y += 1) {
-            var x = rect.x;
-            while (x < rect.x +| rect.width) : (x += 1) {
-                if (self.indexOf(x, y)) |idx| {
-                    self.cells[idx].style = style;
-                }
-            }
-        }
-    }
-
     pub fn setString(self: *Buffer, x: u16, y: u16, string: []const u8, style: Style) void {
         self.setStringMax(x, y, string, style, std.math.maxInt(u16));
     }

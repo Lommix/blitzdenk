@@ -140,10 +140,6 @@ pub const MarkdownStreamRenderer = struct {
         return .{ .alloc = alloc, .gpa = alloc, .width = width, .mermaid_options = .{ .width = width } };
     }
 
-    pub fn initWithTheme(alloc: std.mem.Allocator, width: u16, theme: HighlightTheme) Self {
-        return .{ .alloc = alloc, .gpa = alloc, .width = width, .theme = theme, .mermaid_options = .{ .width = width, .theme = theme.mermaid } };
-    }
-
     pub fn initWithOptions(gpa: std.mem.Allocator, alloc: std.mem.Allocator, width: u16, theme: HighlightTheme, options: mermaid.Options) Self {
         var mermaid_options = options;
         mermaid_options.width = width;
@@ -161,16 +157,6 @@ pub const MarkdownStreamRenderer = struct {
             self.pending.items[i].deinit(self.alloc);
         }
         self.pending.deinit(self.alloc);
-    }
-
-    /// Hand the internal byte buffer to the caller. After this, `deinit` is a
-    /// no-op on the buffer, so previously-emitted span slices stay valid for
-    /// as long as the returned ArrayList lives. Caller must eventually
-    /// `.deinit(alloc)` it (same allocator used at `init`).
-    pub fn detachBuffer(self: *Self) std.ArrayList(u8) {
-        const out = self.buffer;
-        self.buffer = .empty;
-        return out;
     }
 
     pub fn feed(self: *Self, src: []const u8) !void {
