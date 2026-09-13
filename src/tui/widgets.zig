@@ -746,6 +746,20 @@ test "Paragraph renders markdown table full width" {
     try std.testing.expectEqual(@as(u21, '│'), buf.get(19, 2).char);
 }
 
+test "Paragraph prewrap leaves the paragraph intact when the inner width is zero" {
+    const alloc = std.testing.allocator;
+    var p: Paragraph = .{};
+    defer p.deinit(alloc);
+    try p.appendText(alloc, "a\nb", .{});
+    const lines_ptr = p.lines.items.ptr;
+    const lines_len = p.lines.items.len;
+
+    try std.testing.expect(!p.prewrap(alloc, 0));
+    try std.testing.expect(p.wrap);
+    try std.testing.expect(p.lines.items.ptr == lines_ptr);
+    try std.testing.expectEqual(lines_len, p.lines.items.len);
+}
+
 test "Paragraph reverse scroll_offset skips bottom rows" {
     const alloc = std.testing.allocator;
     var p: Paragraph = .{ .reverse = true, .scroll_offset = 1 };
@@ -957,6 +971,17 @@ pub const Paragraph = struct {
 
     pub fn totalHeight(self: *const Paragraph, width: u16) u16 {
         return @intCast(@min(self.totalHeightLong(width), std.math.maxInt(u16)));
+    }
+
+    pub fn prewrap(self: *Paragraph, alloc: std.mem.Allocator, width: u16) bool {
+        if (!self.wrap) return true;
+        const inner_w = self.innerWidth(width);
+        if (inner_w == 0) return false;
+        var wrapped: std.ArrayList(Line) = .empty;
+        buildParagraphRows(alloc, self.lines.items, inner_w, &wrapped) catch return false;
+        self.wrap = false;
+        self.lines = wrapped;
+        return true;
     }
 
     /// Convenience: render with clip = area. Use `render` directly for cases

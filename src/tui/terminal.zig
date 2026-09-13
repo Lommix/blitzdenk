@@ -38,6 +38,7 @@ pub fn RingQueue(comptime T: type, comptime capacity: usize) type {
 pub const Terminal = struct {
     current: Buffer,
     previous: Buffer,
+    resize_generation: u64 = 0,
     original_termios: posix.termios,
     stdout: std.Io.File,
     io: std.Io,
@@ -135,6 +136,10 @@ pub const Terminal = struct {
         return getSize(self.stdout.handle);
     }
 
+    pub fn selectionActive(self: *const Terminal) bool {
+        return self.selection != null;
+    }
+
     /// Draw with a context value (avoids needing globals).
     pub fn drawWith(self: *Terminal, ctx: anytype, comptime render_fn: fn (@TypeOf(ctx), Rect, *Buffer) void) !void {
         const rect = self.size();
@@ -142,6 +147,8 @@ pub const Terminal = struct {
         if (rect.width != self.current.rect.width or rect.height != self.current.rect.height) {
             try self.current.resize(rect);
             try self.previous.resize(rect);
+            self.resize_generation +%= 1;
+            self.selection = null;
             // Clear terminal so stale content from the old layout is removed
             var clr_buf: [16]u8 = undefined;
             var clr_w = self.stdout.writerStreaming(self.io, &clr_buf);

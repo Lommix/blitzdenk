@@ -75,6 +75,7 @@ pub const Agent = struct {
     tool_display: state.Locked(std.StringHashMapUnmanaged(state.ToolDisplay)) = .{},
     compaction: compact.State = .{},
     messages: ?agent_run.OwnedMessages = null,
+    history_gen: u64 = 0,
     tools: []const sdk.Tool = &.{},
     flags: Flags = .{},
     type_idx: u8,
@@ -171,6 +172,7 @@ pub const Agent = struct {
         const owned = try agent_run.OwnedMessages.clone(self.alloc, messages);
         if (self.messages) |*previous| previous.deinit();
         self.messages = owned;
+        self.history_gen +%= 1;
     }
 
     pub fn setSystemPrompt(self: *Agent, prompt: []const u8) !void {
@@ -407,6 +409,7 @@ pub const Agent = struct {
         if (next_messages) |owned| {
             if (self.messages) |*previous| previous.deinit();
             self.messages = owned;
+            self.history_gen +%= 1;
             self.status = .complete;
             self.last_error = null;
             self.last_provider_retryable = false;
@@ -420,6 +423,7 @@ pub const Agent = struct {
             if (checkpoint) |owned| {
                 if (self.messages) |*previous| previous.deinit();
                 self.messages = owned;
+                self.history_gen +%= 1;
             }
             const blocked_retry = failure != null and failure.? != error.Canceled and self.contextNearLimit();
             if ((is_overflow or blocked_retry) and !self.flags.overflow_recovery and has_checkpoint) {
@@ -631,6 +635,7 @@ pub const Agent = struct {
             self.compaction.completed_continue_after = self.compaction.continue_after;
             if (self.messages) |*previous| previous.deinit();
             self.messages = value.messages;
+            self.history_gen +%= 1;
             self.usage.add(value.usage);
             self.context_tokens = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, self.history());
             self.context_from_provider = false;

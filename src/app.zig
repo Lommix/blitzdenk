@@ -235,6 +235,7 @@ pub const App = struct {
     arena_streaming_snapshot: std.heap.ArenaAllocator,
     /// frame render arena
     arena_frame: std.heap.ArenaAllocator,
+    arena_timeline_render: std.heap.ArenaAllocator,
     mu: std.Io.Mutex = .init,
     io: std.Io,
     input_buffer: std.ArrayList(u8) = .empty,
@@ -274,6 +275,20 @@ pub const App = struct {
     timeline_heights_thinking: bool = false,
     timeline_heights_diffs: bool = false,
     timeline_heights_agent: bool = false,
+    timeline_render_cache: std.ArrayList(?TimelineRenderSlot) = .empty,
+    timeline_render_width: u16 = 0,
+    timeline_render_thinking: bool = false,
+    timeline_render_diffs: bool = false,
+    timeline_render_agent_key: ?u32 = null,
+    timeline_render_history_gen: u64 = 0,
+    timeline_render_valid: bool = false,
+    frame_snapshot: ?*const r.tui.Buffer = null,
+    frame_snapshot_valid: bool = false,
+    frame_snapshot_blocked: bool = false,
+    frame_snapshot_resize_gen: ?*const u64 = null,
+    frame_snapshot_resize_seen: u64 = 0,
+    frame_snapshot_tools: std.ArrayList(FrameSnapshotTool) = .empty,
+    frame_snapshot_calls: std.ArrayList(TimelinePart.ToolCallEntry) = .empty,
     input_mode: InputMode = .{ .text = .{} },
     context_factory: *r.ContextFactory,
     theme: Theme = .default,
@@ -343,6 +358,7 @@ pub const App = struct {
             .arena_streaming_preview = .init(gpa),
             .arena_streaming_snapshot = .init(gpa),
             .arena_frame = .init(gpa),
+            .arena_timeline_render = .init(gpa),
             .context_factory = agent_factory,
             .io = io,
             .cwd = cwd,
@@ -385,6 +401,10 @@ pub const App = struct {
         self.arena_streaming_preview.deinit();
         self.arena_streaming_snapshot.deinit();
         self.arena_frame.deinit();
+        self.arena_timeline_render.deinit();
+        self.timeline_render_cache.deinit(self.gpa);
+        self.frame_snapshot_tools.deinit(self.gpa);
+        self.frame_snapshot_calls.deinit(self.gpa);
         self.arena_session.deinit();
         self.arena_app.deinit();
     }
@@ -505,6 +525,12 @@ pub const App = struct {
     /// Session-scoped allocator. Wiped on reset.
     pub fn sessionAlloc(self: *App) std.mem.Allocator {
         return self.arena_session.allocator();
+    }
+
+    pub fn invalidateTimelineRenderCache(self: *App) void {
+        self.timeline_render_cache.clearRetainingCapacity();
+        self.timeline_render_valid = false;
+        _ = self.arena_timeline_render.reset(.free_all);
     }
 
     pub fn setToolStatus(
@@ -671,6 +697,7 @@ pub const App = struct {
         // stale ptr/capacity don't cause UB on next append.
         self.input_buffer = .empty;
         self.timeline = .empty;
+        self.invalidateTimelineRenderCache();
         self.context_factory.resetLoadedTools() catch {};
         self.lua_vm.disableAllMcp();
         self.lua_vm.resetInjectDigest();
@@ -693,6 +720,7 @@ pub const App = struct {
         try self.finishMcpLoad(false);
         self.finishSshConnect();
         self.registry.flush();
+        const running_before = self.running;
         for (&self.registry.slots, 0..) |*slot, index| {
             const state = slot.state.load(.acquire);
             if (state == .free or state == .reserved) continue;
@@ -703,6 +731,8 @@ pub const App = struct {
         }
         self.registry.retryDue();
         self.running = self.registry.countActive() > 0;
+        if (self.running != running_before) self.dirty = true;
+        if (self.drainPendingDiffs() > 0) self.dirty = true;
         self.updateSessionTime();
         self.tickPathCompletion();
 
@@ -711,6 +741,11 @@ pub const App = struct {
         {}
 
         self.syncCompactionIndicator();
+    }
+
+    pub fn animationActive(self: *const App) bool {
+        if (self.running) return true;
+        return self.timeline.items.len == 0 and !self.isMainAgentCompacting();
     }
 
     fn updateSessionTime(self: *App) void {
@@ -1397,6 +1432,7 @@ pub const App = struct {
             .role = .system,
             .parts = parts,
         }) catch return;
+        self.dirty = true;
     }
 
     pub fn warnUnboundAgentModels(self: *App) void {
@@ -1509,12 +1545,79 @@ pub const App = struct {
     }
 
     pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-        app.drainPendingDiffs();
         refreshLuaStatusBar(app);
+        if (renderFrameSnapshot(app, area, buf)) return;
         refreshLuaWidgets(app, area, buf);
         renderCore(app, area, buf);
         drawLuaPanels(app, buf);
         renderCompletionPopup(app, app.arena_frame.allocator(), app.widget_frame_input_area, app.widget_frame_progress_h, buf);
+        if (app.frame_snapshot_resize_gen) |gen| app.frame_snapshot_resize_seen = gen.*;
+    }
+
+    fn renderFrameSnapshot(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) bool {
+        if (!frameSnapshotUsable(app, buf)) return false;
+        const snap = app.frame_snapshot.?;
+
+        @memcpy(buf.cells, snap.cells);
+        refreshLuaWidgets(app, area, buf);
+
+        app.mu.lockUncancelable(app.io);
+        _ = app.arena_frame.reset(.free_all);
+        const frame_alloc = app.arena_frame.allocator();
+        repaintFrameSnapshotTools(app, frame_alloc, buf);
+        if (app.widget_frame_input_area.width > 0 and app.widget_frame_input_area.height > 0) {
+            const progress_line = mainProgressLine(app, frame_alloc);
+            renderInputWidget(app, frame_alloc, app.widget_frame_input_area, app.widget_frame_progress_h, progress_line, buf);
+        }
+        app.mu.unlock(app.io);
+
+        drawLuaPanels(app, buf);
+        return true;
+    }
+
+    fn frameSnapshotUsable(app: *App, buf: *const r.tui.Buffer) bool {
+        if (app.dirty or !app.frame_snapshot_valid or app.frame_snapshot_blocked) return false;
+        const snap = app.frame_snapshot orelse return false;
+        if (snap.rect.width != buf.rect.width or snap.rect.height != buf.rect.height) return false;
+        if (app.frame_snapshot_resize_gen) |gen| {
+            if (gen.* != app.frame_snapshot_resize_seen) return false;
+        }
+        if (app.notifications.hasVisible()) return false;
+        const now_ns: i128 = @intCast(std.Io.Clock.Timestamp.now(app.io, .awake).raw.nanoseconds);
+        return !app.lua_vm.errorAlive(now_ns);
+    }
+
+    fn repaintFrameSnapshotTools(app: *App, alloc: std.mem.Allocator, buf: *r.tui.Buffer) void {
+        const calls = app.frame_snapshot_calls.items;
+        for (app.frame_snapshot_tools.items) |tool| {
+            const item = buildToolGroupParagraph(app, alloc, calls[tool.calls_start..][0..tool.calls_len], tool.inner_w) catch {
+                app.frame_snapshot_valid = false;
+                continue;
+            };
+            var p = item.p;
+            p.padding = tool.padding;
+            p.scroll_offset = tool.scroll_offset;
+            p.render(alloc, tool.rect, tool.rect, buf);
+        }
+    }
+
+    fn recordFrameSnapshotTool(app: *App, item: RenderParagraphItem, rect: r.tui.Rect, inner_w: u16) void {
+        const calls = item.live_calls orelse return;
+        const start = app.frame_snapshot_calls.items.len;
+        app.frame_snapshot_calls.appendSlice(app.gpa, calls) catch {
+            app.frame_snapshot_valid = false;
+            return;
+        };
+        app.frame_snapshot_tools.append(app.gpa, .{
+            .calls_start = start,
+            .calls_len = calls.len,
+            .inner_w = inner_w,
+            .padding = item.p.padding,
+            .scroll_offset = item.p.scroll_offset,
+            .rect = rect,
+        }) catch {
+            app.frame_snapshot_valid = false;
+        };
     }
 
     fn renderCore(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
@@ -1522,6 +1625,9 @@ pub const App = struct {
         defer app.mu.unlock(app.io);
         _ = app.arena_frame.reset(.free_all);
         const frame_alloc = app.arena_frame.allocator();
+        app.frame_snapshot_tools.clearRetainingCapacity();
+        app.frame_snapshot_calls.clearRetainingCapacity();
+        app.frame_snapshot_valid = true;
 
         var widget_layout_fallback = WidgetLayout{ .area = area, .main = area };
         const cache_matches_area = app.widget_layout_valid and
@@ -2113,6 +2219,9 @@ pub const App = struct {
         agent.setMessages(history[0..turn_start]) catch return;
 
         self.timeline.shrinkRetainingCapacity(start);
+        if (self.timeline_render_cache.items.len > start) {
+            self.timeline_render_cache.shrinkRetainingCapacity(start);
+        }
         if (text.len > 0) {
             const alloc = self.sessionAlloc();
             self.input_buffer.clearRetainingCapacity();
@@ -2398,11 +2507,11 @@ pub const App = struct {
         try g.ptr.append(self.gpa, .{ .path = path, .before = before, .after = after });
     }
 
-    pub fn drainPendingDiffs(self: *App) void {
+    pub fn drainPendingDiffs(self: *App) usize {
         const g = self.pending_diffs.lock(self.io);
         const items = g.ptr.toOwnedSlice(self.gpa) catch {
             g.unlock();
-            return;
+            return 0;
         };
         g.unlock();
         for (items) |d| {
@@ -2412,6 +2521,7 @@ pub const App = struct {
             self.gpa.free(d.after);
         }
         self.gpa.free(items);
+        return items.len;
     }
 
     pub fn clearPendingDiffs(self: *App) void {
@@ -2553,6 +2663,7 @@ const RegistryDrainContext = struct {
 
 fn applyRegistryEvent(ctx: ?*anyopaque, event: r.agent_run.Event) void {
     const value: *RegistryDrainContext = @ptrCast(@alignCast(ctx.?));
+    value.app.dirty = true;
     value.app.applyRunEvent(value.id, event) catch |err| {
         switch (event) {
             .tool => |chunk| log.err("failed to apply tool stream event type={s} id={s} name={s}: {s}", .{ @tagName(chunk.type), chunk.tool_call_id, chunk.tool_name, @errorName(err) }),
@@ -3689,6 +3800,16 @@ const RenderParagraphItem = struct {
     p: r.tui.Paragraph,
     h: usize,
     is_tool_block: bool = false,
+    live_calls: ?[]const TimelinePart.ToolCallEntry = null,
+};
+
+const FrameSnapshotTool = struct {
+    calls_start: usize,
+    calls_len: usize,
+    inner_w: u16,
+    padding: r.tui.Padding,
+    scroll_offset: usize,
+    rect: r.tui.Rect,
 };
 
 /// Zero the facing padding between the last two stack items when both are tool
@@ -3722,10 +3843,12 @@ fn appendToolGroup(
     app: *App,
     calls: *std.ArrayList(TimelinePart.ToolCallEntry),
     inner_w: u16,
+    live: bool,
 ) !void {
     if (calls.items.len == 0) return;
     std.mem.reverse(TimelinePart.ToolCallEntry, calls.items);
-    const para = try buildToolGroupParagraph(app, arena, calls.items, inner_w);
+    var para = try buildToolGroupParagraph(app, arena, calls.items, inner_w);
+    if (live) para.live_calls = arena.dupe(TimelinePart.ToolCallEntry, calls.items) catch null;
     try out.append(arena, para);
     total.* += para.h;
     collapseToolPadding(out, total, inner_w);
@@ -3742,6 +3865,7 @@ fn buildTimelineEntryParagraph(
     app: *App,
     entry: TimelineEntry,
     inner_w: u16,
+    live_tool_blocks: bool,
 ) !void {
     // var buf: [255]u8 = undefined;
 
@@ -3758,7 +3882,7 @@ fn buildTimelineEntryParagraph(
         switch (part) {
             .tool_call => |call| try tool_call_list.append(arena, call),
             else => {
-                try appendToolGroup(arena, out, total, app, &tool_call_list, inner_w);
+                try appendToolGroup(arena, out, total, app, &tool_call_list, inner_w, live_tool_blocks);
                 switch (part) {
                     .thinking => |text| {
                         if (app.flags.show_thinking) {
@@ -3799,7 +3923,7 @@ fn buildTimelineEntryParagraph(
         }
     }
 
-    try appendToolGroup(arena, out, total, app, &tool_call_list, inner_w);
+    try appendToolGroup(arena, out, total, app, &tool_call_list, inner_w, live_tool_blocks);
 
     const show_header = entry.role != .agent or has_text;
     if (show_header) {
@@ -4055,21 +4179,26 @@ const TimelineStack = struct {
 
 const TimelineEntryHeight = struct { h: usize, bottom_tool: bool };
 
+const TimelineRenderSlot = struct {
+    items: []RenderParagraphItem,
+    total: usize,
+};
+
+fn toolCallChildId(app: *App, call: TimelinePart.ToolCallEntry) ?r.AgentId {
+    const statuses = app.tool_status_entries.lock(app.io);
+    defer statuses.unlock();
+    const status_agent = &statuses.ptr.agents[call.agent_id.index];
+    if (status_agent.generation != call.agent_id.generation) return null;
+    const entry = status_agent.entries.getPtr(call.call_id) orelse return null;
+    return entry.child_id;
+}
+
 fn timelineEntrySettled(app: *App, entry: TimelineEntry) bool {
     for (entry.parts) |part| switch (part) {
         .tool_call => |call| {
             const agent = app.registry.get(call.agent_id) orelse return false;
             if (findToolResult(agent, call.call_id) == null) return false;
-            var child_id: ?r.AgentId = null;
-            {
-                const statuses = app.tool_status_entries.lock(app.io);
-                defer statuses.unlock();
-                const status_agent = &statuses.ptr.agents[call.agent_id.index];
-                if (status_agent.generation == call.agent_id.generation) {
-                    if (status_agent.entries.getPtr(call.call_id)) |se| child_id = se.child_id;
-                }
-            }
-            if (child_id) |cid| {
+            if (toolCallChildId(app, call)) |cid| {
                 const child = app.registry.get(cid) orelse continue;
                 if (child.activity != .idle) return false;
             }
@@ -4077,6 +4206,72 @@ fn timelineEntrySettled(app: *App, entry: TimelineEntry) bool {
         else => {},
     };
     return true;
+}
+
+fn entryRenderCacheable(app: *App, entry: TimelineEntry, inner_w: u16) bool {
+    if (inner_w == 0) return false;
+    for (entry.parts) |part| switch (part) {
+        .tool_call => |call| {
+            const agent = app.registry.get(call.agent_id) orelse return false;
+            if (findToolResult(agent, call.call_id) == null) return false;
+            if (toolCallChildId(app, call)) |cid| {
+                if (app.registry.get(cid) != null) return false;
+            }
+        },
+        else => {},
+    };
+    return true;
+}
+
+fn timelineRenderCacheSync(app: *App, inner_w: u16, agent_key: ?u32, history_gen: u64) void {
+    const key_match = app.timeline_render_valid and
+        app.timeline_render_width == inner_w and
+        app.timeline_render_thinking == app.flags.show_thinking and
+        app.timeline_render_diffs == app.flags.show_diffs and
+        app.timeline_render_agent_key == agent_key and
+        app.timeline_render_history_gen == history_gen;
+    if (key_match) return;
+    app.invalidateTimelineRenderCache();
+    app.timeline_render_valid = true;
+    app.timeline_render_width = inner_w;
+    app.timeline_render_thinking = app.flags.show_thinking;
+    app.timeline_render_diffs = app.flags.show_diffs;
+    app.timeline_render_agent_key = agent_key;
+    app.timeline_render_history_gen = history_gen;
+}
+
+fn timelineRenderCacheGet(app: *App, idx: usize) ?TimelineRenderSlot {
+    if (idx >= app.timeline_render_cache.items.len) return null;
+    return app.timeline_render_cache.items[idx];
+}
+
+fn timelineRenderCachePut(app: *App, idx: usize, items: []RenderParagraphItem, inner_w: u16) ?usize {
+    const arena = app.arena_timeline_render.allocator();
+    var total: usize = 0;
+    for (items) |*item| {
+        if (!item.p.prewrap(arena, inner_w)) return null;
+        item.h = item.p.totalHeightLong(inner_w);
+        total += item.h;
+    }
+    while (app.timeline_render_cache.items.len < idx + 1) {
+        app.timeline_render_cache.append(app.gpa, null) catch return null;
+    }
+    app.timeline_render_cache.items[idx] = .{ .items = items, .total = total };
+    return total;
+}
+
+fn appendEntryRenderItems(
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(RenderParagraphItem),
+    total: *usize,
+    items: []const RenderParagraphItem,
+    inner_w: u16,
+) !void {
+    for (items) |item| {
+        try out.append(alloc, item);
+        total.* += item.h;
+        collapseToolPadding(out, total, inner_w);
+    }
 }
 
 fn timelineEntryHeights(app: *App, alloc: std.mem.Allocator, inner_w: u16) []const TimelineEntryHeight {
@@ -4107,7 +4302,7 @@ fn timelineEntryHeights(app: *App, alloc: std.mem.Allocator, inner_w: u16) []con
 
         var scratch: std.ArrayList(RenderParagraphItem) = .empty;
         var delta: usize = 0;
-        buildTimelineEntryParagraph(alloc, &scratch, &delta, app, entry, inner_w) catch break;
+        buildTimelineEntryParagraph(alloc, &scratch, &delta, app, entry, inner_w, false) catch break;
         const top_tool = scratch.items.len > 0 and scratch.items[scratch.items.len - 1].is_tool_block;
         if (chain_bottom_tool and top_tool) delta -|= 2;
         const bottom_tool = scratch.items.len > 0 and scratch.items[0].is_tool_block;
@@ -4119,6 +4314,9 @@ fn timelineEntryHeights(app: *App, alloc: std.mem.Allocator, inner_w: u16) []con
 fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u16) !TimelineStack {
     var s = TimelineStack{};
     const maybe_agent: ?*r.agent.Agent = if (app.main_agent_id) |id| app.registry.get(id) else null;
+    const agent_key: ?u32 = if (maybe_agent != null) app.main_agent_id.?.pack() else null;
+    const history_gen: u64 = if (maybe_agent) |agent| agent.history_gen else 0;
+    timelineRenderCacheSync(app, inner_w, agent_key, history_gen);
 
     var scroll_offset_usize: usize = if (app.auto_scroll) 0 else app.scroll_offset;
     const target: usize = @as(usize, inner_h) +| scroll_offset_usize;
@@ -4156,12 +4354,12 @@ fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h
             try buildTimelineEntryParagraph(alloc, &s.items, &s.total, app, .{
                 .role = .agent,
                 .parts = parts,
-            }, inner_w);
+            }, inner_w, true);
         }
     }
 
     if (app.streaming_entry) |entry| {
-        try buildTimelineEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w);
+        try buildTimelineEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w, true);
     }
 
     while (i > 0 and s.total < target) {
@@ -4170,7 +4368,17 @@ fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h
 
         if (maybe_agent == null and entry.role != .system) continue;
 
-        try buildTimelineEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w);
+        if (timelineRenderCacheGet(app, i)) |slot| {
+            try appendEntryRenderItems(alloc, &s.items, &s.total, slot.items, inner_w);
+        } else {
+            var scratch: std.ArrayList(RenderParagraphItem) = .empty;
+            var delta: usize = 0;
+            const cacheable = entryRenderCacheable(app, entry, inner_w);
+            const build_alloc = if (cacheable) app.arena_timeline_render.allocator() else alloc;
+            try buildTimelineEntryParagraph(build_alloc, &scratch, &delta, app, entry, inner_w, !cacheable);
+            if (cacheable) _ = timelineRenderCachePut(app, i, scratch.items, inner_w);
+            try appendEntryRenderItems(alloc, &s.items, &s.total, scratch.items, inner_w);
+        }
     }
 
     const heights = timelineEntryHeights(app, alloc, inner_w);
@@ -4184,7 +4392,17 @@ fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h
         if (maybe_agent == null and entry.role != .system) continue;
         var scratch: std.ArrayList(RenderParagraphItem) = .empty;
         var delta: usize = 0;
-        buildTimelineEntryParagraph(alloc, &scratch, &delta, app, entry, inner_w) catch break;
+        if (timelineRenderCacheGet(app, j)) |slot| {
+            scratch.appendSlice(alloc, slot.items) catch break;
+            delta = slot.total;
+        } else {
+            const cacheable = entryRenderCacheable(app, entry, inner_w);
+            const build_alloc = if (cacheable) app.arena_timeline_render.allocator() else alloc;
+            buildTimelineEntryParagraph(build_alloc, &scratch, &delta, app, entry, inner_w, !cacheable) catch break;
+            if (cacheable) {
+                if (timelineRenderCachePut(app, j, scratch.items, inner_w)) |cached_total| delta = cached_total;
+            }
+        }
         const top_tool = scratch.items.len > 0 and scratch.items[scratch.items.len - 1].is_tool_block;
         if (fresh_bottom_tool and top_tool) delta -|= 2;
         if (scratch.items.len > 0) {
@@ -4254,6 +4472,11 @@ fn renderTimelineStack(app: *App, s: TimelineStack, area: r.tui.Rect, buf: *r.tu
             .width = inner_w,
             .height = @intCast(visible_bottom - visible_top),
         };
+        if (e.live_calls != null) {
+            var recorded = e;
+            recorded.p.scroll_offset = p.scroll_offset;
+            app.recordFrameSnapshotTool(recorded, sub, inner_w);
+        }
         p.render(alloc, sub, area, buf);
     }
 }
@@ -4947,7 +5170,9 @@ fn undoTestApp() App {
     var app: App = undefined;
     app.io = std.testing.io;
     app.arena_session = .init(std.testing.allocator);
+    app.arena_timeline_render = .init(std.testing.allocator);
     app.timeline = .empty;
+    app.timeline_render_cache = .empty;
     app.input_buffer = .empty;
     app.input_cursor = 0;
     app.input_mode = .{ .text = .{} };
@@ -4959,6 +5184,7 @@ fn undoTestApp() App {
 
 fn undoTestTeardown(app: *App) void {
     app.arena_session.deinit();
+    app.arena_timeline_render.deinit();
     app.registry.deinit();
     std.testing.allocator.destroy(app.registry);
 }
@@ -5110,6 +5336,7 @@ test "undoLastTurn does nothing without a user entry" {
 test "undoLastTurn does not fire while running" {
     var app = undoTestApp();
     defer app.arena_session.deinit();
+    defer app.arena_timeline_render.deinit();
     app.running = true;
 
     const alloc = app.sessionAlloc();
@@ -6032,4 +6259,514 @@ test "wizard skip writes defaults, honors marker, and existing provider.lua wins
     const preserved = try tmp.dir.readFileAlloc(std.testing.io, r.wizard.PROVIDER_LUA, std.testing.allocator, .limited(64 * 1024));
     defer std.testing.allocator.free(preserved);
     try std.testing.expectEqualStrings(existing, preserved);
+}
+
+test "animation stays live for running agents and the welcome screen" {
+    var app: App = undefined;
+    app.timeline = .empty;
+    app.main_agent_id = null;
+    app.running = false;
+    try std.testing.expect(app.animationActive());
+
+    app.running = true;
+    try std.testing.expect(app.animationActive());
+
+    app.running = false;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    const alloc = app.sessionAlloc();
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .user, "hello"));
+    try std.testing.expect(!app.animationActive());
+}
+
+test "retryable provider errors still mark the frame dirty" {
+    var app: App = undefined;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.arena_streaming_preview = .init(std.testing.allocator);
+    defer app.arena_streaming_preview.deinit();
+    app.main_agent_id = .{ .index = 0, .generation = 7 };
+    app.dirty = false;
+
+    var drain_context = RegistryDrainContext{ .app = &app, .id = .{ .index = 1, .generation = 0 } };
+    applyRegistryEvent(&drain_context, .{ .provider_error = .{
+        .status_code = 500,
+        .response_body = "",
+        .is_retryable = true,
+        .will_retry = true,
+    } });
+
+    try std.testing.expect(app.dirty);
+}
+
+test "draining queued diffs reports the materialized count" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.gpa = std.testing.allocator;
+    app.pending_diffs = .{};
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.arena_streaming_preview = .init(std.testing.allocator);
+    defer app.arena_streaming_preview.deinit();
+    app.arena_streaming_snapshot = .init(std.testing.allocator);
+    defer app.arena_streaming_snapshot.deinit();
+    app.timeline = .empty;
+    app.streaming_entry = null;
+    app.sdk_preview_parts = .empty;
+    app.sdk_preview_flushed = false;
+    app.main_agent_id = .{ .index = 0, .generation = 0 };
+    app.event_bus = .{};
+
+    try std.testing.expectEqual(@as(usize, 0), app.drainPendingDiffs());
+    try app.queueDiffToHistory(.{ .path = "demo.txt", .before = null, .after = "content" });
+    try std.testing.expectEqual(@as(usize, 1), app.drainPendingDiffs());
+    try std.testing.expectEqual(@as(usize, 1), app.timeline.items.len);
+    try std.testing.expectEqual(@as(usize, 0), app.drainPendingDiffs());
+}
+
+fn timelineCacheTestApp(app: *App) void {
+    app.io = std.testing.io;
+    app.gpa = std.testing.allocator;
+    app.arena_session = .init(std.testing.allocator);
+    app.arena_app = .init(std.testing.allocator);
+    app.arena_timeline_render = .init(std.testing.allocator);
+    app.timeline = .empty;
+    app.timeline_heights = .empty;
+    app.timeline_heights_width = 0;
+    app.timeline_heights_thinking = false;
+    app.timeline_heights_diffs = true;
+    app.timeline_heights_agent = false;
+    app.timeline_render_cache = .empty;
+    app.timeline_render_valid = false;
+    app.frame_snapshot = null;
+    app.frame_snapshot_valid = false;
+    app.frame_snapshot_blocked = false;
+    app.frame_snapshot_resize_gen = null;
+    app.frame_snapshot_resize_seen = 0;
+    app.frame_snapshot_tools = .empty;
+    app.frame_snapshot_calls = .empty;
+    app.flags = .{};
+    app.theme = .default;
+    app.tool_status_entries = .{};
+    app.main_agent_id = null;
+    app.auto_scroll = true;
+    app.scroll_offset = 0;
+    app.streaming_entry = null;
+    app.active_permission = null;
+    app.frame_count = 0;
+}
+
+fn timelineCacheTestDeinit(app: *App) void {
+    app.timeline_render_cache.deinit(app.gpa);
+    app.frame_snapshot_tools.deinit(app.gpa);
+    app.frame_snapshot_calls.deinit(app.gpa);
+    app.arena_timeline_render.deinit();
+    app.arena_app.deinit();
+    app.arena_session.deinit();
+}
+
+fn timelineCacheTestAgent(app: *App, registry: *r.agent_registry.Registry) !r.AgentId {
+    app.registry = registry;
+    const id = registry.reserve().?;
+    _ = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    app.main_agent_id = id;
+    return id;
+}
+
+test "settled timeline entries reuse the render cache across frames" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    const alloc = app.sessionAlloc();
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .system, "hello **cache** world"));
+
+    var total_first: usize = 0;
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        const s = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+        total_first = s.total;
+        try std.testing.expect(s.total > 0);
+        try std.testing.expectEqual(@as(usize, 1), app.timeline_render_cache.items.len);
+        try std.testing.expect(app.timeline_render_cache.items[0] != null);
+    }
+
+    const cached_lines_ptr = app.timeline_render_cache.items[0].?.items[0].p.lines.items.ptr;
+    const cached_total = app.timeline_render_cache.items[0].?.total;
+    app.frame_count += 6;
+
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        const s = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+        try std.testing.expectEqual(total_first, s.total);
+        try std.testing.expect(s.items.items[0].p.lines.items.ptr == cached_lines_ptr);
+        try std.testing.expect(!s.items.items[0].p.wrap);
+    }
+    try std.testing.expectEqual(cached_total, total_first);
+}
+
+test "timeline render cache invalidates on width change" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    const alloc = app.sessionAlloc();
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .system, "some longer message that wraps over rows"));
+
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        _ = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+    }
+    const wide_total = app.timeline_render_cache.items[0].?.total;
+    const wide_ptr = app.timeline_render_cache.items[0].?.items[0].p.lines.items.ptr;
+
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        _ = try buildTimelineStack(&app, frame.allocator(), 12, 10);
+    }
+    try std.testing.expectEqual(@as(u16, 12), app.timeline_render_width);
+    try std.testing.expect(app.timeline_render_cache.items[0] != null);
+    try std.testing.expect(app.timeline_render_cache.items[0].?.items[0].p.lines.items.ptr != wide_ptr);
+    try std.testing.expect(app.timeline_render_cache.items[0].?.total > wide_total);
+}
+
+test "timeline render cache invalidates on timeline mutation" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    const alloc = app.sessionAlloc();
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .system, "first entry"));
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .system, "second entry"));
+
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        _ = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+    }
+    try std.testing.expectEqual(@as(usize, 2), app.timeline_render_cache.items.len);
+    try std.testing.expect(app.timeline_render_cache.items[0] != null);
+    try std.testing.expect(app.timeline_render_cache.items[1] != null);
+    const first_total = app.timeline_render_cache.items[0].?.total;
+
+    app.timeline.shrinkRetainingCapacity(1);
+    app.invalidateTimelineRenderCache();
+
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        _ = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+    }
+    try std.testing.expectEqual(@as(usize, 1), app.timeline_render_cache.items.len);
+    try std.testing.expect(app.timeline_render_cache.items[0] != null);
+    try std.testing.expectEqual(first_total, app.timeline_render_cache.items[0].?.total);
+}
+
+test "running tool calls stay out of the cache and keep spinning" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const id = try timelineCacheTestAgent(&app, &registry);
+    registry.get(id).?.activity = .processing;
+
+    const alloc = app.sessionAlloc();
+    const parts = try alloc.alloc(TimelinePart, 1);
+    parts[0] = .{ .tool_call = .{
+        .agent_id = id,
+        .call_id = "call_volatile",
+        .tool_name = "edit",
+    } };
+    try app.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
+
+    const glyph_first = text_utils.spinnerDots(app.frame_count);
+    var glyph_span_first: []const u8 = "";
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        const s = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+        glyph_span_first = s.items.items[0].p.lines.items[0].spans.items[0].content;
+        try std.testing.expectEqualStrings(glyph_first, glyph_span_first);
+    }
+    try std.testing.expectEqual(@as(usize, 0), app.timeline_render_cache.items.len);
+
+    app.frame_count += 6;
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        const s = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+        const glyph_span_second = s.items.items[0].p.lines.items[0].spans.items[0].content;
+        try std.testing.expect(!std.mem.eql(u8, glyph_span_first, glyph_span_second));
+        try std.testing.expectEqualStrings(text_utils.spinnerDots(app.frame_count), glyph_span_second);
+    }
+    try std.testing.expectEqual(@as(usize, 0), app.timeline_render_cache.items.len);
+}
+
+test "snapshot fast path repaints the running tool block spinner" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const id = try timelineCacheTestAgent(&app, &registry);
+    registry.get(id).?.activity = .processing;
+
+    const alloc = app.sessionAlloc();
+    const parts = try alloc.alloc(TimelinePart, 1);
+    parts[0] = .{ .tool_call = .{
+        .agent_id = id,
+        .call_id = "call_running",
+        .tool_name = "edit",
+    } };
+    try app.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
+
+    var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer frame.deinit();
+    var buf = try r.tui.Buffer.init(std.testing.allocator, .{ .x = 0, .y = 0, .width = 40, .height = 10 });
+    defer buf.deinit();
+
+    const stack = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+    app.frame_snapshot_valid = true;
+    renderTimelineStack(&app, stack, buf.rect, &buf);
+    try std.testing.expectEqual(@as(usize, 1), app.frame_snapshot_tools.items.len);
+
+    const tool = app.frame_snapshot_tools.items[0];
+    buf.fill(tool.rect, .{});
+    app.frame_count += 6;
+    app.repaintFrameSnapshotTools(frame.allocator(), &buf);
+
+    const want = try std.unicode.utf8Decode(text_utils.spinnerDots(app.frame_count));
+    const glyph_x = tool.rect.x +| tool.padding.left;
+    const glyph_y = tool.rect.y +| tool.padding.top;
+    try std.testing.expectEqual(want, buf.get(glyph_x, glyph_y).char);
+    try std.testing.expectEqual(@as(u21, ' '), buf.get(tool.rect.x, tool.rect.y).char);
+}
+
+const ScribbleAllocator = struct {
+    child: std.mem.Allocator,
+
+    fn init(child: std.mem.Allocator) ScribbleAllocator {
+        return .{ .child = child };
+    }
+
+    fn allocator(self: *ScribbleAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *ScribbleAllocator = @ptrCast(@alignCast(ctx));
+        return self.child.vtable.alloc(self.child.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *ScribbleAllocator = @ptrCast(@alignCast(ctx));
+        return self.child.vtable.resize(self.child.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        _ = ctx;
+        _ = alignment;
+        _ = new_len;
+        _ = ret_addr;
+        _ = memory;
+        return null;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        @memset(memory, 0xAA);
+        const self: *ScribbleAllocator = @ptrCast(@alignCast(ctx));
+        self.child.vtable.free(self.child.ptr, memory, alignment, ret_addr);
+    }
+};
+
+test "snapshot fast path survives a calls buffer realloc" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const id = try timelineCacheTestAgent(&app, &registry);
+    registry.get(id).?.activity = .processing;
+
+    const alloc = app.sessionAlloc();
+    for ([_][]const u8{ "call_left", "call_mid", "call_right" }) |group| {
+        const parts = try alloc.alloc(TimelinePart, 10);
+        for (parts, 0..) |*part, i| part.* = .{ .tool_call = .{
+            .agent_id = id,
+            .call_id = try std.fmt.allocPrint(alloc, "{s}_{d}", .{ group, i }),
+            .tool_name = "edit",
+        } };
+        try app.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
+    }
+
+    var scribble = ScribbleAllocator.init(std.testing.allocator);
+    app.gpa = scribble.allocator();
+
+    var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer frame.deinit();
+    var buf = try r.tui.Buffer.init(std.testing.allocator, .{ .x = 0, .y = 0, .width = 40, .height = 40 });
+    defer buf.deinit();
+
+    const stack = try buildTimelineStack(&app, frame.allocator(), 40, 40);
+    app.frame_snapshot_valid = true;
+    renderTimelineStack(&app, stack, buf.rect, &buf);
+    try std.testing.expectEqual(@as(usize, 3), app.frame_snapshot_tools.items.len);
+    try std.testing.expectEqual(@as(usize, 30), app.frame_snapshot_calls.items.len);
+
+    for (app.frame_snapshot_tools.items) |tool| buf.fill(tool.rect, .{});
+    app.frame_count += 6;
+    app.repaintFrameSnapshotTools(frame.allocator(), &buf);
+
+    const want = try std.unicode.utf8Decode(text_utils.spinnerDots(app.frame_count));
+    for (app.frame_snapshot_tools.items) |tool| {
+        const glyph_x = tool.rect.x +| tool.padding.left;
+        const glyph_y = tool.rect.y +| tool.padding.top;
+        try std.testing.expectEqual(want, buf.get(glyph_x, glyph_y).char);
+    }
+}
+
+test "adjacent tool entries keep one layout across the settle boundary" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const id = try timelineCacheTestAgent(&app, &registry);
+    const agent = registry.get(id).?;
+    try agent.setMessages(&.{
+        .{ .role = .tool, .content = &.{.{ .tool_result = .{ .id = "call_a", .name = "bash", .output = "a" } }} },
+        .{ .role = .tool, .content = &.{.{ .tool_result = .{ .id = "call_b", .name = "bash", .output = "b" } }} },
+    });
+
+    const alloc = app.sessionAlloc();
+    const first_parts = try alloc.alloc(TimelinePart, 1);
+    first_parts[0] = .{ .tool_call = .{ .agent_id = id, .call_id = "call_a", .tool_name = "bash" } };
+    try app.appendTimelineEntry(alloc, .{ .role = .agent, .parts = first_parts });
+    const second_parts = try alloc.alloc(TimelinePart, 1);
+    second_parts[0] = .{ .tool_call = .{ .agent_id = id, .call_id = "call_b", .tool_name = "bash" } };
+    try app.appendTimelineEntry(alloc, .{ .role = .agent, .parts = second_parts });
+
+    var fill_total: usize = 0;
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        const s = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+        fill_total = s.total;
+        try std.testing.expectEqual(@as(usize, 4), s.total);
+    }
+    try std.testing.expect(app.timeline_render_cache.items[0] != null);
+    try std.testing.expect(app.timeline_render_cache.items[1] != null);
+    try std.testing.expectEqual(@as(u16, 1), app.timeline_render_cache.items[0].?.items[0].p.padding.bottom);
+
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        const s = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+        try std.testing.expectEqual(fill_total, s.total);
+        try std.testing.expectEqual(@as(u16, 0), s.items.items[0].p.padding.top);
+        try std.testing.expectEqual(@as(u16, 1), s.items.items[0].p.padding.bottom);
+        try std.testing.expectEqual(@as(u16, 0), s.items.items[1].p.padding.bottom);
+        try std.testing.expectEqual(@as(u16, 1), s.items.items[1].p.padding.top);
+    }
+    try std.testing.expectEqual(@as(u16, 1), app.timeline_render_cache.items[0].?.items[0].p.padding.bottom);
+    try std.testing.expectEqual(@as(u16, 1), app.timeline_render_cache.items[1].?.items[0].p.padding.top);
+}
+
+test "rewriting the agent history drops cached entries" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const id = try timelineCacheTestAgent(&app, &registry);
+    const agent = registry.get(id).?;
+    try agent.setMessages(&.{
+        .{ .role = .tool, .content = &.{.{ .tool_result = .{ .id = "call_keep", .name = "bash", .output = "kept" } }} },
+    });
+
+    const alloc = app.sessionAlloc();
+    const parts = try alloc.alloc(TimelinePart, 1);
+    parts[0] = .{ .tool_call = .{ .agent_id = id, .call_id = "call_keep", .tool_name = "bash" } };
+    try app.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
+
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        _ = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+    }
+    try std.testing.expect(app.timeline_render_cache.items[0] != null);
+
+    try agent.setMessages(&.{r.sdk.UserMessage("history rewritten")});
+
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        const s = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+        try std.testing.expectEqual(@as(usize, 0), app.timeline_render_cache.items.len);
+        const glyph = s.items.items[0].p.lines.items[0].spans.items[0].content;
+        try std.testing.expectEqualStrings(text_utils.spinnerDots(app.frame_count), glyph);
+    }
+}
+
+test "tool entries with live children stay uncached and keep updating" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const id = try timelineCacheTestAgent(&app, &registry);
+    const child_id = registry.reserve().?;
+    _ = try registry.activate(child_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    const agent = registry.get(id).?;
+    try agent.setMessages(&.{
+        .{ .role = .tool, .content = &.{.{ .tool_result = .{ .id = "call_child", .name = "bash", .output = "done" } }} },
+    });
+    try app.setToolChild(id, "call_child", child_id);
+
+    const alloc = app.sessionAlloc();
+    const parts = try alloc.alloc(TimelinePart, 1);
+    parts[0] = .{ .tool_call = .{ .agent_id = id, .call_id = "call_child", .tool_name = "bash" } };
+    try app.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
+
+    registry.get(child_id).?.tokens_per_second = 5;
+
+    var tps_span_first: []const u8 = "";
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        const s = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+        tps_span_first = s.items.items[0].p.lines.items[0].spans.items[4].content;
+        try std.testing.expectEqualStrings("5", tps_span_first);
+    }
+    try std.testing.expectEqual(@as(usize, 0), app.timeline_render_cache.items.len);
+
+    registry.get(child_id).?.tokens_per_second = 42;
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        const s = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+        try std.testing.expectEqualStrings("42", s.items.items[0].p.lines.items[0].spans.items[4].content);
+    }
+    try std.testing.expectEqual(@as(usize, 0), app.timeline_render_cache.items.len);
 }

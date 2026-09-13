@@ -98,6 +98,30 @@ pub fn build(b: *std.Build) void {
     run_lua_gen.step.dependOn(b.getInstallStep());
     // -----------------------------------------------
 
+    const bench = b.addExecutable(.{
+        .name = "bench_render",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_render.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "blitz-sdk", .module = blitz_sdk_mod },
+                .{ .name = "exec", .module = exec_mod },
+                .{ .name = "agent-id", .module = agent_id_mod },
+                .{ .name = "agent-state", .module = agent_state_mod },
+                .{ .name = "models", .module = models_mod },
+                .{ .name = "permissions", .module = permissions_mod },
+                .{ .name = "c", .module = lua_c_mod },
+                .{ .name = "build_options", .module = options_mod },
+            },
+        }),
+    });
+    b.installArtifact(bench);
+    const bench_step = b.step("bench", "Run the render benchmark");
+    const run_bench = b.addRunArtifact(bench);
+    bench_step.dependOn(&run_bench.step);
+    run_bench.step.dependOn(b.getInstallStep());
+
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }

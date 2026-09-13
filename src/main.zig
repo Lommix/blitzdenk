@@ -682,34 +682,40 @@ pub fn run(
     {
         var term = try tui.Terminal.init(arena, io);
         defer term.deinit();
+        app.frame_snapshot = &term.previous;
+        app.frame_snapshot_resize_gen = &term.resize_generation;
 
         var was_running = app.running;
         var error_fade_pending = false;
+        var last_frame_ns: i128 = 0;
         main_loop: while (true) {
-            // tick notifications
-            const had_visible_notifications = app.notifications.hasVisible();
+            const now_ns: i128 = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
+            const notifications_before = app.notifications.hasVisible();
             app.notifications.tick(1.0 / 60.0);
-            if (had_visible_notifications or app.notifications.hasVisible()) app.dirty = true;
-            const error_fading = app.lua_vm.errorNeedsFrame(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
-            if (error_fading or error_fade_pending) app.dirty = true;
+            const error_fading = app.lua_vm.errorNeedsFrame(now_ns);
+            const fading_before = notifications_before or error_fade_pending;
+            const fading_now = app.notifications.hasVisible() or error_fading;
             error_fade_pending = error_fading;
+            if (fading_before and !fading_now) app.dirty = true;
 
             if (app.lua_redraw.swap(false, .acq_rel)) app.dirty = true;
 
-            if (app.dirty or app.main_agent_id == null) {
+            const animated = app.animationActive() or fading_now;
+            app.frame_snapshot_blocked = term.selectionActive();
+            if (app.dirty or (animated and now_ns -| last_frame_ns >= 16 * std.time.ns_per_ms)) {
+                last_frame_ns = now_ns;
                 try term.drawWith(&app, App.render);
                 app.frame_count +%= 1;
                 app.dirty = false;
             }
-
-            // TODO: cleanup state
-            if (app.running) app.dirty = true;
 
             // Drain new agent messages from broadcast into the timeline
             // app.drainBroadcast();
             // Mirror in-progress streaming message so TUI shows tokens as they arrive.
             {
                 var g = app.permission_queue.lock(io);
+                const pending_before = app.pending_permissions.items.len;
+                const active_before = app.active_permission;
                 while (g.ptr.items.len > 0) {
                     const next = g.ptr.swapRemove(0);
                     g.unlock();
@@ -767,6 +773,7 @@ pub fn run(
                     if (app.active_permission == null) app.active_permission = req;
                     index += 1;
                 }
+                if (app.pending_permissions.items.len != pending_before or app.active_permission != active_before) app.dirty = true;
                 g.unlock();
             }
 
@@ -839,6 +846,7 @@ pub fn run(
                     }
                     if (!lua_reload_failed) app.lua_vm.clearLastError();
                     app.lua_vm.readConfigFields();
+                    app.invalidateTimelineRenderCache();
                     if (app.input_mode != .wizard) app.warnUnboundAgentModels();
                     try app.lua_vm.publishAvailableSystems(context_factory);
                     app.dirty = true;
@@ -1464,7 +1472,7 @@ test "free text survives curated row detours" {
 
 /// Journal materializes lazily in appendCheckpoint; do not gate on file_name.
 fn checkpoint(app: *App, store: *session_store.Store) void {
-    app.drainPendingDiffs();
+    _ = app.drainPendingDiffs();
     const agent = app.mainAgent() orelse return;
 
     var arena = std.heap.ArenaAllocator.init(app.gpa);
@@ -1526,7 +1534,7 @@ fn runHeadless(app: *App, io: std.Io, prompt: []const u8) !void {
         std.debug.print("Error: no agent response\n", .{});
         std.process.exit(1);
     }
-    app.drainPendingDiffs();
+    _ = app.drainPendingDiffs();
     printHeadlessFooter(app, io);
 }
 

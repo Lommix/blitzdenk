@@ -37,6 +37,7 @@ pub const Line = widgets.Line;
 pub const DiffLine = widgets.DiffLine;
 pub const DiffLineKind = widgets.DiffLineKind;
 pub const Input = widgets.Input;
+pub const Padding = widgets.Padding;
 
 test {
     @import("std").testing.refAllDecls(@This());
