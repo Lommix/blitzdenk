@@ -10,6 +10,9 @@ const HEADER_ART =
     \\╚═════╝ ╚══════╝╚═╝   ╚═╝   ╚══════╝╚═════╝ ╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝
 ;
 
+const wave_cols = 85;
+pub const welcome_wave_frames = wave_cols * 2;
+
 pub var start_ns: i128 = 0;
 var startup_ms: ?i64 = null;
 
@@ -35,7 +38,7 @@ pub fn build_header(frame: usize, base_color: r.tui.Color, alloc: std.mem.Alloca
             i += len;
             if (cp < 0x20 or cp == 0x7F) continue;
 
-            const wave_pos = (frame / 2) % 85;
+            const wave_pos = (frame / 2) % wave_cols;
             const dx = if (col >= wave_pos) col - wave_pos else wave_pos - col;
             const t: u16 = @intCast(@min(dx, 10));
             const blend: u8 = if (t >= 10) 0 else @intCast((10 - t) * 25);

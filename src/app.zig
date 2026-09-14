@@ -251,6 +251,7 @@ pub const App = struct {
     registry: *r.agent_registry.Registry = undefined,
     exec_pool: *r.exec.CmdPool = undefined,
     update_check: ?r.update.CheckTask = null,
+    update_result_seen: bool = false,
     config: r.config.BlitzdenkCfg = .{},
     main_agent_id: ?r.AgentId = null,
     running: bool = false,
@@ -733,11 +734,17 @@ pub const App = struct {
         {}
 
         self.syncCompactionIndicator();
+
+        if (!self.update_result_seen and self.availableUpdateVersion() != null) {
+            self.update_result_seen = true;
+            self.dirty = true;
+        }
     }
 
     pub fn animationActive(self: *const App) bool {
         if (self.running) return true;
-        return self.timeline.items.len == 0 and !self.isMainAgentCompacting();
+        if (self.timeline.items.len != 0 or self.isMainAgentCompacting()) return false;
+        return self.frame_count < r.dash.welcome_wave_frames;
     }
 
     fn updateSessionTime(self: *App) void {
@@ -1597,6 +1604,7 @@ pub const App = struct {
     }
 
     fn frameSnapshotUsable(app: *App, buf: *const r.tui.Buffer) bool {
+        if (app.timeline.items.len == 0) return false;
         if (app.dirty or !app.frame_snapshot_valid or app.frame_snapshot_blocked) return false;
         const snap = app.frame_snapshot orelse return false;
         if (snap.rect.width != buf.rect.width or snap.rect.height != buf.rect.height) return false;
@@ -6276,13 +6284,18 @@ test "wizard skip writes defaults, honors marker, and existing provider.lua wins
     try std.testing.expectEqualStrings(existing, preserved);
 }
 
-test "animation stays live for running agents and the welcome screen" {
+test "welcome animation plays once, running agents stay live" {
     var app: App = undefined;
     app.timeline = .empty;
     app.main_agent_id = null;
     app.running = false;
+    app.frame_count = 0;
     try std.testing.expect(app.animationActive());
 
+    app.frame_count = r.dash.welcome_wave_frames;
+    try std.testing.expect(!app.animationActive());
+
+    app.frame_count = 0;
     app.running = true;
     try std.testing.expect(app.animationActive());
 
@@ -6567,6 +6580,18 @@ test "snapshot fast path repaints the running tool block spinner" {
     const glyph_y = tool.rect.y +| tool.padding.top;
     try std.testing.expectEqual(want, buf.get(glyph_x, glyph_y).char);
     try std.testing.expectEqual(@as(u21, ' '), buf.get(tool.rect.x, tool.rect.y).char);
+}
+
+test "empty timeline never takes the snapshot fast path" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    app.frame_snapshot_valid = true;
+    var buf = try r.tui.Buffer.init(std.testing.allocator, .{ .x = 0, .y = 0, .width = 40, .height = 10 });
+    defer buf.deinit();
+
+    try std.testing.expect(!app.frameSnapshotUsable(&buf));
 }
 
 const ScribbleAllocator = struct {
