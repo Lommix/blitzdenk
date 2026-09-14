@@ -38,6 +38,7 @@ pub const DiffLine = widgets.DiffLine;
 pub const DiffLineKind = widgets.DiffLineKind;
 pub const Input = widgets.Input;
 pub const Padding = widgets.Padding;
+pub const Field = @import("field.zig").Field;
 
 test {
     @import("std").testing.refAllDecls(@This());

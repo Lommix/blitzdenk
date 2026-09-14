@@ -82,13 +82,9 @@ pub const InputMode = union(enum) {
         completion_query_len: usize = 0,
     };
     pub const PermSelect = struct { selected: u8 = 0 };
-    pub const PermMessage = struct {
-        buf: [512]u8 = undefined,
-        len: usize = 0,
-    };
+    pub const PermMessage = struct { field: r.tui.Field(8192) = .{} };
     pub const Passphrase = struct {
-        buf: [256]u8 = undefined,
-        len: usize = 0,
+        field: r.tui.Field(256) = .{},
         // Buffers backing user/host/cwd are owned by App.passphrase_args_buf.
         user: []const u8,
         host: []const u8,
@@ -238,9 +234,8 @@ pub const App = struct {
     arena_timeline_render: std.heap.ArenaAllocator,
     mu: std.Io.Mutex = .init,
     io: std.Io,
-    input_buffer: std.ArrayList(u8) = .empty,
-    input_cursor: u32 = 0,
-    input_desired_col: ?u32 = null,
+    input: r.tui.Field(8192) = .{},
+    input_desired_col: ?usize = null,
     input_scroll_offset: u16 = 0,
     // ---------------
     // async interface
@@ -679,7 +674,7 @@ pub const App = struct {
         self.session_run_started_ns = 0;
         self.scroll_offset = 0;
         self.input_mode = .{ .text = .{} };
-        self.input_cursor = 0;
+        self.input.clear();
         self.input_desired_col = null;
         self.streaming_entry = null;
         self.sdk_preview_parts = .empty;
@@ -693,9 +688,6 @@ pub const App = struct {
         self.screenshot_buf = null;
         self.dirty = true;
         _ = self.arena_session.reset(.free_all);
-        // Backing storage just got freed — reset list headers to .empty so
-        // stale ptr/capacity don't cause UB on next append.
-        self.input_buffer = .empty;
         self.timeline = .empty;
         self.invalidateTimelineRenderCache();
         self.context_factory.resetLoadedTools() catch {};
@@ -822,12 +814,12 @@ pub const App = struct {
     };
 
     fn currentTokenParts(self: *const App) ?TokenParts {
-        const tok = r.completion.tokenAt(self.input_buffer.items, self.input_cursor);
+        const tok = r.completion.tokenAt(self.input.slice(), self.input.cursor);
         if (!tok.is_path) return null;
-        if (tok.start == 0 and self.input_buffer.items.len > 0 and self.input_buffer.items[0] == '/') {
-            if (r.completion.commandTokenOwns(self.input_buffer.items, self.input_cursor)) return null;
+        if (tok.start == 0 and !self.input.isEmpty() and self.input.slice()[0] == '/') {
+            if (r.completion.commandTokenOwns(self.input.slice(), self.input.cursor)) return null;
         }
-        const token = self.input_buffer.items[tok.start..tok.end];
+        const token = self.input.slice()[tok.start..tok.end];
         const slash = std.mem.lastIndexOfScalar(u8, token, '/') orelse return null;
         const filter = token[slash + 1 ..];
         return .{
@@ -1128,11 +1120,38 @@ pub const App = struct {
         self.returnToText();
     }
 
+    pub const FieldOp = enum { left, right, home, end, backspace, delete_forward, insert };
+
+    fn applyFieldOp(comptime op: FieldOp, f: anytype, bytes: []const u8) void {
+        switch (op) {
+            .left => f.left(),
+            .right => f.right(),
+            .home => f.home(),
+            .end => f.end(),
+            .backspace => f.backspace(),
+            .delete_forward => f.deleteForward(),
+            .insert => f.insert(bytes),
+        }
+    }
+
+    pub fn fieldOp(self: *App, comptime op: FieldOp, bytes: []const u8) bool {
+        switch (self.input_mode) {
+            .text => applyFieldOp(op, &self.input, bytes),
+            .perm_message => |*pm| applyFieldOp(op, &pm.field, bytes),
+            .passphrase => |*pp| applyFieldOp(op, &pp.field, bytes),
+            .wizard => |*w| return if (w.activeText()) |f| blk: {
+                applyFieldOp(op, f, bytes);
+                break :blk true;
+            } else false,
+            else => return false,
+        }
+        return true;
+    }
+
     pub fn returnToText(self: *App) void {
         // Zero passphrase buffer when leaving the modal so it doesn't linger.
         if (self.input_mode == .passphrase) {
-            const pp = &self.input_mode.passphrase;
-            @memset(pp.buf[0..pp.len], 0);
+            self.input_mode.passphrase.field.wipe();
         }
         if (self.input_mode == .wizard) {
             self.input_mode.wizard.abortClearSecrets();
@@ -1163,9 +1182,9 @@ pub const App = struct {
             const rows = pathCompletions(self, arena.allocator());
             t.completion_open = rows.len > 0;
         } else {
-            t.completion_query_len = commandCompletionPrefix(self.input_buffer.items, self.input_cursor).len;
-            const rows = commandCompletions(self, arena.allocator(), self.input_buffer.items, self.input_cursor);
-            t.completion_open = rows.len > 0 and commandTokenActive(self.input_buffer.items, self.input_cursor);
+            t.completion_query_len = commandCompletionPrefix(self.input.slice(), self.input.cursor).len;
+            const rows = commandCompletions(self, arena.allocator(), self.input.slice(), self.input.cursor);
+            t.completion_open = rows.len > 0 and commandTokenActive(self.input.slice(), self.input.cursor);
         }
     }
 
@@ -1188,7 +1207,7 @@ pub const App = struct {
         defer arena.deinit();
         const alloc = arena.allocator();
 
-        const rows = activeCompletions(self, alloc, self.input_buffer.items, self.input_cursor);
+        const rows = activeCompletions(self, alloc, self.input.slice(), self.input.cursor);
         if (rows.len == 0) {
             t.completion_open = false;
             t.completion_selected = 0;
@@ -1208,8 +1227,8 @@ pub const App = struct {
         }
 
         const chosen = rows.items[t.completion_selected].text;
-        const cur_tok = r.completion.tokenAt(self.input_buffer.items, self.input_cursor);
-        const cur_token = self.input_buffer.items[cur_tok.start..cur_tok.end];
+        const cur_tok = r.completion.tokenAt(self.input.slice(), self.input.cursor);
+        const cur_token = self.input.slice()[cur_tok.start..cur_tok.end];
         const already = std.ascii.eqlIgnoreCase(cur_token, chosen);
 
         switch (move) {
@@ -1273,7 +1292,7 @@ pub const App = struct {
     pub fn startSshUnlock(self: *App) void {
         if (self.input_mode != .passphrase) return;
         const pp = &self.input_mode.passphrase;
-        if (pp.len == 0) {
+        if (pp.field.isEmpty()) {
             self.notifications.append(self.gpa, self.nowMillis(), "SSH: empty passphrase, canceled", .{}) catch {};
             self.returnToText();
             return;
@@ -1284,8 +1303,10 @@ pub const App = struct {
             return;
         }
         const task = &self.ssh_connect.?;
-        @memcpy(task.pass_buf[0..pp.len], pp.buf[0..pp.len]);
-        task.pass_len = pp.len;
+        const pass = pp.field.slice();
+        const n = @min(pass.len, task.pass_buf.len);
+        @memcpy(task.pass_buf[0..n], pass[0..n]);
+        task.pass_len = n;
         self.returnToText();
         self.toastSshConnecting(task.user(), task.host());
         task.start();
@@ -1801,7 +1822,7 @@ pub const App = struct {
 
     fn renderCompletionPopup(app: *App, frame_alloc: std.mem.Allocator, input_area: r.tui.Rect, progress_h: u16, buf: *r.tui.Buffer) void {
         if (app.input_mode == .text and app.input_mode.text.completion_open) {
-            const completions = activeCompletions(app, frame_alloc, app.input_buffer.items, app.input_cursor);
+            const completions = activeCompletions(app, frame_alloc, app.input.slice(), app.input.cursor);
             if (completions.len > 0) {
                 var max_width: usize = 0;
                 for (completions.items[0..completions.len]) |cmp| {
@@ -1877,9 +1898,7 @@ pub const App = struct {
     }
 
     pub fn setInput(self: *App, text: []const u8) void {
-        self.input_buffer.clearRetainingCapacity();
-        self.input_buffer.appendSlice(self.sessionAlloc(), text) catch return;
-        self.input_cursor = @intCast(self.input_buffer.items.len);
+        self.input.set(text);
         self.input_desired_col = null;
         self.input_scroll_offset = 0;
         self.syncCompletion();
@@ -1971,8 +1990,8 @@ pub const App = struct {
     }
 
     pub fn moveCursorVertical(self: *App, delta: i32) void {
-        const buf = self.input_buffer.items;
-        if (self.input_cursor > buf.len) self.input_cursor = @intCast(buf.len);
+        const buf = self.input.slice();
+        if (self.input.cursor > buf.len) self.input.cursor = buf.len;
 
         const width: usize = self.widget_frame_input_area.width -| 5;
         if (width == 0) return;
@@ -2009,7 +2028,7 @@ pub const App = struct {
         }
 
         const desired: usize = self.input_desired_col orelse cur_col;
-        self.input_desired_col = @intCast(desired);
+        self.input_desired_col = desired;
 
         const target: usize = if (delta < 0) cur_row -| 1 else cur_row + 1;
         if (delta < 0 and cur_row == 0) return;
@@ -2030,52 +2049,46 @@ pub const App = struct {
             pos -= 1;
             while (pos > row.start and (display.text[pos] & 0xC0) == 0x80) pos -= 1;
         }
-        self.input_cursor = @intCast(r.clipboard.fromDisplayPos(buf, pos));
+        self.input.cursor = r.clipboard.fromDisplayPos(buf, pos);
     }
 
     pub fn appendBytes(self: *App, bytes: []const u8) void {
-        if (self.input_cursor > self.input_buffer.items.len) {
-            self.input_cursor = @intCast(self.input_buffer.items.len);
-        }
         self.input_desired_col = null;
-        const idx = self.input_cursor;
-        self.input_buffer.replaceRange(self.sessionAlloc(), idx, 0, bytes) catch return;
-        self.input_cursor += @intCast(bytes.len);
+        self.input.insert(bytes);
         self.syncCompletion();
     }
 
     pub fn deleteChar(self: *App) void {
-        if (self.input_cursor > self.input_buffer.items.len) {
-            self.input_cursor = @intCast(self.input_buffer.items.len);
-        }
-        if (self.input_cursor == 0) return;
         self.input_desired_col = null;
 
         // Pasted image: deleting anywhere inside (or right after) the masked
         // `[Image]` token removes the whole link.
-        if (r.clipboard.findPasteAt(self.input_buffer.items, self.input_cursor)) |rg| {
-            self.input_buffer.replaceRange(self.sessionAlloc(), rg.start, rg.end - rg.start, &.{}) catch return;
-            self.input_cursor = @intCast(rg.start);
-            self.syncCompletion();
-            return;
+        if (r.clipboard.findPasteAt(self.input.slice(), self.input.cursor)) |rg| {
+            self.input.deleteRange(rg.start, rg.end);
+        } else {
+            self.input.backspace();
         }
+        self.syncCompletion();
+    }
 
-        var start: usize = self.input_cursor;
-        while (start > 0) {
-            start -= 1;
-            if ((self.input_buffer.items[start] & 0xC0) != 0x80) break;
+    pub fn deleteForwardChar(self: *App) void {
+        self.input_desired_col = null;
+        if (r.clipboard.findPasteAt(self.input.slice(), self.input.cursor + 1)) |rg| {
+            if (rg.start == self.input.cursor) {
+                self.input.deleteRange(rg.start, rg.end);
+                self.syncCompletion();
+                return;
+            }
         }
-        const len = self.input_cursor - start;
-        self.input_buffer.replaceRange(self.sessionAlloc(), start, len, &.{}) catch return;
-        self.input_cursor = @intCast(start);
+        self.input.deleteForward();
         self.syncCompletion();
     }
 
     /// The input as rendered: pasted-image URLs are masked with `[Image]` and
     /// `cursor` is remapped to the display position.
     pub fn displayInput(self: *const App, arena: std.mem.Allocator) r.clipboard.Display {
-        return r.clipboard.toDisplay(arena, self.input_buffer.items, self.input_cursor) catch {
-            return .{ .text = self.input_buffer.items, .cursor = self.input_cursor };
+        return r.clipboard.toDisplay(arena, self.input.slice(), self.input.cursor) catch {
+            return .{ .text = self.input.slice(), .cursor = self.input.cursor };
         };
     }
 
@@ -2139,7 +2152,7 @@ pub const App = struct {
     }
 
     pub fn inputSlice(self: *const App) []const u8 {
-        return self.input_buffer.items;
+        return self.input.slice();
     }
 
     pub fn pushHistory(self: *App, store_dir: std.Io.Dir, text: []const u8) void {
@@ -2168,10 +2181,7 @@ pub const App = struct {
         if (self.history_cursor == 0) return true;
         if (self.running) return true;
         self.history_cursor -= 1;
-        const text = self.history.items[self.history_cursor].text;
-        self.input_buffer.clearRetainingCapacity();
-        self.input_buffer.appendSlice(self.sessionAlloc(), text) catch {};
-        self.input_cursor = @intCast(self.input_buffer.items.len);
+        self.input.set(self.history.items[self.history_cursor].text);
         self.input_desired_col = null;
         self.syncCompletion();
         return true;
@@ -2182,12 +2192,11 @@ pub const App = struct {
         if (self.history_cursor >= self.history.items.len) return true;
         if (self.running) return true;
         self.history_cursor += 1;
-        self.input_buffer.clearRetainingCapacity();
         if (self.history_cursor < self.history.items.len) {
-            const text = self.history.items[self.history_cursor].text;
-            self.input_buffer.appendSlice(self.sessionAlloc(), text) catch {};
+            self.input.set(self.history.items[self.history_cursor].text);
+        } else {
+            self.input.clear();
         }
-        self.input_cursor = @intCast(self.input_buffer.items.len);
         self.input_desired_col = null;
         self.syncCompletion();
         return true;
@@ -2223,10 +2232,7 @@ pub const App = struct {
             self.timeline_render_cache.shrinkRetainingCapacity(start);
         }
         if (text.len > 0) {
-            const alloc = self.sessionAlloc();
-            self.input_buffer.clearRetainingCapacity();
-            self.input_buffer.appendSlice(alloc, text) catch return;
-            self.input_cursor = @intCast(self.input_buffer.items.len);
+            self.input.set(text);
             self.input_desired_col = null;
         }
 
@@ -2897,14 +2903,14 @@ pub fn myersDiff(old: []const []const u8, new: []const []const u8, alloc: std.me
     return ops;
 }
 
-fn commandCompletionPrefix(input: []const u8, cursor: u32) []const u8 {
+fn commandCompletionPrefix(input: []const u8, cursor: usize) []const u8 {
     if (input.len == 0) return "";
     const end = @min(@as(usize, cursor), input.len);
     const command_end = std.mem.indexOfScalar(u8, input[0..end], ' ') orelse end;
     return input[0..command_end];
 }
 
-fn commandQueryPrefix(input: []const u8, cursor: u32, query_len: usize, open: bool) []const u8 {
+fn commandQueryPrefix(input: []const u8, cursor: usize, query_len: usize, open: bool) []const u8 {
     if (open and query_len > 0 and query_len <= input.len) return input[0..query_len];
     return commandCompletionPrefix(input, cursor);
 }
@@ -2921,7 +2927,7 @@ fn completionMatches(completion: []const u8, prefix: []const u8) bool {
     return std.ascii.startsWithIgnoreCase(completion, prefix) and !std.ascii.eqlIgnoreCase(completion, prefix);
 }
 
-fn commandTokenActive(input: []const u8, cursor: u32) bool {
+fn commandTokenActive(input: []const u8, cursor: usize) bool {
     if (input.len == 0) return false;
     const end = @min(@as(usize, cursor), input.len);
     if (end == 0) return false;
@@ -2989,7 +2995,7 @@ const CompletionRows = struct {
     len: usize = 0,
 };
 
-fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: u32) CompletionRows {
+fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: usize) CompletionRows {
     var matches: [COMMAND_COMPLETION_ROWS]?CommandCompletion = [_]?CommandCompletion{null} ** COMMAND_COMPLETION_ROWS;
     var count: usize = 0;
 
@@ -3012,7 +3018,7 @@ fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cu
     return rows;
 }
 
-fn activeCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: u32) CompletionRows {
+fn activeCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: usize) CompletionRows {
     if (app.pathTokenActive()) return pathCompletions(app, alloc);
     return commandCompletions(app, alloc, input, cursor);
 }
@@ -3042,14 +3048,15 @@ fn pathCompletions(app: *App, alloc: std.mem.Allocator) CompletionRows {
 fn insertCompletionToken(self: *App, entry: []const u8) void {
     self.input_desired_col = null;
     if (self.pathTokenActive()) {
-        const tok = r.completion.tokenAt(self.input_buffer.items, self.input_cursor);
-        self.input_buffer.replaceRange(self.sessionAlloc(), tok.start, tok.end - tok.start, entry) catch return;
-        self.input_cursor = @intCast(tok.start + entry.len);
+        const tok = r.completion.tokenAt(self.input.slice(), self.input.cursor);
+        self.input.deleteRange(tok.start, tok.end);
+        self.input.cursor = tok.start;
+        self.input.insert(entry);
         return;
     }
-    const token_end = std.mem.indexOfScalar(u8, self.input_buffer.items, ' ') orelse self.input_buffer.items.len;
-    self.input_buffer.replaceRange(self.sessionAlloc(), 0, token_end, entry) catch return;
-    self.input_cursor = @intCast(entry.len);
+    const token_end = std.mem.indexOfScalar(u8, self.input.slice(), ' ') orelse self.input.len;
+    self.input.deleteRange(0, token_end);
+    self.input.insert(entry);
 }
 
 fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, progress_h: u16, progress_line: ?r.tui.Line, buf: *r.tui.Buffer) void {
@@ -3237,7 +3244,8 @@ fn pushPlainWrappedLine(app: *App, arena: std.mem.Allocator, raw_line: []const u
 
 fn renderPermMessageContent(app: *App, pm: *const InputMode.PermMessage, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const input_widget: r.tui.Input = .{
-        .text = pm.buf[0..pm.len],
+        .text = pm.field.slice(),
+        .cursor = pm.field.cursor,
         .border_style = .{ .fg = app.theme.warn },
         .screenshot_style = .{ .fg = app.theme.ok },
         .has_screenshot = app.screenshot_buf != null,
@@ -3259,13 +3267,15 @@ fn renderPassphraseInput(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     var x: u16 = area.x +| label_width;
     const y: u16 = area.y;
     const max_chars = area.width -| label_width -| 1;
-    const shown: usize = @min(pp.len, max_chars);
+    const text = pp.field.slice();
+    const shown: usize = @min(text.len, max_chars);
     var i: usize = 0;
     while (i < shown) : (i += 1) {
         buf.set(x, y, .{ .char = '*', .style = style });
         x += 1;
     }
-    buf.set(x, y, .{ .char = '_', .style = style });
+    const caret: usize = @min(pp.field.cursor, max_chars);
+    buf.set(area.x +| label_width +| @as(u16, @intCast(caret)), y, .{ .char = '_', .style = style });
 }
 
 const WIZARD_HELP_TEXT = "↑/↓ select · enter next · esc abort";
@@ -3312,32 +3322,32 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
         },
         .url => {
             wizardAppendHeading(arena, &para, "Endpoint url (enter keeps the shown value):");
-            wizardAppendInputLine(arena, &para, w.url_buf[0..w.url_len], true);
+            wizardAppendInputLine(arena, &para, &w.url, true);
         },
         .key => {
             wizardAppendHeading(arena, &para, "Paste your api key (stored in provider.lua):");
-            wizardAppendInputLine(arena, &para, w.key_buf[0..w.key_len], true);
+            wizardAppendInputLine(arena, &para, &w.key, true);
         },
         .model => {
             const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
             if (entry.free_text_model_only) {
                 wizardAppendHeading(arena, &para, "Model id:");
-                wizardAppendInputLine(arena, &para, w.model_buf[0..w.model_len], true);
+                wizardAppendInputLine(arena, &para, &w.model, true);
             } else {
                 wizardAppendHeading(arena, &para, "Choose a model (pick the last row to type your own):");
                 for (entry.models, 0..) |model, i| {
                     wizardAppendOption(arena, &para, model.name, !w.model_free_text and w.model_curated_index == i);
                 }
                 wizardAppendOption(arena, &para, "Enter model id…", w.model_free_text);
-                if (w.model_free_text) wizardAppendInputLine(arena, &para, w.model_buf[0..w.model_len], true);
+                if (w.model_free_text) wizardAppendInputLine(arena, &para, &w.model, true);
             }
         },
         .vision => {
             const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
-            const detected = r.wizard.selectModel(entry, w.model_buf[0..w.model_len]).vision;
+            const detected = r.wizard.selectModel(entry, w.model.slice()).vision;
             wizardAppendHeading(arena, &para, "Custom model id — should image input be enabled?");
             wizardAppendHeading(arena, &para, "Catalogued models skip this; vision follows the catalogue.");
-            wizardAppendKeyValue(app, arena, &para, "model", w.model_buf[0..w.model_len]);
+            wizardAppendKeyValue(app, arena, &para, "model", w.model.slice());
             wizardAppendKeyValue(app, arena, &para, "catalogue", if (detected) "vision" else "no vision");
             wizardAppendHeading(arena, &para, "");
             wizardAppendOption(arena, &para, "Enable vision", w.vision_override == true);
@@ -3351,11 +3361,11 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
             const replay_text = if (selection) |sel| (if (sel.replay_reasoning) "true" else "false") else "unknown";
             wizardAppendKeyValue(app, arena, &para, "schema", w.provider_type_buf[0..w.provider_type_len]);
             wizardAppendKeyValue(app, arena, &para, "provider", entry.name);
-            wizardAppendKeyValue(app, arena, &para, "url", w.url_buf[0..w.url_len]);
-            wizardAppendKeyValue(app, arena, &para, "key", if (w.key_len > 0) "<set>" else "");
+            wizardAppendKeyValue(app, arena, &para, "url", w.url.slice());
+            wizardAppendKeyValue(app, arena, &para, "key", if (!w.key.isEmpty()) "<set>" else "");
             wizardAppendKeyValue(app, arena, &para, "vision", vision_text);
             wizardAppendKeyValue(app, arena, &para, "replay_reasoning", replay_text);
-            wizardAppendKeyValue(app, arena, &para, "model", w.model_buf[0..w.model_len]);
+            wizardAppendKeyValue(app, arena, &para, "model", w.model.slice());
             wizardAppendHeading(arena, &para, "");
             wizardAppendOption(arena, &para, "Write provider.lua", w.accept_selected);
             wizardAppendOption(arena, &para, "Back", !w.accept_selected);
@@ -3456,11 +3466,24 @@ fn wizardAppendOption(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []
     para.lines.append(arena, line) catch {};
 }
 
-fn wizardAppendInputLine(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8, selected: bool) void {
+fn wizardAppendInputLine(arena: std.mem.Allocator, para: *r.tui.Paragraph, field: anytype, selected: bool) void {
+    const base = wizardSelStyle(selected);
+    var caret = base;
+    caret.modifier.reverse = true;
+
+    const text = field.slice();
+    const cursor = @min(field.cursor, text.len);
     var line = r.tui.Line{};
-    line.pushText(arena, "  ", .{}) catch return;
-    line.pushText(arena, text, wizardSelStyle(selected)) catch return;
-    line.pushText(arena, "_", wizardSelStyle(selected)) catch return;
+    line.pushText(arena, "  ", base) catch return;
+    line.pushText(arena, text[0..cursor], base) catch return;
+    if (cursor < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[cursor]) catch 1;
+        const stop = @min(cursor + len, text.len);
+        line.pushText(arena, text[cursor..stop], caret) catch return;
+        line.pushText(arena, text[stop..], base) catch return;
+    } else {
+        line.pushText(arena, "_", caret) catch return;
+    }
     para.lines.append(arena, line) catch {};
 }
 
@@ -5173,8 +5196,7 @@ fn undoTestApp() App {
     app.arena_timeline_render = .init(std.testing.allocator);
     app.timeline = .empty;
     app.timeline_render_cache = .empty;
-    app.input_buffer = .empty;
-    app.input_cursor = 0;
+    app.input = .{};
     app.input_mode = .{ .text = .{} };
     app.running = false;
     app.dirty = false;
@@ -5241,7 +5263,7 @@ test "undoLastTurn pops the last turn into the input" {
     app.undoLastTurn();
 
     try std.testing.expectEqual(@as(usize, 0), app.timeline.items.len);
-    try std.testing.expectEqualStrings("hello", app.input_buffer.items);
+    try std.testing.expectEqualStrings("hello", app.input.slice());
     try std.testing.expectEqual(@as(usize, 1), agent.history().len);
     try std.testing.expectEqualStrings("old", agent.history()[0].text());
 }
@@ -5265,7 +5287,7 @@ test "undoLastTurn removes tool calls together with their results" {
 
     try std.testing.expectEqual(@as(usize, 0), app.timeline.items.len);
     try std.testing.expectEqual(@as(usize, 0), agent.history().len);
-    try std.testing.expectEqualStrings("run it", app.input_buffer.items);
+    try std.testing.expectEqualStrings("run it", app.input.slice());
 }
 
 test "undoLastTurn pops only the last of queued parallel turns" {
@@ -5290,7 +5312,7 @@ test "undoLastTurn pops only the last of queued parallel turns" {
     try std.testing.expectEqual(@as(usize, 2), app.timeline.items.len);
     try std.testing.expectEqualStrings("first", app.timeline.items[0].parts[0].message);
     try std.testing.expectEqual(@as(usize, 2), agent.history().len);
-    try std.testing.expectEqualStrings("second", app.input_buffer.items);
+    try std.testing.expectEqualStrings("second", app.input.slice());
 }
 
 test "undoLastTurn ignores the compaction summary turn" {
@@ -5313,7 +5335,7 @@ test "undoLastTurn ignores the compaction summary turn" {
     try std.testing.expectEqual(@as(usize, 0), app.timeline.items.len);
     try std.testing.expectEqual(@as(usize, 1), agent.history().len);
     try std.testing.expectEqualStrings("old", agent.history()[0].text());
-    try std.testing.expectEqualStrings("run it", app.input_buffer.items);
+    try std.testing.expectEqualStrings("run it", app.input.slice());
 }
 
 test "undoLastTurn does nothing without a user entry" {
@@ -5330,7 +5352,7 @@ test "undoLastTurn does nothing without a user entry" {
 
     try std.testing.expectEqual(@as(usize, 2), app.timeline.items.len);
     try std.testing.expectEqual(@as(usize, 1), agent.history().len);
-    try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
+    try std.testing.expect(app.input.isEmpty());
 }
 
 test "undoLastTurn does not fire while running" {
@@ -5345,7 +5367,7 @@ test "undoLastTurn does not fire while running" {
     app.undoLastTurn();
 
     try std.testing.expectEqual(@as(usize, 1), app.timeline.items.len);
-    try std.testing.expectEqual(@as(usize, 0), app.input_buffer.items.len);
+    try std.testing.expect(app.input.isEmpty());
 }
 
 test "SDK run events preserve preview final rendering and usage" {
@@ -5809,13 +5831,12 @@ test "inputWrapPosition reports rows above and column of token start" {
     var app: App = undefined;
     app.io = testing.io;
     app.input_mode = .{ .text = .{} };
-    app.input_buffer = .empty;
-    app.input_cursor = 0;
+    app.input = .{};
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    app.input_buffer.items = @constCast("check ./src/foo");
-    app.input_cursor = 15;
+    app.input.set("check ./src/foo");
+    app.input.cursor = 15;
 
     const anchor = inputWrapPosition(&app, arena.allocator(), 80, true);
     try testing.expectEqual(@as(usize, 0), anchor.row);
@@ -5823,45 +5844,45 @@ test "inputWrapPosition reports rows above and column of token start" {
     const caret = inputWrapPosition(&app, arena.allocator(), 80, false);
     try testing.expectEqual(@as(usize, 0), caret.row);
 
-    app.input_buffer.items = @constCast("hello\n./src/foo");
-    app.input_cursor = 15;
+    app.input.set("hello\n./src/foo");
+    app.input.cursor = 15;
     const multiline = inputWrapPosition(&app, arena.allocator(), 80, true);
     try testing.expectEqual(@as(usize, 1), multiline.row);
     try testing.expectEqual(@as(usize, 0), multiline.col);
     try testing.expectEqual(@as(usize, 2), multiline.total);
 
-    app.input_cursor = 2;
+    app.input.cursor = 2;
     const cursor_back = inputWrapPosition(&app, arena.allocator(), 80, false);
     try testing.expectEqual(@as(usize, 0), cursor_back.row);
     try testing.expectEqual(@as(usize, 2), cursor_back.total);
 
-    app.input_buffer.items = @constCast("ab\n");
-    app.input_cursor = 3;
+    app.input.set("ab\n");
+    app.input.cursor = 3;
     const trailing = inputWrapPosition(&app, arena.allocator(), 80, false);
     try testing.expectEqual(@as(usize, 1), trailing.row);
     try testing.expectEqual(@as(usize, 2), trailing.total);
 
-    app.input_buffer.items = @constCast("aa bb cc d");
-    app.input_cursor = 10;
+    app.input.set("aa bb cc d");
+    app.input.cursor = 10;
     const exact_fill = inputWrapPosition(&app, arena.allocator(), 10, false);
     try testing.expectEqual(@as(usize, 0), exact_fill.row);
     try testing.expectEqual(@as(usize, 1), exact_fill.total);
 
-    app.input_buffer.items = @constCast("aa bb cc d ");
-    app.input_cursor = 11;
+    app.input.set("aa bb cc d ");
+    app.input.cursor = 11;
     const space_wrap = inputWrapPosition(&app, arena.allocator(), 10, false);
     try testing.expectEqual(@as(usize, 1), space_wrap.row);
     try testing.expectEqual(@as(usize, 2), space_wrap.total);
 
-    app.input_buffer.items = @constCast("a  ");
-    app.input_cursor = 2;
+    app.input.set("a  ");
+    app.input.cursor = 2;
     const mid_run = inputWrapPosition(&app, arena.allocator(), 1, false);
     try testing.expectEqual(@as(usize, 1), mid_run.row);
     try testing.expectEqual(@as(usize, 0), mid_run.col);
     try testing.expectEqual(@as(usize, 2), mid_run.total);
 
-    app.input_buffer.items = @constCast("aa bb cc dd ee /file");
-    app.input_cursor = 20;
+    app.input.set("aa bb cc dd ee /file");
+    app.input.cursor = 20;
     const wrapped = inputWrapPosition(&app, arena.allocator(), 10, true);
     try testing.expectEqual(@as(usize, 1), wrapped.row);
     try testing.expectEqual(@as(usize, 6), wrapped.col);
@@ -5874,43 +5895,43 @@ test "moveCursorVertical preserves column and clamps to line end" {
     app.io = testing.io;
     app.gpa = testing.allocator;
     app.input_mode = .{ .text = .{} };
-    app.input_buffer = .empty;
+    app.input = .{};
     app.input_desired_col = null;
     app.widget_frame_input_area = .{ .width = 100, .height = 10 };
 
-    app.input_buffer.items = @constCast("abc\nxy\ndefghi");
-    app.input_cursor = 3;
+    app.input.set("abc\nxy\ndefghi");
+    app.input.cursor = 3;
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 6), app.input_cursor);
+    try testing.expectEqual(@as(usize, 6), app.input.cursor);
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 10), app.input_cursor);
+    try testing.expectEqual(@as(usize, 10), app.input.cursor);
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 10), app.input_cursor);
+    try testing.expectEqual(@as(usize, 10), app.input.cursor);
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 6), app.input_cursor);
+    try testing.expectEqual(@as(usize, 6), app.input.cursor);
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 3), app.input_cursor);
+    try testing.expectEqual(@as(usize, 3), app.input.cursor);
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 3), app.input_cursor);
+    try testing.expectEqual(@as(usize, 3), app.input.cursor);
 
-    app.input_cursor = 8;
+    app.input.cursor = 8;
     app.input_desired_col = null;
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 5), app.input_cursor);
+    try testing.expectEqual(@as(usize, 5), app.input.cursor);
 
-    app.input_buffer.items = @constCast("abcd\ncé");
-    app.input_cursor = 2;
+    app.input.set("abcd\ncé");
+    app.input.cursor = 2;
     app.input_desired_col = null;
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 8), app.input_cursor);
+    try testing.expectEqual(@as(usize, 8), app.input.cursor);
 
-    app.input_buffer.items = @constCast("one");
-    app.input_cursor = 1;
+    app.input.set("one");
+    app.input.cursor = 1;
     app.input_desired_col = null;
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 1), app.input_cursor);
+    try testing.expectEqual(@as(usize, 1), app.input.cursor);
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 1), app.input_cursor);
+    try testing.expectEqual(@as(usize, 1), app.input.cursor);
 }
 
 test "moveCursorVertical moves by wrapped rows" {
@@ -5919,68 +5940,68 @@ test "moveCursorVertical moves by wrapped rows" {
     app.io = testing.io;
     app.gpa = testing.allocator;
     app.input_mode = .{ .text = .{} };
-    app.input_buffer = .empty;
+    app.input = .{};
     app.input_desired_col = null;
     app.widget_frame_input_area = .{ .width = 11, .height = 10 };
 
-    app.input_buffer.items = @constCast("aaaa bbbb cccc dddd eeee ffff");
-    app.input_cursor = 30;
+    app.input.set("aaaa bbbb cccc dddd eeee ffff");
+    app.input.cursor = 30;
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 24), app.input_cursor);
+    try testing.expectEqual(@as(usize, 24), app.input.cursor);
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 19), app.input_cursor);
+    try testing.expectEqual(@as(usize, 19), app.input.cursor);
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 24), app.input_cursor);
+    try testing.expectEqual(@as(usize, 24), app.input.cursor);
 
-    app.input_cursor = 2;
+    app.input.cursor = 2;
     app.input_desired_col = null;
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 7), app.input_cursor);
+    try testing.expectEqual(@as(usize, 7), app.input.cursor);
 
-    app.input_buffer.items = @constCast("aaaaaa bbb");
-    app.input_cursor = 2;
+    app.input.set("aaaaaa bbb");
+    app.input.cursor = 2;
     app.input_desired_col = null;
     app.widget_frame_input_area = .{ .width = 9, .height = 10 };
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 6), app.input_cursor);
+    try testing.expectEqual(@as(usize, 6), app.input.cursor);
 
-    app.input_buffer.items = @constCast("aaaaaaaaaaaaaaaa");
-    app.input_cursor = 16;
+    app.input.set("aaaaaaaaaaaaaaaa");
+    app.input.cursor = 16;
     app.input_desired_col = null;
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 11), app.input_cursor);
+    try testing.expectEqual(@as(usize, 11), app.input.cursor);
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 7), app.input_cursor);
+    try testing.expectEqual(@as(usize, 7), app.input.cursor);
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 3), app.input_cursor);
+    try testing.expectEqual(@as(usize, 3), app.input.cursor);
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 3), app.input_cursor);
+    try testing.expectEqual(@as(usize, 3), app.input.cursor);
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 7), app.input_cursor);
+    try testing.expectEqual(@as(usize, 7), app.input.cursor);
 
-    app.input_buffer.items = @constCast("ab\ncd");
-    app.input_cursor = 1;
+    app.input.set("ab\ncd");
+    app.input.cursor = 1;
     app.input_desired_col = null;
     app.widget_frame_input_area = .{ .width = 0, .height = 10 };
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 1), app.input_cursor);
+    try testing.expectEqual(@as(usize, 1), app.input.cursor);
 
-    app.input_buffer.items = @constCast("ab\n");
-    app.input_cursor = 3;
+    app.input.set("ab\n");
+    app.input.cursor = 3;
     app.input_desired_col = null;
     app.widget_frame_input_area = .{ .width = 100, .height = 10 };
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 3), app.input_cursor);
+    try testing.expectEqual(@as(usize, 3), app.input.cursor);
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 0), app.input_cursor);
+    try testing.expectEqual(@as(usize, 0), app.input.cursor);
 
-    app.input_buffer.items = @constCast("");
-    app.input_cursor = 0;
+    app.input.set("");
+    app.input.cursor = 0;
     app.input_desired_col = null;
     app.moveCursorVertical(-1);
-    try testing.expectEqual(@as(u32, 0), app.input_cursor);
+    try testing.expectEqual(@as(usize, 0), app.input.cursor);
     app.moveCursorVertical(1);
-    try testing.expectEqual(@as(u32, 0), app.input_cursor);
+    try testing.expectEqual(@as(usize, 0), app.input.cursor);
 }
 
 test "appendWrappedPlainRows matches wrapLine row boundaries" {
@@ -6020,22 +6041,21 @@ test "completion visibility rule" {
     var app: App = undefined;
     app.io = std.testing.io;
     app.input_mode = .{ .text = .{} };
-    app.input_buffer = .empty;
-    app.input_cursor = 0;
+    app.input = .{};
     app.exec_pool = undefined;
 
-    app.input_buffer.items = @constCast("/ski");
-    app.input_cursor = 4;
+    app.input.set("/ski");
+    app.input.cursor = 4;
     try std.testing.expect(!app.pathTokenActive());
     try std.testing.expect(commandTokenActive("/ski", 4));
 
-    app.input_buffer.items = @constCast("/cd /tm");
-    app.input_cursor = 7;
+    app.input.set("/cd /tm");
+    app.input.cursor = 7;
     try std.testing.expect(app.pathTokenActive());
     try std.testing.expect(!commandTokenActive("/cd /tm", 7));
 
-    app.input_buffer.items = @constCast("/etc/");
-    app.input_cursor = 5;
+    app.input.set("/etc/");
+    app.input.cursor = 5;
     try std.testing.expect(app.pathTokenActive());
     try std.testing.expect(!r.completion.commandTokenOwns("/etc/", 5));
 }
@@ -6067,8 +6087,7 @@ const PathCompletionFixture = struct {
         const root_len = try f.tmp.dir.realPathFile(testing.io, ".", &buf);
         f.app.cwd = try f.app.appAlloc().dupe(u8, buf[0..root_len]);
         f.app.input_mode = .{ .text = .{} };
-        f.app.input_buffer = .empty;
-        f.app.input_cursor = 0;
+        f.app.input = .{};
         f.app.path_completion = .{};
     }
 
@@ -6098,8 +6117,8 @@ test "path completion probes dirs and lists entries" {
     try f.tmp.dir.createDir(testing.io, "sub", .default_dir);
     try f.tmp.dir.writeFile(testing.io, .{ .sub_path = "zz.txt", .data = "x" });
 
-    f.app.input_buffer.items = try f.app.sessionAlloc().dupe(u8, "./");
-    f.app.input_cursor = 2;
+    f.app.input.set("./");
+    f.app.input.cursor = 2;
     try f.waitForDirList(".");
     try testing.expect(f.app.path_completion.cache.find(".") != null);
 
@@ -6129,8 +6148,8 @@ test "path completion next prev highlight without descending" {
     try f.tmp.dir.writeFile(testing.io, .{ .sub_path = "zz.txt", .data = "x" });
     try f.tmp.dir.writeFile(testing.io, .{ .sub_path = "sub/aa.txt", .data = "x" });
 
-    f.app.input_buffer.items = try f.app.sessionAlloc().dupe(u8, "./");
-    f.app.input_cursor = 2;
+    f.app.input.set("./");
+    f.app.input.cursor = 2;
     try f.waitForDirList(".");
 
     f.app.syncCompletion();
@@ -6138,33 +6157,33 @@ test "path completion next prev highlight without descending" {
     try testing.expectEqual(@as(usize, 0), f.app.input_mode.text.completion_selected);
 
     f.app.handleCompletion(.next);
-    try testing.expectEqualStrings("./", f.app.input_buffer.items);
-    try testing.expectEqual(@as(u32, 2), f.app.input_cursor);
+    try testing.expectEqualStrings("./", f.app.input.slice());
+    try testing.expectEqual(@as(usize, 2), f.app.input.cursor);
     try testing.expectEqual(@as(usize, 1), f.app.input_mode.text.completion_selected);
 
     f.app.handleCompletion(.next);
     try testing.expectEqual(@as(usize, 1), f.app.input_mode.text.completion_selected);
 
     f.app.handleCompletion(.prev);
-    try testing.expectEqualStrings("./", f.app.input_buffer.items);
-    try testing.expectEqual(@as(u32, 2), f.app.input_cursor);
+    try testing.expectEqualStrings("./", f.app.input.slice());
+    try testing.expectEqual(@as(usize, 2), f.app.input.cursor);
     try testing.expectEqual(@as(usize, 0), f.app.input_mode.text.completion_selected);
 
     f.app.handleCompletion(.accept);
-    try testing.expectEqualStrings("./sub/", f.app.input_buffer.items);
-    try testing.expectEqual(@as(u32, 6), f.app.input_cursor);
+    try testing.expectEqualStrings("./sub/", f.app.input.slice());
+    try testing.expectEqual(@as(usize, 6), f.app.input.cursor);
     try testing.expect(f.app.input_mode.text.completion_open);
     try testing.expectEqual(@as(usize, 0), f.app.input_mode.text.completion_selected);
 
     try f.waitForDirList("sub");
 
     f.app.handleCompletion(.next);
-    try testing.expectEqualStrings("./sub/", f.app.input_buffer.items);
-    try testing.expectEqual(@as(u32, 6), f.app.input_cursor);
+    try testing.expectEqualStrings("./sub/", f.app.input.slice());
+    try testing.expectEqual(@as(usize, 6), f.app.input.cursor);
     try testing.expectEqual(@as(usize, 1), f.app.input_mode.text.completion_selected);
 
     f.app.handleCompletion(.accept);
-    try testing.expectEqualStrings("./sub/aa.txt", f.app.input_buffer.items);
+    try testing.expectEqualStrings("./sub/aa.txt", f.app.input.slice());
     try testing.expect(!f.app.input_mode.text.completion_open);
 }
 
@@ -6174,8 +6193,8 @@ test "path completion skips nonexistent dirs without crashing" {
     try f.init();
     defer f.deinit();
 
-    f.app.input_buffer.items = @constCast("/no/such/path/");
-    f.app.input_cursor = 14;
+    f.app.input.set("/no/such/path/");
+    f.app.input.cursor = 14;
     try f.waitForDirList("/no/such/path");
 
     const list = f.app.path_completion.cache.find("/no/such/path");
@@ -6201,12 +6220,9 @@ test "wizard confirm writes provider.lua and marker then returns to text" {
     w.provider_index = 0;
     w.provider_type_len = entry.provider_type.len;
     @memcpy(w.provider_type_buf[0..w.provider_type_len], entry.provider_type);
-    w.url_len = entry.default_url.len;
-    @memcpy(w.url_buf[0..w.url_len], entry.default_url);
-    w.key_len = "sk-ant-secret".len;
-    @memcpy(w.key_buf[0..w.key_len], "sk-ant-secret");
-    w.model_len = entry.models[0].name.len;
-    @memcpy(w.model_buf[0..w.model_len], entry.models[0].name);
+    w.url.set(entry.default_url);
+    w.key.set("sk-ant-secret");
+    w.model.set(entry.models[0].name);
 
     app.wizardConfirm(tmp.dir);
 
@@ -6232,8 +6248,7 @@ test "wizard skip writes defaults, honors marker, and existing provider.lua wins
 
     app.enterWizard();
     const w = app.wizardState().?;
-    w.key_len = "leftover".len;
-    @memcpy(w.key_buf[0..w.key_len], "leftover");
+    w.key.set("leftover");
     app.wizardSkip(tmp.dir);
 
     try std.testing.expect(app.input_mode == .text);
@@ -6241,7 +6256,7 @@ test "wizard skip writes defaults, honors marker, and existing provider.lua wins
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.indexOf(u8, contents, "https://opencode.ai/zen/go/v1") != null);
     try tmp.dir.access(std.testing.io, r.wizard.DONE_MARKER, .{});
-    for (w.key_buf[0.."leftover".len]) |ch| try std.testing.expectEqual(@as(u8, 0), ch);
+    for (w.key.buf[0.."leftover".len]) |ch| try std.testing.expectEqual(@as(u8, 0), ch);
 
     const existing = "local model = 42\nreturn model\n";
     {

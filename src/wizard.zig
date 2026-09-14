@@ -147,12 +147,9 @@ pub const Wizard = struct {
     vision_override: ?bool = null,
     provider_type_buf: [16]u8 = undefined,
     provider_type_len: usize = 0,
-    url_buf: [256]u8 = undefined,
-    url_len: usize = 0,
-    key_buf: [256]u8 = undefined,
-    key_len: usize = 0,
-    model_buf: [256]u8 = undefined,
-    model_len: usize = 0,
+    url: root.tui.Field(256) = .{},
+    key: root.tui.Field(256) = .{},
+    model: root.tui.Field(256) = .{},
     free_text_buf: [256]u8 = undefined,
     free_text_len: usize = 0,
     error_msg: ?[]const u8 = null,
@@ -180,29 +177,18 @@ pub const Wizard = struct {
         };
     }
 
-    const TextTarget = struct { buf: []u8, len: *usize };
-
-    pub fn activeText(w: *Wizard) ?TextTarget {
+    pub fn activeText(w: *Wizard) ?*root.tui.Field(256) {
         return switch (w.step) {
-            .url => .{ .buf = w.url_buf[0..], .len = &w.url_len },
-            .key => .{ .buf = w.key_buf[0..], .len = &w.key_len },
-            .model => if (w.model_free_text) .{ .buf = w.model_buf[0..], .len = &w.model_len } else null,
+            .url => &w.url,
+            .key => &w.key,
+            .model => if (w.model_free_text) &w.model else null,
             else => null,
         };
     }
 
-    pub fn storeText(w: *Wizard, text: []const u8) void {
-        const target = w.activeText() orelse return;
-        if (target.len.* + text.len <= target.buf.len) {
-            @memcpy(target.buf[target.len.*..][0..text.len], text);
-            target.len.* += text.len;
-        }
-    }
-
     fn refreshUrl(w: *Wizard) void {
         const entry = catalogEntry(w.provider_index) orelse return;
-        w.url_len = @min(entry.default_url.len, w.url_buf.len);
-        @memcpy(w.url_buf[0..w.url_len], entry.default_url[0..w.url_len]);
+        w.url.set(entry.default_url);
     }
 
     pub fn resetModel(w: *Wizard) void {
@@ -210,8 +196,7 @@ pub const Wizard = struct {
         w.model_free_text = if (entry) |e| e.free_text_model_only else false;
         w.model_curated_index = if (w.step == .model and !w.model_free_text) null else w.model_curated_index;
         w.vision_override = null;
-        w.model_len = 0;
-        @memset(w.model_buf[0..], 0);
+        w.model.clear();
         w.free_text_len = 0;
         @memset(w.free_text_buf[0..], 0);
     }
@@ -219,7 +204,7 @@ pub const Wizard = struct {
     pub fn syncModelStep(w: *Wizard) void {
         if (w.step != .model) return;
         w.resetModel();
-        if (!w.model_free_text and w.model_len == 0) w.moveCursor(0);
+        if (!w.model_free_text and w.model.isEmpty()) w.moveCursor(0);
     }
 
     pub fn enterProvider(w: *Wizard) void {
@@ -238,7 +223,7 @@ pub const Wizard = struct {
         w.provider_type_len = @min(chosen.len, w.provider_type_buf.len);
         @memcpy(w.provider_type_buf[0..w.provider_type_len], chosen[0..w.provider_type_len]);
         w.step = .url;
-        if (w.url_len == 0) w.list_selected = 0;
+        if (w.url.isEmpty()) w.list_selected = 0;
     }
 
     pub fn moveCursor(w: *Wizard, delta: i8) void {
@@ -265,39 +250,34 @@ pub const Wizard = struct {
         const now_free = w.list_selected == free_row;
         if (now_free and w.model_free_text) return;
         if (w.model_free_text) {
-            w.free_text_len = @min(w.model_len, w.free_text_buf.len);
-            @memcpy(w.free_text_buf[0..w.free_text_len], w.model_buf[0..w.free_text_len]);
+            w.free_text_len = @min(w.model.len, w.free_text_buf.len);
+            @memcpy(w.free_text_buf[0..w.free_text_len], w.model.slice()[0..w.free_text_len]);
         }
         w.model_free_text = now_free;
-        w.model_len = 0;
-        @memset(w.model_buf[0..], 0);
+        w.model.clear();
         if (now_free) {
-            w.model_len = @min(w.free_text_len, w.model_buf.len);
-            @memcpy(w.model_buf[0..w.model_len], w.free_text_buf[0..w.model_len]);
+            w.model.set(w.free_text_buf[0..w.free_text_len]);
         } else {
             w.model_curated_index = w.list_selected;
             if (w.list_selected < entry.models.len) {
-                const model = entry.models[w.list_selected];
-                w.model_len = @min(model.name.len, w.model_buf.len);
-                @memcpy(w.model_buf[0..w.model_len], model.name[0..w.model_len]);
+                w.model.set(entry.models[w.list_selected].name);
             }
         }
     }
 
     pub fn abortClearSecrets(w: *Wizard) void {
-        @memset(w.key_buf[0..w.key_len], 0);
-        w.key_len = 0;
+        w.key.wipe();
     }
 
     pub fn selection(w: *const Wizard) ?Selection {
         const entry = catalogEntry(w.provider_index) orelse return null;
-        const model = selectModel(entry, w.model_buf[0..w.model_len]);
+        const model = selectModel(entry, w.model.slice());
         return .{
             .entry = entry,
             .provider_type = w.provider_type_buf[0..w.provider_type_len],
-            .url = w.url_buf[0..w.url_len],
-            .key = w.key_buf[0..w.key_len],
-            .model = w.model_buf[0..w.model_len],
+            .url = w.url.slice(),
+            .key = w.key.slice(),
+            .model = w.model.slice(),
             .vision = if (w.vision_override) |v| v else model.vision,
             .replay_reasoning = model.replay_reasoning,
             .session_key_header = entry.session_key_header,

@@ -2,7 +2,6 @@ const std = @import("std");
 const rect = @import("rect.zig");
 const cell = @import("cell.zig");
 const buffer = @import("buffer.zig");
-const util = @import("text_utils.zig");
 const icon = @import("icon.zig");
 
 pub const Rect = rect.Rect;
@@ -790,6 +789,7 @@ pub const DiffLine = struct {
 
 pub const Input = struct {
     text: []const u8,
+    cursor: usize = std.math.maxInt(usize),
     border_style: Style = .{},
     text_style: Style = .{},
     screenshot_style: Style = .{},
@@ -823,10 +823,16 @@ pub const Input = struct {
 
         var cx = input_start;
         var cy = inner.y;
+        var caret_shown = false;
 
-        var w_it = util.WrappedTextIter.new(self.text, inner.width -| 2);
-        while (w_it.next()) |c| {
-            if (c == '\n') {
+        var pos: usize = 0;
+        while (pos < self.text.len) {
+            const at_cursor = pos == self.cursor;
+            const cp_len = std.unicode.utf8ByteSequenceLength(self.text[pos]) catch 1;
+            const stop = @min(pos + cp_len, self.text.len);
+            const cp = std.unicode.utf8Decode(self.text[pos..stop]) catch 0xFFFD;
+            pos = stop;
+            if (cp == '\n') {
                 cx = input_start;
                 cy += 1;
                 if (cy >= inner_end_y) break;
@@ -834,18 +840,29 @@ pub const Input = struct {
             }
 
             if (cy < inner_end_y) {
-                buf.set(cx, cy, .{ .char = c, .style = self.text_style });
+                if (at_cursor) {
+                    buf.set(cx, cy, .{ .char = cp, .style = self.caretStyle() });
+                    caret_shown = true;
+                } else {
+                    buf.set(cx, cy, .{ .char = cp, .style = self.text_style });
+                }
             }
             cx += 1;
+            if (cx >= input_end) {
+                cx = input_start;
+                cy += 1;
+            }
         }
 
-        if (cx >= input_end) {
-            cx = input_start;
-            cy += 1;
-        }
-        if (cy < inner_end_y and cx < input_end) {
+        if (!caret_shown and cy < inner_end_y and cx < input_end) {
             buf.set(cx, cy, .{ .char = '_', .style = self.border_style });
         }
+    }
+
+    fn caretStyle(self: *const Input) Style {
+        var style = self.text_style;
+        style.modifier.reverse = true;
+        return style;
     }
 };
 
@@ -1571,6 +1588,48 @@ test "input renders newline rows without phantom breaks" {
     for (row2, 0..) |ch, i| {
         try std.testing.expectEqual(@as(u21, ch), buf.get(3 + @as(u16, @intCast(i)), 2).char);
     }
+}
+
+test "input caret lands on the cell under the cursor" {
+    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });
+    defer buf.deinit();
+    const text = "ab  cd";
+    const input: Input = .{ .text = text, .cursor = 4 };
+    input.render(.{ .width = 16, .height = 9 }, &buf);
+
+    try std.testing.expectEqual(@as(u21, 'c'), buf.get(3 + 4, 1).char);
+    try std.testing.expect(buf.get(3 + 4, 1).style.modifier.reverse);
+    try std.testing.expect(!buf.get(3 + 3, 1).style.modifier.reverse);
+    var y: u16 = 0;
+    while (y < 9) : (y += 1) {
+        var x: u16 = 0;
+        while (x < 16) : (x += 1) {
+            if (x == 3 + 4 and y == 1) continue;
+            try std.testing.expect(!buf.get(x, y).style.modifier.reverse);
+        }
+    }
+}
+
+test "input caret follows the cursor onto a wrapped row" {
+    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });
+    defer buf.deinit();
+    const text = "aaaa bbbb cccc";
+    const input: Input = .{ .text = text, .cursor = "aaaa bbbb cc".len };
+    input.render(.{ .width = 16, .height = 9 }, &buf);
+
+    try std.testing.expectEqual(@as(u21, 'c'), buf.get(3, 2).char);
+    try std.testing.expect(buf.get(3, 2).style.modifier.reverse);
+}
+
+test "input shows the trailing underscore when the cursor is at the end" {
+    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });
+    defer buf.deinit();
+    const input: Input = .{ .text = "hi", .cursor = 2 };
+    input.render(.{ .width = 16, .height = 9 }, &buf);
+
+    try std.testing.expectEqual(@as(u21, 'h'), buf.get(3, 1).char);
+    try std.testing.expectEqual(@as(u21, 'i'), buf.get(4, 1).char);
+    try std.testing.expectEqual(@as(u21, '_'), buf.get(5, 1).char);
 }
 
 test "input renders nothing when the box is too narrow" {

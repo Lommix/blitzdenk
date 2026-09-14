@@ -154,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
     app.running = true;
 
     try buildTranscript(&app, agent, arena);
-    try app.input_buffer.appendSlice(app.sessionAlloc(), "explain the render fast path\nand show the bench numbers");
+    app.input.set("explain the render fast path\nand show the bench numbers");
 
     var buf = try r.tui.Buffer.init(gpa, .{ .x = 0, .y = 0, .width = bench_width, .height = bench_height });
     defer buf.deinit();

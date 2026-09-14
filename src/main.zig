@@ -122,11 +122,11 @@ fn handleWizardEnter(app: *App) void {
         },
         .provider => w.enterProvider(),
         .provider_type => w.finishProviderType(),
-        .url => w.step = r.wizard.nextStep(.url, r.wizard.catalogEntry(w.provider_index) orelse return, w.model_buf[0..w.model_len]),
-        .key => w.step = r.wizard.nextStep(.key, r.wizard.catalogEntry(w.provider_index) orelse return, w.model_buf[0..w.model_len]),
+        .url => w.step = r.wizard.nextStep(.url, r.wizard.catalogEntry(w.provider_index) orelse return, w.model.slice()),
+        .key => w.step = r.wizard.nextStep(.key, r.wizard.catalogEntry(w.provider_index) orelse return, w.model.slice()),
         .model => {
-            if (w.model_len == 0) return;
-            w.step = r.wizard.nextStep(.model, r.wizard.catalogEntry(w.provider_index) orelse return, w.model_buf[0..w.model_len]);
+            if (w.model.isEmpty()) return;
+            w.step = r.wizard.nextStep(.model, r.wizard.catalogEntry(w.provider_index) orelse return, w.model.slice());
             w.list_selected = 0;
             if (w.step == .vision) w.vision_override = true;
             w.accept_selected = true;
@@ -137,7 +137,7 @@ fn handleWizardEnter(app: *App) void {
                 w.list_selected = 0;
                 w.resetModel();
                 w.provider_type_len = 0;
-                w.url_len = 0;
+                w.url.clear();
                 w.abortClearSecrets();
                 return;
             }
@@ -672,8 +672,7 @@ pub fn run(
     app.startUpdateCheck();
 
     if (prompt) |p| {
-        try app.input_buffer.appendSlice(app.sessionAlloc(), p);
-        app.input_cursor = @intCast(app.input_buffer.items.len);
+        app.input.set(p);
     }
 
     // Terminal is scoped so its restore happens before the session hint is
@@ -943,26 +942,28 @@ pub fn run(
                                     continue;
                                 },
                                 .cursor_left => {
+                                    _ = app.fieldOp(.left, "");
                                     app.input_desired_col = null;
-                                    app.input_cursor -|= 1;
+                                    continue;
                                 },
                                 .cursor_right => {
+                                    _ = app.fieldOp(.right, "");
                                     app.input_desired_col = null;
-                                    app.input_cursor = @min(app.input_cursor + 1, app.input_buffer.items.len);
+                                    continue;
                                 },
                                 .cursor_up => {
                                     if (app.completionIsOpen()) {
                                         app.handleCompletion(.prev);
                                         continue;
                                     }
-                                    app.moveCursorVertical(-1);
+                                    if (app.input_mode == .text) app.moveCursorVertical(-1);
                                 },
                                 .cursor_down => {
                                     if (app.completionIsOpen()) {
                                         app.handleCompletion(.next);
                                         continue;
                                     }
-                                    app.moveCursorVertical(1);
+                                    if (app.input_mode == .text) app.moveCursorVertical(1);
                                 },
                                 .history_prev => {
                                     if (app.historyUp()) continue;
@@ -994,103 +995,76 @@ pub fn run(
                         }
                         switch (k.code) {
                             .char => |c| {
+                                if (app.input_mode == .text) {
+                                    app.appendBytes(k.textSlice());
+                                    continue;
+                                }
+                                if (app.fieldOp(.insert, k.textSlice())) continue;
                                 switch (app.input_mode) {
-                                    .text => {
-                                        app.appendBytes(k.textSlice());
-                                    },
                                     .perm_select => |*ps| {
                                         const max_sel = app.permSelectMaxIndex();
                                         if (c == 'j' and ps.selected < max_sel) ps.selected += 1;
                                         if (c == 'k' and ps.selected > 0) ps.selected -= 1;
                                     },
-                                    .perm_message => |*pm| {
-                                        const ts = k.textSlice();
-                                        if (pm.len + ts.len <= pm.buf.len) {
-                                            @memcpy(pm.buf[pm.len..][0..ts.len], ts);
-                                            pm.len += ts.len;
-                                        }
-                                    },
-                                    .passphrase => |*pp| {
-                                        const ts = k.textSlice();
-                                        if (pp.len + ts.len <= pp.buf.len) {
-                                            @memcpy(pp.buf[pp.len..][0..ts.len], ts);
-                                            pp.len += ts.len;
-                                        }
-                                    },
                                     .wizard => |*w| {
-                                        if (w.stepIsList()) {
-                                            if (c == 'j') w.moveCursor(1);
-                                            if (c == 'k') w.moveCursor(-1);
-                                        } else {
-                                            w.storeText(k.textSlice());
-                                        }
+                                        if (c == 'j') w.moveCursor(1);
+                                        if (c == 'k') w.moveCursor(-1);
                                     },
-                                    .session_picker => {},
+                                    else => {},
                                 }
                             },
                             .arrow_up => switch (app.input_mode) {
-                                .text => {},
                                 .perm_select => |*ps| {
                                     if (ps.selected > 0) ps.selected -= 1;
                                 },
-                                .perm_message => {},
-                                .passphrase => {},
                                 .wizard => |*w| {
                                     w.moveCursor(-1);
                                 },
-                                .session_picker => {},
+                                else => {},
                             },
                             .arrow_down => switch (app.input_mode) {
-                                .text => {},
                                 .perm_select => |*ps| {
                                     const max_sel = app.permSelectMaxIndex();
                                     if (ps.selected < max_sel) ps.selected += 1;
                                 },
-                                .perm_message => {},
-                                .passphrase => {},
                                 .wizard => |*w| {
                                     w.moveCursor(1);
                                 },
-                                .session_picker => {},
+                                else => {},
                             },
-                            .backspace => switch (app.input_mode) {
-                                .text => app.deleteChar(),
-                                .perm_select => {},
-                                .perm_message => |*pm| {
-                                    while (pm.len > 0) {
-                                        pm.len -= 1;
-                                        if ((pm.buf[pm.len] & 0xC0) != 0x80) break;
-                                    }
-                                },
-                                .passphrase => |*pp| {
-                                    while (pp.len > 0) {
-                                        pp.len -= 1;
-                                        if ((pp.buf[pp.len] & 0xC0) != 0x80) break;
-                                    }
-                                },
-                                .wizard => |*w| {
-                                    if (w.activeText()) |target| {
-                                        if (target.len.* > 0) {
-                                            target.len.* -= 1;
-                                            while (target.len.* > 0 and (target.buf[target.len.*] & 0xC0) == 0x80) {
-                                                target.len.* -= 1;
-                                            }
-                                            @memset(target.buf[target.len.*..], 0);
-                                        }
-                                    }
-                                },
-                                .session_picker => {},
+                            .backspace => {
+                                if (app.input_mode == .text) {
+                                    app.deleteChar();
+                                } else {
+                                    _ = app.fieldOp(.backspace, "");
+                                }
+                            },
+                            .home => {
+                                app.input_desired_col = null;
+                                _ = app.fieldOp(.home, "");
+                                if (app.input_mode == .text) app.syncCompletion();
+                            },
+                            .end => {
+                                app.input_desired_col = null;
+                                _ = app.fieldOp(.end, "");
+                                if (app.input_mode == .text) app.syncCompletion();
+                            },
+                            .delete => {
+                                if (app.input_mode == .text) {
+                                    app.deleteForwardChar();
+                                } else {
+                                    _ = app.fieldOp(.delete_forward, "");
+                                }
                             },
                             .enter => switch (app.input_mode) {
                                 .perm_message => |*pm| {
                                     if (app.active_permission == null) {
                                         if (app.active_selection != null) {
-                                            if (pm.len == 0) {
+                                            if (pm.field.isEmpty()) {
                                                 app.enterPermSelect();
                                                 break;
                                             }
-                                            const sel_msg = pm.buf[0..pm.len];
-                                            app.resolveActiveSelection(sel_msg, null);
+                                            app.resolveActiveSelection(pm.field.slice(), null);
                                             break;
                                         }
                                     }
@@ -1098,11 +1072,11 @@ pub fn run(
 
                                     const is_ask = entry.payload == .ask;
 
-                                    if (pm.len == 0) {
+                                    if (pm.field.isEmpty()) {
                                         app.enterPermSelect();
                                         break;
                                     }
-                                    const msg = pm.buf[0..pm.len];
+                                    const msg = pm.field.slice();
                                     if (is_ask) {
                                         app.resolveActivePermission(.{ .message = msg });
                                     } else {
@@ -1155,7 +1129,7 @@ pub fn run(
                                 },
                                 .text => {
                                     _ = app.closeCompletion();
-                                    if (app.input_buffer.items.len == 0) break;
+                                    if (app.input.isEmpty()) break;
                                     var input: []const u8 = std.fmt.allocPrint(app.sessionAlloc(), "{f}", .{std.unicode.fmtUtf8(app.inputSlice())}) catch break;
                                     if (app.lua_vm.vm_mu.tryLock()) {
                                         defer app.lua_vm.vm_mu.unlock(io);
@@ -1176,7 +1150,7 @@ pub fn run(
                                             defer app.lua_vm.vm_mu.unlock(io);
                                             if (app.lua_vm.invokeCommand(input)) {
                                                 app.pushHistory(history_store_dir, input);
-                                                app.input_buffer.clearRetainingCapacity();
+                                                app.input.clear();
                                                 break;
                                             }
                                         } else {
@@ -1189,14 +1163,14 @@ pub fn run(
                                             switch (c) {
                                                 .ssh => |args| {
                                                     app.startSshConnect(args.user, args.host, args.cwd);
-                                                    app.input_buffer.clearRetainingCapacity();
+                                                    app.input.clear();
                                                 },
                                                 .ssh_off => {
                                                     app.cancelSshConnect();
                                                     app.exec_pool.clearSsh();
                                                     app.invalidatePathCompletions();
                                                     app.notifications.append(gpa, app.nowMillis(), "SSH mode disabled", .{}) catch {};
-                                                    app.input_buffer.clearRetainingCapacity();
+                                                    app.input.clear();
                                                 },
                                             }
                                             break;
@@ -1208,24 +1182,24 @@ pub fn run(
                                             } else {
                                                 app.pushSystemMessage("unknown ssh alias: {s}", .{alias});
                                             }
-                                            app.input_buffer.clearRetainingCapacity();
+                                            app.input.clear();
                                             break;
                                         }
 
                                         if (skills.parseSkillCommand(input)) |sc| {
                                             const entry = app.context_factory.skills.find(sc.name) orelse {
                                                 app.pushSystemMessage("unknown skill: {s}", .{sc.name});
-                                                app.input_buffer.clearRetainingCapacity();
+                                                app.input.clear();
                                                 break;
                                             };
                                             if (!entry.meta.user_invocable) {
                                                 app.pushSystemMessage("skill '{s}' is not user-invocable", .{entry.meta.name});
-                                                app.input_buffer.clearRetainingCapacity();
+                                                app.input.clear();
                                                 break;
                                             }
                                             const loaded = skills.loadSkill(app.io, app.sessionAlloc(), entry) orelse {
                                                 app.pushSystemMessage("unknown skill: {s}", .{sc.name});
-                                                app.input_buffer.clearRetainingCapacity();
+                                                app.input.clear();
                                                 break;
                                             };
                                             send_text = skills.skillSendText(app.sessionAlloc(), loaded.body, sc.prompt) catch break;
@@ -1262,7 +1236,7 @@ pub fn run(
 
                                         try app.cmd_queue.append(io, .{ .scroll_down = 999999 });
                                         app.screenshot_buf = null;
-                                        app.input_buffer.clearRetainingCapacity();
+                                        app.input.clear();
                                         continue;
                                     }
 
@@ -1282,7 +1256,7 @@ pub fn run(
                                     app.screenshot_buf = null;
 
                                     try app.sendPrompt(io, parts, timeline_text);
-                                    app.input_buffer.clearRetainingCapacity();
+                                    app.input.clear();
                                 },
                                 .passphrase => {
                                     app.startSshUnlock();
@@ -1296,8 +1270,7 @@ pub fn run(
                                 .text => {
                                     const input = app.inputSlice();
                                     if (input.len > 0 and input[0] == '/') {
-                                        app.input_buffer.clearRetainingCapacity();
-                                        app.input_cursor = 0;
+                                        app.input.clear();
                                         app.input_desired_col = null;
                                     }
                                 },
@@ -1310,25 +1283,12 @@ pub fn run(
                             else => {},
                         }
                     },
-                    .paste => |text| switch (app.input_mode) {
-                        .text => app.pasteImageOrText(text),
-                        .perm_message => |*pm| {
-                            if (pm.len + text.len <= pm.buf.len) {
-                                @memcpy(pm.buf[pm.len..][0..text.len], text);
-                                pm.len += text.len;
-                            }
-                        },
-                        .perm_select => {},
-                        .passphrase => |*pp| {
-                            if (pp.len + text.len <= pp.buf.len) {
-                                @memcpy(pp.buf[pp.len..][0..text.len], text);
-                                pp.len += text.len;
-                            }
-                        },
-                        .wizard => |*w| {
-                            w.storeText(text);
-                        },
-                        .session_picker => {},
+                    .paste => |text| {
+                        if (app.input_mode == .text) {
+                            app.pasteImageOrText(text);
+                        } else {
+                            _ = app.fieldOp(.insert, text);
+                        }
                     },
                     .mouse => |m| {
                         if (!app.handleScrollbarMouse(m)) {
@@ -1380,7 +1340,7 @@ test "provider step enter commits the selected catalog row" {
 
     const ollama = r.wizard.catalog[wizardCatalogIndexOf("Ollama")];
     try std.testing.expectEqualStrings(ollama.provider_type, w.provider_type_buf[0..w.provider_type_len]);
-    try std.testing.expectEqualStrings(ollama.default_url, w.url_buf[0..w.url_len]);
+    try std.testing.expectEqualStrings(ollama.default_url, w.url.slice());
     try std.testing.expectEqual(r.wizard.Step.url, w.step);
 }
 
@@ -1392,18 +1352,17 @@ test "model selection change preserves typed free text across row moves" {
     w.model_free_text = true;
     w.list_selected = 3;
     const typed = "my-custom-model";
-    w.model_len = typed.len;
-    @memcpy(w.model_buf[0..typed.len], typed);
+    w.model.set(typed);
 
     w.moveCursor(0);
 
     try std.testing.expect(w.model_free_text);
-    try std.testing.expectEqualStrings(typed, w.model_buf[0..w.model_len]);
+    try std.testing.expectEqualStrings(typed, w.model.slice());
 
     w.list_selected = 1;
     w.moveCursor(0);
     try std.testing.expect(!w.model_free_text);
-    try std.testing.expectEqualStrings(r.wizard.catalog[0].models[1].name, w.model_buf[0..w.model_len]);
+    try std.testing.expectEqualStrings(r.wizard.catalog[0].models[1].name, w.model.slice());
 }
 
 test "entering the model step preselects the first curated row" {
@@ -1415,12 +1374,12 @@ test "entering the model step preselects the first curated row" {
     w.step = .model;
     w.resetModel();
 
-    if (w.step == .model and !w.model_free_text and w.model_len == 0) {
+    if (w.step == .model and !w.model_free_text and w.model.isEmpty()) {
         w.moveCursor(0);
     }
 
     const anthropic = r.wizard.catalog[wizardCatalogIndexOf("Anthropic")];
-    try std.testing.expectEqualStrings(anthropic.models[0].name, w.model_buf[0..w.model_len]);
+    try std.testing.expectEqualStrings(anthropic.models[0].name, w.model.slice());
     try std.testing.expect(!w.model_free_text);
 }
 
@@ -1438,14 +1397,14 @@ test "custom endpoint model step accepts typed input immediately" {
 
     try std.testing.expect(!w.stepIsList());
     try std.testing.expect(w.activeText() != null);
-    try std.testing.expectEqualStrings("", w.model_buf[0..w.model_len]);
+    try std.testing.expectEqualStrings("", w.model.slice());
 
-    w.storeText("my-model-id");
-    try std.testing.expectEqualStrings("my-model-id", w.model_buf[0..w.model_len]);
-    try std.testing.expect(w.model_len > 0);
+    w.activeText().?.insert("my-model-id");
+    try std.testing.expectEqualStrings("my-model-id", w.model.slice());
+    try std.testing.expect(!w.model.isEmpty());
 
     w.moveCursor(1);
-    try std.testing.expectEqualStrings("my-model-id", w.model_buf[0..w.model_len]);
+    try std.testing.expectEqualStrings("my-model-id", w.model.slice());
 }
 
 test "free text survives curated row detours" {
@@ -1457,17 +1416,17 @@ test "free text survives curated row detours" {
     w.moveCursor(0);
     try std.testing.expect(w.model_free_text);
 
-    w.storeText("claude-custom");
+    w.activeText().?.insert("claude-custom");
     const free_row = r.wizard.catalog[wizardCatalogIndexOf("Anthropic")].models.len;
     w.list_selected = free_row - 1;
     w.moveCursor(0);
     try std.testing.expect(!w.model_free_text);
-    try std.testing.expectEqualStrings(r.wizard.catalog[wizardCatalogIndexOf("Anthropic")].models[2].name, w.model_buf[0..w.model_len]);
+    try std.testing.expectEqualStrings(r.wizard.catalog[wizardCatalogIndexOf("Anthropic")].models[2].name, w.model.slice());
 
     w.list_selected = free_row;
     w.moveCursor(0);
     try std.testing.expect(w.model_free_text);
-    try std.testing.expectEqualStrings("claude-custom", w.model_buf[0..w.model_len]);
+    try std.testing.expectEqualStrings("claude-custom", w.model.slice());
 }
 
 /// Journal materializes lazily in appendCheckpoint; do not gate on file_name.

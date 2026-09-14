@@ -2110,7 +2110,7 @@ fn luaInputGet(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "input.get: only available on the main thread");
         return 0;
     }
-    _ = c.lua_pushlstring(state, a.input_buffer.items.ptr, a.input_buffer.items.len);
+    _ = c.lua_pushlstring(state, a.input.slice().ptr, a.input.slice().len);
     return 1;
 }
 
@@ -5742,13 +5742,13 @@ test "prompt hook transforms typed input" {
 
 test "input bindings queue set append and read buffer" {
     var app_state = permissionTestApp();
-    app_state.input_buffer = .empty;
+    app_state.input = .{};
     app_state.cmd_queue = try r.cmd.CommandQueue.init(std.testing.allocator);
     const vm = try LuaVm.init(std.testing.allocator);
     defer vm.deinit();
     vm.setApp(&app_state);
 
-    try app_state.input_buffer.appendSlice(std.testing.allocator, "hello");
+    app_state.input.set("hello");
     try vm.exec(
         \\assert(blitz.input.get() == "hello")
         \\blitz.input.set("new text")
@@ -5759,12 +5759,11 @@ test "input bindings queue set append and read buffer" {
     );
 
     app_state.cmd_queue.arena.deinit();
-    app_state.input_buffer.deinit(std.testing.allocator);
 }
 
 test "input get rejects tool vms" {
     var app_state = permissionTestApp();
-    app_state.input_buffer = .empty;
+    app_state.input = .{};
     app_state.cmd_queue = try r.cmd.CommandQueue.init(std.testing.allocator);
     const vm = try LuaVm.initTool(std.testing.allocator);
     defer vm.deinit();
