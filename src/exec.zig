@@ -604,6 +604,7 @@ pub const CmdPool = struct {
         const handle = try self.runWithOpts(opts);
         const slot = &self.slots[@intFromEnum(handle)];
         const start_ms = nowMs(self.io);
+        var polls: usize = 0;
 
         while (true) {
             if (slot.done.load(.acquire)) {
@@ -614,7 +615,9 @@ pub const CmdPool = struct {
                 return self.killAndCollect(handle);
             }
 
-            std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(25), .real) catch {
+            const sleep_us: i64 = @min(@as(i64, 100) << @min(polls, 8), 5_000);
+            polls += 1;
+            std.Io.sleep(self.io, std.Io.Duration.fromMicroseconds(sleep_us), .real) catch {
                 self.cancel(handle);
                 return error.Canceled;
             };

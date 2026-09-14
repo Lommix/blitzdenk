@@ -5,7 +5,10 @@ const util = @import("util.zig");
 const MAX_NAME_BYTES = 128;
 const WRITE_TIMEOUT_MS = 30_000;
 
+var wrote_artifacts = std.atomic.Value(bool).init(false);
+
 pub fn write(pool: *exec.CmdPool, alloc: std.mem.Allocator, name: []const u8, content: []const u8) ![]const u8 {
+    wrote_artifacts.store(true, .release);
     var name_buf: [MAX_NAME_BYTES]u8 = undefined;
     const safe_name = sanitizeName(name, &name_buf);
     const path = try std.fmt.allocPrint(alloc, "{s}/{d}/{s}", .{ util.TMP_DIR, std.c.getpid(), safe_name });
@@ -24,16 +27,16 @@ pub fn write(pool: *exec.CmdPool, alloc: std.mem.Allocator, name: []const u8, co
 }
 
 pub fn cleanup(pool: *exec.CmdPool) void {
+    if (!wrote_artifacts.swap(false, .acq_rel)) return;
     var dir_buf: [64]u8 = undefined;
     const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/{d}", .{ util.TMP_DIR, std.c.getpid() }) catch return;
-    remove(pool, dir_path, false);
-    if (pool.ssh_active and pool.ssh_target != null) remove(pool, dir_path, true);
+    if (pool.ssh_active and pool.ssh_target != null) removeRemote(pool, dir_path);
+    std.Io.Dir.cwd().deleteTree(pool.io, dir_path) catch {};
 }
 
-fn remove(pool: *exec.CmdPool, dir_path: []const u8, force_local: bool) void {
+fn removeRemote(pool: *exec.CmdPool, dir_path: []const u8) void {
     const result = pool.runAndWaitTimeout(.{
         .argv = &.{ "rm", "-rf", "--", dir_path },
-        .force_local = force_local,
     }, WRITE_TIMEOUT_MS) catch return;
     pool.alloc.free(result.stdout);
     pool.alloc.free(result.stderr);
