@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .blitz_sdk = .{
-            .path = "sdk",
+            .path = "blitz-sdk",
         },
     },
     .paths = .{
