@@ -824,6 +824,7 @@ pub fn run(
                         std.log.scoped(.lua).err("hot-reload: failed to reset lua vm ({any})", .{err});
                     };
                     app.clearSelections(false);
+                    app.keymap.custom.clearRetainingCapacity();
                     context_factory.resetDefs();
                     try context_factory.resetLoadedTools();
                     if (config_lua) |info| {
@@ -872,7 +873,6 @@ pub fn run(
                     app.loadMcpTools(reloaded_mcp_servers);
 
                     lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
-                    app.keymap.custom.clearRetainingCapacity();
                     for (lua_binds) |bind| {
                         try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn }, .description = bind.description });
                     }

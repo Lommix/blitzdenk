@@ -3586,6 +3586,7 @@ pub const LuaVm = struct {
         self.bind_entries = .empty;
         self.command_entries = .empty;
         self.mcp_entries = .empty;
+        self.inject_hooks = .empty;
         self.spawn_callbacks.clearRetainingCapacity();
         self.stdout_buf = .empty;
         self.prepareArenaLists() catch return error.LuaInitFailed;
@@ -3596,7 +3597,6 @@ pub const LuaVm = struct {
         self.mcp_entries.clearRetainingCapacity();
         self.stdout_buf.clearRetainingCapacity();
         self.permission_hook = c.LUA_NOREF;
-        self.inject_hooks.clearRetainingCapacity();
         self.prompt_hook = c.LUA_NOREF;
         if (self.app) |a| {
             a.config.reset();
@@ -4039,6 +4039,11 @@ pub const LuaVm = struct {
         defer c.lua_settop(L, top);
 
         _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, func_ref);
+        if (c.lua_type(L, -1) != c.LUA_TFUNCTION) {
+            c.lua_pop(L, 1);
+            c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
+            return;
+        }
         pushAny(L, r.AgentId.unpack(packed_id));
         c.lua_pushinteger(L, status);
         const call_status = c.lua_pcallk(L, 2, 0, 0, 0, null);
@@ -4110,6 +4115,10 @@ pub const LuaVm = struct {
             if (!entry.hook.allows(a.main_agent_id, agent_id)) continue;
 
             _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, entry.func_ref);
+            if (c.lua_type(L, -1) != c.LUA_TFUNCTION) {
+                c.lua_pop(L, 1);
+                continue;
+            }
             pushAny(L, agent_id);
             pushAny(L, agent_type);
             const status = c.lua_pcallk(L, 2, 1, 0, 0, null);
@@ -6264,6 +6273,28 @@ test "inject hook receives agent type" {
     defer w.deinit();
     vm.emitInjectHooks(&w.writer, id, 3, null);
     try std.testing.expectEqualStrings("type:3", w.writer.buffered());
+}
+
+test "inject hooks survive a lua reload without stale arena storage" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+    app_state.lua_inject_hooks_enabled.store(true, .release);
+
+    try vm.exec("blitz.hooks.inject({ func = function() return 'stale' end })");
+    try std.testing.expectEqual(@as(usize, 1), vm.inject_hooks.items.len);
+
+    try vm.reset();
+    try std.testing.expectEqual(@as(usize, 0), vm.inject_hooks.capacity);
+
+    try vm.exec("blitz.hooks.inject({ func = function() return 'fresh' end })");
+
+    const id = r.AgentId{ .index = 0, .generation = 0 };
+    var w = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer w.deinit();
+    vm.emitInjectHooks(&w.writer, id, 0, null);
+    try std.testing.expectEqualStrings("fresh", w.writer.buffered());
 }
 
 test "inject listeners run in registration order and fail independent" {
