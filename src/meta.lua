@@ -106,7 +106,7 @@
 ---@field result fun(agent_id: integer): string|nil
 ---Return the full message history of an agent as a list of BlitzHistoryRow.
 ---@field history fun(agent_id: integer): BlitzHistoryRow[]
----Return the agent history from the user prompt that started the current turn, as a list of BlitzHistoryRow. The checkpoint resets when the agent resets or its history is replaced: session load, rewind or compaction.
+---Return the agent history from the user prompt that started the current turn, as a list of BlitzHistoryRow. The checkpoint resets when the agent resets or its history is replaced: session load, rewind or compaction. A canceled run keeps the checkpoint: the next prompt after a cancel extends the same turn.
 ---@field history_since_checkpoint fun(agent_id: integer): BlitzHistoryRow[]
 ---Cancel the given agent. Returns 'Success' or 'Not Found'.
 ---@field cancel fun(agent_id: integer): string

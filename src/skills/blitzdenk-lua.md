@@ -261,7 +261,8 @@ a render callback.
 `blitz.agent.history_since_checkpoint(agent_id)` returns the rows from the user
 prompt that started the current turn. The checkpoint moves when a run starts
 with a new prompt or a queued user message. It resets whenever the history is
-replaced or the agent resets: session load, prompt rewind, compaction. Use it
+replaced or the agent resets: session load, prompt rewind, compaction. A cancel
+keeps the checkpoint, so a correction still sees the canceled output. Use it
 in a `blitz.hooks.agent_complete` listener to hand one turn to a memory
 compressor agent:
 

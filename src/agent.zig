@@ -57,6 +57,7 @@ pub const InitOptions = struct {
 pub const Flags = struct {
     cwd_seen: bool = false,
     cancel: bool = false,
+    turn_canceled: bool = false,
     overflow_recovery: bool = false,
     vision: bool = false,
 };
@@ -298,6 +299,8 @@ pub const Agent = struct {
 
     pub fn startModel(self: *Agent, model: sdk.LanguageModel, options: sdk.GenerateOptions) !void {
         if (self.task != null) return error.RunInProgress;
+        const continue_turn = self.flags.turn_canceled;
+        self.flags.turn_canceled = false;
         self.run_model = model;
         self.last_error = null;
         self.last_provider_retryable = false;
@@ -310,7 +313,7 @@ pub const Agent = struct {
         var run_options = options;
         if (run_options.timeout_ms == null) run_options.timeout_ms = stream_timeout_ms;
         if (run_options.system.len == 0) run_options.system = self.system_prompt;
-        if (run_options.prompt.len > 0 or self.queued_messages.items.len > 0) {
+        if (!continue_turn and (run_options.prompt.len > 0 or self.queued_messages.items.len > 0)) {
             self.turn_checkpoint = self.history().len;
         }
         if (run_options.prompt.len > 0) {
@@ -415,6 +418,7 @@ pub const Agent = struct {
             if (self.messages) |*previous| previous.deinit();
             self.messages = owned;
             self.history_gen +%= 1;
+            self.flags.turn_canceled = false;
             self.status = .complete;
             self.last_error = null;
             self.last_provider_retryable = false;
@@ -493,6 +497,7 @@ pub const Agent = struct {
 
     pub fn cancel(self: *Agent) void {
         self.flags.cancel = true;
+        if (self.task != null) self.flags.turn_canceled = true;
         self.activity = .idle;
         if (self.compact_task) |*task| task.cancel();
         if (self.task) |*task| task.cancel();
@@ -715,6 +720,39 @@ pub const Agent = struct {
 };
 
 fn discardEvent(_: ?*anyopaque, _: agent_run.Event) void {}
+
+test "wake after cancel keeps the turn checkpoint" {
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+
+    try agent.appendHistory(&.{ sdk.UserMessage("one"), sdk.AssistantMessage("partial turn") });
+    agent.turn_checkpoint = 1;
+    agent.cancel();
+    try std.testing.expectEqual(false, agent.flags.turn_canceled);
+
+    agent.flags.turn_canceled = true;
+    try agent.queueMessages(&.{sdk.UserMessage("correction")});
+    try agent.startModel(agent.model.languageModel(), .{ .max_steps = 0 });
+    agent.task.?.wait();
+    while (agent.drain(2, null, discardEvent) != 0) {}
+    try std.testing.expect(agent.reap());
+    try std.testing.expectEqual(@as(usize, 1), agent.turn_checkpoint);
+    try std.testing.expectEqual(false, agent.flags.turn_canceled);
+
+    try agent.startModel(agent.model.languageModel(), .{ .max_steps = 0 });
+    agent.task.?.wait();
+    agent.flags.turn_canceled = true;
+    while (agent.drain(2, null, discardEvent) != 0) {}
+    try std.testing.expect(agent.reap());
+    try std.testing.expectEqual(false, agent.flags.turn_canceled);
+    try std.testing.expectEqual(@as(usize, 2), agent.turn_checkpoint);
+}
 
 test "agent owns SDK state and adopts completed history" {
     const Fixture = struct {

@@ -2829,7 +2829,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
     },
     .{
         .name = "history_since_checkpoint",
-        .desc = "Return the agent history from the user prompt that started the current turn, as a list of BlitzHistoryRow. The checkpoint resets when the agent resets or its history is replaced: session load, rewind or compaction.",
+        .desc = "Return the agent history from the user prompt that started the current turn, as a list of BlitzHistoryRow. The checkpoint resets when the agent resets or its history is replaced: session load, rewind or compaction. A canceled run keeps the checkpoint: the next prompt after a cancel extends the same turn.",
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
             .ret = &HistoryRowListDef,
