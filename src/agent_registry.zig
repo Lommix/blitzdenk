@@ -635,6 +635,46 @@ test "registry retry is allowed while an agent is retrying" {
     registry.release(id);
 }
 
+test "turn checkpoint follows the wake trigger and resets on history replacement" {
+    const Fixture = struct {
+        fn discard(_: ?*anyopaque, _: agent_run.Event) void {}
+    };
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    var registry = Registry.init(std.testing.allocator, io);
+    defer registry.deinit();
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    try agent.setMessages(&.{ sdk.UserMessage("one"), sdk.AssistantMessage("two") });
+    try agent.queueMessages(&.{sdk.UserMessage("turn two")});
+    try registry.run(id, .{ .max_steps = 0 });
+    while (registry.state(id) == .active) {
+        _ = registry.drain(id, 64, null, Fixture.discard);
+        _ = registry.reap(id);
+        if (registry.state(id) == .active) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 2), agent.history().len);
+    try std.testing.expectEqual(@as(usize, 1), agent.queued_messages.items.len);
+    try std.testing.expectEqual(@as(usize, 2), agent.turn_checkpoint);
+
+    try registry.retry(id, .{ .max_steps = 0 });
+    while (registry.state(id) == .active) {
+        _ = registry.drain(id, 64, null, Fixture.discard);
+        _ = registry.reap(id);
+        if (registry.state(id) == .active) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(usize, 2), agent.turn_checkpoint);
+
+    agent.turn_checkpoint = 9;
+    try agent.setMessages(&.{sdk.UserMessage("rewound")});
+    try std.testing.expectEqual(@as(usize, 0), agent.turn_checkpoint);
+}
+
 test "registry completes a canceled retry-waiting agent" {
     var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
     const io = io_state.io();

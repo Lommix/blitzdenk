@@ -175,6 +175,12 @@ local researcher = blitz.add_agent({
 })
 ```
 
+`blitz.add_agent` returns the agent type handle. A tool or listener VM
+replays the config but cannot register agents, so the call looks the name up
+in the live registry and returns the same handle. A module local set at
+config load stays valid in hooks and tools. An unknown name returns 0, which
+spawns `general`.
+
 An agent id is one packed integer; the agent tool result carries it as
 `agent_id: <int>`.
 
@@ -246,6 +252,29 @@ definition and queues the swap on live agents of that type: idle agents adopt
 at once, a running agent keeps pumping data on its previous binding until the
 run ends. Type getters and the render can go stale mid run; the live read
 never does. Unknown agent ids raise an error.
+
+`blitz.agent.history(agent_id)` returns the agent conversation as rows
+`{ role, text }`. `text` flattens the message parts, inlining tool calls and
+results; reasoning parts are skipped. Rows can be large; do not read them from
+a render callback.
+
+`blitz.agent.history_since_checkpoint(agent_id)` returns the rows from the user
+prompt that started the current turn. The checkpoint moves when a run starts
+with a new prompt or a queued user message. It resets whenever the history is
+replaced or the agent resets: session load, prompt rewind, compaction. Use it
+in a `blitz.hooks.agent_complete` listener to hand one turn to a memory
+compressor agent:
+
+```lua
+blitz.hooks.agent_complete(function(ev)
+    local rows = blitz.agent.history_since_checkpoint(ev.id)
+    local chunk = {}
+    for i, row in ipairs(rows) do
+        chunk[i] = row.role .. ": " .. row.text
+    end
+    blitz.state.set("last_turn", table.concat(chunk, "\n"))
+end)
+```
 
 ## Commands
 
@@ -432,12 +461,14 @@ hook. Never call `blitz.agent.await` inside the hook.
 ## Inject hook
 
 `blitz.hooks.inject({ main_only = bool, func = fn, digest = bool })` installs
-one hook that runs on each agent step, right before the system reminder is
+one listener that runs on each agent step, right before the system reminder is
 built. `func(agent_id, agent_type_id)` returns a string to append to that
 agent's `<system-reminder>` block, or nil to add nothing. `agent_type_id` is
 the type handle from `blitz.list_agent_types()`. It runs in the main Lua VM
-with a brief lock. Errors are logged and the step continues. Last registration
-wins. Never call `blitz.agent.await` inside the hook. A clean agent builds no
+with a brief lock. Errors are logged and the step continues. Each registration
+adds a listener; listeners run in registration order. `digest` suppresses the
+text while it matches the last text that this listener returned. Never call
+`blitz.agent.await` inside the hook. A clean agent builds no
 reminder at all, so the hook never runs for it. The reminder precedes the user
 prompt.
 

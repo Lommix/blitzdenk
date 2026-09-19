@@ -89,6 +89,12 @@
 ---runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside
 ---@field on_complete? fun(agent_id: integer, status: integer)
 
+---@class BlitzHistoryRow
+---system, developer, user, agent or tool
+---@field role string
+---flattened parts; tool calls render as 'tool_call <name> <input>', tool results as 'tool_result <name>: <output>', reasoning parts are skipped
+---@field text string
+
 ---@class BlitzAgent
 ---Reserve a free slot and enqueue a spawn into it. Args take background to detach the agent from the timeline and on_complete, a one-shot main-thread callback for the end of the spawned run.
 ---@field spawn fun(args: BlitzSpawnArgs): integer|nil
@@ -98,6 +104,10 @@
 ---@field await fun(agent_id: integer): integer
 ---Return the awaited agent's last assistant text.
 ---@field result fun(agent_id: integer): string|nil
+---Return the full message history of an agent as a list of BlitzHistoryRow.
+---@field history fun(agent_id: integer): BlitzHistoryRow[]
+---Return the agent history from the user prompt that started the current turn, as a list of BlitzHistoryRow. The checkpoint resets when the agent resets or its history is replaced: session load, rewind or compaction.
+---@field history_since_checkpoint fun(agent_id: integer): BlitzHistoryRow[]
 ---Cancel the given agent. Returns 'Success' or 'Not Found'.
 ---@field cancel fun(agent_id: integer): string
 ---Cancel a finished or running agent and free its slot. History stays rendered. Returns 'Success' or 'Not Found'.
@@ -320,15 +330,16 @@
 ---blitz.permissions.get and decide with blitz.permissions.resolve.
 ---Unresolved tickets fall back to the TUI.The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field permission_requested fun(func: fun(ev: BlitzPermissionRequestEvent))
----Install the system-reminder injection hook. Takes one
+---Install one system-reminder injection listener. Takes one
 ---BlitzInjectHook table. func runs for every agent step before
 ---the reminder is built, in the main Lua VM on the calling
 ---thread. Return a string to append it to the agent's
 ---<system-reminder> block, nil for nothing. main_only limits
 ---func to the main agent. digest suppresses the text while it
----matches the last injected text. Last registration wins. Never
----call blitz.agent.await inside the hook. Clean agents get no
----reminder at all, so the hook never runs for them.
+---matches the last text this listener returned. Listeners run
+---in registration order. Never call blitz.agent.await inside
+---the hook. Clean agents get no reminder at all, so the hook
+---never runs for them.
 ---@field inject fun(hook: BlitzInjectHook)
 ---Install the typed-input hook. Runs on every Enter press with
 ---text, in the main Lua VM on the main thread, before command
@@ -584,7 +595,7 @@
 ---@field add_provider fun(def: BlitzProviderDef): integer
 ---Register a model with provider, vision capability and cost.
 ---@field add_model fun(def: BlitzModelDef): integer
----Register a complete agent configuration.
+---Register a complete agent configuration and return its agent type handle. In a tool or listener vm the call cannot register: it resolves the name against the live registry and returns the existing handle, or 0 when the name is unknown.
 ---@field add_agent fun(def: BlitzAgentDef): integer
 ---Set the model config for a specific agent.
 ---@field set_agent_model fun(agent_type: integer, model: integer, force?: boolean)

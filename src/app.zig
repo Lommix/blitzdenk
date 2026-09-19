@@ -720,7 +720,12 @@ pub const App = struct {
             const id = r.AgentId{ .index = @intCast(index), .generation = slot.generation };
             var drain_context = RegistryDrainContext{ .app = self, .id = id };
             _ = self.registry.drain(id, 64, &drain_context, applyRegistryEvent);
-            if (self.registry.reap(id)) try self.handleReapedAgent(id);
+            const agent = self.registry.get(id) orelse continue;
+            const finished_run = agent.task != null;
+            if (self.registry.reap(id)) {
+                if (finished_run and agent.status == .complete) self.event_bus.emit(self, .{ .agent_complete = id });
+                try self.handleReapedAgent(id);
+            }
         }
         self.registry.retryDue();
         self.running = self.registry.countActive() > 0;
@@ -2360,7 +2365,6 @@ pub const App = struct {
                 try self.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
             },
             .complete => |result| {
-                self.event_bus.emit(self, .{ .agent_complete = agent_id });
                 if (!is_main) return;
                 const skip_final = self.sdk_preview_flushed;
                 if (!skip_final and self.streaming_entry != null) {

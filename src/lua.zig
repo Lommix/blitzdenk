@@ -304,6 +304,56 @@ const AgentRowDef = LuaType{ .table_def = .{ .name = "BlitzAgentRow", .fields = 
     .{ .name = "queued", .ty = LuaType.integer, .desc = "messages waiting in the agent queue" },
 } } };
 const AgentRowListDef = LuaType{ .raw_refs = .{ .text = "BlitzAgentRow[]", .refs = &.{AgentRowDef} } };
+
+const HistoryRowDef = LuaType{ .table_def = .{ .name = "BlitzHistoryRow", .fields = &.{
+    .{ .name = "role", .ty = LuaType.string, .desc = "system, developer, user, agent or tool" },
+    .{ .name = "text", .ty = LuaType.string, .desc = "flattened parts; tool calls render as 'tool_call <name> <input>', tool results as 'tool_result <name>: <output>', reasoning parts are skipped" },
+} } };
+const HistoryRowListDef = LuaType{ .raw_refs = .{ .text = "BlitzHistoryRow[]", .refs = &.{HistoryRowDef} } };
+
+const HistoryBinder = struct {
+    const Row = struct { role: []const u8, text: []const u8 };
+
+    fn roleLabel(role: r.sdk.Role) []const u8 {
+        return switch (role) {
+            .system => "system",
+            .developer => "developer",
+            .user => "user",
+            .assistant => "agent",
+            .tool => "tool",
+        };
+    }
+
+    fn renderMessage(alloc: std.mem.Allocator, message: r.sdk.Message) ![]const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        for (message.parts()) |part| switch (part) {
+            .text => |text| try appendChunk(alloc, &out, text),
+            .tool_call => |call| try appendChunk(alloc, &out, try std.fmt.allocPrint(alloc, "tool_call {s} {s}", .{ call.name, call.input })),
+            .tool_result => |result| try appendChunk(alloc, &out, try std.fmt.allocPrint(alloc, "tool_result {s}: {s}", .{ result.name, result.output })),
+            .image => try appendChunk(alloc, &out, "[image]"),
+            .file => |file| try appendChunk(alloc, &out, try std.fmt.allocPrint(alloc, "[file {s}]", .{file.filename})),
+            else => {},
+        };
+        return out.toOwnedSlice(alloc);
+    }
+
+    fn appendChunk(alloc: std.mem.Allocator, out: *std.ArrayList(u8), chunk: []const u8) !void {
+        if (out.items.len > 0) try out.append(alloc, '\n');
+        try out.appendSlice(alloc, chunk);
+    }
+
+    fn rows(L: *c.lua_State, a: *r.app.App, agent_id: r.AgentId, since_checkpoint: bool) ![]Row {
+        const vm = fromState(L) orelse return error.NoLuaVm;
+        const alloc = vm.luaArena();
+        const agent = a.registry.get(agent_id) orelse return error.AgentNotFound;
+        const history = agent.history();
+        const start: usize = if (since_checkpoint) @min(agent.turn_checkpoint, history.len) else 0;
+        const list = try alloc.alloc(Row, history.len - start);
+        for (history[start..], list) |message, *row|
+            row.* = .{ .role = roleLabel(message.role), .text = try renderMessage(alloc, message) };
+        return list;
+    }
+};
 const AgentTypeRowDef = LuaType{ .table_def = .{ .name = "BlitzAgentTypeRow", .fields = &.{
     .{ .name = "agent_type", .ty = LuaType.integer, .desc = "type handle for blitz.agent.spawn" },
     .{ .name = "name", .ty = LuaType.string, .desc = "value the agent tool takes as agent_type" },
@@ -813,7 +863,7 @@ pub const Blitz = LuaType{
             },
             .{
                 .name = "add_agent",
-                .desc = "Register a complete agent configuration.",
+                .desc = "Register a complete agent configuration and return its agent type handle. In a tool or listener vm the call cannot register: it resolves the name against the live registry and returns the existing handle, or 0 when the name is unknown.",
                 .ty = LuaType{
                     .function = .{
                         .args = &.{.{ .name = "def", .ty = AgentDef }},
@@ -830,7 +880,10 @@ pub const Blitz = LuaType{
                             };
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, def: Args) !u32 {
-                                if (try isToolVm(state)) return 0;
+                                if (try isToolVm(state)) {
+                                    if (a.context_factory.findAgentType(def.name)) |agent_type| return @intFromEnum(agent_type);
+                                    return 0;
+                                }
                                 const effort = if (def.effort) |eff|
                                     r.config.parseReasoningEffort(eff) orelse return error.UnknownEffortType
                                 else
@@ -1460,15 +1513,16 @@ pub const BlitzHooks = LuaType{
             .{
                 .name = "inject",
                 .desc =
-                \\Install the system-reminder injection hook. Takes one
+                \\Install one system-reminder injection listener. Takes one
                 \\BlitzInjectHook table. func runs for every agent step before
                 \\the reminder is built, in the main Lua VM on the calling
                 \\thread. Return a string to append it to the agent's
                 \\<system-reminder> block, nil for nothing. main_only limits
                 \\func to the main agent. digest suppresses the text while it
-                \\matches the last injected text. Last registration wins. Never
-                \\call blitz.agent.await inside the hook. Clean agents get no
-                \\reminder at all, so the hook never runs for them.
+                \\matches the last text this listener returned. Listeners run
+                \\in registration order. Never call blitz.agent.await inside
+                \\the hook. Clean agents get no reminder at all, so the hook
+                \\never runs for them.
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "hook", .ty = InjectHookDef }},
@@ -1476,11 +1530,15 @@ pub const BlitzHooks = LuaType{
                         fn t(state: *c.lua_State, a: *r.app.App, hook: InjectHookArgs) !void {
                             if (try isToolVm(state)) return;
                             const vm = fromState(state) orelse return error.NoLuaVm;
-                            if (vm.inject_fn != c.LUA_NOREF) c.luaL_unref(state, c.LUA_REGISTRYINDEX, vm.inject_fn);
-                            vm.inject_fn = hook.func.idx;
-                            vm.inject_hook = .{
-                                .main_only = hook.main_only orelse false,
-                                .digest = hook.digest orelse false,
+                            vm.inject_hooks.append(vm.luaArena(), .{
+                                .func_ref = hook.func.idx,
+                                .hook = .{
+                                    .main_only = hook.main_only orelse false,
+                                    .digest = hook.digest orelse false,
+                                },
+                            }) catch {
+                                c.luaL_unref(state, c.LUA_REGISTRYINDEX, hook.func.idx);
+                                return error.OutOfMemory;
                             };
                             a.lua_inject_hooks_enabled.store(true, .release);
                         }
@@ -1547,8 +1605,8 @@ pub const BlitzHooks = LuaType{
                             if (try isToolVm(state)) return;
                             const vm = fromState(state) orelse return error.NoLuaVm;
                             vm.permission_hook = c.LUA_NOREF;
-                            vm.inject_fn = c.LUA_NOREF;
-                            vm.inject_hook = .{};
+                            for (vm.inject_hooks.items) |*entry| c.luaL_unref(state, c.LUA_REGISTRYINDEX, entry.func_ref);
+                            vm.inject_hooks.clearRetainingCapacity();
                             vm.prompt_hook = c.LUA_NOREF;
                         }
                     }).t, "clear"),
@@ -2757,6 +2815,32 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
         } },
     },
     .{
+        .name = "history",
+        .desc = "Return the full message history of an agent as a list of BlitzHistoryRow.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &HistoryRowListDef,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(L: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]HistoryBinder.Row {
+                    return HistoryBinder.rows(L, a, agent_id, false);
+                }
+            }).lua_fn, "agent.history"),
+        } },
+    },
+    .{
+        .name = "history_since_checkpoint",
+        .desc = "Return the agent history from the user prompt that started the current turn, as a list of BlitzHistoryRow. The checkpoint resets when the agent resets or its history is replaced: session load, rewind or compaction.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &HistoryRowListDef,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(L: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]HistoryBinder.Row {
+                    return HistoryBinder.rows(L, a, agent_id, true);
+                }
+            }).lua_fn, "agent.history_since_checkpoint"),
+        } },
+    },
+    .{
         .name = "cancel",
         .desc = "Cancel the given agent. Returns 'Success' or 'Not Found'.",
         .ty = LuaType{ .function = .{
@@ -2866,6 +2950,11 @@ const LuaBindEntry = struct {
 const LuaHookEntry = struct {
     tag: r.events.AppEventTag,
     func_ref: c_int = c.LUA_NOREF,
+};
+
+const LuaInjectEntry = struct {
+    func_ref: c_int,
+    hook: r.inject.LuaInjectHook = .{},
 };
 
 pub const WidgetKind = enum { sidebar, panel };
@@ -3359,8 +3448,7 @@ pub const LuaVm = struct {
     vm_mu: std.Io.Mutex = .init,
     /// blitz.hooks.approve() slot. One handler, last registration wins.
     permission_hook: c_int = c.LUA_NOREF,
-    inject_fn: c_int = c.LUA_NOREF,
-    inject_hook: r.inject.LuaInjectHook = .{},
+    inject_hooks: std.ArrayList(LuaInjectEntry) = .empty,
     prompt_hook: c_int = c.LUA_NOREF,
     /// Packed agent id to registry ref of agent.spawn on_complete callbacks.
     /// Main vm only, touched under vm_mu.
@@ -3508,8 +3596,7 @@ pub const LuaVm = struct {
         self.mcp_entries.clearRetainingCapacity();
         self.stdout_buf.clearRetainingCapacity();
         self.permission_hook = c.LUA_NOREF;
-        self.inject_fn = c.LUA_NOREF;
-        self.inject_hook = .{};
+        self.inject_hooks.clearRetainingCapacity();
         self.prompt_hook = c.LUA_NOREF;
         if (self.app) |a| {
             a.config.reset();
@@ -3996,7 +4083,7 @@ pub const LuaVm = struct {
         const a = self.app orelse return;
         self.vm_mu.lockUncancelable(a.io);
         defer self.vm_mu.unlock(a.io);
-        self.inject_hook.last_digest = null;
+        for (self.inject_hooks.items) |*entry| entry.hook.last_digest = null;
     }
 
     pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, agent_type: u8, cancel_token: ?*r.sdk.CancellationToken) void {
@@ -4004,9 +4091,7 @@ pub const LuaVm = struct {
         if (!a.lua_inject_hooks_enabled.load(.acquire)) return;
         self.vm_mu.lockUncancelable(a.io);
         defer self.vm_mu.unlock(a.io);
-        if (self.inject_fn == c.LUA_NOREF) return;
-
-        if (!self.inject_hook.allows(a.main_agent_id, agent_id)) return;
+        if (self.inject_hooks.items.len == 0) return;
 
         if (cancel_token) |token| {
             self.cancel_token = token;
@@ -4021,22 +4106,26 @@ pub const LuaVm = struct {
         const top = c.lua_gettop(L);
         defer c.lua_settop(L, top);
 
-        _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, self.inject_fn);
-        pushAny(L, agent_id);
-        pushAny(L, agent_type);
-        const status = c.lua_pcallk(L, 2, 1, 0, 0, null);
-        if (status != 0) {
-            self.popError(.action);
-            return;
+        for (self.inject_hooks.items) |*entry| {
+            if (!entry.hook.allows(a.main_agent_id, agent_id)) continue;
+
+            _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, entry.func_ref);
+            pushAny(L, agent_id);
+            pushAny(L, agent_type);
+            const status = c.lua_pcallk(L, 2, 1, 0, 0, null);
+            if (status != 0) {
+                self.popError(.action);
+                continue;
+            }
+            if (c.lua_type(L, -1) != c.LUA_TSTRING) continue;
+            var len: usize = 0;
+            const ptr = c.lua_tolstring(L, -1, &len) orelse continue;
+
+            if (!entry.hook.accepts(ptr[0..len])) continue;
+
+            w.writeAll(ptr[0..len]) catch return;
+            entry.hook.remember(ptr[0..len]);
         }
-        if (c.lua_type(L, -1) != c.LUA_TSTRING) return;
-        var len: usize = 0;
-        const ptr = c.lua_tolstring(L, -1, &len) orelse return;
-
-        if (!self.inject_hook.accepts(ptr[0..len])) return;
-
-        w.writeAll(ptr[0..len]) catch return;
-        self.inject_hook.remember(ptr[0..len]);
     }
 };
 
@@ -5611,6 +5700,83 @@ test "hook listeners run sandboxed by registration order" {
     try std.testing.expect(!app_state.event_bus.active.contains(.session_reset));
 }
 
+test "agent history bindings expose rows and the turn checkpoint" {
+    var app_state = permissionTestApp();
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app_state.registry = &registry;
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{});
+    try agent.setMessages(&.{
+        r.sdk.UserMessage("old turn"),
+        .{ .role = .assistant, .single = .{ .text = "old answer" } },
+        r.sdk.UserMessage("summarize this"),
+        .{ .role = .assistant, .content = &.{
+            .{ .text = "checking" },
+            .{ .tool_call = .{ .id = "c1", .name = "bash", .input = "{\"cmd\":\"ls\"}" } },
+        } },
+        .{ .role = .tool, .single = .{ .tool_result = .{ .id = "c1", .name = "bash", .output = "files" } } },
+    });
+    agent.turn_checkpoint = 2;
+
+    const vm = try LuaVm.initTool(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+    const code = try std.fmt.allocPrint(std.testing.allocator,
+        \\local all = blitz.agent.history({d})
+        \\assert(#all == 5, #all)
+        \\assert(all[1].role == "user" and all[1].text == "old turn")
+        \\assert(all[2].role == "agent" and all[2].text == "old answer")
+        \\local turn = blitz.agent.history_since_checkpoint({d})
+        \\assert(#turn == 3, #turn)
+        \\assert(turn[1].role == "user" and turn[1].text == "summarize this")
+        \\assert(turn[2].text == "checking\ntool_call bash {{\"cmd\":\"ls\"}}")
+        \\assert(turn[3].role == "tool" and turn[3].text == "tool_result bash: files")
+    , .{ id.pack(), id.pack() });
+    defer std.testing.allocator.free(code);
+    try vm.exec(code);
+}
+
+test "add_agent in a tool vm returns the registered handle by name" {
+    var app_state = permissionTestApp();
+    const factory = try r.ContextFactory.init(std.testing.allocator, std.testing.io, "/tmp", "/tmp");
+    defer factory.deinit();
+    app_state.context_factory = factory;
+
+    const main_vm = try LuaVm.init(std.testing.allocator);
+    defer main_vm.deinit();
+    main_vm.setApp(&app_state);
+    try main_vm.exec(
+        \\handle = blitz.add_agent({
+        \\    name = "compressor",
+        \\    description = "d",
+        \\    prompt = "p",
+        \\    tools = { "read" },
+        \\})
+    );
+    _ = c.lua_getglobal(main_vm.L, "handle");
+    const handle = c.lua_tointegerx(main_vm.L, -1, null);
+    c.lua_pop(main_vm.L, 1);
+
+    const tool_vm = try LuaVm.initTool(std.testing.allocator);
+    defer tool_vm.deinit();
+    tool_vm.setApp(&app_state);
+    const code = try std.fmt.allocPrint(std.testing.allocator,
+        \\local function reg(name)
+        \\    return blitz.add_agent({{ name = name, description = "d", prompt = "p", tools = {{ "read" }} }})
+        \\end
+        \\assert(reg("compressor") == {d}, "sandbox handle mismatch")
+        \\assert(reg("nope") == 0)
+    , .{handle});
+    defer std.testing.allocator.free(code);
+    try tool_vm.exec(code);
+}
+
 test "state values round-trip through the Lua stack" {
     const L = c.luaL_newstate() orelse return error.LuaInitFailed;
     defer c.lua_close(L);
@@ -6010,7 +6176,7 @@ test "permission hook clear and no handler fall back" {
         \\blitz.hooks.clear()
     );
     try std.testing.expect(vm.permissionHookDecision(&req) == null);
-    try std.testing.expectEqual(c.LUA_NOREF, vm.inject_fn);
+    try std.testing.expectEqual(@as(usize, 0), vm.inject_hooks.items.len);
 }
 
 test "inject hook digest suppresses unchanged text" {
@@ -6098,6 +6264,27 @@ test "inject hook receives agent type" {
     defer w.deinit();
     vm.emitInjectHooks(&w.writer, id, 3, null);
     try std.testing.expectEqualStrings("type:3", w.writer.buffered());
+}
+
+test "inject listeners run in registration order and fail independent" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.hooks.inject({ func = function() return nil end })
+        \\blitz.hooks.inject({ func = function() return "b\n" end })
+        \\blitz.hooks.inject({ func = function() error("boom") end })
+        \\blitz.hooks.inject({ func = function() return "d" end })
+    );
+    try std.testing.expectEqual(@as(usize, 4), vm.inject_hooks.items.len);
+
+    const id = r.AgentId{ .index = 0, .generation = 0 };
+    var w = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer w.deinit();
+    vm.emitInjectHooks(&w.writer, id, 0, null);
+    try std.testing.expectEqualStrings("b\nd", w.writer.buffered());
 }
 
 test "list_agents snapshots occupied slots" {

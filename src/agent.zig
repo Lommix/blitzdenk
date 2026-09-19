@@ -76,6 +76,7 @@ pub const Agent = struct {
     compaction: compact.State = .{},
     messages: ?agent_run.OwnedMessages = null,
     history_gen: u64 = 0,
+    turn_checkpoint: usize = 0,
     tools: []const sdk.Tool = &.{},
     flags: Flags = .{},
     type_idx: u8,
@@ -173,6 +174,7 @@ pub const Agent = struct {
         if (self.messages) |*previous| previous.deinit();
         self.messages = owned;
         self.history_gen +%= 1;
+        self.turn_checkpoint = 0;
     }
 
     pub fn setSystemPrompt(self: *Agent, prompt: []const u8) !void {
@@ -308,6 +310,9 @@ pub const Agent = struct {
         var run_options = options;
         if (run_options.timeout_ms == null) run_options.timeout_ms = stream_timeout_ms;
         if (run_options.system.len == 0) run_options.system = self.system_prompt;
+        if (run_options.prompt.len > 0 or self.queued_messages.items.len > 0) {
+            self.turn_checkpoint = self.history().len;
+        }
         if (run_options.prompt.len > 0) {
             try self.appendHistory(&.{sdk.UserMessage(run_options.prompt)});
             run_options.prompt = "";
@@ -603,6 +608,7 @@ pub const Agent = struct {
         self.compaction.must_progress_past_message_count = cloned.len;
         self.compaction.resetInFlight();
         _ = self.compaction.completion_count.fetchAdd(1, .release);
+        self.turn_checkpoint = 0;
         return cloned;
     }
 
@@ -636,6 +642,7 @@ pub const Agent = struct {
             if (self.messages) |*previous| previous.deinit();
             self.messages = value.messages;
             self.history_gen +%= 1;
+            self.turn_checkpoint = 0;
             self.usage.add(value.usage);
             self.context_tokens = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, self.history());
             self.context_from_provider = false;
