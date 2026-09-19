@@ -196,9 +196,9 @@ build a silent subagent: read the answer in the callback with
 `blitz.agent.result(id)`.
 
 `clean = true` in `blitz.agent.spawn`, or `clean` on the `agent` tool, builds a
-bare agent: no AGENTS.md files in the system prompt, and no `<system-reminder>`
-injection on any step, so `blitz.hooks.inject` never runs for it. A finished
-background child still queues its result notice into a clean parent.
+bare agent: no AGENTS.md context, and no `<system-reminder>` injection on any
+step, so `blitz.hooks.inject` never runs for it. A finished background child
+still queues its result notice into a clean parent.
 
 `cwd` in `blitz.agent.spawn` sets the working directory of the child. A relative
 path resolves against the parent agent cwd.

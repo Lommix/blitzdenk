@@ -1580,7 +1580,7 @@ pub const CliFlags = packed struct {
     debug_log: bool = false,
     /// permission required
     approval_mode: r.permissions.ApprovalMode = .default,
-    /// don't load AGENTS.md
+    /// don't inject the local AGENTS.md
     no_context: bool = false,
     /// run --prompt headless, print final message instead of tui
     headless: bool = false,

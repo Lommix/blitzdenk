@@ -56,6 +56,7 @@ pub const InitOptions = struct {
 
 pub const Flags = struct {
     cwd_seen: bool = false,
+    agents_context_files_seen: bool = false,
     cancel: bool = false,
     turn_canceled: bool = false,
     overflow_recovery: bool = false,
@@ -185,6 +186,7 @@ pub const Agent = struct {
     pub fn setCwd(self: *Agent, cwd: []const u8) !void {
         self.cwd = try self.metadata.allocator().dupe(u8, cwd);
         self.flags.cwd_seen = false;
+        self.flags.agents_context_files_seen = false;
     }
 
     pub fn setTools(self: *Agent, tools: []const sdk.Tool) !void {

@@ -41,6 +41,7 @@ pub const InjectionsHooks = struct {
         inline for (.{
             &inject_datetime_information,
             &inject_cwd_information,
+            &inject_agents_context,
             &inject_available_skills,
             &inject_capability_catalog,
             &inject_lua_reload_notice,
@@ -122,6 +123,41 @@ fn inject_cwd_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Ag
         "unknown";
 
     try w.print("[CWD] {s}\n[OS] {s}\n[TMP TESTING DIR] {s}/{d}/\n", .{ cwd, os_name, r.util.TMP_DIR, std.c.getpid() });
+}
+
+fn inject_agents_context(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    if (agent.flags.agents_context_files_seen) return;
+
+    const io = app.io;
+    const factory = app.context_factory;
+
+    var global_path: ?[]const u8 = null;
+    if (app.lua_config_dir) |dir_path| {
+        if (factory.config_dir) |dir| {
+            if (hasContextFile(io, dir)) global_path = std.mem.trimEnd(u8, dir_path, "/");
+        }
+    }
+
+    var local_path: ?[]const u8 = null;
+    if (!factory.flags.skip_local_context_file) {
+        const cwd = if (agent.cwd.len > 0) agent.cwd else app.cwd;
+        if (std.Io.Dir.openDirAbsolute(io, cwd, .{})) |dir| {
+            defer dir.close(io);
+            if (hasContextFile(io, dir)) local_path = std.mem.trimEnd(u8, cwd, "/");
+        } else |_| {}
+    }
+
+    if (global_path == null and local_path == null) return;
+
+    agent.flags.agents_context_files_seen = true;
+    try w.writeAll("Read these files for user and project instructions:\n");
+    if (global_path) |path| try w.print("- {s}/AGENTS.md\n", .{path});
+    if (local_path) |path| try w.print("- {s}/AGENTS.md\n", .{path});
+}
+
+fn hasContextFile(io: std.Io, dir: std.Io.Dir) bool {
+    const stat = dir.statFile(io, "AGENTS.md", .{}) catch return false;
+    return stat.kind == .file;
 }
 
 fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.Agent) !void {

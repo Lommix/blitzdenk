@@ -113,7 +113,7 @@ Tools.agent_tool = blitz.register_tool({
 		cwd = { type = "string", description = "The working directoy of the agent. Defaults to current" },
 		clean = {
 			type = "boolean",
-			description = "Bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections. Defaults to false",
+			description = "Bare agent: no system-reminder injections and no AGENTS.md context. Defaults to false",
 		},
 	},
 	snippet = "Launch a subagent",

@@ -6,7 +6,6 @@ const r = @import("root.zig");
 const skills_mod = @import("skills.zig");
 
 const CONFIG_DIR = @import("main.zig").DEFAULT_CONFIG_PATH;
-const CONTEXT_FILES = .{"AGENTS.md"};
 pub const MAX_AGENT_TOOLS = 64;
 const MAX_AVAILABLE_SYSTEMS = 32;
 
@@ -648,7 +647,7 @@ pub fn configureAgent(
 ) !void {
     try self.refreshAgentTools(agent, base);
     const alloc = agent.state_arena.allocator();
-    const prompt = try self.build_system_prompt(alloc, @enumFromInt(agent.type_idx), agent.clean, agent.flags.vision);
+    const prompt = try self.build_system_prompt(alloc, @enumFromInt(agent.type_idx), agent.flags.vision);
     try agent.setSystemPrompt(prompt);
 }
 
@@ -805,7 +804,6 @@ pub fn build_system_prompt(
     self: *const Self,
     alloc: std.mem.Allocator,
     agent_type: AgentType,
-    clean: bool,
     vision: bool,
 ) ![]const u8 {
     var allocating = std.Io.Writer.Allocating.init(alloc);
@@ -850,15 +848,6 @@ pub fn build_system_prompt(
             }
         }
 
-        if (self.agentHasTool(agent_type, r.tools.skill.SkillTool.def.name)) {
-            try w.writeAll(
-                \\
-                \\# Skills:
-                \\Call the `skill` tool when the task matches a skill's trigger rules.
-                \\
-            );
-        }
-
         if (self.available_mcp_count > 0 and self.agentHasTool(agent_type, r.tools.start.StartMcpTool.def.name)) {
             try w.writeAll(
                 \\
@@ -871,40 +860,6 @@ pub fn build_system_prompt(
         }
     }
 
-    if (clean) return allocating.written();
-
-    _ = try w.write(
-        \\
-        \\# User context (AGENTS.md):
-        \\
-    );
-
-    // global context
-    if (self.config_dir) |dir| {
-        inline for (CONTEXT_FILES) |context_file| {
-            var buf: [255]u8 = undefined;
-            if (dir.openFile(self.io, context_file, .{})) |user_ctx_file| {
-                var filer_reader = user_ctx_file.reader(self.io, &buf);
-                _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-                try w.writeAll("\n\n");
-            } else |_| {}
-        }
-    }
-
-    try w.writeAll("\n\n");
-
-    // local context
-    if (!self.flags.skip_local_context_file) {
-        inline for (CONTEXT_FILES) |context_file| {
-            if (std.Io.Dir.cwd().openFile(self.io, context_file, .{})) |user_ctx_file| {
-                var buf: [100]u8 = undefined;
-                var filer_reader = user_ctx_file.reader(self.io, &buf);
-                _ = try std.Io.Reader.streamRemaining(&filer_reader.interface, w);
-                try w.writeAll("\n\n");
-            } else |_| {}
-        }
-    }
-
     return allocating.written();
 }
 
@@ -912,7 +867,7 @@ pub fn precalcGeneralPromptSize(self: *Self, cfg: *const r.config.BlitzdenkCfg) 
     var arena = std.heap.ArenaAllocator.init(self.alloc);
     defer arena.deinit();
     const vision = self.agentVision(cfg, .general);
-    const prompt = self.build_system_prompt(arena.allocator(), .general, false, vision) catch {
+    const prompt = self.build_system_prompt(arena.allocator(), .general, vision) catch {
         self.general_prompt_size = 0;
         return;
     };
@@ -1376,23 +1331,19 @@ test "system_prompt" {
     defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
-    const prompt = try factory.build_system_prompt(alloc, .general, false, true);
+    const prompt = try factory.build_system_prompt(alloc, .general, true);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# Available tools:") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- read: Read file contents") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- bash: Execute a bash command") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# Guidelines:") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- Use read to examine files instead of cat or sed.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, prompt, "# User context (AGENTS.md):") != null);
-
-    const clean_prompt = try factory.build_system_prompt(alloc, .general, true, true);
-    try std.testing.expect(std.mem.indexOf(u8, clean_prompt, "# Available tools:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, clean_prompt, "# User context (AGENTS.md):") == null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "# User context (AGENTS.md):") == null);
 
     try factory.setAgentTools(.general, &.{});
-    const toolless_prompt = try factory.build_system_prompt(alloc, .general, false, true);
+    const toolless_prompt = try factory.build_system_prompt(alloc, .general, true);
     try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# Available tools:") == null);
     try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# Guidelines:") == null);
-    try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# User context (AGENTS.md):") != null);
+    try std.testing.expect(std.mem.indexOf(u8, toolless_prompt, "# User context (AGENTS.md):") == null);
 }
 
 test "vision tools gated by the agent model vision flag" {
@@ -1407,9 +1358,9 @@ test "vision tools gated by the agent model vision flag" {
     defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
-    const blind = try factory.build_system_prompt(alloc, .general, true, false);
+    const blind = try factory.build_system_prompt(alloc, .general, false);
     try std.testing.expect(std.mem.indexOf(u8, blind, "view_image") == null);
-    const sighted = try factory.build_system_prompt(alloc, .general, true, true);
+    const sighted = try factory.build_system_prompt(alloc, .general, true);
     try std.testing.expect(std.mem.indexOf(u8, sighted, "- view_image: Load an image into the context") != null);
 
     var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);

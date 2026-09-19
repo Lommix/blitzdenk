@@ -84,7 +84,7 @@
 ---@field background? boolean
 ---short task description shown in agent listings
 ---@field task? string
----bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections, so the blitz.hooks.inject hook never runs for it
+---bare agent: no system-reminder injections and no AGENTS.md context, so the blitz.hooks.inject hook never runs for it
 ---@field clean? boolean
 ---runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside
 ---@field on_complete? fun(agent_id: integer, status: integer)
