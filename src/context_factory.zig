@@ -619,6 +619,10 @@ pub fn add(self: *Self, tool: r.tools.Tool, flags: ToolFlags) !void {
     try self.loaded_tools.append(self.alloc, .{ .tool = owned, .flags = flags });
 }
 
+pub fn availableMcpNames(self: *const Self) []const []const u8 {
+    return self.available_mcp_names[0..self.available_mcp_count];
+}
+
 pub fn setAvailableSystems(self: *Self, mcp_names: []const []const u8) !void {
     const alloc = self.prompt_arena.allocator();
     self.available_mcp_count = 0;
@@ -845,17 +849,6 @@ pub fn build_system_prompt(
                     wrote_guidelines_header = true;
                 }
                 try w.print("- {s}\n", .{guidelines});
-            }
-        }
-
-        if (self.available_mcp_count > 0 and self.agentHasTool(agent_type, r.tools.start.StartMcpTool.def.name)) {
-            try w.writeAll(
-                \\
-                \\# Available mcp:
-                \\
-            );
-            for (self.available_mcp_names[0..self.available_mcp_count]) |name| {
-                try w.print("- name: \"{s}\"\n", .{name});
             }
         }
     }

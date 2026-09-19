@@ -43,6 +43,7 @@ pub const InjectionsHooks = struct {
             &inject_cwd_information,
             &inject_agents_context,
             &inject_available_skills,
+            &inject_mcp_catalog,
             &inject_capability_catalog,
             &inject_lua_reload_notice,
         }) |cb| {
@@ -190,6 +191,27 @@ fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.A
     try emitCatalog(w, "available_skills", count, serialized, &agent.skill_catalog_digest);
 }
 
+fn inject_mcp_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    if (!agentHasMcpStartTool(agent)) return;
+
+    const names = app.context_factory.availableMcpNames();
+    if (names.len == 0) {
+        agent.mcp_catalog_digest = null;
+        return;
+    }
+
+    const alloc = app.gpa;
+    var rows = std.Io.Writer.Allocating.init(alloc);
+    for (names) |name| {
+        try rows.writer.print("- name: \"{s}\"\n", .{name});
+    }
+
+    const serialized = try rows.toOwnedSlice();
+    defer alloc.free(serialized);
+
+    try emitCatalog(w, "available_mcp", names.len, serialized, &agent.mcp_catalog_digest);
+}
+
 fn emitCatalog(w: *std.Io.Writer, tag: []const u8, count: usize, serialized: []const u8, digest_slot: *?u64) !void {
     const digest = std.hash.Wyhash.hash(0, serialized);
     if (digest_slot.*) |last| {
@@ -232,6 +254,13 @@ fn inject_lua_reload_notice(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.
     if (generation == agent.lua_reload_generation_seen) return;
     agent.lua_reload_generation_seen = generation;
     try w.writeAll("[LUA VM RELOADED]\n");
+}
+
+fn agentHasMcpStartTool(agent: *const r.agent.Agent) bool {
+    for (agent.tools) |tool| {
+        if (std.mem.eql(u8, tool.name, r.tools.start.StartMcpTool.def.name)) return true;
+    }
+    return false;
 }
 
 fn agentHasBashTool(agent: *const r.agent.Agent) bool {
