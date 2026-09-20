@@ -84,6 +84,13 @@ pub const Registry = struct {
         }
     }
 
+    pub fn resetUsage(self: *Registry) void {
+        var iterator = self.model_usage.iterator();
+        while (iterator.next()) |entry| self.alloc.free(entry.key_ptr.*);
+        self.model_usage.clearRetainingCapacity();
+        self.total_usage = .{};
+    }
+
     pub fn reserve(self: *Registry) ?AgentId {
         for (&self.slots, 0..) |*slot, index| {
             if (slot.state.cmpxchgStrong(.free, .reserved, .acq_rel, .monotonic) == null) {

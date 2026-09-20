@@ -56,7 +56,7 @@
 
 ---@class BlitzCmd
 ---Reset the active session.
----@field reset_session fun()
+---@field reset_session fun(reset_usage?: boolean)
 ---Change the working directory.
 ---@field cd fun(path: string)
 ---Cancel all in-flight agent work and drop streaming preview.

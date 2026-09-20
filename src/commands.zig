@@ -55,7 +55,7 @@ pub const CommandQueue = struct {
 pub const Command = union(enum) {
     const Self = @This();
     // -------------------------------------------
-    reset_session,
+    reset_session: bool,
     cancel,
     cancel_agent: r.AgentId,
     close_agent: r.AgentId,
@@ -130,7 +130,10 @@ pub const Command = union(enum) {
     pub fn execute(self: *Self, app: *App) !void {
         const alloc = app.sessionAlloc();
         switch (self.*) {
-            .reset_session => app.reset(),
+            .reset_session => |reset_usage| {
+                app.reset();
+                if (reset_usage) app.registry.resetUsage();
+            },
             .cancel => {
                 const main_id = app.main_agent_id;
                 var main_active = false;

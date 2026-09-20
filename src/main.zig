@@ -926,10 +926,6 @@ pub fn run(
                                     try app.cmd_queue.append(io, .{ .scroll_up = 1 });
                                     continue;
                                 },
-                                .clear_session => {
-                                    try app.cmd_queue.append(io, .reset_session);
-                                    continue;
-                                },
                                 .retry => {
                                     try app.cmd_queue.append(io, .retry);
                                     continue;

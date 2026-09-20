@@ -2368,9 +2368,12 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
         .desc = "Reset the active session.",
         .ty = LuaType{
             .function = .{
+                .args = &.{
+                    .{ .name = "reset_usage", .ty = LuaType.boolean, .optional = true, .desc = "also zero the session token usage" },
+                },
                 .fn_ptr = LuaFnBind((struct {
-                    fn lua_fn(_: *c.lua_State, a: *r.app.App) !void {
-                        try a.cmd_queue.append(a.io, .reset_session);
+                    fn lua_fn(_: *c.lua_State, a: *r.app.App, reset_usage: ?bool) !void {
+                        try a.cmd_queue.append(a.io, .{ .reset_session = reset_usage orelse false });
                     }
                 }).lua_fn, "cmd.reset_session"),
             },
