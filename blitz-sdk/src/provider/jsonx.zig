@@ -669,6 +669,28 @@ fn postSse(
     return .{ .status = status, .body = try output.toOwnedSlice(a), .retry_after_ms = retry_after_ms };
 }
 
+pub fn sseCompleted(sse_text: []const u8, terminators: []const []const u8) bool {
+    var it = std.mem.splitScalar(u8, sse_text, '\n');
+    while (it.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "data:")) continue;
+        const data = std.mem.trim(u8, line["data:".len..], " \t\r");
+        for (terminators) |terminator| {
+            if (std.mem.indexOf(u8, data, terminator) != null) return true;
+        }
+    }
+    return false;
+}
+
+test "sse completion finds each provider terminator" {
+    try std.testing.expect(!sseCompleted("", &.{"[DONE]"}));
+    try std.testing.expect(!sseCompleted("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n", &.{ "[DONE]", "\"finish_reason\":\"" }));
+    try std.testing.expect(sseCompleted("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n", &.{ "[DONE]", "\"finish_reason\":\"" }));
+    try std.testing.expect(sseCompleted("data: [DONE]\n", &.{ "[DONE]", "\"finish_reason\":\"" }));
+    try std.testing.expect(sseCompleted("data: [DONE]\r\n", &.{"[DONE]"}));
+    try std.testing.expect(sseCompleted("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n", &.{"\"type\":\"message_delta\""}));
+    try std.testing.expect(sseCompleted("data: {\"type\":\"response.completed\"}\n", &.{"\"type\":\"response.completed\""}));
+}
+
 fn retryAfterMs(head: std.http.Client.Response.Head) ?u64 {
     var it = head.iterateHeaders();
     while (it.next()) |header| {

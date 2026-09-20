@@ -149,6 +149,7 @@ pub const Chat = struct {
         var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
         const sse_text = try jsonx.postSseWithRetry(alloc, io, client, url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         defer alloc.free(sse_text);
+        if (!jsonx.sseCompleted(sse_text, &.{ "[DONE]", "\"finish_reason\":\"" })) return error.NetworkError;
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
         return openai.parseChatStream(alloc, sse_text, &final_ctx);
     }
@@ -230,4 +231,48 @@ test "live stream event releases parsed result" {
     var stream = model.StreamContext{ .emit = discardChunk };
     var live = LiveStream{ .alloc = std.testing.allocator, .sctx = &stream, .options = .{} };
     try emitLiveEvent(&live, "{\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}");
+}
+
+test "stream ends without a terminator fails the run" {
+    const Server = struct {
+        fn serve(server: *std.Io.net.Server, io: std.Io) void {
+            var connection = server.accept(io) catch return;
+            defer connection.close(io);
+            const payload = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
+            var header: [32]u8 = undefined;
+            const chunk_header = std.fmt.bufPrint(&header, "{x}\r\n", .{payload.len}) catch return;
+            var buffer: [1024]u8 = undefined;
+            var writer = connection.writer(io, &buffer);
+            writer.interface.writeAll(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+            ) catch return;
+            writer.interface.writeAll(chunk_header) catch return;
+            writer.interface.writeAll(payload) catch return;
+            writer.interface.writeAll("\r\n0\r\n\r\n") catch return;
+            writer.interface.flush() catch return;
+        }
+    };
+    const Capture = struct {
+        partial: bool = false,
+
+        fn emit(ctx: ?*anyopaque, chunk: types.StreamChunk) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            if (std.mem.indexOf(u8, chunk.text, "partial") != null) self.partial = true;
+        }
+    };
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    var serving = std.Io.async(io, Server.serve, .{ &server, io });
+    defer serving.cancel(io);
+    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}", .{server.socket.address.getPort()});
+    defer std.testing.allocator.free(url);
+    var chat = try Chat.init(std.testing.allocator, "test", .{ .base_url = url, .api_key = "key" });
+    defer chat.deinit(std.testing.allocator);
+    var capture = Capture{};
+    var stream = model.StreamContext{ .emit = Capture.emit, .emit_ctx = &capture };
+    try std.testing.expectError(error.NetworkError, chat.languageModel().stream(std.testing.allocator, io, .{}, null, 0, &stream));
+    try std.testing.expect(capture.partial);
 }

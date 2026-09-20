@@ -152,6 +152,7 @@ pub const Chat = struct {
         var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
         const sse_text = try jsonx.postSseWithRetry(alloc, io, client, url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         defer alloc.free(sse_text);
+        if (!jsonx.sseCompleted(sse_text, &.{ "[DONE]", "\"finish_reason\":\"" })) return error.NetworkError;
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
         return parseChatStream(alloc, sse_text, &final_ctx);
     }

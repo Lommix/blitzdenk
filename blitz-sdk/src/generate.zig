@@ -206,7 +206,8 @@ fn run(
 
         const has_tools = result.tool_calls.len > 0;
         if (!has_tools and result.finish_reason == .tool_calls) {
-            log.err("provider finished with tool_calls but returned no valid tool calls at step {d}; ending agent loop", .{step_no});
+            log.err("provider finished with tool_calls but returned no valid tool calls at step {d}; retrying turn", .{step_no});
+            return error.NetworkError;
         }
         const execute_tools = has_tools and step_no < opts.max_steps;
         if (has_tools and !execute_tools) exhausted = true;
