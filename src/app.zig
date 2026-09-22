@@ -259,6 +259,8 @@ pub const App = struct {
     session_run_ns: i128 = 0,
     session_run_started_ns: i128 = 0,
     scroll_offset: usize = 0,
+    scroll_total: usize = 0,
+    scroll_total_width: u16 = 0,
     auto_scroll: bool = true,
     scrollbar_dragging: bool = false,
     scrollbar_grab: u16 = 0,
@@ -674,6 +676,7 @@ pub const App = struct {
         self.session_run_ns = 0;
         self.session_run_started_ns = 0;
         self.scroll_offset = 0;
+        self.auto_scroll = true;
         self.input_mode = .{ .text = .{} };
         self.input.clear();
         self.input_desired_col = null;
@@ -1749,6 +1752,10 @@ pub const App = struct {
                 log.err("timeline build failed with {any}", .{err});
                 break :blk null;
             };
+            if (timeline_stack != null and timeline_stack.?.pinned_growth) {
+                const stale = timeline_stack;
+                timeline_stack = buildTimelineStack(app, frame_alloc, _timeline_status_area.width -| scrollbar_reserved, timeline_h) catch stale;
+            }
             if (timeline_stack) |cs| content_end_h = cs.total -| cs.scroll_offset;
         }
         app.scrollbar_track = .{};
@@ -4210,6 +4217,7 @@ const TimelineStack = struct {
     full_total: usize = 0,
     scroll_offset: usize = 0,
     overflow: bool = false,
+    pinned_growth: bool = false,
 };
 
 const TimelineEntryHeight = struct { h: usize, bottom_tool: bool };
@@ -4454,6 +4462,18 @@ fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h
     }
 
     const max_scroll: usize = s.full_total -| inner_h;
+    if (app.scroll_total_width != inner_w) {
+        app.scroll_total_width = inner_w;
+    } else if (!app.auto_scroll and !app.scrollbar_dragging) {
+        const growth = s.full_total -| app.scroll_total;
+        if (growth > 0) {
+            app.scroll_offset +|= growth;
+            scroll_offset_usize = app.scroll_offset;
+            s.pinned_growth = true;
+        }
+    }
+    app.scroll_total = s.full_total;
+
     if (scroll_offset_usize > max_scroll) {
         scroll_offset_usize = max_scroll;
         app.scroll_offset = max_scroll;
@@ -6501,6 +6521,39 @@ test "timeline render cache invalidates on timeline mutation" {
     try std.testing.expectEqual(@as(usize, 1), app.timeline_render_cache.items.len);
     try std.testing.expect(app.timeline_render_cache.items[0] != null);
     try std.testing.expectEqual(first_total, app.timeline_render_cache.items[0].?.total);
+}
+
+test "pinned scroll offset tracks content growth" {
+    var app: App = undefined;
+    timelineCacheTestApp(&app);
+    defer timelineCacheTestDeinit(&app);
+
+    const alloc = app.sessionAlloc();
+    for (0..12) |_| try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .system, "row"));
+
+    {
+        var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer frame.deinit();
+        _ = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+    }
+
+    app.auto_scroll = false;
+    app.scroll_offset = 3;
+    const pinned_top = app.scroll_total -| 10 -| 3;
+
+    try app.appendTimelineEntry(alloc, try TimelineEntry.userMessageSimple(alloc, .system, "new row"));
+
+    var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer frame.deinit();
+    const s = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+    try std.testing.expect(s.pinned_growth);
+    try std.testing.expect(!app.auto_scroll);
+    try std.testing.expectEqual(pinned_top, app.scroll_total -| 10 -| app.scroll_offset);
+
+    const s2 = try buildTimelineStack(&app, frame.allocator(), 40, 10);
+    try std.testing.expect(!s2.pinned_growth);
+    try std.testing.expectEqual(app.scroll_offset, s2.scroll_offset);
+    try std.testing.expectEqual(pinned_top, app.scroll_total -| 10 -| app.scroll_offset);
 }
 
 test "running tool calls stay out of the cache and keep spinning" {
