@@ -1975,8 +1975,7 @@ pub const App = struct {
                 var take_cols: usize = 0;
                 while (bi + take_bytes < run_end and take_cols < remaining) {
                     const len = std.unicode.utf8ByteSequenceLength(line[bi + take_bytes]) catch 1;
-                    if (bi + take_bytes + len > run_end) break;
-                    take_bytes += len;
+                    take_bytes += @min(len, run_end - bi - take_bytes);
                     take_cols += 1;
                 }
                 if (take_cols == 0) {
@@ -6049,6 +6048,8 @@ test "appendWrappedPlainRows matches wrapLine row boundaries" {
         .{ .text = "héllo wörld foo", .width = 4 },
         .{ .text = "   ", .width = 3 },
         .{ .text = "a b c d e f g", .width = 1 },
+        .{ .text = "⠋⠙⠹\xe2", .width = 3 },
+        .{ .text = "bad \x80\x81 bytes \xff end", .width = 8 },
     };
 
     for (cases) |case| {

@@ -425,8 +425,7 @@ pub fn wrapLineEx(
                     var take_cols: usize = 0;
                     while (bi + take_bytes < run.len and take_cols < remaining) {
                         const len = std.unicode.utf8ByteSequenceLength(run[bi + take_bytes]) catch 1;
-                        if (bi + take_bytes + len > run.len) break;
-                        take_bytes += len;
+                        take_bytes += @min(len, run.len - bi - take_bytes);
                         take_cols += 1;
                     }
                     if (take_cols == 0) {
@@ -633,6 +632,34 @@ test "wrapLine hard-splits long word" {
     try std.testing.expectEqual(@as(usize, 3), out.items.len);
 }
 
+test "wrapLine terminates on truncated and invalid utf8" {
+    const alloc = std.testing.allocator;
+    const exact = [_]struct { text: []const u8, width: usize, rows: []const []const u8 }{
+        .{ .text = "⠋⠙⠹\xe2", .width = 3, .rows = &.{ "⠋⠙⠹", "\xe2" } },
+        .{ .text = "\xf0\x9f", .width = 3, .rows = &.{"\xf0\x9f"} },
+        .{ .text = "\x80\x81\x80", .width = 3, .rows = &.{"\x80\x81\x80"} },
+    };
+    for (exact) |case| {
+        var src: Line = .{};
+        defer src.deinit(alloc);
+        try src.pushText(alloc, case.text, .{});
+
+        var out: std.ArrayList(Line) = .empty;
+        defer {
+            for (out.items) |*l| l.deinit(alloc);
+            out.deinit(alloc);
+        }
+
+        try wrapLine(alloc, &src, case.width, &out);
+        try std.testing.expectEqual(case.rows.len, out.items.len);
+        for (case.rows, out.items) |want, got| {
+            const text = try lineText(alloc, &got);
+            defer alloc.free(text);
+            try std.testing.expectEqualStrings(want, text);
+        }
+    }
+}
+
 test "wrapLineIndented indents wrapped list continuation rows" {
     const alloc = std.testing.allocator;
     var src: Line = .{};
@@ -830,7 +857,10 @@ pub const Input = struct {
             const at_cursor = pos == self.cursor;
             const cp_len = std.unicode.utf8ByteSequenceLength(self.text[pos]) catch 1;
             const stop = @min(pos + cp_len, self.text.len);
-            const cp = std.unicode.utf8Decode(self.text[pos..stop]) catch 0xFFFD;
+            const cp = if (stop - pos == cp_len)
+                (std.unicode.utf8Decode(self.text[pos..stop]) catch 0xFFFD)
+            else
+                0xFFFD;
             pos = stop;
             if (cp == '\n') {
                 cx = input_start;
@@ -1323,8 +1353,7 @@ fn countWrappedRowsEx(src: *const Line, first_width: usize, cont_width: usize) u
                     var take_cols: usize = 0;
                     while (bi + take_bytes < run.len and take_cols < remaining) {
                         const len = std.unicode.utf8ByteSequenceLength(run[bi + take_bytes]) catch 1;
-                        if (bi + take_bytes + len > run.len) break;
-                        take_bytes += len;
+                        take_bytes += @min(len, run.len - bi - take_bytes);
                         take_cols += 1;
                     }
                     if (take_cols == 0) {
@@ -1646,5 +1675,16 @@ test "input renders nothing when the box is too narrow" {
         while (x < 4) : (x += 1) {
             try std.testing.expect(buf.get(x, y).char != '_');
         }
+    }
+}
+
+test "input renders truncated and invalid utf8 without panicking" {
+    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 20, .height = 9 });
+    defer buf.deinit();
+    const cases = [_][]const u8{ "trunc \xe2\x8b", "\xf0\x9f", "\x80\x81", "\xed\xa0\x80", "⠋⠙⠹\xe2" };
+    for (cases) |text| {
+        buf.clear();
+        const input: Input = .{ .text = text, .cursor = text.len };
+        input.render(.{ .width = 20, .height = 9 }, &buf);
     }
 }

@@ -1,5 +1,14 @@
 const std = @import("std");
 
+fn clampUtf8(bytes: []const u8, limit: usize) usize {
+    if (limit >= bytes.len) return bytes.len;
+    var n = limit;
+    while (n > 0 and (bytes[n] & 0xC0) == 0x80) n -= 1;
+    const len = std.unicode.utf8ByteSequenceLength(bytes[n]) catch 1;
+    if (n + len > limit) return n;
+    return limit;
+}
+
 pub fn Field(comptime max: usize) type {
     return struct {
         const Self = @This();
@@ -19,7 +28,7 @@ pub fn Field(comptime max: usize) type {
         }
 
         pub fn set(self: *Self, text: []const u8) void {
-            const n = @min(text.len, capacity);
+            const n = clampUtf8(text, @min(text.len, capacity));
             @memcpy(self.buf[0..n], text[0..n]);
             self.len = n;
             self.cursor = n;
@@ -37,7 +46,7 @@ pub fn Field(comptime max: usize) type {
 
         pub fn insert(self: *Self, bytes: []const u8) void {
             if (self.cursor > self.len) self.cursor = self.len;
-            const n = @min(bytes.len, capacity - self.len);
+            const n = clampUtf8(bytes, @min(bytes.len, capacity - self.len));
             const tail = self.len - self.cursor;
             std.mem.copyBackwards(u8, self.buf[self.cursor + n ..][0..tail], self.buf[self.cursor..][0..tail]);
             @memcpy(self.buf[self.cursor..][0..n], bytes[0..n]);
@@ -220,4 +229,18 @@ test "set truncates and parks cursor at end" {
     f.cursor = 0;
     f.set("abcdef");
     try std.testing.expectEqual(@as(usize, 6), f.cursor);
+}
+
+test "insert never splits a codepoint at capacity" {
+    var f: Field(8) = .{};
+    f.insert("⠋⠙⠹");
+    try std.testing.expectEqualStrings("⠋⠙", f.slice());
+    f.insert("⠹");
+    try std.testing.expectEqualStrings("⠋⠙", f.slice());
+}
+
+test "set never splits a codepoint at capacity" {
+    var f: Field(7) = .{};
+    f.set("⠋⠙⠹");
+    try std.testing.expectEqualStrings("⠋⠙", f.slice());
 }

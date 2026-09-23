@@ -141,9 +141,8 @@ pub const LineIterator = struct {
                 break;
             }
             if (b == ' ') last_space_byte = byte_end;
-            const cp_len = std.unicode.utf8ByteSequenceLength(b) catch break;
-            if (byte_end + cp_len > remaining.len) break;
-            byte_end += cp_len;
+            const cp_len = std.unicode.utf8ByteSequenceLength(b) catch 1;
+            byte_end += @min(cp_len, remaining.len - byte_end);
             col += 1;
         }
 
@@ -181,7 +180,7 @@ pub fn wrappedRowCount(text: []const u8, width: usize) u16 {
     if (width == 0) return 0;
     var iter = LineIterator{ .text = text, .width = width };
     var count: u16 = 0;
-    while (iter.next() != null) count += 1;
+    while (iter.next() != null) count +|= 1;
     return count;
 }
 
@@ -189,6 +188,19 @@ test "wrapped rows honor newlines" {
     try std.testing.expectEqual(@as(u16, 3), wrappedRowCount("first\nsecond line", 6));
     try std.testing.expectEqual(@as(u16, 3), wrappedRowCount("first\n\nlast", 20));
     try std.testing.expectEqual(@as(u16, 2), wrappedRowCount("first line\nlast", 20));
+}
+
+test "wrapped rows terminate on invalid utf8" {
+    try std.testing.expectEqual(@as(u16, 3), wrappedRowCount("bad \x80\x81 bytes \xff end", 8));
+    try std.testing.expectEqual(@as(u16, 1), wrappedRowCount("\x80", 8));
+    try std.testing.expectEqual(@as(u16, 2), wrappedRowCount("truncated \xe2\x8b", 8));
+    try std.testing.expectEqual(@as(u16, 1), wrappedRowCount("\xf0\x9f", 8));
+}
+
+test "wrapped iter yields invalid bytes as single cells" {
+    var it = LineIterator{ .text = "a\x80b", .width = 8 };
+    try std.testing.expectEqualStrings("a\x80b", it.next().?);
+    try std.testing.expect(it.next() == null);
 }
 
 fn expectRowEqual(idx: *usize, expected: []const []const u8, got: []const u8) !void {
