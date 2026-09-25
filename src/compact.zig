@@ -143,6 +143,7 @@ pub const Task = struct {
     tools: []const sdk.Tool,
     messages: []const sdk.Message,
     force: bool,
+    cache_key: ?[]const u8 = null,
     cancellation: sdk.CancellationToken = .{},
     finished: std.atomic.Value(bool) = .init(false),
     future: ?std.Io.Future(void) = null,
@@ -191,9 +192,10 @@ pub const Task = struct {
     fn run(self: *Task) void {
         defer self.finished.store(true, .release);
         self.result = switch (self.model.*) {
-            .response => |*model| compactResponses(self.alloc, self.io, model, self.tools, self.messages, &self.cancellation),
-            inline else => |*model| compactOrdinary(self.alloc, self.io, model.languageModel(), self.messages, &self.cancellation, self.force),
+            .response => |*model| compactResponses(self.alloc, self.io, model, self.tools, self.messages, &self.cancellation, self.cache_key),
+            inline else => |*model| compactOrdinary(self.alloc, self.io, model.languageModel(), self.messages, &self.cancellation, self.force, self.cache_key),
         } catch |err| {
+            if (!@import("builtin").is_test) std.log.scoped(.compact).warn("compaction failed for {s}: {s}", .{ self.model.languageModel().modelId(), @errorName(err) });
             self.failure = err;
             return;
         };
@@ -288,6 +290,7 @@ pub fn compactOrdinary(
     messages: []const sdk.Message,
     cancellation: ?*sdk.CancellationToken,
     force: bool,
+    cache_key: ?[]const u8,
 ) !Outcome {
     const cut_index = if (force) computeForcedCutIndex(messages) else computeCutIndex(messages);
     if (cut_index == 0) return error.NothingToCompact;
@@ -298,8 +301,10 @@ pub fn compactOrdinary(
         .system = SUMMARY_SYSTEM_PROMPT,
         .messages = prompt[1..],
         .max_steps = 1,
+        .hooks = .{ .on_provider_error = logProviderError },
         .timeout_ms = TIMEOUT_MS,
         .cancellation = cancellation,
+        .cache_key = cache_key,
     });
     const summary = if (result.text.len > 0) result.text else summaryFromMessages(result.messages);
     return .{
@@ -315,19 +320,26 @@ pub fn compactResponses(
     tools: []const sdk.Tool,
     messages: []const sdk.Message,
     cancellation: ?*sdk.CancellationToken,
+    cache_key: ?[]const u8,
 ) !Outcome {
     var scratch = std.heap.ArenaAllocator.init(alloc);
     defer scratch.deinit();
     const result = try model.compact(scratch.allocator(), io, .{
         .messages = messages,
         .tools = tools,
+        .on_provider_error = logProviderError,
         .timeout_ms = TIMEOUT_MS,
         .cancellation = cancellation,
+        .cache_key = cache_key,
     }, null, 2);
     return .{
         .messages = try installResponseParts(alloc, messages, result.parts),
         .usage = result.usage,
     };
+}
+
+fn logProviderError(_: ?*anyopaque, info: sdk.options.ProviderErrorInfo) void {
+    if (!@import("builtin").is_test) std.log.scoped(.compact).warn("provider error status={d} retry={any}: {s}", .{ info.status_code, info.will_retry, info.response_body });
 }
 
 fn messageBytes(message: sdk.Message) u64 {
@@ -608,6 +620,8 @@ test "ordinary SDK compaction generates and installs a summary" {
         }
 
         fn generate(_: *anyopaque, alloc: std.mem.Allocator, _: std.Io, params: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            try std.testing.expectEqualStrings("compaction-session", params.cache_key.?);
+            try std.testing.expect(params.on_provider_error != null);
             try std.testing.expectEqualStrings(SUMMARY_SYSTEM_PROMPT, params.system);
             try std.testing.expectEqual(@as(usize, 1), params.messages.len);
             const result = try alloc.create(sdk.model.GenerateResult);
@@ -624,13 +638,13 @@ test "ordinary SDK compaction generates and installs a summary" {
     const messages = [_]sdk.Message{ sdk.SystemMessage("system"), sdk.UserMessage(big), sdk.UserMessage("recent") };
     var fixture: u8 = 0;
     const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
-    var outcome = try compactOrdinary(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, &messages, null, false);
+    var outcome = try compactOrdinary(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, &messages, null, false, "compaction-session");
     defer outcome.deinit();
     try std.testing.expectEqual(@as(u64, 12), outcome.usage.total_tokens);
     try std.testing.expect(std.mem.endsWith(u8, outcome.messages.messages[outcome.messages.messages.len - 1].text(), "generated summary"));
 
     const small = [_]sdk.Message{ sdk.SystemMessage("system"), sdk.UserMessage("small conversation") };
-    var forced = try compactOrdinary(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, &small, null, true);
+    var forced = try compactOrdinary(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, &small, null, true, "compaction-session");
     defer forced.deinit();
     try std.testing.expectEqual(@as(usize, 2), forced.messages.messages.len);
     try std.testing.expect(std.mem.endsWith(u8, forced.messages.messages[1].text(), "generated summary"));

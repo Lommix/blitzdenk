@@ -118,6 +118,7 @@ pub const Agent = struct {
     task: ?agent_run.RunTask = null,
     compact_task: ?compact.Task = null,
     resume_options: ?agent_run.OwnedOptions = null,
+    cache_key: ?[]const u8 = null,
     run_model: ?sdk.LanguageModel = null,
     pending_model: ?models.Model = null,
     pending_vision: ?bool = null,
@@ -164,6 +165,7 @@ pub const Agent = struct {
         if (self.messages) |*messages| messages.deinit();
         if (self.pending_model) |*model| model.deinit(self.alloc);
         self.model.deinit(self.alloc);
+        if (self.cache_key) |key| self.alloc.free(key);
         self.state_arena.deinit();
         self.injection_arena.deinit();
         self.tool_arena.deinit();
@@ -284,7 +286,7 @@ pub const Agent = struct {
         self.compaction.request(reason);
     }
 
-    pub fn startCompaction(self: *Agent) !bool {
+    pub fn startCompaction(self: *Agent, fallback_cache_key: ?[]const u8) !bool {
         if (self.task != null or self.compact_task != null) return error.RunInProgress;
         const estimate = self.currentContextEstimate();
         if (!self.compaction.shouldStart(self.history().len, estimate, self.context_limit, self.failureNow())) return false;
@@ -295,6 +297,7 @@ pub const Agent = struct {
         self.compaction.completed_continue_after = null;
         self.compaction.estimated_input_tokens = estimate;
         self.compact_task = compact.Task.init(self.alloc, self.io, &self.model, self.tools, self.history(), force);
+        self.compact_task.?.cache_key = self.cache_key orelse fallback_cache_key;
         self.status = .compacting;
         self.compact_task.?.start();
         return true;
@@ -302,6 +305,9 @@ pub const Agent = struct {
 
     pub fn startModel(self: *Agent, model: sdk.LanguageModel, options: sdk.GenerateOptions) !void {
         if (self.task != null) return error.RunInProgress;
+        const cache_key = if (options.cache_key) |key| try self.alloc.dupe(u8, key) else null;
+        if (self.cache_key) |key| self.alloc.free(key);
+        self.cache_key = cache_key;
         const continue_turn = self.flags.turn_canceled;
         self.flags.turn_canceled = false;
         self.run_model = model;
@@ -314,6 +320,7 @@ pub const Agent = struct {
         self.tokens_per_second = 0;
         self.activity = .processing;
         var run_options = options;
+        run_options.cache_key = self.cache_key;
         if (run_options.timeout_ms == null) run_options.timeout_ms = stream_timeout_ms;
         if (run_options.system.len == 0) run_options.system = self.system_prompt;
         if (!continue_turn and (run_options.prompt.len > 0 or self.queued_messages.items.len > 0)) {
@@ -442,7 +449,7 @@ pub const Agent = struct {
                 self.flags.overflow_recovery = true;
                 self.context_from_provider = false;
                 self.requestCompaction(.auto, true);
-                if (!(self.startCompaction() catch false)) {
+                if (!(self.startCompaction(null) catch false)) {
                     self.last_error = if (is_overflow) error.ContextOverflow else failure.?;
                     self.status = .failed;
                 }
@@ -591,9 +598,10 @@ pub const Agent = struct {
         var scratch = std.heap.ArenaAllocator.init(self.alloc);
         defer scratch.deinit();
         const cancellation = if (self.task) |*task| &task.cancellation else null;
+        const cache_key = self.cache_key;
         var outcome = switch (self.model) {
-            .response => |*model| compact.compactResponses(scratch.allocator(), self.io, model, self.tools, messages, cancellation),
-            inline else => |*model| compact.compactOrdinary(scratch.allocator(), self.io, model.languageModel(), messages, cancellation, force),
+            .response => |*model| compact.compactResponses(scratch.allocator(), self.io, model, self.tools, messages, cancellation, cache_key),
+            inline else => |*model| compact.compactOrdinary(scratch.allocator(), self.io, model.languageModel(), messages, cancellation, force, cache_key),
         } catch |err| {
             std.log.scoped(.agent).warn("in-step compaction failed ({s}); backing off before retry", .{@errorName(err)});
             self.compaction.noteFailure(self.failureNow(), err);
@@ -800,12 +808,13 @@ test "agent owns SDK state and adopts completed history" {
     var fixture: u8 = 0;
     const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
     var prompt = [_]u8{ 'n', 'e', 'w' };
-    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = &prompt });
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = &prompt, .cache_key = "chat-session" });
     prompt[0] = 'x';
     agent.task.?.wait();
     while (agent.drain(2, &agent, Fixture.collect) != 0) {}
     try std.testing.expect(agent.reap());
     try std.testing.expectEqual(Status.complete, agent.status);
+    try std.testing.expectEqualStrings("chat-session", agent.cache_key.?);
     try std.testing.expectEqual(@as(usize, 4), agent.history().len);
     try std.testing.expectEqualStrings("old", agent.history()[0].text());
     try std.testing.expectEqualStrings("new", agent.history()[1].text());

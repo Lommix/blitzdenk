@@ -269,7 +269,7 @@ pub const Registry = struct {
         const running = agent.task != null;
         agent.requestCompaction(.external, running);
         if (running) return .queued;
-        const started = try agent.startCompaction();
+        const started = try agent.startCompaction(self.cache_key_buf[0..self.cache_key_len]);
         if (started) {
             slot.event.reset();
             slot.state.store(.active, .release);
