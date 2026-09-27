@@ -6,6 +6,7 @@ const compact = @import("compact.zig");
 pub const state = @import("agent-state");
 
 const stream_timeout_ms: u64 = 15 * 60 * 1000;
+const stream_idle_timeout_ms: u64 = 120 * 1000;
 
 const PrepareHook = *const fn (?*anyopaque, sdk.options.PrepareStepInfo) anyerror!sdk.options.PrepareStepResult;
 const ToolCallHook = *const fn (?*anyopaque, sdk.options.ToolCallInfo) void;
@@ -322,6 +323,7 @@ pub const Agent = struct {
         var run_options = options;
         run_options.cache_key = self.cache_key;
         if (run_options.timeout_ms == null) run_options.timeout_ms = stream_timeout_ms;
+        if (run_options.idle_timeout_ms == null) run_options.idle_timeout_ms = stream_idle_timeout_ms;
         if (run_options.system.len == 0) run_options.system = self.system_prompt;
         if (!continue_turn and (run_options.prompt.len > 0 or self.queued_messages.items.len > 0)) {
             self.turn_checkpoint = self.history().len;

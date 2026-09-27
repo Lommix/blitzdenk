@@ -22,6 +22,7 @@ pub const GenerateParams = struct {
     tool_choice: options.ToolChoice = .auto,
     response_format: ?types.ResponseFormat = null,
     timeout_ms: ?u64 = null,
+    idle_timeout_ms: ?u64 = null,
     cancellation: ?*options.CancellationToken = null,
     on_provider_error: ?*const fn (ctx: ?*anyopaque, info: options.ProviderErrorInfo) void = null,
     on_provider_error_ctx: ?*anyopaque = null,

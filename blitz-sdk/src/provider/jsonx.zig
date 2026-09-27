@@ -333,6 +333,7 @@ const Response = struct {
 
 pub const RequestOptions = struct {
     timeout_ms: ?u64 = null,
+    idle_timeout_ms: ?u64 = null,
     cancellation: ?*opts_mod.CancellationToken = null,
     on_provider_error: ?*const fn (ctx: ?*anyopaque, info: opts_mod.ProviderErrorInfo) void = null,
     on_provider_error_ctx: ?*anyopaque = null,
@@ -384,7 +385,7 @@ pub fn postSseWithRetry(
     var attempt: u32 = 0;
     while (true) {
         if (options.cancellation) |token| try token.check();
-        const response = try postSseTimed(a, io, client, url, body, headers, options.timeout_ms, options.cancellation, event_ctx, on_event);
+        const response = try postSseTimed(a, io, client, url, body, headers, options.timeout_ms, options.idle_timeout_ms, options.cancellation, event_ctx, on_event);
         if (@intFromEnum(response.status) < 400) return response.body;
         if (!isRetryableStatus(response.status) or attempt >= max_retries) {
             defer a.free(response.body);
@@ -482,6 +483,19 @@ pub fn reportStreamError(a: std.mem.Allocator, options: RequestOptions, body: []
 
 fn timeoutTask(io: std.Io, timeout_ms: u64) void {
     std.Io.sleep(io, .fromMilliseconds(@intCast(timeout_ms)), .awake) catch {};
+}
+
+fn nowNs(io: std.Io) i64 {
+    return @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds);
+}
+
+fn idleWatchdog(io: std.Io, idle_ms: u64, last_chunk: *std.atomic.Value(i64)) void {
+    const limit_ns: i64 = @as(i64, @intCast(idle_ms)) * std.time.ns_per_ms;
+    while (true) {
+        const remaining = last_chunk.load(.acquire) + limit_ns - nowNs(io);
+        if (remaining <= 0) return;
+        std.Io.sleep(io, .fromNanoseconds(remaining), .awake) catch return;
+    }
 }
 
 fn postTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header) !Response {
@@ -598,6 +612,7 @@ fn postSse(
     headers: []const std.http.Header,
     event_ctx: ?*anyopaque,
     on_event: *const fn (?*anyopaque, []const u8) anyerror!void,
+    last_chunk: ?*std.atomic.Value(i64),
 ) !Response {
     const h = try a.alloc(std.http.Header, headers.len + 1);
     defer a.free(h);
@@ -653,14 +668,20 @@ fn postSse(
         if (writer.end == 0) continue;
         const chunk = scratch[0..writer.end];
         try output.appendSlice(a, chunk);
-        if (@intFromEnum(status) >= 400) continue;
+        if (@intFromEnum(status) >= 400) {
+            if (last_chunk) |stamp| stamp.store(nowNs(io), .release);
+            continue;
+        }
         try pending.appendSlice(a, chunk);
         while (std.mem.indexOfScalar(u8, pending.items, '\n')) |end| {
             const line = std.mem.trimEnd(u8, pending.items[0..end], "\r");
             if (std.mem.startsWith(u8, line, "data:")) {
                 const data = std.mem.trim(u8, line["data:".len..], " ");
                 if (std.mem.eql(u8, data, "[DONE]")) return .{ .status = status, .body = try output.toOwnedSlice(a), .retry_after_ms = retry_after_ms };
-                if (data.len > 0) try on_event(event_ctx, data);
+                if (data.len > 0) {
+                    if (last_chunk) |stamp| stamp.store(nowNs(io), .release);
+                    try on_event(event_ctx, data);
+                }
             }
             try pending.replaceRange(a, 0, end + 1, "");
         }
@@ -709,20 +730,25 @@ fn postSseTimed(
     body: []const u8,
     headers: []const std.http.Header,
     timeout_ms: ?u64,
+    idle_timeout_ms: ?u64,
     cancellation: ?*opts_mod.CancellationToken,
     event_ctx: ?*anyopaque,
     on_event: *const fn (?*anyopaque, []const u8) anyerror!void,
 ) !Response {
-    if (timeout_ms == null and cancellation == null) return postSse(a, io, client, url, body, headers, event_ctx, on_event);
+    var last_chunk = std.atomic.Value(i64).init(nowNs(io));
+    if (timeout_ms == null and idle_timeout_ms == null and cancellation == null) return postSse(a, io, client, url, body, headers, event_ctx, on_event, null);
     const Selection = union(enum) {
         response: anyerror!Response,
         timeout: void,
         canceled: void,
+        idle: void,
     };
-    var buffer: [3]Selection = undefined;
+    var buffer: [4]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
-    select.async(.response, postSseTask, .{ a, io, client, url, body, headers, event_ctx, on_event });
+    const chunk_stamp: ?*std.atomic.Value(i64) = if (idle_timeout_ms == null) null else &last_chunk;
+    select.async(.response, postSseTask, .{ a, io, client, url, body, headers, event_ctx, on_event, chunk_stamp });
     if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout });
+    if (idle_timeout_ms) |idle| select.async(.idle, idleWatchdog, .{ io, idle, &last_chunk });
     if (cancellation) |token| select.async(.canceled, opts_mod.CancellationToken.waitUntilCanceled, .{ token, io });
     switch (try select.await()) {
         .response => |response| {
@@ -737,11 +763,15 @@ fn postSseTimed(
             select.cancelDiscard();
             return error.Canceled;
         },
+        .idle => {
+            select.cancelDiscard();
+            return error.NetworkError;
+        },
     }
 }
 
-fn postSseTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, event_ctx: ?*anyopaque, on_event: *const fn (?*anyopaque, []const u8) anyerror!void) !Response {
-    return postSse(a, io, client, url, body, headers, event_ctx, on_event);
+fn postSseTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, event_ctx: ?*anyopaque, on_event: *const fn (?*anyopaque, []const u8) anyerror!void, last_chunk: ?*std.atomic.Value(i64)) !Response {
+    return postSse(a, io, client, url, body, headers, event_ctx, on_event, last_chunk);
 }
 
 test "retryable statuses" {
@@ -883,6 +913,74 @@ test "cancellation interrupts HTTP reads" {
     try std.testing.expectError(error.Canceled, postWithRetry(std.testing.allocator, io, null, url, "{}", &.{}, 0, .{ .cancellation = &token }));
 }
 
+test "armed idle watchdog does not delay a finished stream" {
+    const Fixture = struct {
+        fn serve(server: *std.Io.net.Server, io: std.Io) void {
+            var stream = server.accept(io) catch return;
+            defer stream.close(io);
+            var buffer: [1024]u8 = undefined;
+            var writer = stream.writer(io, &buffer);
+            writer.interface.writeAll(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n" ++
+                    "d\r\ndata: hello\n\n\r\n" ++
+                    "e\r\ndata: [DONE]\n\n\r\n",
+            ) catch return;
+            writer.interface.flush() catch return;
+            std.Io.sleep(io, .fromSeconds(60), .awake) catch {};
+        }
+    };
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    var serving = std.Io.async(io, Fixture.serve, .{ &server, io });
+    defer serving.cancel(io);
+    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
+    defer std.testing.allocator.free(url);
+    const started = std.Io.Timestamp.now(io, .awake);
+    const response = try postSseTimed(std.testing.allocator, io, null, url, "{}", &.{}, null, 8000, null, null, discardEventData);
+    defer std.testing.allocator.free(response.body);
+    const elapsed_ms = started.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
+    try std.testing.expect(elapsed_ms < 4000);
+}
+
+fn discardEventData(_: ?*anyopaque, _: []const u8) !void {}
+
+test "idle watchdog fails a stalled SSE stream as a network error" {
+    const Fixture = struct {
+        fn serve(server: *std.Io.net.Server, io: std.Io) void {
+            var stream = server.accept(io) catch return;
+            defer stream.close(io);
+            var buffer: [1024]u8 = undefined;
+            var writer = stream.writer(io, &buffer);
+            writer.interface.writeAll(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n" ++
+                    "d\r\ndata: hello\n\n\r\n",
+            ) catch return;
+            writer.interface.flush() catch return;
+            std.Io.sleep(io, .fromSeconds(60), .awake) catch {};
+        }
+
+        fn receive(ctx: ?*anyopaque, data: []const u8) !void {
+            const seen: *bool = @ptrCast(@alignCast(ctx.?));
+            seen.* = std.mem.eql(u8, data, "hello");
+        }
+    };
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    var serving = std.Io.async(io, Fixture.serve, .{ &server, io });
+    defer serving.cancel(io);
+    const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
+    defer std.testing.allocator.free(url);
+    var seen = false;
+    try std.testing.expectError(error.NetworkError, postSseTimed(std.testing.allocator, io, null, url, "{}", &.{}, null, 150, null, &seen, Fixture.receive));
+    try std.testing.expect(seen);
+}
+
 test "SSE done marker ends a response without waiting for connection close" {
     const Fixture = struct {
         fn serve(server: *std.Io.net.Server, io: std.Io) void {
@@ -914,7 +1012,7 @@ test "SSE done marker ends a response without waiting for connection close" {
     const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
     defer std.testing.allocator.free(url);
     var seen = false;
-    const response = try postSseTimed(std.testing.allocator, io, null, url, "{}", &.{}, 100, null, &seen, Fixture.receive);
+    const response = try postSseTimed(std.testing.allocator, io, null, url, "{}", &.{}, 100, null, null, &seen, Fixture.receive);
     defer std.testing.allocator.free(response.body);
     try std.testing.expect(seen);
 }

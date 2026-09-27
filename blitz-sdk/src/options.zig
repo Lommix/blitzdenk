@@ -200,6 +200,7 @@ pub const GenerateOptions = struct {
 
     max_retries: u32 = 2,
     timeout_ms: ?u64 = null,
+    idle_timeout_ms: ?u64 = null,
     headers: []const std.http.Header = &.{},
     provider_options: ?std.json.Value = null,
     prompt_caching: bool = false,

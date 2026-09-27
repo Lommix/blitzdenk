@@ -161,6 +161,7 @@ fn run(
                 .schema = value,
             } else null,
             .timeout_ms = opts.timeout_ms,
+            .idle_timeout_ms = opts.idle_timeout_ms,
             .cancellation = opts.cancellation,
             .on_provider_error = opts.hooks.on_provider_error,
             .on_provider_error_ctx = opts.hooks.on_provider_error_ctx,

@@ -190,6 +190,7 @@ pub const Chat = struct {
 fn requestOptions(self: *const Chat, params: model.GenerateParams) jsonx.RequestOptions {
     return .{
         .timeout_ms = params.timeout_ms,
+        .idle_timeout_ms = params.idle_timeout_ms,
         .cancellation = params.cancellation,
         .on_provider_error = params.on_provider_error,
         .on_provider_error_ctx = params.on_provider_error_ctx,
