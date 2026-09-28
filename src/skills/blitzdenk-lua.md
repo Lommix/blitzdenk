@@ -517,8 +517,12 @@ end)
 ```
 
 The payload is `BlitzPermissionPayload` in `meta.lua`: `agent_id`, `call_id`,
-`kind` (`call|diff|ask|plan`), `tool`, plus the kind fields. The decision
-shape is `BlitzPermissionDecision` in the same file.
+`kind` (`call|diff|ask|plan`), `tool`, `tool_input` (the raw JSON arguments of
+the call), the agent block (`agent_name`, `agent_description`, `agent_task`,
+`agent_cwd`), plus the kind
+fields. `agent_task` is the string set at spawn; it is empty for a main agent
+started from a plain prompt. The decision shape is
+`BlitzPermissionDecision` in the same file.
 
 Never call `blitz.agent.await` inside the hook. The hook runs on the main
 thread; the await would block the loop that runs the agent. The hook runs
@@ -527,27 +531,34 @@ misses.
 
 ## Permission queue
 
-Requests that pass the approve hook untouched and miss auto-approval park in a
-pending set. Each parked request gets an integer `ticket`, and Lua can inspect
+Requests that pass the approve hook untouched park in a pending set, in every
+approval mode. Each parked request gets an integer `ticket`, and Lua can inspect
 and decide parked requests at any time from commands, keybinds, or event
-listeners. `list_pending()` returns an array of snapshot tables, `get(ticket)`
-one snapshot or nil, and `resolve(ticket, decision)` decides one ticket. It
+listeners. `list_pending()` returns an array of `BlitzPermissionSnapshot`,
+`get(ticket)` one snapshot or nil, and `resolve(ticket, decision)` decides one
+ticket. It
 returns `false` for unknown or already-resolved tickets. Snapshots carry
-`ticket`, `agent_id`, `call_id`, `kind`, `tool`, and the kind fields, the same
-shape as the hook payload; `decision` takes the same `BlitzPermissionDecision`
+`ticket`, `agent_id`, `call_id`, `kind`, `tool`, `tool_input`, the agent block,
+and the kind fields, the same shape as the hook payload; `decision` takes the
+same `BlitzPermissionDecision`
 table as the approve hook, including `msg` and ask `select`. Requests whose
 agent died deny on resolve no matter what the decision says.
 
-`blitz.hooks.permission_requested(fn)` fires when a request parks. The event
-carries the ticket; fetch details with `blitz.permissions.get`. Listeners run
-in the sandbox VM, so they may spawn agents. The lazy reviewer pattern: the
-listener only spawns a judge agent, and the judge decides by calling a custom
-tool that resolves the ticket. No awaiting, no answer parsing.
+`blitz.hooks.permission_requested(fn)` fires for every parked request, before
+the approval-mode check: a listener can deny what yolo would auto-approve. The
+event carries the ticket; fetch details with `blitz.permissions.get`.
+`blitz.get_flags().approval_mode` reads the current mode inside a listener.
+Mode auto-approval and the TUI wait until every listener returned, so a
+listener may spawn agents: the lazy reviewer pattern only spawns a judge agent,
+and the judge decides by calling a custom tool that resolves the ticket. No
+awaiting, no answer parsing.
 
 Give the reviewer read-only tools plus the review tool. Tool calls from the
 reviewer emit their own permission events, and a reviewer that can run bash
-spawns reviewers without end. Unresolved tickets fall back to the TUI. A
-snapshot never goes stale, only `resolve` can fail late.
+spawns reviewers without end. Unresolved tickets fall back to the approval-mode
+check, then the TUI. A snapshot never goes stale, only `resolve` can fail late.
+Headless `--prompt` runs bypass the Lua stage: they auto-resolve requests
+without the event.
 
 ## Shared state
 

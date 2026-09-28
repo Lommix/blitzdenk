@@ -35,27 +35,34 @@ pub const EventBus = struct {
     /// hang exit; runEventHook installs it as the sandbox VM cancel token.
     hook_cancel: r.sdk.CancellationToken = .{},
 
-    pub fn emit(self: *EventBus, app: *r.app.App, event: AppEvent) void {
-        if (self.shutting_down.load(.acquire)) return;
+    pub fn emit(self: *EventBus, app: *r.app.App, event: AppEvent) bool {
+        if (self.shutting_down.load(.acquire)) return false;
 
         self.active_mu.lockUncancelable(app.io);
         const has_listeners = self.active.contains(std.meta.activeTag(event));
         self.active_mu.unlock(app.io);
-        if (!has_listeners) return;
+        if (!has_listeners) return false;
 
-        const owned = dupEvent(app.gpa, event) catch return;
+        const owned = dupEvent(app.gpa, event) catch return false;
         const call = app.gpa.create(HookCall) catch {
             freeEvent(app.gpa, owned);
-            return;
+            return false;
         };
         call.* = .{ .bus = self, .app = app, .event = owned };
 
         _ = self.pending_hooks.fetchAdd(1, .acq_rel);
         const thread = std.Thread.spawn(.{}, hookThreadMain, .{call}) catch {
             self.finishHook(call);
-            return;
+            return false;
         };
         thread.detach();
+        return true;
+    }
+
+    pub fn willDeliver(self: *EventBus, io: std.Io, event_type: AppEventTag) bool {
+        self.active_mu.lockUncancelable(io);
+        defer self.active_mu.unlock(io);
+        return self.active.contains(event_type);
     }
 
     fn finishHook(self: *EventBus, call: *HookCall) void {
@@ -67,6 +74,10 @@ pub const EventBus = struct {
     fn hookThreadMain(call: *HookCall) void {
         defer call.bus.finishHook(call);
         r.lua.runEventHook(call.app, call.event);
+        switch (call.event) {
+            .permission_requested => |ticket| call.app.finishLuaPermission(ticket),
+            else => {},
+        }
     }
 
     pub fn addTag(self: *EventBus, io: std.Io, event_type: AppEventTag) void {

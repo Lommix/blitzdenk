@@ -420,6 +420,33 @@ pub const App = struct {
         if (self.active_permission == req) self.active_permission = null;
     }
 
+    pub fn permissionModeApproves(self: *App, req: *r.permissions.Request) bool {
+        self.mu.lockUncancelable(self.io);
+        const mode = self.flags.approval_mode;
+        self.mu.unlock(self.io);
+        const is_ask = req.payload == .ask or req.payload == .plan;
+        return r.permissions.shouldAutoApprove(mode, is_ask, self.exec_pool.ssh_active);
+    }
+
+    pub fn finishLuaPermission(self: *App, ticket: u64) void {
+        const g = self.permission_queue.lock(self.io);
+        defer g.unlock();
+        for (self.pending_permissions.items) |req| {
+            if (req.ticket != ticket) continue;
+            self.releaseLuaStage(req);
+            return;
+        }
+    }
+
+    pub fn releaseLuaStage(self: *App, req: *r.permissions.Request) void {
+        if (req.stage != .in_lua) return;
+        if (self.permissionModeApproves(req)) {
+            self.settlePermission(req, .approved);
+        } else {
+            req.stage = .in_tui;
+        }
+    }
+
     pub fn cancelPermissions(self: *App, only: ?r.AgentId) void {
         var cleared_active = false;
         if (self.active_permission) |req| {
@@ -698,7 +725,7 @@ pub const App = struct {
         self.lua_vm.disableAllMcp();
         self.lua_vm.resetInjectDigest();
         self.lua_state.reset(self.io, self.gpa);
-        self.event_bus.emit(self, .session_reset);
+        _ = self.event_bus.emit(self, .session_reset);
         self.reloadMcpTools() catch {};
         self.reloadLuaTools() catch {};
 
@@ -726,7 +753,7 @@ pub const App = struct {
             const agent = self.registry.get(id) orelse continue;
             const finished_run = agent.task != null;
             if (self.registry.reap(id)) {
-                if (finished_run and agent.status == .complete) self.event_bus.emit(self, .{ .agent_complete = id });
+                if (finished_run and agent.status == .complete) _ = self.event_bus.emit(self, .{ .agent_complete = id });
                 try self.handleReapedAgent(id);
             }
         }
@@ -953,7 +980,7 @@ pub const App = struct {
         if (state == .active) return;
         if (agent.queued_messages.items.len > 0) {
             try self.registry.run(agent_id, .{ .max_steps = std.math.maxInt(usize) });
-            self.event_bus.emit(self, .{ .agent_started = .{ .id = agent_id, .fresh = false } });
+            _ = self.event_bus.emit(self, .{ .agent_started = .{ .id = agent_id, .fresh = false } });
             return;
         }
         if (agent.reported_task_done) return;
@@ -1001,7 +1028,7 @@ pub const App = struct {
                 try parent.queueReminder(wrapped);
                 if (parent.task == null and parent.compact_task == null and parent.status != .retrying and parent.status != .compacting) {
                     try self.registry.run(parent_id, .{ .max_steps = std.math.maxInt(usize) });
-                    self.event_bus.emit(self, .{ .agent_started = .{ .id = parent_id, .fresh = false } });
+                    _ = self.event_bus.emit(self, .{ .agent_started = .{ .id = parent_id, .fresh = false } });
                 }
             }
         }
@@ -1393,7 +1420,7 @@ pub const App = struct {
             for (self.mcp_manager.registeredTools()) |entry| try self.context_factory.add(entry.tool, entry.flags);
             try self.refreshLiveAgentTools();
         }
-        self.event_bus.emit(self, .mcp_tools_reloaded);
+        _ = self.event_bus.emit(self, .mcp_tools_reloaded);
         self.dirty = true;
     }
     pub fn reloadLuaTools(self: *App) !void {
@@ -1534,6 +1561,21 @@ pub const App = struct {
         };
     }
 
+    pub fn fillAgentInfo(self: *App, request: *r.permissions.Request) void {
+        const agent = self.registry.get(request.agent_id) orelse {
+            request.agent = .{};
+            return;
+        };
+        const def = self.context_factory.agentTypeAt(agent.type_idx);
+        const alloc = self.sessionAlloc();
+        request.agent = .{
+            .name = alloc.dupe(u8, if (def) |d| d.name else agent.name) catch "",
+            .description = alloc.dupe(u8, if (def) |d| d.description else "") catch "",
+            .task = alloc.dupe(u8, agent.task_description) catch "",
+            .cwd = alloc.dupe(u8, agent.cwd) catch "",
+        };
+    }
+
     pub fn contextPercent(self: *const App) f32 {
         const id = self.main_agent_id orelse return 0;
         const slot = &self.registry.slots[id.index];
@@ -1559,7 +1601,7 @@ pub const App = struct {
         if (agent.status == .compacting) {
             if (!self.compaction_indicator_active) {
                 self.compaction_indicator_active = true;
-                self.event_bus.emit(self, .{ .compaction_started = agent_id });
+                _ = self.event_bus.emit(self, .{ .compaction_started = agent_id });
             }
             return;
         }
@@ -1570,7 +1612,7 @@ pub const App = struct {
         if (compacted_count == 0 or compacted_count == self.compaction_completion_seen_count) return;
 
         self.compaction_completion_seen_count = compacted_count;
-        self.event_bus.emit(self, .{ .compaction_complete = agent_id });
+        _ = self.event_bus.emit(self, .{ .compaction_complete = agent_id });
         self.pushSystemMessage("compact complete", .{});
         self.dirty = true;
     }
@@ -2400,7 +2442,7 @@ pub const App = struct {
                         return;
                     }
                 }
-                if (!canceled) self.event_bus.emit(self, .{ .agent_failed = .{ .id = agent_id, .err = @errorName(err) } });
+                if (!canceled) _ = self.event_bus.emit(self, .{ .agent_failed = .{ .id = agent_id, .err = @errorName(err) } });
                 if (!is_main) return;
                 self.dropStreamingPreview();
                 if (canceled) return;
@@ -2470,7 +2512,7 @@ pub const App = struct {
         try self.waitForMcpTools();
         const alloc = self.sessionAlloc();
         const timeline_entry = try TimelineEntry.userMessageSimple(alloc, .user, timeline_text);
-        self.event_bus.emit(self, .{ .user_message_sent = timeline_text });
+        _ = self.event_bus.emit(self, .{ .user_message_sent = timeline_text });
 
         if (self.main_agent_id) |id| {
             try self.appendTimelineEntry(alloc, timeline_entry);
@@ -2478,7 +2520,7 @@ pub const App = struct {
             try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
             self.sdk_run_rendered_steps = 0;
             try self.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
-            self.event_bus.emit(self, .{ .agent_started = .{ .id = id, .fresh = false } });
+            _ = self.event_bus.emit(self, .{ .agent_started = .{ .id = id, .fresh = false } });
         } else {
             const id = self.registry.reserve().?;
             self.cmd_queue.append(io, .{
@@ -6867,4 +6909,51 @@ test "tool entries with live children stay uncached and keep updating" {
         try std.testing.expectEqualStrings("42", s.items.items[0].p.lines.items[0].spans.items[4].content);
     }
     try std.testing.expectEqual(@as(usize, 0), app.timeline_render_cache.items.len);
+}
+
+test "finishLuaPermission settles mode-approved tickets and hands the rest to the tui" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    var pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &env);
+
+    var app_state: App = undefined;
+    app_state.io = std.testing.io;
+    app_state.gpa = std.testing.allocator;
+    app_state.mu = .init;
+    app_state.flags = .{};
+    app_state.exec_pool = &pool;
+    app_state.permission_queue = .{};
+    app_state.pending_permissions = .empty;
+    app_state.active_permission = null;
+
+    var strict_req = r.permissions.Request{
+        .agent_id = .{ .index = 1, .generation = 1 },
+        .tool_name = "bash",
+        .payload = .{ .call = .{ .description = "run" } },
+    };
+    strict_req.ticket = 7;
+    strict_req.stage = .in_lua;
+    try app_state.pending_permissions.append(std.testing.allocator, &strict_req);
+
+    app_state.flags.approval_mode = .strict;
+    app_state.finishLuaPermission(7);
+    try std.testing.expect(strict_req.stage == .in_tui);
+    try std.testing.expect(strict_req.state == .pending);
+    try std.testing.expectEqual(@as(usize, 1), app_state.pending_permissions.items.len);
+
+    var yolo_req = r.permissions.Request{
+        .agent_id = .{ .index = 2, .generation = 1 },
+        .tool_name = "bash",
+        .payload = .{ .call = .{ .description = "run" } },
+    };
+    yolo_req.ticket = 8;
+    yolo_req.stage = .in_lua;
+    try app_state.pending_permissions.append(std.testing.allocator, &yolo_req);
+
+    app_state.flags.approval_mode = .yolo;
+    app_state.finishLuaPermission(8);
+    try std.testing.expect(yolo_req.state == .approved);
+    try std.testing.expectEqual(@as(usize, 1), app_state.pending_permissions.items.len);
+
+    app_state.pending_permissions.deinit(std.testing.allocator);
 }

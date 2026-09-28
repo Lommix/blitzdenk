@@ -264,7 +264,7 @@
 ---@field text string
 
 ---@class BlitzPermissionRequestEvent
----hand to blitz.permissions.resolve, or blitz.permissions.get for the full payload
+---hand to blitz.permissions.resolve, or blitz.permissions.get for the full BlitzPermissionSnapshot
 ---@field ticket integer
 
 ---@class BlitzInjectHook
@@ -283,6 +283,16 @@
 ---@field kind string
 ---tool name
 ---@field tool string
+---raw JSON arguments of the tool call
+---@field tool_input string
+---requesting agent type name
+---@field agent_name string
+---requesting agent type description
+---@field agent_description string
+---task set at spawn, empty on a prompted main agent
+---@field agent_task string
+---requesting agent working directory
+---@field agent_cwd string
 ---kind == call
 ---@field description? string
 ---kind == diff|plan
@@ -325,10 +335,14 @@
 ---@field user_message_sent fun(func: fun(ev: BlitzUserMessageEvent))
 ---Register a listener for after MCP tools are reloaded. Takes no payload. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field mcp_tools_reloaded fun(func: fun())
----Register a listener for when a tool approval parks for a decision.
----The event carries the ticket; fetch details with
+---Register a listener for every tool approval, before the
+---approval-mode check: a listener can deny what yolo would
+---auto-approve. The event carries the ticket; fetch details with
 ---blitz.permissions.get and decide with blitz.permissions.resolve.
----Unresolved tickets fall back to the TUI.The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
+---blitz.get_flags().approval_mode reads the current mode inside a
+---listener. Mode auto-approval and the TUI wait until every
+---listener finished; unresolved tickets then fall back to the
+---mode check and the TUI.The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field permission_requested fun(func: fun(ev: BlitzPermissionRequestEvent))
 ---Install one system-reminder injection listener. Takes one
 ---BlitzInjectHook table. func runs for every agent step before
@@ -356,11 +370,44 @@
 ---Remove the approve, inject, and prompt hooks.
 ---@field clear fun()
 
+---@class BlitzPermissionSnapshot
+---hand to blitz.permissions.resolve
+---@field ticket integer
+---packed AgentId of the requesting agent
+---@field agent_id integer
+---@field call_id? string
+---call|diff|ask|plan
+---@field kind string
+---tool name
+---@field tool string
+---raw JSON arguments of the tool call
+---@field tool_input string
+---requesting agent type name
+---@field agent_name string
+---requesting agent type description
+---@field agent_description string
+---task set at spawn, empty on a prompted main agent
+---@field agent_task string
+---requesting agent working directory
+---@field agent_cwd string
+---kind == call
+---@field description? string
+---kind == diff|plan
+---@field path? string
+---kind == ask
+---@field header? string
+---kind == ask
+---@field question? string
+---kind == ask
+---@field options? string[]
+---kind == plan, plan text
+---@field plan? string
+
 ---@class BlitzPermissions
----Snapshot every parked approval request as a list of tables: ticket, agent_id, call_id, kind, tool, and the kind fields.
----@field list_pending fun(): table
----Snapshot one parked approval request by ticket, or nil when the ticket is unknown or already resolved.
----@field get fun(ticket: integer): table
+---Snapshot every parked approval request as a list of BlitzPermissionSnapshot.
+---@field list_pending fun(): BlitzPermissionSnapshot[]
+---Snapshot one parked approval request by ticket as a BlitzPermissionSnapshot, or nil when the ticket is unknown or already resolved.
+---@field get fun(ticket: integer): BlitzPermissionSnapshot|nil
 ---Decide a parked approval request: true when the ticket resolved, false when unknown or already gone. Takes the same BlitzPermissionDecision table as the approve hook. Requests of dead agents deny regardless.
 ---@field resolve fun(ticket: integer, decision: BlitzPermissionDecision): boolean
 

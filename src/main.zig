@@ -611,7 +611,7 @@ pub fn run(
     var reload_tick: u32 = 0;
 
     app.reset();
-    app.flags.approval_mode = flags.approval_mode;
+    if (flags.approval_explicit) app.flags.approval_mode = flags.approval_mode;
     if (wizard_pending) app.enterWizard();
     if (app.input_mode != .wizard) app.warnUnboundAgentModels();
 
@@ -719,20 +719,9 @@ pub fn run(
                     const next = g.ptr.swapRemove(0);
                     g.unlock();
 
-                    // The Lua hook decides first. Only the fallback path
-                    // reaches the approval-mode check, the pending set, and
-                    // the TUI.
-                    const decided: ?r.permissions.State = decision: {
-                        if (app.luaPermissionDecision(next)) |d| break :decision d;
-                        app.mu.lockUncancelable(app.io);
-                        const mode = app.flags.approval_mode;
-                        app.mu.unlock(app.io);
-                        const is_ask = next.payload == .ask or next.payload == .plan;
-                        if (r.permissions.shouldAutoApprove(mode, is_ask, app.exec_pool.ssh_active)) {
-                            break :decision .approved;
-                        }
-                        break :decision null;
-                    };
+                    app.fillAgentInfo(next);
+
+                    const decided = app.luaPermissionDecision(next);
 
                     g = app.permission_queue.lock(io);
                     if (decided) |d| {
@@ -747,14 +736,22 @@ pub fn run(
                         continue;
                     }
 
+                    const lua_stage = app.event_bus.willDeliver(io, .permission_requested);
+                    if (!lua_stage and app.permissionModeApproves(next)) {
+                        next.state = .approved;
+                        next.event.set(app.io);
+                        continue;
+                    }
+
                     app.permission_ticket_next += 1;
                     next.ticket = app.permission_ticket_next;
+                    next.stage = if (lua_stage) .in_lua else .in_tui;
                     app.pending_permissions.append(app.gpa, next) catch {
                         next.state = .denied;
                         next.event.set(app.io);
                         continue;
                     };
-                    app.event_bus.emit(&app, .{ .permission_requested = next.ticket });
+                    if (!app.event_bus.emit(&app, .{ .permission_requested = next.ticket })) app.releaseLuaStage(next);
                 }
 
                 var index: usize = 0;
@@ -769,7 +766,7 @@ pub fn run(
                         }
                         continue;
                     }
-                    if (app.active_permission == null) app.active_permission = req;
+                    if (app.active_permission == null and req.stage == .in_tui) app.active_permission = req;
                     index += 1;
                 }
                 if (app.pending_permissions.items.len != pending_before or app.active_permission != active_before) app.dirty = true;
@@ -1207,7 +1204,7 @@ pub fn run(
 
                                     if (app.running) {
                                         app.pushHistory(history_store_dir, input);
-                                        app.event_bus.emit(&app, .{ .user_message_sent = timeline_text });
+                                        _ = app.event_bus.emit(&app, .{ .user_message_sent = timeline_text });
                                         if (app.main_agent_id) |agent_id| {
                                             const alloc = app.sessionAlloc();
                                             const len: usize = if (app.screenshot_buf != null) 2 else 1;
@@ -1576,6 +1573,7 @@ pub const CliFlags = packed struct {
     debug_log: bool = false,
     /// permission required
     approval_mode: r.permissions.ApprovalMode = .default,
+    approval_explicit: bool = false,
     /// don't inject the local AGENTS.md
     no_context: bool = false,
     /// run --prompt headless, print final message instead of tui
@@ -1589,11 +1587,13 @@ pub const CliFlags = packed struct {
 
         if (std.mem.eql(u8, tok, "--strict")) {
             self.approval_mode = .strict;
+            self.approval_explicit = true;
             return true;
         }
 
         if (std.mem.eql(u8, tok, "--yolo")) {
             self.approval_mode = .yolo;
+            self.approval_explicit = true;
             return true;
         }
 
@@ -1605,6 +1605,7 @@ pub const CliFlags = packed struct {
             self.approval_mode = r.permissions.parseApprovalMode(
                 std.ascii.lowerString(&buf, val),
             ) orelse approvalFail(val);
+            self.approval_explicit = true;
             return true;
         }
 

@@ -38,11 +38,21 @@ pub const State = union(enum) {
     message: []const u8,
 };
 
+pub const AgentInfo = struct {
+    name: []const u8 = "",
+    description: []const u8 = "",
+    task: []const u8 = "",
+    cwd: []const u8 = "",
+};
+
 pub const Request = struct {
     agent_id: AgentId,
     call_id: ?[]const u8 = null,
     tool_name: []const u8 = "",
+    tool_input: []const u8 = "",
+    agent: AgentInfo = .{},
     state: State = .pending,
+    stage: Stage = .pending,
     payload: Payload,
     event: std.Io.Event = .unset,
     ticket: u64 = 0,
@@ -56,6 +66,8 @@ pub const Handler = struct {
         if (self.request) |request| request(self.ctx, value);
     }
 };
+
+pub const Stage = enum(u8) { pending, in_lua, in_tui };
 
 pub const ApprovalMode = enum(u2) { strict, default, yolo };
 

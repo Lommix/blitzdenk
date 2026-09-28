@@ -1505,10 +1505,14 @@ pub const BlitzHooks = LuaType{
             .{ .name = "user_message_sent", .desc = "Register a listener for after the user sends a message. " ++ ListenerVmDesc, .ty = EventFn(.user_message_sent, BlitzUserMessageEvent) },
             .{ .name = "mcp_tools_reloaded", .desc = "Register a listener for after MCP tools are reloaded. Takes no payload. " ++ ListenerVmDesc, .ty = EventFn(.mcp_tools_reloaded, null) },
             .{ .name = "permission_requested", .desc =
-            \\Register a listener for when a tool approval parks for a decision.
-            \\The event carries the ticket; fetch details with
+            \\Register a listener for every tool approval, before the
+            \\approval-mode check: a listener can deny what yolo would
+            \\auto-approve. The event carries the ticket; fetch details with
             \\blitz.permissions.get and decide with blitz.permissions.resolve.
-            \\Unresolved tickets fall back to the TUI.
+            \\blitz.get_flags().approval_mode reads the current mode inside a
+            \\listener. Mode auto-approval and the TUI wait until every
+            \\listener finished; unresolved tickets then fall back to the
+            \\mode check and the TUI.
             ++ ListenerVmDesc, .ty = EventFn(.permission_requested, BlitzPermissionRequestEvent) },
             .{
                 .name = "inject",
@@ -1622,20 +1626,35 @@ const PermissionDecisionDef = LuaType{ .table_def = .{ .name = "BlitzPermissionD
     .{ .name = "select", .ty = LuaType.integer, .optional = true, .desc = "1-based option index, ask payloads only; ignored otherwise" },
 } } };
 
-const PermissionPayloadDef = LuaType{ .table_def = .{ .name = "BlitzPermissionPayload", .fields = &.{
+const permission_payload_fields = [_]LuaType.Field{
     .{ .name = "agent_id", .ty = LuaType.integer, .desc = "packed AgentId of the requesting agent" },
     .{ .name = "call_id", .ty = LuaType.string, .optional = true },
     .{ .name = "kind", .ty = LuaType.string, .desc = "call|diff|ask|plan" },
     .{ .name = "tool", .ty = LuaType.string, .desc = "tool name" },
+    .{ .name = "tool_input", .ty = LuaType.string, .desc = "raw JSON arguments of the tool call" },
+    .{ .name = "agent_name", .ty = LuaType.string, .desc = "requesting agent type name" },
+    .{ .name = "agent_description", .ty = LuaType.string, .desc = "requesting agent type description" },
+    .{ .name = "agent_task", .ty = LuaType.string, .desc = "task set at spawn, empty on a prompted main agent" },
+    .{ .name = "agent_cwd", .ty = LuaType.string, .desc = "requesting agent working directory" },
     .{ .name = "description", .ty = LuaType.string, .optional = true, .desc = "kind == call" },
     .{ .name = "path", .ty = LuaType.string, .optional = true, .desc = "kind == diff|plan" },
     .{ .name = "header", .ty = LuaType.string, .optional = true, .desc = "kind == ask" },
     .{ .name = "question", .ty = LuaType.string, .optional = true, .desc = "kind == ask" },
     .{ .name = "options", .ty = StringListDef, .optional = true, .desc = "kind == ask" },
     .{ .name = "plan", .ty = LuaType.string, .optional = true, .desc = "kind == plan, plan text" },
-} } };
+};
+const PermissionPayloadDef = LuaType{ .table_def = .{ .name = "BlitzPermissionPayload", .fields = &permission_payload_fields } };
+const permission_snapshot_fields = blk: {
+    var fields: [permission_payload_fields.len + 1]LuaType.Field = undefined;
+    fields[0] = .{ .name = "ticket", .ty = LuaType.integer, .desc = "hand to blitz.permissions.resolve" };
+    for (permission_payload_fields, 0..) |field, i| fields[i + 1] = field;
+    break :blk fields;
+};
+const PermissionSnapshotDef = LuaType{ .table_def = .{ .name = "BlitzPermissionSnapshot", .fields = &permission_snapshot_fields } };
+const PermissionSnapshotListDef = LuaType{ .raw_refs = .{ .text = "BlitzPermissionSnapshot[]", .refs = &.{PermissionSnapshotDef} } };
+const PermissionSnapshotNilDef = LuaType{ .raw_refs = .{ .text = "BlitzPermissionSnapshot|nil", .refs = &.{PermissionSnapshotDef} } };
 const BlitzPermissionRequestEvent = LuaType{ .table_def = .{ .name = "BlitzPermissionRequestEvent", .fields = &.{
-    .{ .name = "ticket", .desc = "hand to blitz.permissions.resolve, or blitz.permissions.get for the full payload", .ty = LuaType.integer },
+    .{ .name = "ticket", .desc = "hand to blitz.permissions.resolve, or blitz.permissions.get for the full BlitzPermissionSnapshot", .ty = LuaType.integer },
 } } };
 
 const InjectHookDef = LuaType{ .table_def = .{ .name = "BlitzInjectHook", .fields = &.{
@@ -1661,8 +1680,19 @@ const PermSnapshot = struct {
     agent_id: r.AgentId,
     call_id: ?[]const u8,
     tool: []const u8,
+    tool_input: []const u8,
+    agent: r.permissions.AgentInfo,
     payload: r.permissions.Payload,
 };
+
+fn dupeAgentInfo(arena: std.mem.Allocator, info: r.permissions.AgentInfo) !r.permissions.AgentInfo {
+    return .{
+        .name = try arena.dupe(u8, info.name),
+        .description = try arena.dupe(u8, info.description),
+        .task = try arena.dupe(u8, info.task),
+        .cwd = try arena.dupe(u8, info.cwd),
+    };
+}
 
 fn dupePermPayload(arena: std.mem.Allocator, payload: r.permissions.Payload) !r.permissions.Payload {
     return switch (payload) {
@@ -1695,14 +1725,16 @@ fn copyPermSnapshot(arena: std.mem.Allocator, req: *r.permissions.Request) !Perm
         .agent_id = req.agent_id,
         .call_id = if (req.call_id) |id| try arena.dupe(u8, id) else null,
         .tool = try arena.dupe(u8, req.tool_name),
+        .tool_input = try arena.dupe(u8, req.tool_input),
+        .agent = try dupeAgentInfo(arena, req.agent),
         .payload = try dupePermPayload(arena, req.payload),
     };
 }
 
 fn pushPermSnapshot(L: *c.lua_State, snap: PermSnapshot) void {
-    c.lua_createtable(L, 0, 9);
+    c.lua_createtable(L, 0, 16);
     setFieldAny(L, -2, "ticket", snap.ticket);
-    setPermissionFields(L, snap.agent_id, snap.call_id, snap.tool, snap.payload);
+    setPermissionFields(L, snap.agent_id, snap.call_id, snap.tool, snap.tool_input, snap.agent, snap.payload);
 }
 
 fn findPendingTicket(a: *r.app.App, ticket: u64) ?*r.permissions.Request {
@@ -1717,10 +1749,10 @@ const BlitzPermissions = LuaType{ .table_def = .{
     .fields = &.{
         .{
             .name = "list_pending",
-            .desc = "Snapshot every parked approval request as a list of tables: ticket, agent_id, call_id, kind, tool, and the kind fields.",
+            .desc = "Snapshot every parked approval request as a list of BlitzPermissionSnapshot.",
             .ty = LuaType{ .function = .{
                 .args = &.{},
-                .ret = &LuaTable,
+                .ret = &PermissionSnapshotListDef,
                 .fn_ptr = (struct {
                     fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                         const state = L.?;
@@ -1761,10 +1793,10 @@ const BlitzPermissions = LuaType{ .table_def = .{
         },
         .{
             .name = "get",
-            .desc = "Snapshot one parked approval request by ticket, or nil when the ticket is unknown or already resolved.",
+            .desc = "Snapshot one parked approval request by ticket as a BlitzPermissionSnapshot, or nil when the ticket is unknown or already resolved.",
             .ty = LuaType{ .function = .{
                 .args = &.{.{ .name = "ticket", .ty = LuaType.integer }},
-                .ret = &LuaTable,
+                .ret = &PermissionSnapshotNilDef,
                 .fn_ptr = (struct {
                     fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                         const state = L.?;
@@ -4942,6 +4974,9 @@ fn luaAsk(L: ?*c.lua_State) callconv(.c) c_int {
 
     var req = r.permissions.Request{
         .agent_id = bridge.tool_ctx.base.self_id,
+        .call_id = bridge.tool_call.id,
+        .tool_name = bridge.tool_call.name,
+        .tool_input = bridge.tool_call.input,
         .payload = .{ .ask = .{
             .header = header,
             .question = question,
@@ -4967,6 +5002,9 @@ fn luaApprove(L: ?*c.lua_State) callconv(.c) c_int {
 
     var req = r.permissions.Request{
         .agent_id = bridge.tool_ctx.base.self_id,
+        .call_id = bridge.tool_call.id,
+        .tool_name = bridge.tool_call.name,
+        .tool_input = bridge.tool_call.input,
         .payload = .{ .call = .{
             .description = description,
         } },
@@ -4991,6 +5029,9 @@ fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
 
     var req = r.permissions.Request{
         .agent_id = bridge.tool_ctx.base.self_id,
+        .call_id = bridge.tool_call.id,
+        .tool_name = bridge.tool_call.name,
+        .tool_input = bridge.tool_call.input,
         .payload = .{ .plan = .{
             .path = path,
             .plan_text = plan_text,
@@ -5007,10 +5048,10 @@ fn unrefSpawnCb(state: *c.lua_State, cb: ?LuaFnRef) void {
 }
 
 /// Push the hook payload table for a permission request. Strings point into
-/// registry-owned memory and stay valid for the duration of the hook call.
+/// session-arena memory and stay valid for the duration of the hook call.
 fn pushPermissionPayload(L: *c.lua_State, perm: *r.permissions.Request) void {
-    c.lua_createtable(L, 0, 8);
-    setPermissionFields(L, perm.agent_id, perm.call_id, perm.tool_name, perm.payload);
+    c.lua_createtable(L, 0, 17);
+    setPermissionFields(L, perm.agent_id, perm.call_id, perm.tool_name, perm.tool_input, perm.agent, perm.payload);
 }
 
 fn setPermissionFields(
@@ -5018,12 +5059,19 @@ fn setPermissionFields(
     agent_id: r.AgentId,
     call_id: ?[]const u8,
     tool_name: []const u8,
+    tool_input: []const u8,
+    agent: r.permissions.AgentInfo,
     payload: r.permissions.Payload,
 ) void {
     setFieldAny(L, -2, "agent_id", agent_id);
     setFieldAny(L, -2, "call_id", call_id);
     setFieldAny(L, -2, "tool", tool_name);
+    setFieldAny(L, -2, "tool_input", tool_input);
     setFieldAny(L, -2, "kind", @tagName(payload));
+    setFieldAny(L, -2, "agent_name", agent.name);
+    setFieldAny(L, -2, "agent_description", agent.description);
+    setFieldAny(L, -2, "agent_task", agent.task);
+    setFieldAny(L, -2, "agent_cwd", agent.cwd);
 
     switch (payload) {
         .call => |call| setFieldAny(L, -2, "description", call.description),
@@ -5894,6 +5942,38 @@ test "permission hook approve deny and nil fallback" {
         .payload = .{ .call = .{ .description = "search" } },
     };
     try std.testing.expect(vm.permissionHookDecision(&other_req) == null);
+}
+
+test "permission hook sees agent context and raw tool input" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.hooks.approve(function(p)
+        \\  assert(p.tool_input == '{"command":"ls"}')
+        \\  assert(p.agent_name == "general")
+        \\  assert(p.agent_description == "general agent")
+        \\  assert(p.agent_task == "list files")
+        \\  assert(p.agent_cwd == "/tmp")
+        \\  return { approved = true }
+        \\end)
+    );
+
+    var req = r.permissions.Request{
+        .agent_id = .{ .index = 1, .generation = 2 },
+        .tool_name = "bash",
+        .tool_input = "{\"command\":\"ls\"}",
+        .agent = .{
+            .name = "general",
+            .description = "general agent",
+            .task = "list files",
+            .cwd = "/tmp",
+        },
+        .payload = .{ .call = .{ .description = "run" } },
+    };
+    try std.testing.expectEqual(r.permissions.State.approved, vm.permissionHookDecision(&req).?);
 }
 
 test "prompt hook transforms typed input" {

@@ -148,7 +148,7 @@ pub const Command = union(enum) {
                     null;
                 if (main_id) |id| {
                     if (app.registry.get(id)) |agent| {
-                        if (agent.status != .canceled) app.event_bus.emit(app, .{ .agent_cancelled = id });
+                        if (agent.status != .canceled) _ = app.event_bus.emit(app, .{ .agent_cancelled = id });
                     }
                 }
                 if (main_active) {
@@ -171,7 +171,7 @@ pub const Command = union(enum) {
                 if (app.registry.get(id) == null) return;
                 app.cancelPermissions(id);
                 app.registry.cancel(id);
-                app.event_bus.emit(app, .{ .agent_cancelled = id });
+                _ = app.event_bus.emit(app, .{ .agent_cancelled = id });
             },
             .close_agent => |id| {
                 app.detachMainAgent(id);
@@ -181,7 +181,7 @@ pub const Command = union(enum) {
                 if (app.main_agent_id) |id| {
                     app.sdk_run_rendered_steps = 0;
                     try app.registry.retry(id, .{ .max_steps = std.math.maxInt(usize) });
-                    app.event_bus.emit(app, .{ .agent_started = .{ .id = id, .fresh = false } });
+                    _ = app.event_bus.emit(app, .{ .agent_started = .{ .id = id, .fresh = false } });
                     app.running = true;
                     app.auto_scroll = true;
                     app.scroll_offset = 0;
@@ -222,7 +222,7 @@ pub const Command = union(enum) {
                 if (state != .active) {
                     if (app.main_agent_id == arg.agent_id) app.sdk_run_rendered_steps = 0;
                     try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
-                    app.event_bus.emit(app, .{ .agent_started = .{ .id = arg.agent_id, .fresh = false } });
+                    _ = app.event_bus.emit(app, .{ .agent_started = .{ .id = arg.agent_id, .fresh = false } });
                 }
             },
             .cd => |path| {
@@ -322,7 +322,7 @@ pub const Command = union(enum) {
                 agent.background = arg.background;
                 try app.configureAgent(arg.agent_id, agent);
 
-                app.event_bus.emit(app, .{
+                _ = app.event_bus.emit(app, .{
                     .agent_created = .{ .id = arg.agent_id, .name = app.context_factory.agentName(@enumFromInt(arg.agent_type)), .depth = agent.depth },
                 });
 
@@ -340,7 +340,7 @@ pub const Command = union(enum) {
                 try agent.queueMessages(&.{.{ .role = .user, .content = arg.prompt }});
                 if (arg.parent_id == null and !arg.background) app.sdk_run_rendered_steps = 0;
                 try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
-                app.event_bus.emit(app, .{ .agent_started = .{ .id = arg.agent_id, .fresh = true } });
+                _ = app.event_bus.emit(app, .{ .agent_started = .{ .id = arg.agent_id, .fresh = true } });
                 app.running = true;
             },
             .push_notification => |msg| {

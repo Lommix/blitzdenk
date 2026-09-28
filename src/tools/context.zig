@@ -48,6 +48,7 @@ pub const Context = struct {
             .agent_id = self.base.self_id,
             .call_id = call.id,
             .tool_name = call.name,
+            .tool_input = call.input,
             .payload = payload,
         };
         self.base.permissions.send(&request);
