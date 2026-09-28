@@ -166,11 +166,16 @@ pub const Terminal = struct {
         @memcpy(self.previous.cells[0..copy_len], self.current.cells[0..copy_len]);
     }
 
+    pub const MouseResult = struct {
+        wheel: i16 = 0,
+        copied: bool = false,
+    };
+
     /// Handle mouse for selection + report wheel delta (signed rows; up = negative).
-    pub fn handleMouse(self: *Terminal, m: Mouse) i16 {
+    pub fn handleMouse(self: *Terminal, m: Mouse) MouseResult {
         switch (m.button) {
-            .wheel_up => if (m.action == .press) return -3,
-            .wheel_down => if (m.action == .press) return 3,
+            .wheel_up => if (m.action == .press) return .{ .wheel = -3 },
+            .wheel_down => if (m.action == .press) return .{ .wheel = 3 },
             .left => {
                 switch (m.action) {
                     .press => {
@@ -195,17 +200,17 @@ pub const Terminal = struct {
                             sel.end_x = m.x;
                             sel.end_y = m.y;
                             sel.dragging = false;
-                            if (sel.anchor_x != sel.end_x or sel.anchor_y != sel.end_y) {
-                                self.copySelectionOsc52();
-                            }
+                            const moved = sel.anchor_x != sel.end_x or sel.anchor_y != sel.end_y;
+                            const copied = moved and self.copySelectionOsc52();
                             self.selection = null;
+                            if (copied) return .{ .copied = true };
                         }
                     },
                 }
             },
             else => {},
         }
-        return 0;
+        return .{};
     }
 
     fn selectionOrdered(sel: Selection) struct { x1: u16, y1: u16, x2: u16, y2: u16 } {
@@ -276,23 +281,24 @@ pub const Terminal = struct {
         return try out.toOwnedSlice(alloc);
     }
 
-    fn copySelectionOsc52(self: *Terminal) void {
-        const text = self.extractSelection(self.allocator) catch return;
+    fn copySelectionOsc52(self: *Terminal) bool {
+        const text = self.extractSelection(self.allocator) catch return false;
         defer self.allocator.free(text);
-        if (text.len == 0) return;
+        if (text.len == 0) return false;
 
         const encoder = std.base64.standard.Encoder;
         const b64_len = encoder.calcSize(text.len);
-        const b64 = self.allocator.alloc(u8, b64_len) catch return;
+        const b64 = self.allocator.alloc(u8, b64_len) catch return false;
         defer self.allocator.free(b64);
         _ = encoder.encode(b64, text);
 
         var write_buf: [512]u8 = undefined;
         var w = self.stdout.writerStreaming(self.io, &write_buf);
-        w.interface.writeAll("\x1b]52;c;") catch return;
-        w.interface.writeAll(b64) catch return;
-        w.interface.writeAll("\x07") catch return;
-        w.interface.flush() catch {};
+        w.interface.writeAll("\x1b]52;c;") catch return false;
+        w.interface.writeAll(b64) catch return false;
+        w.interface.writeAll("\x07") catch return false;
+        w.interface.flush() catch return false;
+        return true;
     }
 
     pub const Modifiers = packed struct(u8) {

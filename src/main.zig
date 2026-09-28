@@ -1285,11 +1285,14 @@ pub fn run(
                     },
                     .mouse => |m| {
                         if (!app.handleScrollbarMouse(m)) {
-                            const wheel = term.handleMouse(m);
-                            if (wheel < 0) {
-                                try app.cmd_queue.append(io, .{ .scroll_up = @intCast(-wheel) });
-                            } else if (wheel > 0) {
-                                try app.cmd_queue.append(io, .{ .scroll_down = @intCast(wheel) });
+                            const res = term.handleMouse(m);
+                            if (res.copied) {
+                                app.notifications.append(gpa, app.nowMillis(), "Copied to clipboard!", .{}) catch {};
+                            }
+                            if (res.wheel < 0) {
+                                try app.cmd_queue.append(io, .{ .scroll_up = @intCast(-res.wheel) });
+                            } else if (res.wheel > 0) {
+                                try app.cmd_queue.append(io, .{ .scroll_down = @intCast(res.wheel) });
                             }
                         }
                     },
