@@ -1,7 +1,6 @@
 # Blitzdenk
 
-A self improving coding harness for POSIX. No dependencies, vendored Lua.
-It extends its own Lua sandbox on demand to fit your project.
+A minimal self improving coding harness for POSIX. No dependencies, vendored Lua.
 Ships as a single 1.7MB binary using less then 99MB of ram.
 
 ![demo](docs/assets/screenshot.png)
@@ -18,14 +17,15 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 - MCP and Skill support.
 - Multi-provider: any OpenAI or Anthropic chat/response schema supported, including local AI.
 - Mermaid diagram render in tui.
-- Lua hot reload: Agents can code tools and debug them at the same time.
-- Version management: run `blitz update` on new releases.
+- Lua hot reload: Agents can extend themself and debug them at the same time.
+- Version management: run `blitz update` on new releases. (pulls release bin from github)
 - Sessions management per project: `blitz continue <?session_id>` resumes, `blitz sessions` list all
 - Render custom widgets from Lua
 
 ## Defaults
 
-The default config comes with some useful commands for quick testing.
+On first install, we include a solid foundation configuration with some popular Commands, sub agent
+tooling and more. You can delete, overwrite or extend anything!
 
 - `/plan <prompt>`: Plan with the agent - based on grill-me skill
 - `/review <?prompt>`: Launch multiple challenger agents to review what was done.
@@ -53,18 +53,19 @@ Setup at least on provider. The **key_envar** is not the API key! It's the envir
 
 ```lua
 local opencode = blitz.add_provider({
-	type = "openai", -- "response" | "anthropic"
+	type = "openai",
 	url = "https://opencode.ai/zen/go/v1",
 	key_envar = "OPENCODE_API_KEY",
+	session_key_header = "x-opencode-session",
     -- key = "..." -- or
 })
 
 local opencode_ds_flash = blitz.add_model({
-	name = "deepseek-v4-flash",
+	name = "deepseek-flash",
 	provider = opencode,
-    vision = false,
+	vision = true,
 	replay_reasoning = true,
-	cost = { input = 0.14, output = 0.28, cache = 0.028 },
+	cost = { input = 0.15, output = 0.6, cache = 0.006 },
 })
 
 blitz.set_agent_model(blitz.AGENT_GENERAL, opencode_ds_flash, "high")
