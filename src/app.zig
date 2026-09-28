@@ -10,6 +10,11 @@ const ct = @cImport({
 pub const CONTEXT_LIMIT = 124 * 1024;
 const COMMAND_COMPLETION_ROWS = 64;
 
+fn pathInsideDir(path: []const u8, dir: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, dir)) return false;
+    return path.len == dir.len or path[dir.len] == '/';
+}
+
 pub const TimelineRole = enum { system, user, agent };
 
 pub const CommandCompletion = struct {
@@ -371,6 +376,11 @@ pub const App = struct {
                 .value = try .initCapacity(gpa, 4),
             },
         };
+    }
+
+    pub fn localLuaIsGlobal(self: *const App) bool {
+        const dir = self.lua_config_dir orelse return false;
+        return pathInsideDir(self.cwd, dir);
     }
 
     pub fn deinit(self: *App) void {
@@ -3394,7 +3404,8 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
                 wizardAppendHeading(arena, &para, "Model id:");
                 wizardAppendInputLine(arena, &para, &w.model, true);
             } else {
-                wizardAppendHeading(arena, &para, "Choose a model (pick the last row to type your own):");
+                wizardAppendHeading(arena, &para, "Choose a model or type in the model id string (same thing)");
+                wizardAppendHeading(arena, &para, "");
                 for (entry.models, 0..) |model, i| {
                     wizardAppendOption(arena, &para, model.name, !w.model_free_text and w.model_curated_index == i);
                 }
@@ -6956,4 +6967,11 @@ test "finishLuaPermission settles mode-approved tickets and hands the rest to th
     try std.testing.expectEqual(@as(usize, 1), app_state.pending_permissions.items.len);
 
     app_state.pending_permissions.deinit(std.testing.allocator);
+}
+
+test "pathInsideDir keeps the boundary strict" {
+    try std.testing.expect(pathInsideDir("/a/b", "/a/b"));
+    try std.testing.expect(pathInsideDir("/a/b/c", "/a/b"));
+    try std.testing.expect(!pathInsideDir("/a/bc", "/a/b"));
+    try std.testing.expect(!pathInsideDir("/a", "/a/b"));
 }

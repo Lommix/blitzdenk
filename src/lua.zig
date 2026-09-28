@@ -4693,6 +4693,7 @@ fn loadToolConfig(vm: *LuaVm, a: *r.app.App) !void {
     if (a.lua_config_abs) |abs| {
         try vm.load(abs);
     }
+    if (a.localLuaIsGlobal()) return;
     if (std.Io.Dir.cwd().statFile(a.io, "blitz.lua", .{})) |_| {
         try vm.load("blitz.lua");
     } else |_| {}

@@ -83,8 +83,9 @@ fn ensureConfigLua(alloc: std.mem.Allocator, io: std.Io, env: *const std.process
 
     r.defaults.ensure(io, home_dir);
 
-    const abs_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ HOME, DEFAULT_CONFIG_PATH ++ DEFAULT_LUA_CONFIG });
-    const dir_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ HOME, DEFAULT_CONFIG_PATH });
+    const raw_dir: []const u8 = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ HOME, DEFAULT_CONFIG_PATH });
+    const dir_path: []const u8 = std.Io.Dir.cwd().realPathFileAlloc(io, raw_dir, alloc) catch raw_dir;
+    const abs_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_path, DEFAULT_LUA_CONFIG });
     return .{ .abs_path = abs_path, .dir_path = dir_path };
 }
 
@@ -582,7 +583,7 @@ pub fn run(
             std.log.scoped(.lua).err("failed to load {s}: {s} ({any})", .{ info.abs_path, app.lua_vm.getLastError(), err });
         };
     }
-    if (cwdBlitzLuaExists(io)) {
+    if (cwdBlitzLuaExists(io) and !app.localLuaIsGlobal()) {
         app.lua_vm.load("blitz.lua") catch |err| {
             lua_load_failed = true;
             std.log.scoped(.lua).err("failed to load blitz.lua: {s} ({any})", .{ app.lua_vm.getLastError(), err });
@@ -835,7 +836,7 @@ pub fn run(
                             std.log.scoped(.lua).err("hot-reload: failed to load {s}: {s} ({any})", .{ info.abs_path, app.lua_vm.getLastError(), err });
                         };
                     }
-                    if (cwdBlitzLuaExists(io)) {
+                    if (cwdBlitzLuaExists(io) and !app.localLuaIsGlobal()) {
                         app.lua_vm.load("blitz.lua") catch |err| {
                             lua_reload_failed = true;
                             std.log.scoped(.lua).err("hot-reload: failed to load blitz.lua: {s} ({any})", .{ app.lua_vm.getLastError(), err });
