@@ -33,7 +33,7 @@ so someone else can exercise it.
 ## Read meta.lua first
 
 `~/.config/blitzdenk/meta.lua` is the source of truth for every `blitz.*`
-signature, field, and constant, generated from `src/lua.zig`. Before writing
+signature, field, and constant. Before writing
 code, open it and read the class for the calls you need. It already documents
 event tags, tool name constants, every `blitz.cmd` function, and all
 `REQ_STATUS_*`/`AWAIT_*` values. Do not enumerate them elsewhere, do not ask
@@ -181,7 +181,7 @@ in the live registry and returns the same handle. A module local set at
 config load stays valid in hooks and tools. An unknown name returns 0, which
 spawns `general`.
 
-An agent id is one packed integer; the agent tool result carries it as
+An agent id is one integer; the agent tool result carries it as
 `agent_id: <int>`.
 
 `on_complete` in `blitz.agent.spawn` attaches a one-shot callback to the run.
@@ -237,6 +237,34 @@ finished. Fields: `agent_id`, `name`, `task`, `state`, `ctx`,
 at spawn time: the agent tool fills it from its `description` argument, the
 same string shown in the tool status line, and `blitz.agent.spawn` takes it
 as `task = "..."`.
+
+`blitz.agent.set_task_description(agent_id, text)` replaces the task
+description of a live agent, also mid run. `blitz.agent.get_task_description(
+agent_id)` reads it back. A main agent started from a plain prompt has an
+empty task, so fill it from a hook:
+
+```lua
+blitz.hooks.agent_started(function(ev)
+    if not ev.fresh then return end
+    if blitz.agent.get_task_description(ev.id) ~= "" then return end
+    local prompt = blitz.agent.get_prompt(ev.id)
+    if prompt == "" then return end
+    local helper = blitz.agent.spawn({
+        agent_type = blitz.AGENT_GENERAL,
+        background = true,
+        task = "summarize request",
+        prompt = "Summarize this request in at most six words. Reply with the words only:\n" .. prompt,
+    })
+    if blitz.agent.await(helper) == blitz.AWAIT_COMPLETE then
+        blitz.agent.set_task_description(ev.id, blitz.agent.result(helper))
+    end
+end)
+```
+
+The `task` argument on the helper spawn is the loop guard: without it the
+listener spawns a helper for the helper. `blitz.agent.get_prompt(agent_id)`
+returns the user prompt that started the current turn. It is set before
+`agent_started` fires and survives a retry or a cancel continuation.
 
 ```lua
 local agents = blitz.list_agents()
@@ -520,9 +548,9 @@ The payload is `BlitzPermissionPayload` in `meta.lua`: `agent_id`, `call_id`,
 `kind` (`call|diff|ask|plan`), `tool`, `tool_input` (the raw JSON arguments of
 the call), the agent block (`agent_name`, `agent_description`, `agent_task`,
 `agent_cwd`), plus the kind
-fields. `agent_task` is the string set at spawn; it is empty for a main agent
-started from a plain prompt. The decision shape is
-`BlitzPermissionDecision` in the same file.
+fields. `agent_task` is the current task description; it is empty for a main
+agent until a hook sets it with `blitz.agent.set_task_description`. The
+decision shape is `BlitzPermissionDecision` in the same file.
 
 Never call `blitz.agent.await` inside the hook. The hook runs on the main
 thread; the await would block the loop that runs the agent. The hook runs

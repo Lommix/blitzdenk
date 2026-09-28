@@ -2933,6 +2933,47 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
             }).lua_fn, "agent.get_effort"),
         } },
     },
+    .{
+        .name = "set_task_description",
+        .desc = "Replace the task description of a live agent, also mid run. The text shows in agent listings and permission payloads. A main agent starts with an empty task; a listener can set it after evaluating blitz.agent.get_prompt.",
+        .ty = LuaType{ .function = .{
+            .args = &.{ .{ .name = "agent_id", .ty = AgentIdDef }, .{ .name = "description", .ty = LuaType.string } },
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId, description: []const u8) !void {
+                    if (a.registry.get(agent_id) == null) return error.AgentNotFound;
+                    try a.cmd_queue.append(a.io, .{ .set_agent_task = .{ .agent_id = agent_id, .task = description } });
+                }
+            }).lua_fn, "agent.set_task_description"),
+        } },
+    },
+    .{
+        .name = "get_task_description",
+        .desc = "Return the current task description of the agent. Empty when nothing was set.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &LuaString,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
+                    const agent = a.registry.get(agent_id) orelse return error.AgentNotFound;
+                    return agent.task_description;
+                }
+            }).lua_fn, "agent.get_task_description"),
+        } },
+    },
+    .{
+        .name = "get_prompt",
+        .desc = "Return the user prompt that started the agent's current turn. Set before agent_started fires; a retry or a cancel continuation keeps the prompt of the turn.",
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "agent_id", .ty = AgentIdDef }},
+            .ret = &LuaString,
+            .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
+                    const agent = a.registry.get(agent_id) orelse return error.AgentNotFound;
+                    return agent.turn_prompt orelse "";
+                }
+            }).lua_fn, "agent.get_prompt"),
+        } },
+    },
 } } };
 
 // ── Lua Tool Registry (per-VM, reached via registry lookup) ─────────
@@ -6587,6 +6628,86 @@ test "agent.get_model and get_effort read the live agent" {
     , .{id.pack()});
     defer std.testing.allocator.free(script_after);
     try vm.exec(script_after);
+}
+
+test "agent task description and turn prompt bindings" {
+    var app_state = permissionTestApp();
+    app_state.cmd_queue = try r.cmd.CommandQueue.init(std.testing.allocator);
+    defer app_state.cmd_queue.deinit();
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    const io = io_state.io();
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, io);
+    defer registry.deinit();
+    app_state.registry = &registry;
+
+    const id = registry.reserve().?;
+    const agent = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{
+        .name = "general",
+        .task_description = "spawned task",
+        .cwd = "/tmp",
+    } });
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    const script = try std.fmt.allocPrint(std.testing.allocator,
+        \\local id = {d}
+        \\assert(blitz.agent.get_task_description(id) == "spawned task")
+        \\assert(blitz.agent.get_prompt(id) == "")
+        \\blitz.agent.set_task_description(id, "evaluated: fix login")
+        \\assert(blitz.agent.get_task_description(id) == "spawned task")
+        \\local ok = pcall(blitz.agent.get_task_description, id + 9999)
+        \\assert(not ok)
+    , .{id.pack()});
+    defer std.testing.allocator.free(script);
+    try vm.exec(script);
+
+    try app_state.cmd_queue.apply(io, &app_state);
+    try std.testing.expectEqualStrings("evaluated: fix login", agent.task_description);
+    const after = try std.fmt.allocPrint(std.testing.allocator,
+        \\assert(blitz.agent.get_task_description({d}) == "evaluated: fix login")
+    , .{id.pack()});
+    defer std.testing.allocator.free(after);
+    try vm.exec(after);
+
+    const Fixture = struct {
+        fn discard(_: ?*anyopaque, _: r.agent_run.Event) void {}
+    };
+    try agent.queueMessages(&.{r.sdk.UserMessage("initial user request")});
+    try registry.run(id, .{ .max_steps = 0 });
+    while (registry.state(id) == .active) {
+        _ = registry.drain(id, 64, null, Fixture.discard);
+        _ = registry.reap(id);
+        if (registry.state(id) == .active) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    agent.queued_messages.clearRetainingCapacity();
+    const prompt_script = try std.fmt.allocPrint(std.testing.allocator,
+        \\assert(blitz.agent.get_prompt({d}) == "initial user request")
+    , .{id.pack()});
+    defer std.testing.allocator.free(prompt_script);
+    try vm.exec(prompt_script);
+
+    try agent.queueMessages(&.{.{ .role = .user, .content = &.{.{ .image = .{
+        .url = "https://example.com/cat.png",
+        .media_type = "image/png",
+    } }} }});
+    try registry.run(id, .{ .max_steps = 0 });
+    while (registry.state(id) == .active) {
+        _ = registry.drain(id, 64, null, Fixture.discard);
+        _ = registry.reap(id);
+        if (registry.state(id) == .active) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    const image_script = try std.fmt.allocPrint(std.testing.allocator,
+        \\assert(blitz.agent.get_prompt({d}) == "")
+    , .{id.pack()});
+    defer std.testing.allocator.free(image_script);
+    try vm.exec(image_script);
 }
 
 test "agent.get_model and get_effort stay truthful while a run parks a swap" {

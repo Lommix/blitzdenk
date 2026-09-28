@@ -64,6 +64,7 @@ pub const Command = union(enum) {
     push_timeline_entry: TimelineEntry,
     spawn_agent: SpawnArgs,
     queue_agent_message: QueuedMessageArgs,
+    set_agent_task: SetAgentTaskArgs,
     scroll_to: usize,
     scroll_up: usize,
     scroll_down: usize,
@@ -120,6 +121,11 @@ pub const Command = union(enum) {
         parts: []const r.sdk.Part,
         /// optional display message for render
         timeline_entry: ?TimelineEntry = null,
+    };
+
+    pub const SetAgentTaskArgs = struct {
+        agent_id: r.AgentId,
+        task: []const u8,
     };
 
     pub const ScreenshotArgs = struct {
@@ -224,6 +230,10 @@ pub const Command = union(enum) {
                     try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
                     _ = app.event_bus.emit(app, .{ .agent_started = .{ .id = arg.agent_id, .fresh = false } });
                 }
+            },
+            .set_agent_task => |arg| {
+                const agent = app.registry.get(arg.agent_id) orelse return;
+                agent.setTaskDescription(arg.task) catch {};
             },
             .cd => |path| {
                 if (path.len == 0) return;

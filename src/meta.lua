@@ -116,6 +116,12 @@
 ---@field get_model fun(agent_id: integer): string
 ---Return the reasoning effort of the live agent as a tag string. Stays truthful while the agent type definition changes mid run.
 ---@field get_effort fun(agent_id: integer): string
+---Replace the task description of a live agent, also mid run. The text shows in agent listings and permission payloads. A main agent starts with an empty task; a listener can set it after evaluating blitz.agent.get_prompt.
+---@field set_task_description fun(agent_id: integer, description: string)
+---Return the current task description of the agent. Empty when nothing was set.
+---@field get_task_description fun(agent_id: integer): string
+---Return the user prompt that started the agent's current turn. Set before agent_started fires; a retry or a cancel continuation keeps the prompt of the turn.
+---@field get_prompt fun(agent_id: integer): string
 
 ---@class BlitzCmp
 ---Select the next completion row, like <Tab>. No-op when the popup is closed.

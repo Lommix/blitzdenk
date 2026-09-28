@@ -120,6 +120,7 @@ pub const Agent = struct {
     compact_task: ?compact.Task = null,
     resume_options: ?agent_run.OwnedOptions = null,
     cache_key: ?[]const u8 = null,
+    turn_prompt: ?[]const u8 = null,
     run_model: ?sdk.LanguageModel = null,
     pending_model: ?models.Model = null,
     pending_vision: ?bool = null,
@@ -185,6 +186,10 @@ pub const Agent = struct {
 
     pub fn setSystemPrompt(self: *Agent, prompt: []const u8) !void {
         self.system_prompt = try self.metadata.allocator().dupe(u8, prompt);
+    }
+
+    pub fn setTaskDescription(self: *Agent, task: []const u8) !void {
+        self.task_description = try self.metadata.allocator().dupe(u8, task);
     }
 
     pub fn setCwd(self: *Agent, cwd: []const u8) !void {
@@ -327,6 +332,7 @@ pub const Agent = struct {
         if (run_options.system.len == 0) run_options.system = self.system_prompt;
         if (!continue_turn and (run_options.prompt.len > 0 or self.queued_messages.items.len > 0)) {
             self.turn_checkpoint = self.history().len;
+            self.recordTurnPrompt(run_options.prompt);
         }
         if (run_options.prompt.len > 0) {
             try self.appendHistory(&.{sdk.UserMessage(run_options.prompt)});
@@ -354,6 +360,17 @@ pub const Agent = struct {
         };
         self.status = .running;
         self.task.?.start();
+    }
+
+    fn recordTurnPrompt(self: *Agent, prompt: []const u8) void {
+        const text = if (prompt.len > 0) prompt else blk: {
+            for (self.queued_messages.items) |message| {
+                if (message.role != .user) continue;
+                break :blk message.text();
+            }
+            break :blk "";
+        };
+        self.turn_prompt = self.metadata.allocator().dupe(u8, text) catch return;
     }
 
     pub fn drain(self: *Agent, max: usize, ctx: ?*anyopaque, handler: *const fn (?*anyopaque, agent_run.Event) void) usize {
