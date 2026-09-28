@@ -47,9 +47,9 @@ pub const catalog = [_]CatalogEntry{
         .default_url = "https://api.anthropic.com/v1",
         .key_envar = "ANTHROPIC_API_KEY",
         .models = &.{
+            .{ .name = "claude-sonnet-5.5", .vision = true },
+            .{ .name = "claude-opus-5.5", .vision = true },
             .{ .name = "claude-fable-5", .vision = true },
-            .{ .name = "claude-opus-5", .vision = true },
-            .{ .name = "claude-sonnet-5", .vision = true },
         },
     },
     .{
@@ -59,9 +59,8 @@ pub const catalog = [_]CatalogEntry{
         .key_envar = "OPENAI_API_KEY",
         .models = &.{
             .{ .name = "gpt-6-astra", .vision = true },
-            .{ .name = "gpt-5.6-sol", .vision = true },
-            .{ .name = "gpt-5.6-luna", .vision = true },
-            .{ .name = "gpt-5.6-terra", .vision = true },
+            .{ .name = "gpt-6-sol", .vision = true },
+            .{ .name = "gpt-6-luna", .vision = true },
         },
     },
     .{
