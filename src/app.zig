@@ -254,6 +254,7 @@ pub const App = struct {
     active_permission: ?*r.permissions.Request = null,
     active_selection: ?*r.selection.Selection = null,
     registry: *r.agent_registry.Registry = undefined,
+    session_store: ?*r.session_store.Store = null,
     exec_pool: *r.exec.CmdPool = undefined,
     update_check: ?r.update.CheckTask = null,
     update_result_seen: bool = false,
@@ -697,7 +698,27 @@ pub const App = struct {
         return task.availableVersion();
     }
 
+    pub fn checkpoint(self: *App) void {
+        const store = self.session_store orelse return;
+        _ = self.drainPendingDiffs();
+        const agent = self.mainAgent() orelse return;
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const save = r.session.buildSaveState(self, agent, arena.allocator()) catch |err| {
+            std.log.scoped(.session).warn("checkpoint encode failed: {s}", .{@errorName(err)});
+            return;
+        };
+        if (save.chat.len == 0) return;
+
+        store.appendCheckpoint(save) catch |err| {
+            std.log.scoped(.session).warn("checkpoint write failed: {s}", .{@errorName(err)});
+        };
+    }
+
     pub fn reset(self: *App) void {
+        self.checkpoint();
+        if (self.session_store) |store| store.bump();
         if (self.mcp_load) |*task| task.deinit();
         self.mcp_load = null;
         self.cancelSshConnect();

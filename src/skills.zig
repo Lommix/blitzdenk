@@ -44,8 +44,13 @@ pub const SkillRegistry = struct {
         if (cwd.len > 0) {
             if (findProjectRoot(alloc, io, cwd)) |root| {
                 defer alloc.free(root);
-                scanProjectLayer(self, alloc, io, root, ".blitz/skills");
-                scanProjectLayer(self, alloc, io, root, ".agents/skills");
+                const path = std.fs.path.join(alloc, &.{ root, "skills" }) catch return;
+                defer alloc.free(path);
+                if (std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true })) |project_dir| {
+                    var dir = project_dir;
+                    defer dir.close(io);
+                    scanDir(self, alloc, io, dir);
+                } else |_| {}
             }
         }
         if (user_dir) |dir| scanDir(self, alloc, io, dir);
@@ -72,21 +77,13 @@ pub fn loadSkill(io: std.Io, alloc: std.mem.Allocator, entry: *const SkillEntry)
     return .{ .raw = raw, .name = entry.meta.name, .body = body };
 }
 
-fn scanProjectLayer(reg: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, root: []const u8, rel: []const u8) void {
-    const layer = std.fs.path.join(alloc, &.{ root, rel }) catch return;
-    defer alloc.free(layer);
-    var dir = std.Io.Dir.openDirAbsolute(io, layer, .{ .iterate = true }) catch return;
-    defer dir.close(io);
-    scanDir(reg, alloc, io, dir);
-}
-
 fn scanDir(reg: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) void {
     var it = dir.iterate();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var header_buf: [4096]u8 = undefined;
 
     while (it.next(io) catch return) |entry| {
-        if (entry.kind != .file) continue;
+        if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
         addEntry(reg, alloc, io, dir, entry.name, &path_buf, &header_buf);
     }
@@ -513,43 +510,50 @@ test "registry merges layers first-wins and ignores invalid names" {
 
     try tmp.dir.createDir(std.testing.io, "project", .default_dir);
     try tmp.dir.createDir(std.testing.io, "project/.git", .default_dir);
-    try tmp.dir.createDir(std.testing.io, "project/.blitz", .default_dir);
-    try tmp.dir.createDir(std.testing.io, "project/.blitz/skills", .default_dir);
-    try tmp.dir.createDir(std.testing.io, "project/.agents", .default_dir);
-    try tmp.dir.createDir(std.testing.io, "project/.agents/skills", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "project/skills", .default_dir);
+    try tmp.dir.createDir(std.testing.io, "user", .default_dir);
 
     {
-        const file = try tmp.dir.createFile(std.testing.io, "project/.blitz/skills/zig.md", .{});
+        const file = try tmp.dir.createFile(std.testing.io, "project/skills/zig.md", .{});
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, "---\nname: zig\ndescription: project zig\n---\nproject body\n");
     }
     {
-        const file = try tmp.dir.createFile(std.testing.io, "project/.agents/skills/zig.md", .{});
+        const file = try tmp.dir.createFile(std.testing.io, "user/zig.md", .{});
         defer file.close(std.testing.io);
-        try file.writeStreamingAll(std.testing.io, "---\nname: zig\ndescription: agents zig\n---\nagents body\n");
+        try file.writeStreamingAll(std.testing.io, "---\nname: zig\ndescription: user zig\n---\nuser body\n");
     }
     {
-        const file = try tmp.dir.createFile(std.testing.io, "project/.agents/skills/other.md", .{});
+        const file = try tmp.dir.createFile(std.testing.io, "user/other.md", .{});
         defer file.close(std.testing.io);
-        try file.writeStreamingAll(std.testing.io, "---\nname: other\ndescription: interop\n---\ninterop body\n");
+        try file.writeStreamingAll(std.testing.io, "---\nname: other\ndescription: user only\n---\nuser body\n");
     }
     {
-        const file = try tmp.dir.createFile(std.testing.io, "project/.blitz/skills/Bad_Name.md", .{});
+        const file = try tmp.dir.createFile(std.testing.io, "user/linked.md", .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, "---\nname: linked\ndescription: via symlink\n---\nlinked body\n");
+    }
+    try tmp.dir.symLink(std.testing.io, "../../user/linked.md", "project/skills/linked.md", .{});
+    {
+        const file = try tmp.dir.createFile(std.testing.io, "project/skills/Bad_Name.md", .{});
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, "---\nname: Bad_Name\ndescription: bad\n---\nbad body\n");
     }
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd_len = try tmp.dir.realPathFile(std.testing.io, "project", &cwd_buf);
+    var user_dir = try tmp.dir.openDir(std.testing.io, "user", .{ .iterate = true });
+    defer user_dir.close(std.testing.io);
 
     var reg = SkillRegistry{};
     defer reg.deinit(std.testing.allocator);
-    reg.scan(std.testing.allocator, std.testing.io, null, cwd_buf[0..cwd_len]);
+    reg.scan(std.testing.allocator, std.testing.io, user_dir, cwd_buf[0..cwd_len]);
 
-    try std.testing.expectEqual(@as(usize, 2), reg.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 3), reg.entries.items.len);
     const zig = reg.find("zig").?;
     try std.testing.expectEqualStrings("project zig", zig.meta.description);
     try std.testing.expect(reg.find("other") != null);
+    try std.testing.expectEqualStrings("via symlink", reg.find("linked").?.meta.description);
     try std.testing.expect(reg.find("bad_name") == null);
 }
 

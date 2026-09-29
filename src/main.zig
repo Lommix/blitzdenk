@@ -618,6 +618,7 @@ pub fn run(
 
     var store = session_store.Store{ .io = io, .gpa = gpa, .base = cwd_dir };
     defer store.deinit();
+    app.session_store = &store;
     var session_id_buf: [session_store.ID_LEN]u8 = undefined;
     if (resume_session) |prefix| {
         const resolved_opt = session_store.resolve(arena, io, cwd_dir, prefix) catch |err| blk: {
@@ -647,7 +648,7 @@ pub fn run(
             std.log.scoped(.session).warn("resume of {s} failed: {s}", .{ resolved, @errorName(err) });
         }
         if (resumed) {
-            try store.open(file_name);
+            try store.open(cwd, file_name);
         } else {
             store.create(cwd) catch |create_err| {
                 std.log.scoped(.session).warn("session journal unavailable: {s}", .{@errorName(create_err)});
@@ -658,14 +659,14 @@ pub fn run(
             std.log.scoped(.session).warn("session journal unavailable: {s}", .{@errorName(err)});
         };
     }
-    checkpoint(&app, &store);
+    app.checkpoint();
 
     app.loadHistory(history_store_dir);
     try app.cmd_queue.apply(io, &app);
 
     if (headless) {
         try runHeadless(&app, io, prompt.?);
-        checkpoint(&app, &store);
+        app.checkpoint();
         printSessionHint(&store, &session_id_buf);
         return;
     }
@@ -1304,13 +1305,13 @@ pub fn run(
 
             try app.cmd_queue.apply(io, &app);
 
-            if (was_running and !app.running) checkpoint(&app, &store);
+            if (was_running and !app.running) app.checkpoint();
             was_running = app.running;
         }
         exit_hint = true;
     } // tui_phase
 
-    checkpoint(&app, &store);
+    app.checkpoint();
     if (exit_hint) printSessionHint(&store, &session_id_buf);
 }
 
@@ -1424,25 +1425,6 @@ test "free text survives curated row detours" {
     w.moveCursor(0);
     try std.testing.expect(w.model_free_text);
     try std.testing.expectEqualStrings("claude-custom", w.model.slice());
-}
-
-/// Journal materializes lazily in appendCheckpoint; do not gate on file_name.
-fn checkpoint(app: *App, store: *session_store.Store) void {
-    _ = app.drainPendingDiffs();
-    const agent = app.mainAgent() orelse return;
-
-    var arena = std.heap.ArenaAllocator.init(app.gpa);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    const save = session.buildSaveState(app, agent, alloc) catch |err| {
-        std.log.scoped(.session).warn("checkpoint encode failed: {s}", .{@errorName(err)});
-        return;
-    };
-    if (save.chat.len == 0) return;
-
-    store.appendCheckpoint(save) catch |err| {
-        std.log.scoped(.session).warn("checkpoint write failed: {s}", .{@errorName(err)});
-    };
 }
 
 /// Prints the resume hint once the terminal is back on the normal screen.

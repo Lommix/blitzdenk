@@ -24,7 +24,7 @@ Important modules:
 - `src/commands.zig` async command queue.
 - `src/inject.zig` agent status injections
 - `src/session.zig` save/load session state; `SaveState`/`WireToolStatus` shared by store checkpoint and `blitz continue`
-- `src/session_store.zig` JSONL session journals in `~/.cache/blitzdenk/<fnv1a64-of-cwd>/sessions/<id>.jsonl` (header + full-snapshot checkpoints, cap 4, tmp+rename compaction, GC >16d); `blitz continue [ID]`, `blitz sessions` (TUI session picker over `summaries()` rows; widget state in `src/session_picker.zig`, rendered like the wizard) and the exit hint in `main.zig` use it; debug.log also lives in `~/.cache/blitzdenk`; `cacheDir()` honors `XDG_CACHE_HOME` over `~/.cache`
+- `src/session_store.zig` JSONL session journals in `~/.cache/blitzdenk/<fnv1a64-of-cwd>/sessions/<id>.jsonl` (header + full-snapshot checkpoints, cap 4, tmp+rename compaction, GC >16d); `app.reset()` checkpoints the outgoing session, then `Store.bump` retires its journal into history and re-arms a fresh id (reset behaves like a restart); `blitz continue [ID]`, `blitz sessions` (TUI session picker over `summaries()` rows; widget state in `src/session_picker.zig`, rendered like the wizard) and the exit hint in `main.zig` use it; debug.log also lives in `~/.cache/blitzdenk`; `cacheDir()` honors `XDG_CACHE_HOME` over `~/.cache`
 - `src/compact.zig` chat compaction logic
 - `src/events.zig` exposed hooks
 - `src/defaults.zig` installs default config files into `~/.config/blitzdenk`

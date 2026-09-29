@@ -57,9 +57,13 @@ pub const Store = struct {
 
     /// Arms the store so the first `appendCheckpoint` materializes the journal file.
     pub fn create(self: *Store, cwd: []const u8) !void {
+        try self.setCwd(cwd);
+        self.checkpoint_count = 0;
+    }
+
+    fn setCwd(self: *Store, cwd: []const u8) !void {
         if (self.cwd.len > 0) self.gpa.free(self.cwd);
         self.cwd = try self.gpa.dupe(u8, cwd);
-        self.checkpoint_count = 0;
     }
 
     fn createJournal(self: *Store) !void {
@@ -90,8 +94,15 @@ pub const Store = struct {
         self.checkpoint_count = 0;
     }
 
+    pub fn bump(self: *Store) void {
+        if (self.file_name) |name| self.gpa.free(name);
+        self.file_name = null;
+        self.checkpoint_count = 0;
+    }
+
     /// Opens an existing journal; the next append may compact immediately.
-    pub fn open(self: *Store, file_name: []const u8) !void {
+    pub fn open(self: *Store, cwd: []const u8, file_name: []const u8) !void {
+        try self.setCwd(cwd);
         const copy = try self.gpa.dupe(u8, file_name);
         if (self.file_name) |old| self.gpa.free(old);
         self.file_name = copy;
@@ -680,6 +691,57 @@ test "create without checkpoint leaves no journal file" {
     try testing.expectEqual(@as(u32, 0), store.checkpoint_count);
 }
 
+test "bump retires the journal and keeps it in history" {
+    const testing = std.testing;
+    var io_state = std.Io.Threaded.init(testing.allocator, .{});
+    defer io_state.deinit();
+    const io = io_state.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = std.Io.Dir{ .handle = tmp.dir.handle };
+
+    var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
+    defer store.deinit();
+    try store.create("/tmp/project");
+    const chat = [_]session.WireMessage{
+        .{ .role = .user, .parts = &.{.{ .text = "old task" }} },
+    };
+    try store.appendCheckpoint(.{ .chat = &chat, .timeline = &.{} });
+    var id_buf: [64]u8 = undefined;
+    const old_id = try testing.allocator.dupe(u8, store.currentId(&id_buf).?);
+
+    store.bump();
+    try testing.expect(store.file_name == null);
+    try testing.expectEqual(@as(u32, 0), store.checkpoint_count);
+    store.bump();
+
+    const fresh = [_]session.WireMessage{
+        .{ .role = .user, .parts = &.{.{ .text = "fresh task" }} },
+    };
+    try store.appendCheckpoint(.{ .chat = &fresh, .timeline = &.{} });
+    const new_id = store.currentId(&id_buf).?;
+    try testing.expect(!std.mem.eql(u8, old_id, new_id));
+
+    const entries = try list(testing.allocator, io, base);
+    defer freeList(testing.allocator, entries);
+    try testing.expectEqual(@as(usize, 2), entries.len);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const old_name = try fileName(arena.allocator(), old_id);
+    testing.allocator.free(old_id);
+    const loaded = (try load(arena.allocator(), io, base, old_name)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("old task", loaded.save.chat[0].parts[0].text);
+
+    try store.open("/tmp/project", old_name);
+    store.bump();
+    try store.appendCheckpoint(.{ .chat = &fresh, .timeline = &.{} });
+    const new_name = try fileName(arena.allocator(), store.currentId(&id_buf).?);
+    const reopened = (try load(arena.allocator(), io, base, new_name)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("/tmp/project", reopened.header.cwd);
+}
+
 test "pre-tool_status save file loads with empty tool_status" {
     const testing = std.testing;
     const json =
@@ -811,7 +873,7 @@ test "legacy journal is flagged, still loadable, converts on next checkpoint" {
 
     var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
     defer store.deinit();
-    try store.open("20250101-000000-cccc.jsonl");
+    try store.open("/x", "20250101-000000-cccc.jsonl");
     const resumed = [_]session.WireMessage{
         .{ .role = .user, .parts = &.{.{ .text = "fresh prompt" }} },
     };

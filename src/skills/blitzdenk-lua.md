@@ -705,11 +705,10 @@ side replaces the first and its handle goes dead.
 
 ## Skills
 
-Skills are markdown files discovered from three ranked layers: project
-`.blitz/skills` (highest), project `.agents/skills`, and user
-`~/.config/blitzdenk/skills`. Project skills shadow same-named user skills.
-The project root is the nearest ancestor of the working directory containing
-`.git`.
+Skills are markdown files discovered from two ranked layers: project `skills`
+at the project root, and user `~/.config/blitzdenk/skills`. Project skills
+shadow same-named user skills. The project root is the nearest ancestor of the
+working directory containing `.git`.
 
 Frontmatter keys: `name` (kebab-case), `description`, optional `whenToUse`,
 `user-invocable` (default true), and `disable-model-invocation` (default
