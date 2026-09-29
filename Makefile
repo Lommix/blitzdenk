@@ -7,7 +7,7 @@ test:
 	@echo "===blitzdenk tests==="
 	@zig build test --summary all --error-style minimal
 	@echo "===sdk tests==="
-	@cd sdk && zig build test --summary all --error-style minimal
+	@cd blitz-sdk && zig build test --summary all --error-style minimal
 
 gen:
 	@zig build gen

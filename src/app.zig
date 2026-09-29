@@ -6316,7 +6316,9 @@ test "wizard confirm writes provider.lua and marker then returns to text" {
     const contents = try tmp.dir.readFileAlloc(std.testing.io, r.wizard.PROVIDER_LUA, std.testing.allocator, .limited(64 * 1024));
     defer std.testing.allocator.free(contents);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\tkey = \"sk-ant-secret\",\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\tname = \"claude-fable-5\",\n") != null);
+    const expected_name = try std.fmt.allocPrint(std.testing.allocator, "\tname = \"{s}\",\n", .{entry.models[0].name});
+    defer std.testing.allocator.free(expected_name);
+    try std.testing.expect(std.mem.indexOf(u8, contents, expected_name) != null);
     try tmp.dir.access(std.testing.io, r.wizard.DONE_MARKER, .{});
 }
 

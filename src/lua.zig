@@ -4687,7 +4687,7 @@ fn errorBody(msg: []const u8) []const u8 {
 
 fn loadToolConfig(vm: *LuaVm, a: *r.app.App) !void {
     if (a.lua_config_dir) |dir| {
-        const inject = try std.fmt.allocPrint(vm.luaArena(), "package.path = \"{s}?.lua;\" .. package.path", .{dir});
+        const inject = try std.fmt.allocPrint(vm.luaArena(), "package.path = \"{s}/?.lua;\" .. package.path", .{dir});
         try vm.exec(inject);
     }
     if (a.lua_config_abs) |abs| {
@@ -6762,4 +6762,25 @@ test "agent.get_model and get_effort stay truthful while a run parks a swap" {
     , .{id.pack()});
     defer std.testing.allocator.free(script_after);
     try vm.exec(script_after);
+}
+
+test "config require resolves modules from a canonical directory" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config_path_probe.lua", .data = "return 42" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "blitz.lua", .data = "assert(require('config_path_probe') == 42)" });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(dir);
+    const path = try std.fs.path.join(alloc, &.{ dir, "blitz.lua" });
+    defer alloc.free(path);
+    var a: r.app.App = undefined;
+    a.io = io;
+    a.cwd = dir;
+    a.lua_config_dir = dir;
+    a.lua_config_abs = path;
+    const vm = try LuaVm.init(alloc);
+    defer vm.deinit();
+    try loadToolConfig(vm, &a);
 }

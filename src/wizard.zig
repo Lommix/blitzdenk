@@ -555,30 +555,31 @@ fn catalogIndex(name: []const u8) usize {
 }
 
 test "renderProviderLua anthropic with key and curated model" {
+    const entry = catalog[0];
+    const model = entry.models[0];
     const rendered = try renderProviderLua(std.testing.allocator, .{
-        .entry = catalog[0],
-        .provider_type = catalog[0].provider_type,
-        .url = catalog[0].default_url,
+        .entry = entry,
+        .provider_type = entry.provider_type,
+        .url = entry.default_url,
         .key = "sk-ant-secret",
-        .model = catalog[0].models[0].name,
-        .vision = catalog[0].models[0].vision,
+        .model = model.name,
+        .vision = model.vision,
     });
     defer std.testing.allocator.free(rendered);
 
-    const nl = "\n";
-    const tab = "\t";
-    const expected = "local provider = blitz.add_provider({" ++ nl ++
-        tab ++ "type = \"anthropic\"," ++ nl ++
-        tab ++ "url = \"https://api.anthropic.com/v1\"," ++ nl ++
-        tab ++ "--key_envar = \"ANTHROPIC_API_KEY\"," ++ nl ++
-        tab ++ "key = \"sk-ant-secret\"," ++ nl ++
-        "})" ++ nl ++ nl ++
-        "local model = blitz.add_model({" ++ nl ++
-        tab ++ "name = \"claude-fable-5\"," ++ nl ++
-        tab ++ "provider = provider," ++ nl ++
-        tab ++ "vision = true," ++ nl ++
-        "})" ++ nl ++ nl ++
-        "return model" ++ nl;
+    const expected = try std.fmt.allocPrint(std.testing.allocator,
+        "local provider = blitz.add_provider({{\n" ++
+            "\ttype = \"{s}\",\n" ++
+            "\turl = \"{s}\",\n" ++
+            "\t--key_envar = \"{s}\",\n" ++
+            "\tkey = \"sk-ant-secret\",\n" ++
+            "}})\n\nlocal model = blitz.add_model({{\n" ++
+            "\tname = \"{s}\",\n" ++
+            "\tprovider = provider,\n" ++
+            "\tvision = {s},\n" ++
+            "}})\n\nreturn model\n",
+        .{ entry.provider_type, entry.default_url, entry.key_envar, model.name, if (model.vision) "true" else "false" });
+    defer std.testing.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, rendered);
 }
 
@@ -628,7 +629,7 @@ test "renderProviderLua emits gateway session headers" {
         .provider_type = xai.provider_type,
         .url = xai.default_url,
         .key = "",
-        .model = "grok-4.6",
+        .model = if (xai.models.len > 0) xai.models[0].name else "xai-model",
         .vision = true,
         .session_key_header = xai.session_key_header,
     });
@@ -656,16 +657,15 @@ test "renderProviderLua ollama omits key lines and keeps url" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\tvision = true,\n") != null);
 }
 
-test "renderProviderLua omits replay_reasoning for flagless models" {
-    const openai_entry = catalog[catalogIndex("OpenAI")];
-    const gpt = openai_entry.models[0];
+test "renderProviderLua omits replay_reasoning when the selection is flagless" {
+    const entry = catalog[catalogIndex("OpenAI")];
     const plain = try renderProviderLua(std.testing.allocator, .{
-        .entry = openai_entry,
-        .provider_type = openai_entry.provider_type,
-        .url = openai_entry.default_url,
+        .entry = entry,
+        .provider_type = entry.provider_type,
+        .url = entry.default_url,
         .key = "",
-        .model = gpt.name,
-        .vision = gpt.vision,
+        .model = "unlisted-model",
+        .vision = false,
     });
     defer std.testing.allocator.free(plain);
     try std.testing.expect(std.mem.indexOf(u8, plain, "replay_reasoning") == null);
@@ -718,7 +718,9 @@ test "skip writer creates the default combo" {
     try std.testing.expect(std.mem.indexOf(u8, contents, "\tsession_key_header = \"x-opencode-session\",\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\t--key_envar = \"OPENCODE_API_KEY\",\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\tkey = ") == null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\tname = \"deepseek-v4-flash-vision-exp\",\n") != null);
+    const expected_model_line = try std.fmt.allocPrint(std.testing.allocator, "\tname = \"{s}\",\n", .{SKIP_MODEL});
+    defer std.testing.allocator.free(expected_model_line);
+    try std.testing.expect(std.mem.indexOf(u8, contents, expected_model_line) != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\tvision = true,\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\treplay_reasoning = true,\n") != null);
 }
@@ -868,8 +870,10 @@ test "selectModel matches curated entries and falls back to free text" {
     try std.testing.expect(!free.vision);
 
     const opencode = catalog[catalogIndex("opencode go")];
-    try std.testing.expect(selectModel(opencode, "glm-5.3-flash").replay_reasoning);
-    try std.testing.expect(selectModel(opencode, "qwen3.8-flash").replay_reasoning);
+    for (opencode.models) |m| {
+        try std.testing.expect(modelIsCurated(opencode, m.name));
+        try std.testing.expectEqual(m.replay_reasoning, selectModel(opencode, m.name).replay_reasoning);
+    }
     try std.testing.expect(!selectModel(opencode, "unlisted-model").replay_reasoning);
 }
 

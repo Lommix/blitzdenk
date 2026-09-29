@@ -573,7 +573,7 @@ pub fn run(
 
     var lua_load_failed = false;
     if (config_lua) |info| {
-        const inject = try std.fmt.allocPrint(arena, "package.path = \"{s}?.lua;\" .. package.path", .{info.dir_path});
+        const inject = try std.fmt.allocPrint(arena, "package.path = \"{s}/?.lua;\" .. package.path", .{info.dir_path});
         app.lua_vm.exec(inject) catch |err| {
             lua_load_failed = true;
             std.log.scoped(.lua).err("failed to configure lua package.path: {s} ({any})", .{ app.lua_vm.getLastError(), err });
@@ -826,7 +826,7 @@ pub fn run(
                     context_factory.resetDefs();
                     try context_factory.resetLoadedTools();
                     if (config_lua) |info| {
-                        const inject = std.fmt.allocPrint(arena, "package.path = \"{s}?.lua;\" .. package.path", .{info.dir_path}) catch null;
+                        const inject = std.fmt.allocPrint(arena, "package.path = \"{s}/?.lua;\" .. package.path", .{info.dir_path}) catch null;
                         if (inject) |code| app.lua_vm.exec(code) catch |err| {
                             lua_reload_failed = true;
                             std.log.scoped(.lua).err("hot-reload: failed to configure lua package.path: {s} ({any})", .{ app.lua_vm.getLastError(), err });
