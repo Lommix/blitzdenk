@@ -24,6 +24,7 @@ pub const Chat = struct {
     extra_headers: []const std.http.Header,
     rate_limit: u32,
     session_key_header: []const u8,
+    client: ?*std.http.Client = null,
 
     pub fn init(alloc: std.mem.Allocator, model_id: []const u8, opts: Options) !Chat {
         const key = opts.api_key orelse auth.resolveKey(opts.env, api_key_env) orelse "";
@@ -43,6 +44,18 @@ pub const Chat = struct {
         alloc.free(self.base_url);
         auth.freeHeaders(alloc, self.extra_headers);
         alloc.free(self.session_key_header);
+        if (self.client) |c| {
+            c.deinit();
+            alloc.destroy(c);
+        }
+    }
+
+    fn ensureClient(self: *Chat, alloc: std.mem.Allocator, io: std.Io) !*std.http.Client {
+        if (self.client) |c| return c;
+        const c = try alloc.create(std.http.Client);
+        c.* = .{ .allocator = alloc, .io = io };
+        self.client = c;
+        return c;
     }
 
     pub fn languageModel(self: *Chat) model.LanguageModel {
@@ -125,7 +138,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/messages", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client, url, body, headers, max_retries, requestOptions(self, params));
+        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(alloc, io), url, body, headers, max_retries, requestOptions(self, params));
         defer alloc.free(response);
         return parseResponse(alloc, response);
     }
@@ -148,7 +161,7 @@ pub const Chat = struct {
         defer alloc.free(url);
         const request_options = requestOptions(self, params);
         var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
-        const sse_text = try jsonx.postSseWithRetry(alloc, io, client, url, body, headers, max_retries, request_options, &live, emitLiveEvent);
+        const sse_text = try jsonx.postSseWithRetry(alloc, io, client orelse try self.ensureClient(alloc, io), url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         defer alloc.free(sse_text);
         if (!jsonx.sseCompleted(sse_text, &.{"\"type\":\"message_delta\""})) return error.NetworkError;
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };

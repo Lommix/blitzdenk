@@ -72,6 +72,7 @@ pub const Agent = struct {
     metadata: std.heap.ArenaAllocator,
     tool_arena: std.heap.ArenaAllocator,
     injection_arena: std.heap.ArenaAllocator,
+    step_arena: std.heap.ArenaAllocator,
     state_arena: std.heap.ArenaAllocator,
     injection_mutex: std.Io.Mutex = .init,
     queued_messages: std.ArrayList(sdk.Message) = .empty,
@@ -148,6 +149,7 @@ pub const Agent = struct {
             .metadata = metadata,
             .tool_arena = std.heap.ArenaAllocator.init(alloc),
             .injection_arena = std.heap.ArenaAllocator.init(alloc),
+            .step_arena = std.heap.ArenaAllocator.init(alloc),
             .state_arena = .init(alloc),
             .type_idx = options.identity.type_idx,
             .name = name,
@@ -169,6 +171,7 @@ pub const Agent = struct {
         self.model.deinit(self.alloc);
         if (self.cache_key) |key| self.alloc.free(key);
         self.state_arena.deinit();
+        self.step_arena.deinit();
         self.injection_arena.deinit();
         self.tool_arena.deinit();
         self.metadata.deinit();
@@ -558,6 +561,7 @@ pub const Agent = struct {
         const self: *Agent = @ptrCast(@alignCast(ctx.?));
         self.injection_mutex.lockUncancelable(self.io);
         defer self.injection_mutex.unlock(self.io);
+        _ = self.step_arena.reset(.free_all);
         const upstream = if (self.run_hooks.prepare) |hook|
             try hook(self.run_hooks.prepare_ctx, info)
         else
@@ -589,7 +593,7 @@ pub const Agent = struct {
         if (self.queued_messages.items.len == 0 and reminder == null) {
             return .{ .messages = base, .replace = replace, .tools = refreshed_tools };
         }
-        const alloc = self.injection_arena.allocator();
+        const alloc = self.step_arena.allocator();
         const combined = try alloc.alloc(sdk.Message, base.len + @intFromBool(reminder != null) + self.queued_messages.items.len);
         @memcpy(combined[0..base.len], base);
         if (reminder) |text| combined[base.len] = sdk.UserMessage(text);
@@ -629,7 +633,7 @@ pub const Agent = struct {
         };
         defer outcome.deinit();
 
-        const cloned = agent_run.cloneMessages(self.injection_arena.allocator(), outcome.messages.messages) catch |err| {
+        const cloned = agent_run.cloneMessages(self.step_arena.allocator(), outcome.messages.messages) catch |err| {
             self.compaction.noteFailure(self.failureNow(), err);
             self.last_error = error.CompactFailed;
             return null;

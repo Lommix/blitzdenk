@@ -502,6 +502,15 @@ fn postTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []
     return post(a, io, client, url, body, headers);
 }
 
+fn cancelFreeResponses(s: anytype, a: std.mem.Allocator) void {
+    while (s.cancel()) |selection| switch (selection) {
+        .response => |response| if (response) |value| {
+            a.free(value.body);
+        } else |_| {},
+        else => {},
+    };
+}
+
 fn postTimed(
     a: std.mem.Allocator,
     io: std.Io,
@@ -529,11 +538,11 @@ fn postTimed(
             return response;
         },
         .timeout => {
-            select.cancelDiscard();
+            cancelFreeResponses(&select, a);
             return error.Timeout;
         },
         .canceled => {
-            select.cancelDiscard();
+            cancelFreeResponses(&select, a);
             return error.Canceled;
         },
     }
@@ -756,15 +765,15 @@ fn postSseTimed(
             return response;
         },
         .timeout => {
-            select.cancelDiscard();
+            cancelFreeResponses(&select, a);
             return error.Timeout;
         },
         .canceled => {
-            select.cancelDiscard();
+            cancelFreeResponses(&select, a);
             return error.Canceled;
         },
         .idle => {
-            select.cancelDiscard();
+            cancelFreeResponses(&select, a);
             return error.NetworkError;
         },
     }

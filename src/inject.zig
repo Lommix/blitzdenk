@@ -60,7 +60,7 @@ pub const InjectionsHooks = struct {
     pub fn build(self: *const Self, app: *r.app.App, agent: *r.agent.Agent) !?[]const u8 {
         if (agent.clean) return null;
 
-        const alloc = agent.injection_arena.allocator();
+        const alloc = agent.step_arena.allocator();
 
         var writer = std.Io.Writer.Allocating.init(alloc);
         var w = &writer.writer;
@@ -233,17 +233,20 @@ fn inject_capability_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent
     const factory = app.context_factory;
     try factory.ensureCapabilityCatalog(app.exec_pool);
 
-    factory.capability_catalog_mu.lockUncancelable(factory.io);
-    const body = agent.injection_arena.allocator().dupe(u8, factory.capability_catalog_body) catch "";
-    const route = factory.capability_catalog_route;
-    factory.capability_catalog_mu.unlock(factory.io);
-
-    if (body.len == 0) return;
-
-    const digest = std.hash.Wyhash.hash(route orelse 0, body);
-    if (agent.capability_catalog_digest) |last| {
-        if (last == digest) return;
+    var body: []const u8 = "";
+    var digest: u64 = 0;
+    {
+        factory.capability_catalog_mu.lockUncancelable(factory.io);
+        defer factory.capability_catalog_mu.unlock(factory.io);
+        body = factory.capability_catalog_body;
+        if (body.len == 0) return;
+        digest = std.hash.Wyhash.hash(factory.capability_catalog_route orelse 0, body);
+        if (agent.capability_catalog_digest) |last| {
+            if (last == digest) return;
+        }
+        body = agent.step_arena.allocator().dupe(u8, body) catch "";
     }
+    if (body.len == 0) return;
 
     try w.writeAll(body);
     agent.capability_catalog_digest = digest;
