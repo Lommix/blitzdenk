@@ -951,14 +951,14 @@ pub fn run(
                                         app.handleCompletion(.prev);
                                         continue;
                                     }
-                                    if (app.input_mode == .text) app.moveCursorVertical(-1);
+                                    if (app.moveCursorVertical(-1)) continue;
                                 },
                                 .cursor_down => {
                                     if (app.completionIsOpen()) {
                                         app.handleCompletion(.next);
                                         continue;
                                     }
-                                    if (app.input_mode == .text) app.moveCursorVertical(1);
+                                    if (app.moveCursorVertical(1)) continue;
                                 },
                                 .history_prev => {
                                     if (app.historyUp()) continue;

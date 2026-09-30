@@ -10,6 +10,50 @@ const ct = @cImport({
 pub const CONTEXT_LIMIT = 124 * 1024;
 const COMMAND_COMPLETION_ROWS = 64;
 
+const WIDGET_PAD_X: u16 = 2;
+const COMPOSER_PROMPT: []const u8 = "❯";
+const PASSPHRASE_PROMPT: []const u8 = "❯ Passphrase: ";
+
+const FieldStyle = struct {
+    prompt: []const u8,
+    prompt_style: r.tui.Style = .{},
+    text: r.tui.Style,
+    mask: ?u8 = null,
+};
+
+fn modePrompt(mode: *const InputMode) []const u8 {
+    return switch (mode.*) {
+        .passphrase => PASSPHRASE_PROMPT,
+        .wizard => "  ",
+        else => COMPOSER_PROMPT,
+    };
+}
+
+fn modePromptCols(mode: *const InputMode) u16 {
+    return promptCols(modePrompt(mode));
+}
+
+fn inputContentWidth(widget_width: u16) u16 {
+    return widget_width -| (WIDGET_PAD_X * 2);
+}
+
+fn inputTextWidth(area_width: u16, prompt_cols: u16) u16 {
+    return area_width -| prompt_cols;
+}
+
+fn promptCols(prompt: []const u8) u16 {
+    return @intCast(@min(textWidthCols(prompt), @as(usize, std.math.maxInt(u16))));
+}
+
+fn fieldTextStyle(app: *App) r.tui.Style {
+    return .{ .fg = app.theme.text_hl };
+}
+
+fn moveFieldVertical(app: *App, alloc: std.mem.Allocator, field: anytype, width: usize, delta: i32) void {
+    const target = app.verticalFieldTarget(alloc, .{ .text = field.slice(), .cursor = field.cursor }, width, delta) orelse return;
+    field.cursor = target;
+}
+
 fn pathInsideDir(path: []const u8, dir: []const u8) bool {
     if (!std.mem.startsWith(u8, path, dir)) return false;
     return path.len == dir.len or path[dir.len] == '/';
@@ -241,7 +285,6 @@ pub const App = struct {
     io: std.Io,
     input: r.tui.Field(8192) = .{},
     input_desired_col: ?usize = null,
-    input_scroll_offset: u16 = 0,
     // ---------------
     // async interface
     permission_queue: Locked(std.ArrayList(*r.permissions.Request)),
@@ -1748,12 +1791,18 @@ pub const App = struct {
 
         const input_height: u16 = blk: {
             switch (app.input_mode) {
-                .text, .passphrase => {
-                    const inner_w = main_area.width -| 5; // 2 left + 2 right padding + ❯ prompt
-                    const rows: u16 = @intCast(@min(@max(inputWrapPosition(app, frame_alloc, inner_w, false).total, 1), @as(usize, std.math.maxInt(u16))));
+                .text, .perm_message, .passphrase => {
+                    const shown: r.clipboard.Display = switch (app.input_mode) {
+                        .text => app.displayInput(frame_alloc),
+                        .perm_message => |pm| .{ .text = pm.field.slice(), .cursor = pm.field.cursor },
+                        .passphrase => |pp| .{ .text = pp.field.slice(), .cursor = pp.field.cursor },
+                        else => .{ .text = "", .cursor = 0 },
+                    };
+                    const width = inputTextWidth(inputContentWidth(main_area.width), modePromptCols(&app.input_mode));
+                    const counted = r.tui.input_layout.rowCount(frame_alloc, shown.text, width) catch 1;
+                    const rows: u16 = @intCast(@min(@max(counted, 1), @as(usize, std.math.maxInt(u16))));
                     break :blk @min(rows +| 3, 23); // input rows + status + 2 padding
                 },
-                .perm_message => break :blk 8, // 5-row input box + status + 2 padding
                 .wizard => break :blk 18,
                 .session_picker => |*picker| break :blk @intCast(@min(6 + @max(picker.rows.len, 1), main_area.height -| 1)),
                 .perm_select => {
@@ -1944,18 +1993,14 @@ pub const App = struct {
                 }
 
                 if (p.lines.items.len > 0) {
-                    const anchor_para = r.tui.Paragraph{
-                        .border = .none,
-                        .padding = .{ .left = 1 },
-                    };
-                    const input_rect: r.tui.Rect = .{
-                        .x = input_area.x +| 2,
+                    const cols = modePromptCols(&app.input_mode);
+                    const text_origin: r.tui.Rect = .{
+                        .x = input_area.x +| WIDGET_PAD_X +| cols,
                         .y = input_area.y +| 1 +| progress_h,
-                        .width = input_area.width -| 4,
+                        .width = inputTextWidth(inputContentWidth(input_area.width), cols),
                         .height = 1,
                     };
-                    const text_origin = anchor_para.inner(input_rect);
-                    const anchor = inputWrapPosition(app, frame_alloc, text_origin.width, true);
+                    const anchor = completionAnchor(app, frame_alloc, text_origin.width);
 
                     const height: u16 = @intCast(p.lines.items.len);
                     const completion_area = r.tui.Rect{
@@ -1993,155 +2038,49 @@ pub const App = struct {
     pub fn setInput(self: *App, text: []const u8) void {
         self.input.set(text);
         self.input_desired_col = null;
-        self.input_scroll_offset = 0;
         self.syncCompletion();
     }
 
-    const VisualRow = struct { start: usize, end: usize, cols: usize };
-
-    fn appendWrappedPlainRows(
-        alloc: std.mem.Allocator,
-        line: []const u8,
-        width: usize,
-        base: usize,
-        out: *std.ArrayList(VisualRow),
-    ) !void {
-        var row_start: usize = base;
-        var col: usize = 0;
-        var has_content = false;
-        var pos: usize = 0;
-        while (pos < line.len) {
-            const is_space = line[pos] == ' ';
-            var run_end = pos + 1;
-            while (run_end < line.len and (line[run_end] == ' ') == is_space) run_end += 1;
-            const run_cols = std.unicode.utf8CountCodepoints(line[pos..run_end]) catch run_end - pos;
-
-            if (is_space) {
-                if (col > 0 and col + run_cols > width) {
-                    try out.append(alloc, .{ .start = row_start, .end = base + pos, .cols = col });
-                    row_start = base + run_end;
-                    col = 0;
-                    has_content = false;
-                } else {
-                    col += run_cols;
-                    has_content = true;
-                }
-                pos = run_end;
-                continue;
-            }
-            if (run_cols <= width) {
-                if (col + run_cols > width) {
-                    try out.append(alloc, .{ .start = row_start, .end = base + pos, .cols = col });
-                    row_start = base + pos;
-                    col = 0;
-                    has_content = false;
-                }
-                col += run_cols;
-                has_content = true;
-                pos = run_end;
-                continue;
-            }
-            var bi = pos;
-            while (bi < run_end) {
-                const remaining = width -| col;
-                var take_bytes: usize = 0;
-                var take_cols: usize = 0;
-                while (bi + take_bytes < run_end and take_cols < remaining) {
-                    const len = std.unicode.utf8ByteSequenceLength(line[bi + take_bytes]) catch 1;
-                    take_bytes += @min(len, run_end - bi - take_bytes);
-                    take_cols += 1;
-                }
-                if (take_cols == 0) {
-                    try out.append(alloc, .{ .start = row_start, .end = base + bi, .cols = col });
-                    row_start = base + bi;
-                    col = 0;
-                    has_content = false;
-                    continue;
-                }
-                col += take_cols;
-                bi += take_bytes;
-                has_content = true;
-                if (col >= width and bi < run_end) {
-                    try out.append(alloc, .{ .start = row_start, .end = base + bi, .cols = col });
-                    row_start = base + bi;
-                    col = 0;
-                    has_content = false;
-                }
-            }
-            pos = run_end;
-        }
-        if (has_content or line.len == 0) {
-            try out.append(alloc, .{ .start = row_start, .end = base + line.len, .cols = col });
-        }
-    }
-
-    fn visualColAt(text: []const u8, row: VisualRow, pos: usize) usize {
-        if (pos <= row.start) return 0;
-        if (pos >= row.end) return row.cols;
-        return std.unicode.utf8CountCodepoints(text[row.start..pos]) catch pos - row.start;
-    }
-
-    pub fn moveCursorVertical(self: *App, delta: i32) void {
-        const buf = self.input.slice();
-        if (self.input.cursor > buf.len) self.input.cursor = buf.len;
-
-        const width: usize = self.widget_frame_input_area.width -| 5;
-        if (width == 0) return;
+    pub fn moveCursorVertical(self: *App, delta: i32) bool {
+        const width: usize = inputTextWidth(inputContentWidth(self.widget_frame_input_area.width), modePromptCols(&self.input_mode));
+        if (width == 0) return false;
 
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const alloc = arena.allocator();
 
-        const display = self.displayInput(alloc);
-        const cursor = @min(display.cursor, display.text.len);
-
-        var rows: std.ArrayList(VisualRow) = .empty;
-        var it = std.mem.splitScalar(u8, display.text, '\n');
-        var consumed: usize = 0;
-        while (it.next()) |hard_line| {
-            appendWrappedPlainRows(alloc, hard_line, width, consumed, &rows) catch return;
-            consumed += hard_line.len + 1;
+        switch (self.input_mode) {
+            .text => {
+                const buf = self.input.slice();
+                if (self.input.cursor > buf.len) self.input.cursor = buf.len;
+                const display = self.displayInput(alloc);
+                if (self.verticalFieldTarget(alloc, display, width, delta)) |target| {
+                    self.input.cursor = r.clipboard.fromDisplayPos(buf, target);
+                }
+            },
+            .perm_message => |*pm| moveFieldVertical(self, alloc, &pm.field, width, delta),
+            .passphrase => |*pp| moveFieldVertical(self, alloc, &pp.field, width, delta),
+            .wizard => |*w| {
+                const f = w.activeText() orelse return false;
+                moveFieldVertical(self, alloc, f, width, delta);
+            },
+            else => return false,
         }
-        if (rows.items.len == 0) return;
+        return true;
+    }
 
-        var cur_row: usize = 0;
-        var cur_col: usize = 0;
-        for (rows.items, 0..) |row, i| {
-            if (cursor < row.end) {
-                cur_row = i;
-                cur_col = visualColAt(display.text, row, cursor);
-                break;
-            }
-            if (cursor == row.end and (i + 1 >= rows.items.len or rows.items[i + 1].start > cursor)) {
-                cur_row = i;
-                cur_col = row.cols;
-                break;
-            }
-        }
-
-        const desired: usize = self.input_desired_col orelse cur_col;
+    fn verticalFieldTarget(
+        self: *App,
+        alloc: std.mem.Allocator,
+        display: r.clipboard.Display,
+        width: usize,
+        delta: i32,
+    ) ?usize {
+        var l = r.tui.input_layout.layout(alloc, display.text, display.cursor, width, .{}, .{}, null) catch return null;
+        defer l.deinit(alloc);
+        const desired: usize = self.input_desired_col orelse l.cursor.col;
         self.input_desired_col = desired;
-
-        const target: usize = if (delta < 0) cur_row -| 1 else cur_row + 1;
-        if (delta < 0 and cur_row == 0) return;
-        if (target >= rows.items.len) return;
-
-        const row = rows.items[target];
-        const target_col = @min(desired, row.cols);
-        var pos: usize = row.start;
-        var cols_seen: usize = 0;
-        while (pos < row.end and cols_seen < target_col) {
-            const len = std.unicode.utf8ByteSequenceLength(display.text[pos]) catch 1;
-            pos = @min(pos + len, row.end);
-            cols_seen += 1;
-        }
-        if (pos == row.end and pos > row.start and
-            target + 1 < rows.items.len and rows.items[target + 1].start == pos)
-        {
-            pos -= 1;
-            while (pos > row.start and (display.text[pos] & 0xC0) == 0x80) pos -= 1;
-        }
-        self.input.cursor = r.clipboard.fromDisplayPos(buf, pos);
+        return r.tui.input_layout.verticalTarget(&l, delta, desired);
     }
 
     pub fn appendBytes(self: *App, bytes: []const u8) void {
@@ -3155,9 +3094,9 @@ fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, prog
 
     // 1-row top/bottom padding, 2-column left/right padding.
     const content: r.tui.Rect = .{
-        .x = area.x +| 2,
+        .x = area.x +| WIDGET_PAD_X,
         .y = area.y +| 1,
-        .width = area.width -| 4,
+        .width = inputContentWidth(area.width),
         .height = area.height -| 2,
     };
     if (content.width == 0 or content.height == 0) return;
@@ -3180,9 +3119,9 @@ fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, prog
     };
 
     switch (app.input_mode) {
-        .text => renderInputContent(app, arena, input_area, buf) catch {},
-        .passphrase => renderPassphraseInput(app, input_area, buf),
-        .perm_message => |*pm| renderPermMessageContent(app, pm, input_area, buf),
+        .text => renderInputContent(app, arena, input_area, buf),
+        .passphrase => renderPassphraseInput(app, arena, input_area, buf),
+        .perm_message => renderPermMessageContent(app, arena, input_area, buf),
         .perm_select => renderPermissionContent(app, input_area, buf),
         .wizard => renderWizardContent(app, arena, input_area, buf),
         .session_picker => renderSessionPickerContent(app, arena, input_area, buf),
@@ -3191,182 +3130,77 @@ fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, prog
     renderStatusBar(app, status_area, buf);
 }
 
-fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
-    const border_color = app.theme.muted;
+fn renderFieldWidget(
+    app: *App,
+    arena: std.mem.Allocator,
+    text: []const u8,
+    cursor: usize,
+    area: r.tui.Rect,
+    st: FieldStyle,
+    buf: *r.tui.Buffer,
+) void {
+    const prompt_cols = promptCols(st.prompt);
+    const text_width = inputTextWidth(area.width, prompt_cols);
+    if (area.height == 0 or text_width == 0) return;
 
-    var para = r.tui.Paragraph{
+    var l = r.tui.input_layout.layout(arena, text, cursor, text_width, st.text, .{ .fg = app.theme.text_hl, .bg = app.theme.muted }, st.mask) catch return;
+    defer l.deinit(arena);
+
+    var para: r.tui.Paragraph = .{
         .border = .none,
-        .style = .{ .fg = border_color },
-        .padding = .{ .left = 1 }, // ❯ prompt column
+        .wrap = false,
+        .padding = .{ .left = prompt_cols },
     };
-    const inner = para.inner(area);
+    para.lines.appendSlice(arena, l.rows.items) catch return;
+    para.scroll_offset = if (l.cursor.row < area.height) 0 else l.cursor.row - area.height + 1;
 
+    const draw_area: r.tui.Rect = .{
+        .x = area.x,
+        .y = area.y,
+        .width = prompt_cols +| text_width +| 1,
+        .height = area.height,
+    };
+    para.render(arena, draw_area, area, buf);
+    buf.setStringMax(area.x, area.y, st.prompt, st.prompt_style, area.width);
+}
+
+fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const display = app.displayInput(arena);
-    const text = display.text;
-    const cursor: usize = display.cursor;
-    const input_text_style: r.tui.Style = .{ .fg = app.theme.text_hl };
-    const cursor_style: r.tui.Style = .{ .fg = app.theme.text_hl, .bg = border_color };
-
-    var cursor_visual_row: usize = 0;
-    var accumulated_rows: usize = 0;
-    var it = std.mem.splitAny(u8, text, "\n");
-    var consumed: usize = 0;
-    while (it.next()) |raw_line| {
-        const line_start = consumed;
-        const line_end = line_start + raw_line.len;
-
-        var wrapped: std.ArrayList(r.tui.Line) = .empty;
-        defer wrapped.deinit(arena);
-        if (cursor >= line_start and cursor <= line_end) {
-            var line = r.tui.Line{};
-            const off = cursor - line_start;
-            const before = raw_line[0..off];
-            try line.pushText(arena, before, input_text_style);
-            if (off < raw_line.len) {
-                const len = std.unicode.utf8ByteSequenceLength(raw_line[off]) catch 1;
-                const end = @min(off + len, raw_line.len);
-                try line.pushText(arena, raw_line[off..end], cursor_style);
-                try line.pushText(arena, raw_line[end..], input_text_style);
-            } else {
-                try line.pushText(arena, " ", cursor_style);
-            }
-            try r.tui.wrapLine(arena, &line, inner.width, &wrapped);
-        } else {
-            try pushPlainWrappedLine(app, arena, raw_line, inner.width, &wrapped);
-        }
-
-        if (cursor >= line_start and cursor <= line_end) {
-            outer: for (wrapped.items, 0..) |*row, i| {
-                for (row.spans.items) |span| {
-                    if (span.style.fg.eql(cursor_style.fg) and span.style.bg.eql(cursor_style.bg)) {
-                        cursor_visual_row = accumulated_rows + i;
-                        break :outer;
-                    }
-                }
-            }
-        }
-
-        try para.lines.appendSlice(arena, wrapped.items);
-        accumulated_rows += wrapped.items.len;
-        consumed = line_end + 1;
-    }
-
-    const visible_height = inner.height;
-    if (cursor_visual_row >= visible_height) {
-        app.input_scroll_offset = @intCast(cursor_visual_row - visible_height + 1);
-    } else {
-        app.input_scroll_offset = 0;
-    }
-    para.scroll_offset = app.input_scroll_offset;
-
-    para.render(arena, area, area, buf);
-    buf.set(area.x, area.y, .{ .char = '❯' });
+    renderFieldWidget(app, arena, display.text, display.cursor, area, .{
+        .prompt = COMPOSER_PROMPT,
+        .text = fieldTextStyle(app),
+    }, buf);
     if (app.screenshot_buf != null) {
         buf.setString(area.x, area.y, r.tui.icon.eye, .{ .fg = app.theme.ok });
     }
 }
 
-const InputWrapPos = struct { row: usize, col: usize, total: usize };
-
-fn inputWrapPosition(app: *App, arena: std.mem.Allocator, inner_w: u16, to_token_start: bool) InputWrapPos {
-    const display = app.displayInput(arena);
-    const cursor: usize = @min(display.cursor, display.text.len);
-    const target = if (to_token_start) r.completion.tokenAt(display.text, cursor).start else cursor;
-
-    var rows_above: usize = 0;
-    var total: usize = 0;
-    var found_row: ?usize = null;
-    var found_col: usize = 0;
-    var consumed: usize = 0;
-    var it = std.mem.splitAny(u8, display.text, "\n");
-    while (it.next()) |raw_line| {
-        const line_start = consumed;
-        const line_end = line_start + raw_line.len;
-        const in_target = target >= line_start and target <= line_end;
-
-        var wrapped: std.ArrayList(r.tui.Line) = .empty;
-        defer wrapped.deinit(arena);
-
-        if (in_target) {
-            const off = target - line_start;
-            const cursor_marker: r.tui.Style = .{ .bg = .{ .indexed = 255 } };
-            var line = r.tui.Line{};
-            if (off == raw_line.len) {
-                line.pushText(arena, raw_line, .{}) catch break;
-                line.pushText(arena, " ", cursor_marker) catch break;
-            } else {
-                const char_len = std.unicode.utf8ByteSequenceLength(raw_line[off]) catch 1;
-                const mid = @min(off + char_len, raw_line.len);
-                line.pushText(arena, raw_line[0..off], .{}) catch break;
-                line.pushText(arena, raw_line[off..mid], cursor_marker) catch break;
-                line.pushText(arena, raw_line[mid..], .{}) catch break;
-            }
-            r.tui.wrapLine(arena, &line, inner_w, &wrapped) catch break;
-            for (wrapped.items, 0..) |*row, ri| {
-                var col: usize = 0;
-                var hit = false;
-                for (row.spans.items) |span| {
-                    if (span.style.bg.eql(cursor_marker.bg)) {
-                        found_row = rows_above + ri;
-                        found_col = col;
-                        hit = true;
-                        break;
-                    }
-                    col += textWidthCols(span.content);
-                }
-                if (hit) break;
-            }
-        } else {
-            pushPlainWrappedLine(app, arena, raw_line, inner_w, &wrapped) catch break;
-        }
-        const line_rows = @max(wrapped.items.len, 1);
-        rows_above += line_rows;
-        total += line_rows;
-        consumed = line_end + 1;
-    }
-    return .{ .row = found_row orelse 0, .col = found_col, .total = total };
-}
-
-fn pushPlainWrappedLine(app: *App, arena: std.mem.Allocator, raw_line: []const u8, inner_w: u16, out: *std.ArrayList(r.tui.Line)) !void {
-    var line = r.tui.Line{};
-    try line.pushText(arena, raw_line, .{ .fg = app.theme.text_hl });
-    try r.tui.wrapLine(arena, &line, inner_w, out);
-}
-
-fn renderPermMessageContent(app: *App, pm: *const InputMode.PermMessage, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const input_widget: r.tui.Input = .{
-        .text = pm.field.slice(),
-        .cursor = pm.field.cursor,
-        .border_style = .{ .fg = app.theme.warn },
-        .screenshot_style = .{ .fg = app.theme.ok },
-        .has_screenshot = app.screenshot_buf != null,
-    };
-    input_widget.render(area, buf);
-}
-
-fn renderPassphraseInput(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn renderPassphraseInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const pp = &app.input_mode.passphrase;
-    const style: r.tui.Style = .{ .fg = app.theme.warn };
-    const label = "❯ Passphrase: ";
-    const label_width: u16 = 14;
-    if (area.width <= label_width) {
-        buf.setStringMax(area.x, area.y, label, style, area.width);
-        return;
-    }
-    buf.setString(area.x, area.y, label, style);
+    renderFieldWidget(app, arena, pp.field.slice(), pp.field.cursor, area, .{
+        .prompt = PASSPHRASE_PROMPT,
+        .prompt_style = .{ .fg = app.theme.warn },
+        .text = fieldTextStyle(app),
+        .mask = '*',
+    }, buf);
+}
 
-    var x: u16 = area.x +| label_width;
-    const y: u16 = area.y;
-    const max_chars = area.width -| label_width -| 1;
-    const text = pp.field.slice();
-    const shown: usize = @min(text.len, max_chars);
-    var i: usize = 0;
-    while (i < shown) : (i += 1) {
-        buf.set(x, y, .{ .char = '*', .style = style });
-        x += 1;
+fn renderPermMessageContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+    const pm = &app.input_mode.perm_message;
+    renderFieldWidget(app, arena, pm.field.slice(), pm.field.cursor, area, .{
+        .prompt = COMPOSER_PROMPT,
+        .text = fieldTextStyle(app),
+    }, buf);
+    if (app.screenshot_buf != null) {
+        buf.setString(area.x +| area.width -| 6, area.y, "[IMG]", .{ .fg = app.theme.ok });
     }
-    const caret: usize = @min(pp.field.cursor, max_chars);
-    buf.set(area.x +| label_width +| @as(u16, @intCast(caret)), y, .{ .char = '_', .style = style });
+}
+
+fn completionAnchor(app: *App, arena: std.mem.Allocator, width: u16) r.tui.input_layout.Pos {
+    const display = app.displayInput(arena);
+    var l = r.tui.input_layout.layout(arena, display.text, display.cursor, width, .{}, .{}, null) catch return .{};
+    defer l.deinit(arena);
+    return r.tui.input_layout.visualPos(&l, r.completion.tokenAt(display.text, display.cursor).start);
 }
 
 const WIZARD_HELP_TEXT = "↑/↓ select · enter next · esc abort";
@@ -3377,11 +3211,15 @@ fn wizardSelStyle(selected: bool) r.tui.Style {
 
 fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     buf.fill(area, .{ .style = .{ .bg = app.theme.overlay_dark } });
+    if (area.height == 0) return;
     const w = &app.input_mode.wizard;
     var para: r.tui.Paragraph = .{ .border = .none, .padding = .{ .left = 2, .right = 2 } };
+    var err: r.tui.Paragraph = .{ .border = .none, .padding = .{ .left = 2, .right = 2 } };
     const title_style: r.tui.Style = .{ .fg = app.theme.info, .modifier = .{ .bold = true } };
     const muted_style: r.tui.Style = .{ .fg = app.theme.muted };
     const err_style: r.tui.Style = .{ .fg = app.theme.err };
+    var field: ?*r.tui.Field(256) = null;
+    var field_mask: ?u8 = null;
 
     var l = r.tui.Line{};
     l.pushText(arena, "Setup — blitzdenk first-run wizard", title_style) catch {};
@@ -3413,17 +3251,18 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
         },
         .url => {
             wizardAppendHeading(arena, &para, "Endpoint url (enter keeps the shown value):");
-            wizardAppendInputLine(arena, &para, &w.url, true);
+            field = &w.url;
         },
         .key => {
             wizardAppendHeading(arena, &para, "Paste your api key (stored in provider.lua):");
-            wizardAppendInputLine(arena, &para, &w.key, true);
+            field = &w.key;
+            field_mask = '*';
         },
         .model => {
             const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
             if (entry.free_text_model_only) {
                 wizardAppendHeading(arena, &para, "Model id:");
-                wizardAppendInputLine(arena, &para, &w.model, true);
+                field = &w.model;
             } else {
                 wizardAppendHeading(arena, &para, "Choose a model or type in the model id string (same thing)");
                 wizardAppendHeading(arena, &para, "");
@@ -3431,7 +3270,7 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
                     wizardAppendOption(arena, &para, model.name, !w.model_free_text and w.model_curated_index == i);
                 }
                 wizardAppendOption(arena, &para, "Enter model id…", w.model_free_text);
-                if (w.model_free_text) wizardAppendInputLine(arena, &para, &w.model, true);
+                if (w.model_free_text) field = &w.model;
             }
         },
         .vision => {
@@ -3471,10 +3310,35 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
     if (w.error_msg) |msg| {
         var err_line = r.tui.Line{};
         err_line.pushText(arena, msg, err_style) catch {};
-        para.lines.append(arena, err_line) catch {};
+        err.lines.append(arena, err_line) catch {};
+    }
+    const err_rows: u16 = @min(err.totalHeight(area.width), area.height -| 1);
+    const field_rows: u16 = @intCast(@max(1, @as(usize, area.height) -| para.totalHeightLong(area.width) -| err_rows));
+    const shown_rows: u16 = area.height -| field_rows -| err_rows;
+
+    para.renderSimple(arena, .{ .x = area.x, .y = area.y, .width = area.width, .height = shown_rows }, buf);
+
+    if (field) |f| {
+        renderFieldWidget(app, arena, f.slice(), f.cursor, .{
+            .x = area.x +| WIDGET_PAD_X,
+            .y = area.y +| shown_rows,
+            .width = inputContentWidth(area.width),
+            .height = field_rows,
+        }, .{
+            .prompt = modePrompt(&app.input_mode),
+            .text = wizardSelStyle(true),
+            .mask = field_mask,
+        }, buf);
     }
 
-    para.renderSimple(arena, area, buf);
+    if (err_rows > 0) {
+        err.renderSimple(arena, .{
+            .x = area.x,
+            .y = area.y +| shown_rows +| field_rows,
+            .width = area.width,
+            .height = err_rows,
+        }, buf);
+    }
 }
 
 fn wizardAppendHeading(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8) void {
@@ -3555,27 +3419,6 @@ fn wizardAppendOption(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []
     var line = r.tui.Line{};
     line.pushText(arena, if (selected) "❯ " else "  ", wizardSelStyle(selected)) catch return;
     line.pushText(arena, text, wizardSelStyle(selected)) catch return;
-    para.lines.append(arena, line) catch {};
-}
-
-fn wizardAppendInputLine(arena: std.mem.Allocator, para: *r.tui.Paragraph, field: anytype, selected: bool) void {
-    const base = wizardSelStyle(selected);
-    var caret = base;
-    caret.modifier.reverse = true;
-
-    const text = field.slice();
-    const cursor = @min(field.cursor, text.len);
-    var line = r.tui.Line{};
-    line.pushText(arena, "  ", base) catch return;
-    line.pushText(arena, text[0..cursor], base) catch return;
-    if (cursor < text.len) {
-        const len = std.unicode.utf8ByteSequenceLength(text[cursor]) catch 1;
-        const stop = @min(cursor + len, text.len);
-        line.pushText(arena, text[cursor..stop], caret) catch return;
-        line.pushText(arena, text[stop..], base) catch return;
-    } else {
-        line.pushText(arena, "_", caret) catch return;
-    }
     para.lines.append(arena, line) catch {};
 }
 
@@ -5931,7 +5774,7 @@ test "completion matcher excludes exact prefix" {
     try std.testing.expect(completionMatches(skills[1], "/skill"));
 }
 
-test "inputWrapPosition reports rows above and column of token start" {
+test "completionAnchor points at the completion token" {
     const testing = std.testing;
     var app: App = undefined;
     app.io = testing.io;
@@ -5942,56 +5785,21 @@ test "inputWrapPosition reports rows above and column of token start" {
 
     app.input.set("check ./src/foo");
     app.input.cursor = 15;
-
-    const anchor = inputWrapPosition(&app, arena.allocator(), 80, true);
+    const anchor = completionAnchor(&app, arena.allocator(), 80);
     try testing.expectEqual(@as(usize, 0), anchor.row);
     try testing.expectEqual(@as(usize, 6), anchor.col);
-    const caret = inputWrapPosition(&app, arena.allocator(), 80, false);
-    try testing.expectEqual(@as(usize, 0), caret.row);
 
     app.input.set("hello\n./src/foo");
     app.input.cursor = 15;
-    const multiline = inputWrapPosition(&app, arena.allocator(), 80, true);
+    const multiline = completionAnchor(&app, arena.allocator(), 80);
     try testing.expectEqual(@as(usize, 1), multiline.row);
     try testing.expectEqual(@as(usize, 0), multiline.col);
-    try testing.expectEqual(@as(usize, 2), multiline.total);
-
-    app.input.cursor = 2;
-    const cursor_back = inputWrapPosition(&app, arena.allocator(), 80, false);
-    try testing.expectEqual(@as(usize, 0), cursor_back.row);
-    try testing.expectEqual(@as(usize, 2), cursor_back.total);
-
-    app.input.set("ab\n");
-    app.input.cursor = 3;
-    const trailing = inputWrapPosition(&app, arena.allocator(), 80, false);
-    try testing.expectEqual(@as(usize, 1), trailing.row);
-    try testing.expectEqual(@as(usize, 2), trailing.total);
-
-    app.input.set("aa bb cc d");
-    app.input.cursor = 10;
-    const exact_fill = inputWrapPosition(&app, arena.allocator(), 10, false);
-    try testing.expectEqual(@as(usize, 0), exact_fill.row);
-    try testing.expectEqual(@as(usize, 1), exact_fill.total);
-
-    app.input.set("aa bb cc d ");
-    app.input.cursor = 11;
-    const space_wrap = inputWrapPosition(&app, arena.allocator(), 10, false);
-    try testing.expectEqual(@as(usize, 1), space_wrap.row);
-    try testing.expectEqual(@as(usize, 2), space_wrap.total);
-
-    app.input.set("a  ");
-    app.input.cursor = 2;
-    const mid_run = inputWrapPosition(&app, arena.allocator(), 1, false);
-    try testing.expectEqual(@as(usize, 1), mid_run.row);
-    try testing.expectEqual(@as(usize, 0), mid_run.col);
-    try testing.expectEqual(@as(usize, 2), mid_run.total);
 
     app.input.set("aa bb cc dd ee /file");
     app.input.cursor = 20;
-    const wrapped = inputWrapPosition(&app, arena.allocator(), 10, true);
-    try testing.expectEqual(@as(usize, 1), wrapped.row);
-    try testing.expectEqual(@as(usize, 6), wrapped.col);
-    try testing.expectEqual(@as(usize, 3), wrapped.total);
+    const wrapped = completionAnchor(&app, arena.allocator(), 10);
+    try testing.expectEqual(@as(usize, 2), wrapped.row);
+    try testing.expectEqual(@as(usize, 0), wrapped.col);
 }
 
 test "moveCursorVertical preserves column and clamps to line end" {
@@ -6002,41 +5810,64 @@ test "moveCursorVertical preserves column and clamps to line end" {
     app.input_mode = .{ .text = .{} };
     app.input = .{};
     app.input_desired_col = null;
-    app.widget_frame_input_area = .{ .width = 100, .height = 10 };
+    app.widget_frame_input_area = .{ .width = 17, .height = 10 };
 
     app.input.set("abc\nxy\ndefghi");
     app.input.cursor = 3;
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 6), app.input.cursor);
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 10), app.input.cursor);
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 10), app.input.cursor);
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 6), app.input.cursor);
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 3), app.input.cursor);
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 3), app.input.cursor);
 
     app.input.cursor = 8;
     app.input_desired_col = null;
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 5), app.input.cursor);
 
     app.input.set("abcd\ncé");
     app.input.cursor = 2;
     app.input_desired_col = null;
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 8), app.input.cursor);
 
     app.input.set("one");
     app.input.cursor = 1;
     app.input_desired_col = null;
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 1), app.input.cursor);
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 1), app.input.cursor);
+}
+
+test "moveCursorVertical keeps the wizard free text field" {
+    const testing = std.testing;
+    var app: App = undefined;
+    app.io = testing.io;
+    app.gpa = testing.allocator;
+    app.input = .{};
+    app.input_mode = .{ .wizard = .{ .step = .model, .model_free_text = true } };
+    app.input_desired_col = null;
+    app.widget_frame_input_area = .{ .width = 13, .height = 10 };
+
+    const typed = "my/very/long/model/id";
+    app.input_mode.wizard.model.set(typed);
+    app.input_mode.wizard.model.cursor = typed.len;
+    try testing.expect(app.moveCursorVertical(-1));
+    try testing.expect(app.input_mode.wizard.model.cursor < typed.len);
+    try testing.expectEqualStrings(typed, app.input_mode.wizard.model.slice());
+    try testing.expect(app.moveCursorVertical(-1));
+    try testing.expectEqualStrings(typed, app.input_mode.wizard.model.slice());
+
+    app.input_mode = .{ .wizard = .{ .step = .model, .model_free_text = false } };
+    try testing.expect(!app.moveCursorVertical(-1));
 }
 
 test "moveCursorVertical moves by wrapped rows" {
@@ -6051,97 +5882,62 @@ test "moveCursorVertical moves by wrapped rows" {
 
     app.input.set("aaaa bbbb cccc dddd eeee ffff");
     app.input.cursor = 30;
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 24), app.input.cursor);
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 19), app.input.cursor);
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 24), app.input.cursor);
 
     app.input.cursor = 2;
     app.input_desired_col = null;
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 7), app.input.cursor);
 
     app.input.set("aaaaaa bbb");
     app.input.cursor = 2;
     app.input_desired_col = null;
     app.widget_frame_input_area = .{ .width = 9, .height = 10 };
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 6), app.input.cursor);
 
     app.input.set("aaaaaaaaaaaaaaaa");
     app.input.cursor = 16;
     app.input_desired_col = null;
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 11), app.input.cursor);
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 7), app.input.cursor);
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 3), app.input.cursor);
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 3), app.input.cursor);
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 7), app.input.cursor);
 
     app.input.set("ab\ncd");
     app.input.cursor = 1;
     app.input_desired_col = null;
     app.widget_frame_input_area = .{ .width = 0, .height = 10 };
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 1), app.input.cursor);
 
     app.input.set("ab\n");
     app.input.cursor = 3;
     app.input_desired_col = null;
-    app.widget_frame_input_area = .{ .width = 100, .height = 10 };
-    app.moveCursorVertical(1);
+    app.widget_frame_input_area = .{ .width = 17, .height = 10 };
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 3), app.input.cursor);
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 0), app.input.cursor);
 
     app.input.set("");
     app.input.cursor = 0;
     app.input_desired_col = null;
-    app.moveCursorVertical(-1);
+    _ = app.moveCursorVertical(-1);
     try testing.expectEqual(@as(usize, 0), app.input.cursor);
-    app.moveCursorVertical(1);
+    _ = app.moveCursorVertical(1);
     try testing.expectEqual(@as(usize, 0), app.input.cursor);
-}
-
-test "appendWrappedPlainRows matches wrapLine row boundaries" {
-    const testing = std.testing;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const cases = [_]struct { text: []const u8, width: usize }{
-        .{ .text = "aaaa bbbb cccc dddd", .width = 9 },
-        .{ .text = "aaaaaaaa bbb", .width = 4 },
-        .{ .text = "ab   cd", .width = 5 },
-        .{ .text = "héllo wörld foo", .width = 4 },
-        .{ .text = "   ", .width = 3 },
-        .{ .text = "a b c d e f g", .width = 1 },
-        .{ .text = "⠋⠙⠹\xe2", .width = 3 },
-        .{ .text = "bad \x80\x81 bytes \xff end", .width = 8 },
-    };
-
-    for (cases) |case| {
-        var line: r.tui.Line = .{};
-        try line.pushText(a, case.text, .{});
-        var wrapped: std.ArrayList(r.tui.Line) = .empty;
-        try r.tui.wrapLine(a, &line, case.width, &wrapped);
-
-        var rows: std.ArrayList(App.VisualRow) = .empty;
-        try App.appendWrappedPlainRows(a, case.text, case.width, 0, &rows);
-
-        try testing.expectEqual(wrapped.items.len, rows.items.len);
-        for (wrapped.items, rows.items) |*w, row| {
-            var content: std.ArrayList(u8) = .empty;
-            for (w.spans.items) |span| try content.appendSlice(a, span.content);
-            try testing.expectEqualStrings(content.items, case.text[row.start..row.end]);
-        }
-    }
 }
 
 test "completion visibility rule" {

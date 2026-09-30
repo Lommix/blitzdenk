@@ -353,11 +353,181 @@ pub const Text = struct {
     }
 };
 
+pub const WrapRow = struct {
+    start: usize,
+    end: usize,
+    cols: usize,
+};
+
+const Mark = struct { span: usize, pos: usize };
+
+const Run = struct { end: Mark, cols: usize, bytes: usize };
+
+fn markBefore(a: Mark, b: Mark) bool {
+    return a.span < b.span or (a.span == b.span and a.pos < b.pos);
+}
+
+fn markPush(cur: *Line, alloc: std.mem.Allocator, spans: []const Span, from: Mark, to: Mark) !void {
+    var m = from;
+    while (markBefore(m, to)) {
+        const content = spans[m.span].content;
+        const stop = if (m.span == to.span) to.pos else content.len;
+        if (m.pos < stop) try cur.pushSpan(alloc, .{ .content = content[m.pos..stop], .style = spans[m.span].style });
+        m = .{ .span = m.span + 1, .pos = 0 };
+    }
+}
+
+pub fn codepointLen(s: []const u8, i: usize) usize {
+    return @min(std.unicode.utf8ByteSequenceLength(s[i]) catch 1, s.len - i);
+}
+
+pub fn displayCols(s: []const u8) usize {
+    var cols: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        i += codepointLen(s, i);
+        cols += 1;
+    }
+    return cols;
+}
+
+fn markScan(spans: []const Span, from: Mark, stop: ?Mark, max_cols: usize, space: ?bool) Run {
+    var m = from;
+    var take: Run = .{ .end = from, .cols = 0, .bytes = 0 };
+    while (take.cols < max_cols and (stop == null or markBefore(m, stop.?))) {
+        const content = spans[m.span].content;
+        const limit = if (stop) |s| (if (m.span == s.span) s.pos else content.len) else content.len;
+        while (m.pos < limit and take.cols < max_cols) {
+            const cp = @min(codepointLen(content, m.pos), limit - m.pos);
+            const len: usize = if (space) |sp| (if ((content[m.pos] == ' ') == sp) cp else 0) else cp;
+            if (len == 0) break;
+            m.pos += len;
+            take.bytes += len;
+            take.cols += 1;
+        }
+        if (m.pos < limit or m.span + 1 >= spans.len) break;
+        take.bytes += content.len - m.pos;
+        m = .{ .span = m.span + 1, .pos = 0 };
+    }
+    take.end = m;
+    return take;
+}
+
+const WrapState = struct {
+    alloc: ?std.mem.Allocator,
+    out: ?*std.ArrayList(Line),
+    rows: ?*std.ArrayList(WrapRow),
+    cur: Line,
+    first_width: usize,
+    cont_width: usize,
+    col: usize = 0,
+    row_start: usize = 0,
+    src: usize = 0,
+    row_count: usize = 0,
+    has_content: bool = false,
+
+    fn width(self: *const WrapState) usize {
+        return if (self.row_count == 0) self.first_width else self.cont_width;
+    }
+
+    fn push(self: *WrapState, spans: []const Span, from: Mark, to: Mark) !void {
+        self.has_content = true;
+        if (self.out != null) try markPush(&self.cur, self.alloc.?, spans, from, to);
+    }
+
+    fn flush(self: *WrapState) !void {
+        if (self.out) |out| {
+            try out.append(self.alloc.?, self.cur);
+            self.cur = .{ .style = self.cur.style };
+        }
+        if (self.rows) |rows| {
+            try rows.append(self.alloc.?, .{ .start = self.row_start, .end = self.src, .cols = self.col });
+        }
+        self.row_start = self.src;
+        self.col = 0;
+        self.row_count += 1;
+        self.has_content = false;
+    }
+};
+
+fn wrapRows(
+    alloc: ?std.mem.Allocator,
+    src: *const Line,
+    first_width: usize,
+    cont_width: usize,
+    out: ?*std.ArrayList(Line),
+    rows_out: ?*std.ArrayList(WrapRow),
+) !usize {
+    if (first_width == 0 and cont_width == 0) return 0;
+
+    var st: WrapState = .{
+        .alloc = alloc,
+        .out = out,
+        .rows = rows_out,
+        .cur = .{ .style = src.style },
+        .first_width = first_width,
+        .cont_width = cont_width,
+    };
+    errdefer if (st.alloc) |a| st.cur.deinit(a);
+
+    const spans = src.spans.items;
+    var si: usize = 0;
+    var pos: usize = 0;
+
+    while (si < spans.len) {
+        if (pos >= spans[si].content.len) {
+            si += 1;
+            pos = 0;
+            continue;
+        }
+        const space = spans[si].content[pos] == ' ';
+        const from: Mark = .{ .span = si, .pos = pos };
+        const run = markScan(spans, from, null, std.math.maxInt(usize), space);
+        si = run.end.span;
+        pos = run.end.pos;
+
+        const row_width = st.width();
+        const fits = run.cols <= row_width -| st.col;
+        const placeable = (st.col > 0 or run.cols <= row_width) and (space or run.cols <= row_width);
+        if (placeable and st.col > 0 and !fits) {
+            try st.flush();
+            if (space) {
+                st.src += run.bytes;
+                st.row_start = st.src;
+                continue;
+            }
+        }
+        if (placeable) {
+            try st.push(spans, from, run.end);
+            st.col += run.cols;
+            st.src += run.bytes;
+            continue;
+        }
+
+        var m = from;
+        while (markBefore(m, run.end)) {
+            const take = markScan(spans, m, run.end, st.width() -| st.col, null);
+            try st.push(spans, m, take.end);
+            st.col += take.cols;
+            st.src += take.bytes;
+            m = take.end;
+            if (markBefore(m, run.end)) try st.flush();
+        }
+    }
+
+    if (st.has_content or spans.len == 0) {
+        try st.flush();
+    } else if (st.alloc) |a| {
+        st.cur.deinit(a);
+    }
+    return st.row_count;
+}
+
 /// Wrap a span-sequence into lines of <= width columns.
 /// Word boundaries are spaces. Words longer than width are hard-split.
 /// Styles are preserved per sub-span. Caller owns output and must deinit each Line.
 pub fn wrapLine(alloc: std.mem.Allocator, src: *const Line, width: usize, out: *std.ArrayList(Line)) !void {
-    return wrapLineEx(alloc, src, width, width, out);
+    _ = try wrapRows(alloc, src, width, width, out, null);
 }
 
 /// Like wrapLine but the first emitted row uses `first_width` columns; subsequent
@@ -369,93 +539,21 @@ pub fn wrapLineEx(
     cont_width: usize,
     out: *std.ArrayList(Line),
 ) !void {
-    if (first_width == 0 and cont_width == 0) return;
+    _ = try wrapRows(alloc, src, first_width, cont_width, out, null);
+}
 
-    var cur: Line = .{ .style = src.style };
-    errdefer cur.deinit(alloc);
-    var col: usize = 0;
-    var emitted: usize = 0;
-    const startWidth = struct {
-        fn f(em: usize, fw: usize, cw: usize) usize {
-            return if (em == 0) fw else cw;
-        }
-    }.f;
-    var width = startWidth(emitted, first_width, cont_width);
+pub fn wrapLineTracked(
+    alloc: std.mem.Allocator,
+    src: *const Line,
+    width: usize,
+    out: *std.ArrayList(Line),
+    rows: *std.ArrayList(WrapRow),
+) !usize {
+    return wrapRows(alloc, src, width, width, out, rows);
+}
 
-    for (src.spans.items) |span| {
-        var pos: usize = 0;
-        while (pos < span.content.len) {
-            const is_space = span.content[pos] == ' ';
-            var end = pos + 1;
-            while (end < span.content.len and (span.content[end] == ' ') == is_space) end += 1;
-            const run = span.content[pos..end];
-            pos = end;
-
-            const run_cols = std.unicode.utf8CountCodepoints(run) catch run.len;
-
-            if (is_space) {
-                if (col > 0 and col + run_cols > width) {
-                    try out.append(alloc, cur);
-                    cur = .{ .style = src.style };
-                    col = 0;
-                    emitted += 1;
-                    width = startWidth(emitted, first_width, cont_width);
-                    continue;
-                }
-                try cur.pushSpan(alloc, .{ .content = run, .style = span.style });
-                col += run_cols;
-                continue;
-            }
-
-            if (run_cols <= width) {
-                if (col + run_cols > width) {
-                    try out.append(alloc, cur);
-                    cur = .{ .style = src.style };
-                    col = 0;
-                    emitted += 1;
-                    width = startWidth(emitted, first_width, cont_width);
-                }
-                try cur.pushSpan(alloc, .{ .content = run, .style = span.style });
-                col += run_cols;
-            } else {
-                var bi: usize = 0;
-                while (bi < run.len) {
-                    const remaining = width -| col;
-                    var take_bytes: usize = 0;
-                    var take_cols: usize = 0;
-                    while (bi + take_bytes < run.len and take_cols < remaining) {
-                        const len = std.unicode.utf8ByteSequenceLength(run[bi + take_bytes]) catch 1;
-                        take_bytes += @min(len, run.len - bi - take_bytes);
-                        take_cols += 1;
-                    }
-                    if (take_cols == 0) {
-                        try out.append(alloc, cur);
-                        cur = .{ .style = src.style };
-                        col = 0;
-                        emitted += 1;
-                        width = startWidth(emitted, first_width, cont_width);
-                        continue;
-                    }
-                    try cur.pushSpan(alloc, .{ .content = run[bi .. bi + take_bytes], .style = span.style });
-                    col += take_cols;
-                    bi += take_bytes;
-                    if (col >= width and bi < run.len) {
-                        try out.append(alloc, cur);
-                        cur = .{ .style = src.style };
-                        col = 0;
-                        emitted += 1;
-                        width = startWidth(emitted, first_width, cont_width);
-                    }
-                }
-            }
-        }
-    }
-
-    if (cur.spans.items.len > 0 or src.spans.items.len == 0) {
-        try out.append(alloc, cur);
-    } else {
-        cur.deinit(alloc);
-    }
+pub fn wrapLineCount(src: *const Line, first_width: usize, cont_width: usize) usize {
+    return wrapRows(null, src, first_width, cont_width, null, null) catch 0;
 }
 
 fn prependIndent(alloc: std.mem.Allocator, row: *Line, indent: usize) !void {
@@ -660,6 +758,55 @@ test "wrapLine terminates on truncated and invalid utf8" {
     }
 }
 
+test "wrapLine adds no phantom row after a trailing space run" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct { text: []const u8, width: usize, rows: []const []const u8 }{
+        .{ .text = "ab    ", .width = 3, .rows = &.{"ab"} },
+        .{ .text = "ab   ", .width = 3, .rows = &.{"ab"} },
+        .{ .text = "abc    ", .width = 3, .rows = &.{"abc"} },
+        .{ .text = "日x         ", .width = 9, .rows = &.{"日x"} },
+        .{ .text = "b   日 é   a日 ", .width = 2, .rows = &.{ "b", "日 ", "é", "a日" } },
+        .{ .text = "a b ", .width = 2, .rows = &.{ "a ", "b " } },
+        .{ .text = "   ", .width = 3, .rows = &.{"   "} },
+        .{ .text = "", .width = 3, .rows = &.{} },
+        .{ .text = "hello world", .width = 4, .rows = &.{ "hell", "o wo", "rld" } },
+        .{ .text = "aaaaaaaaaa", .width = 4, .rows = &.{ "aaaa", "aaaa", "aa" } },
+        .{ .text = "日本語 テスト end", .width = 8, .rows = &.{ "日本語 テスト ", "end" } },
+        .{ .text = "██████╗ ██╗", .width = 11, .rows = &.{"██████╗ ██╗"} },
+        .{ .text = "██████╗ ██╗ ███████╗███╗   ██╗", .width = 100, .rows = &.{"██████╗ ██╗ ███████╗███╗   ██╗"} },
+    };
+    for (cases) |case| {
+        var src: Line = .{};
+        defer src.deinit(alloc);
+        try src.pushText(alloc, case.text, .{});
+
+        var out: std.ArrayList(Line) = .empty;
+        defer {
+            for (out.items) |*l| l.deinit(alloc);
+            out.deinit(alloc);
+        }
+
+        try wrapLine(alloc, &src, case.width, &out);
+        try std.testing.expectEqual(case.rows.len, out.items.len);
+        try std.testing.expectEqual(case.rows.len, wrapLineCount(&src, case.width, case.width));
+        for (case.rows, out.items) |want, got| {
+            const text = try lineText(alloc, &got);
+            defer alloc.free(text);
+            try std.testing.expectEqualStrings(want, text);
+        }
+    }
+
+    var empty: Line = .{};
+    defer empty.deinit(alloc);
+    var out: std.ArrayList(Line) = .empty;
+    defer {
+        for (out.items) |*l| l.deinit(alloc);
+        out.deinit(alloc);
+    }
+    try wrapLine(alloc, &empty, 3, &out);
+    try std.testing.expectEqual(@as(usize, 1), out.items.len);
+}
+
 test "wrapLineIndented indents wrapped list continuation rows" {
     const alloc = std.testing.allocator;
     var src: Line = .{};
@@ -677,7 +824,7 @@ test "wrapLineIndented indents wrapped list continuation rows" {
     try std.testing.expect(out.items.len > 1);
     try std.testing.expectEqualStrings("•", out.items[0].spans.items[0].content);
     try std.testing.expectEqualStrings("  ", out.items[1].spans.items[0].content);
-    try std.testing.expectEqual(@as(usize, out.items.len), countWrappedRowsEx(&src, 11, 9));
+    try std.testing.expectEqual(@as(usize, out.items.len), wrapLineCount(&src, 11, 9));
 }
 
 test "buildParagraphRows indents wrapped list continuation rows" {
@@ -810,90 +957,6 @@ pub const DiffLine = struct {
     kind: DiffLineKind,
     line_number: ?u32 = null,
     content: []const u8,
-};
-
-// ── Input ──
-
-pub const Input = struct {
-    text: []const u8,
-    cursor: usize = std.math.maxInt(usize),
-    border_style: Style = .{},
-    text_style: Style = .{},
-    screenshot_style: Style = .{},
-    has_screenshot: bool = false,
-
-    pub fn render(self: *const Input, area: Rect, buf: *Buffer) void {
-        const block: Block = .{
-            .border_style = self.border_style,
-            .borders = .{ .bottom = true, .left = true, .right = true },
-        };
-
-        const prompt_area: Rect = .{ .x = area.x, .y = area.y, .height = 5, .width = area.width };
-
-        block.render(prompt_area, buf);
-        const inner = block.innerArea(prompt_area);
-
-        const input_end = inner.x + inner.width;
-        const input_start = inner.x + 2;
-        const inner_end_y = inner.y + inner.height;
-
-        buf.set(inner.x, inner.y, .{ .char = '❯' });
-
-        // Screenshot indicator
-        if (self.has_screenshot) {
-            const tag = "[IMG]";
-            const tag_x: u16 = if (input_end > tag.len + 1) input_end - @as(u16, tag.len + 1) else inner.x;
-            for (tag, 0..) |ch, i| {
-                buf.set(tag_x +| @as(u16, @intCast(i)), inner.y, .{ .char = ch, .style = self.screenshot_style });
-            }
-        }
-
-        var cx = input_start;
-        var cy = inner.y;
-        var caret_shown = false;
-
-        var pos: usize = 0;
-        while (pos < self.text.len) {
-            const at_cursor = pos == self.cursor;
-            const cp_len = std.unicode.utf8ByteSequenceLength(self.text[pos]) catch 1;
-            const stop = @min(pos + cp_len, self.text.len);
-            const cp = if (stop - pos == cp_len)
-                (std.unicode.utf8Decode(self.text[pos..stop]) catch 0xFFFD)
-            else
-                0xFFFD;
-            pos = stop;
-            if (cp == '\n') {
-                cx = input_start;
-                cy += 1;
-                if (cy >= inner_end_y) break;
-                continue;
-            }
-
-            if (cy < inner_end_y) {
-                if (at_cursor) {
-                    buf.set(cx, cy, .{ .char = cp, .style = self.caretStyle() });
-                    caret_shown = true;
-                } else {
-                    buf.set(cx, cy, .{ .char = cp, .style = self.text_style });
-                }
-            }
-            cx += 1;
-            if (cx >= input_end) {
-                cx = input_start;
-                cy += 1;
-            }
-        }
-
-        if (!caret_shown and cy < inner_end_y and cx < input_end) {
-            buf.set(cx, cy, .{ .char = '_', .style = self.border_style });
-        }
-    }
-
-    fn caretStyle(self: *const Input) Style {
-        var style = self.text_style;
-        style.modifier.reverse = true;
-        return style;
-    }
 };
 
 pub const Padding = struct {
@@ -1300,82 +1363,13 @@ fn countParagraphRows(lines: []Line, width: u16) usize {
 
         const indent = listMarkerIndent(&lines[i]) orelse blockquoteIndent(&lines[i]) orelse 0;
         const wrapped = if (indent > 0 and @as(usize, width) > indent)
-            countWrappedRowsEx(&lines[i], width, width - indent)
+            wrapLineCount(&lines[i], width, width - indent)
         else
-            countWrappedRows(&lines[i], width);
+            wrapLineCount(&lines[i], width, width);
         count += if (wrapped == 0) 1 else wrapped;
         i += 1;
     }
     return count;
-}
-
-fn countWrappedRows(src: *const Line, width: u16) usize {
-    return countWrappedRowsEx(src, width, width);
-}
-
-fn countWrappedRowsEx(src: *const Line, first_width: usize, cont_width: usize) usize {
-    if (first_width == 0 and cont_width == 0) return 0;
-
-    var rows: usize = 0;
-    var col: usize = 0;
-    var width = first_width;
-
-    for (src.spans.items) |span| {
-        var pos: usize = 0;
-        while (pos < span.content.len) {
-            const is_space = span.content[pos] == ' ';
-            var end = pos + 1;
-            while (end < span.content.len and (span.content[end] == ' ') == is_space) end += 1;
-            const run = span.content[pos..end];
-            pos = end;
-
-            const run_cols = std.unicode.utf8CountCodepoints(run) catch run.len;
-            if (is_space) {
-                if (col > 0 and col + run_cols > width) {
-                    rows += 1;
-                    col = 0;
-                    width = cont_width;
-                    continue;
-                }
-                col += run_cols;
-            } else if (run_cols <= width) {
-                if (col + run_cols > width) {
-                    rows += 1;
-                    col = 0;
-                    width = cont_width;
-                }
-                col += run_cols;
-            } else {
-                var bi: usize = 0;
-                while (bi < run.len) {
-                    const remaining = width -| col;
-                    var take_bytes: usize = 0;
-                    var take_cols: usize = 0;
-                    while (bi + take_bytes < run.len and take_cols < remaining) {
-                        const len = std.unicode.utf8ByteSequenceLength(run[bi + take_bytes]) catch 1;
-                        take_bytes += @min(len, run.len - bi - take_bytes);
-                        take_cols += 1;
-                    }
-                    if (take_cols == 0) {
-                        rows += 1;
-                        col = 0;
-                        width = cont_width;
-                        continue;
-                    }
-                    col += take_cols;
-                    bi += take_bytes;
-                    if (col >= width and bi < run.len) {
-                        rows += 1;
-                        col = 0;
-                        width = cont_width;
-                    }
-                }
-            }
-        }
-    }
-
-    if (col > 0 or src.spans.items.len == 0) rows += 1;
-    return rows;
 }
 
 pub fn appendTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: *std.ArrayList(Line)) !void {
@@ -1579,112 +1573,5 @@ fn renderRowClipped(row: *const Line, x: i32, y: i32, max_width: u16, buf: *Buff
             setClipped(buf, clip, x + @as(i32, col), y, .{ .char = cp, .style = span_style });
             col +|= 1;
         }
-    }
-}
-
-test "input keeps overflowing text inside the box" {
-    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });
-    defer buf.deinit();
-    const input: Input = .{ .text = "r1\nr2\nr3\nr4\nr5\nr6" };
-    input.render(.{ .width = 16, .height = 9 }, &buf);
-
-    try std.testing.expectEqual(@as(u21, '╰'), buf.get(0, 4).char);
-    try std.testing.expectEqual(@as(u21, '╯'), buf.get(15, 4).char);
-    var x: u16 = 1;
-    while (x < 15) : (x += 1) {
-        try std.testing.expectEqual(@as(u21, '─'), buf.get(x, 4).char);
-    }
-    var y: u16 = 5;
-    while (y < 9) : (y += 1) {
-        var x2: u16 = 0;
-        while (x2 < 16) : (x2 += 1) {
-            try std.testing.expectEqual(@as(u21, ' '), buf.get(x2, y).char);
-        }
-    }
-}
-
-test "input renders newline rows without phantom breaks" {
-    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });
-    defer buf.deinit();
-    const input: Input = .{ .text = "one\ntwo three" };
-    input.render(.{ .width = 16, .height = 9 }, &buf);
-
-    const row1 = "one";
-    for (row1, 0..) |ch, i| {
-        try std.testing.expectEqual(@as(u21, ch), buf.get(3 + @as(u16, @intCast(i)), 1).char);
-    }
-    const row2 = "two three";
-    for (row2, 0..) |ch, i| {
-        try std.testing.expectEqual(@as(u21, ch), buf.get(3 + @as(u16, @intCast(i)), 2).char);
-    }
-}
-
-test "input caret lands on the cell under the cursor" {
-    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });
-    defer buf.deinit();
-    const text = "ab  cd";
-    const input: Input = .{ .text = text, .cursor = 4 };
-    input.render(.{ .width = 16, .height = 9 }, &buf);
-
-    try std.testing.expectEqual(@as(u21, 'c'), buf.get(3 + 4, 1).char);
-    try std.testing.expect(buf.get(3 + 4, 1).style.modifier.reverse);
-    try std.testing.expect(!buf.get(3 + 3, 1).style.modifier.reverse);
-    var y: u16 = 0;
-    while (y < 9) : (y += 1) {
-        var x: u16 = 0;
-        while (x < 16) : (x += 1) {
-            if (x == 3 + 4 and y == 1) continue;
-            try std.testing.expect(!buf.get(x, y).style.modifier.reverse);
-        }
-    }
-}
-
-test "input caret follows the cursor onto a wrapped row" {
-    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });
-    defer buf.deinit();
-    const text = "aaaa bbbb cccc";
-    const input: Input = .{ .text = text, .cursor = "aaaa bbbb cc".len };
-    input.render(.{ .width = 16, .height = 9 }, &buf);
-
-    try std.testing.expectEqual(@as(u21, 'c'), buf.get(3, 2).char);
-    try std.testing.expect(buf.get(3, 2).style.modifier.reverse);
-}
-
-test "input shows the trailing underscore when the cursor is at the end" {
-    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 16, .height = 9 });
-    defer buf.deinit();
-    const input: Input = .{ .text = "hi", .cursor = 2 };
-    input.render(.{ .width = 16, .height = 9 }, &buf);
-
-    try std.testing.expectEqual(@as(u21, 'h'), buf.get(3, 1).char);
-    try std.testing.expectEqual(@as(u21, 'i'), buf.get(4, 1).char);
-    try std.testing.expectEqual(@as(u21, '_'), buf.get(5, 1).char);
-}
-
-test "input renders nothing when the box is too narrow" {
-    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 4, .height = 9 });
-    defer buf.deinit();
-    const input: Input = .{ .text = "some long text\nwith lines" };
-    input.render(.{ .width = 4, .height = 9 }, &buf);
-
-    try std.testing.expectEqual(@as(u21, '╰'), buf.get(0, 4).char);
-    try std.testing.expectEqual(@as(u21, '╯'), buf.get(3, 4).char);
-    var y: u16 = 0;
-    while (y < 9) : (y += 1) {
-        var x: u16 = 0;
-        while (x < 4) : (x += 1) {
-            try std.testing.expect(buf.get(x, y).char != '_');
-        }
-    }
-}
-
-test "input renders truncated and invalid utf8 without panicking" {
-    var buf = try buffer.Buffer.init(std.testing.allocator, .{ .width = 20, .height = 9 });
-    defer buf.deinit();
-    const cases = [_][]const u8{ "trunc \xe2\x8b", "\xf0\x9f", "\x80\x81", "\xed\xa0\x80", "⠋⠙⠹\xe2" };
-    for (cases) |text| {
-        buf.clear();
-        const input: Input = .{ .text = text, .cursor = text.len };
-        input.render(.{ .width = 20, .height = 9 }, &buf);
     }
 }
