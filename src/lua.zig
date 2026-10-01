@@ -270,6 +270,8 @@ const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "approve", .ty = LuaType{ .raw = "fun(self: BlitzCtx, description: string): integer, string|nil" } },
     .{ .name = "plan", .ty = LuaType{ .raw = "fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil" } },
     .{ .name = "ask", .ty = LuaType{ .raw = "fun(self: BlitzCtx, header: string, question: string, options: string[]): integer, string|nil" } },
+    .{ .name = "call", .ty = LuaType{ .raw = "fun(self: BlitzCtx, name: string, args: table): string" }, .desc = "Run one tool of this agent. Returns the tool result text; the nested error text on failure. Rejects nested codemode." },
+    .{ .name = "batch", .ty = LuaType{ .raw = "fun(self: BlitzCtx, requests: table): string[]" }, .desc = "Run an array of { name, args } requests in parallel, limit 8. Returns one result text per request, in input order. A failed item does not abort the batch." },
 } } };
 const CallDef = LuaType{ .table_def = .{ .name = "BlitzCall", .fields = &.{
     .{ .name = "id", .ty = LuaType.string },
@@ -3413,6 +3415,7 @@ const CtxBridge = struct {
     cwd: []const u8,
     tool_ctx: ToolContext,
     tool_call: ToolCall,
+    nested_count: usize = 0,
 };
 
 // ── LuaVm ───────────────────────────────────────────────────────────
@@ -4901,6 +4904,8 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
         .{ "approve", &luaApprove },
         .{ "plan", &luaPlan },
         .{ "set_child_id", &luaSetChildId },
+        .{ "call", &luaCtxCall },
+        .{ "batch", &luaCtxBatch },
     }) |binding| {
         setClosureField(L, -2, binding[0], @ptrCast(bridge), binding[1]);
     }
@@ -4958,6 +4963,148 @@ fn luaSetChildId(L: ?*c.lua_State) callconv(.c) c_int {
     const id = readAgentIdArg(state, "ctx.set_child_id", 2);
     r.tools.setToolChild(bridge.tool_ctx, bridge.tool_call, id);
     return 0;
+}
+
+const NESTED_TOOL_PARALLEL: usize = 8;
+
+const NestedToolRun = struct {
+    execute: r.sdk.types.ToolExecuteFn,
+    execute_ctx: ?*anyopaque,
+    call: ToolCall,
+};
+
+fn prepareNestedRun(bridge: *CtxBridge, state: *c.lua_State, name: []const u8, args_idx: c_int) !?NestedToolRun {
+    if (std.mem.eql(u8, name, "codemode")) {
+        _ = c.luaL_error(state, "nested codemode is not allowed");
+        return null;
+    }
+    const vm = fromState(state) orelse return error.NoLuaVm;
+    const arena = vm.luaArena();
+
+    for (bridge.tool_ctx.agent().tools) |tool| {
+        if (!std.mem.eql(u8, tool.name, name)) continue;
+        const execute = tool.execute orelse break;
+        bridge.nested_count += 1;
+        return .{
+            .execute = execute,
+            .execute_ctx = tool.execute_ctx,
+            .call = .{
+                .id = try std.fmt.allocPrint(arena, "{s}/{d}", .{ bridge.tool_call.id, bridge.nested_count }),
+                .name = try arena.dupe(u8, name),
+                .input = luaToJsonAlloc(arena, state, args_idx) catch {
+                    _ = c.luaL_error(state, "nested tool args must be JSON-serializable");
+                    return null;
+                },
+            },
+        };
+    }
+    _ = c.luaL_error(state, "unknown tool");
+    return null;
+}
+
+fn runNestedTool(run: NestedToolRun, alloc: std.mem.Allocator, io: std.Io) anyerror![]const u8 {
+    const output = run.execute(run.execute_ctx, alloc, io, run.call) catch |err| {
+        if (err == error.Canceled) return err;
+        return std.fmt.allocPrint(alloc, "error: nested tool failed: {s}", .{@errorName(err)}) catch err;
+    };
+    return output.content;
+}
+
+fn luaCtxCall(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const bridge = getBridge(state) orelse return 0;
+    if (c.lua_type(state, 2) != c.LUA_TSTRING) {
+        _ = c.luaL_error(state, "ctx.call: tool name must be a string");
+        return 0;
+    }
+    if (c.lua_type(state, 3) != c.LUA_TTABLE) {
+        _ = c.luaL_error(state, "ctx.call: args must be a table");
+        return 0;
+    }
+    var name_len: usize = 0;
+    const name_ptr = c.lua_tolstring(state, 2, &name_len);
+    const run = prepareNestedRun(bridge, state, name_ptr[0..name_len], 3) catch {
+        _ = c.luaL_error(state, "ctx.call: out of memory");
+        return 0;
+    } orelse return 0;
+    const output = runNestedTool(run, bridge.tool_ctx.alloc, bridge.tool_ctx.io) catch |err| {
+        _ = c.luaL_error(state, "ctx.call: %s", @errorName(err).ptr);
+        return 0;
+    };
+    _ = c.lua_pushlstring(state, output.ptr, output.len);
+    return 1;
+}
+
+fn luaCtxBatch(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    const bridge = getBridge(state) orelse return 0;
+    if (c.lua_type(state, 2) != c.LUA_TTABLE) {
+        _ = c.luaL_error(state, "ctx.batch: requests must be a table");
+        return 0;
+    }
+    const vm = fromState(state) orelse return 0;
+    const arena = vm.luaArena();
+    const tool_ctx = bridge.tool_ctx;
+    const count = c.lua_rawlen(state, 2);
+    const runs = arena.alloc(NestedToolRun, count) catch {
+        _ = c.luaL_error(state, "ctx.batch: out of memory");
+        return 0;
+    };
+
+    for (1..count + 1) |i| {
+        _ = c.lua_rawgeti(state, 2, @intCast(i));
+        if (c.lua_type(state, -1) != c.LUA_TTABLE) {
+            _ = c.luaL_error(state, "ctx.batch: request must be a table");
+            return 0;
+        }
+        if (c.lua_getfield(state, -1, "name") != c.LUA_TSTRING) {
+            _ = c.luaL_error(state, "ctx.batch: request name must be a string");
+            return 0;
+        }
+        if (c.lua_getfield(state, -2, "args") != c.LUA_TTABLE) {
+            _ = c.luaL_error(state, "ctx.batch: request args must be a table");
+            return 0;
+        }
+        var name_len: usize = 0;
+        const name_ptr = c.lua_tolstring(state, -2, &name_len);
+        runs[i - 1] = prepareNestedRun(bridge, state, name_ptr[0..name_len], -1) catch {
+            _ = c.luaL_error(state, "ctx.batch: out of memory");
+            return 0;
+        } orelse return 0;
+        c.lua_pop(state, 3);
+    }
+
+    const futures = arena.alloc(std.Io.Future(anyerror![]const u8), count) catch {
+        _ = c.luaL_error(state, "ctx.batch: out of memory");
+        return 0;
+    };
+    const results = arena.alloc([]const u8, count) catch {
+        _ = c.luaL_error(state, "ctx.batch: out of memory");
+        return 0;
+    };
+    const parallel = @min(count, NESTED_TOOL_PARALLEL);
+    var spawned: usize = 0;
+    var awaited: usize = 0;
+    while (awaited < count) {
+        while (spawned < count and spawned - awaited < parallel) : (spawned += 1) {
+            futures[spawned] = std.Io.async(tool_ctx.io, runNestedTool, .{ runs[spawned], tool_ctx.alloc, tool_ctx.io });
+        }
+        results[awaited] = futures[awaited].await(tool_ctx.io) catch |err| {
+            for (futures[awaited..spawned]) |*future| {
+                if (future.cancel(tool_ctx.io)) |_| {} else |_| {}
+            }
+            _ = c.luaL_error(state, "ctx.batch: %s", @errorName(err).ptr);
+            return 0;
+        };
+        awaited += 1;
+    }
+
+    c.lua_createtable(state, @intCast(count), 0);
+    for (results, 0..) |output, i| {
+        _ = c.lua_pushlstring(state, output.ptr, output.len);
+        c.lua_rawseti(state, -2, @intCast(i + 1));
+    }
+    return 1;
 }
 
 /// Block on the perm event, then push (status_int, payload?) onto the Lua
@@ -5216,15 +5363,17 @@ fn luaToJsonWriter(L: *c.lua_State, idx: c_int, writer: anytype, depth: usize) !
                 c.lua_pushnil(L);
                 while (c.lua_next(L, abs_idx) != 0) {
                     // key at -2, value at -1
-                    if (c.lua_type(L, -2) == c.LUA_TSTRING) {
-                        if (!first) try writer.writeByte(',');
-                        first = false;
-                        var klen: usize = 0;
-                        const kptr = c.lua_tolstring(L, -2, &klen);
-                        try writeJsonString(writer, kptr[0..klen]);
-                        try writer.writeByte(':');
-                        try luaToJsonWriter(L, -1, writer, depth + 1);
+                    if (c.lua_type(L, -2) != c.LUA_TSTRING) {
+                        c.lua_pop(L, 2);
+                        return error.NonStringKey;
                     }
+                    if (!first) try writer.writeByte(',');
+                    first = false;
+                    var klen: usize = 0;
+                    const kptr = c.lua_tolstring(L, -2, &klen);
+                    try writeJsonString(writer, kptr[0..klen]);
+                    try writer.writeByte(':');
+                    try luaToJsonWriter(L, -1, writer, depth + 1);
                     c.lua_pop(L, 1); // pop value, keep key
                 }
                 try writer.writeByte('}');

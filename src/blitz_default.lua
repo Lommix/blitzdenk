@@ -29,20 +29,26 @@ blitz.set_capabilities({
 --- Custom Lua tooling
 ---------------------------------------------------------------------------------------------------
 local Tools = {}
-Tools.lua_repl = blitz.register_tool({
-	name = "lua_repl",
-	description = "Execute arbitrary Lua code and return the result. Runs inside the blitzdenk Lua VM",
+Tools.codemode = blitz.register_tool({
+	name = "codemode",
+	description = [[Execute a Lua script that drives the other tools. Inside the script:
+- ctx:call(name, args) runs one tool of this agent and returns its result text (error text on failure)
+- ctx:batch({ { name = ..., args = ... }, ... }) runs several in parallel (limit 8) and returns one text per request, in input order
+Only the script's printed and returned text enters the chat, so chain, loop and filter tool output at will.]],
 	args = {
 		code = { type = "string", description = "Lua code to execute", required = true },
 	},
+	snippet = "Run Lua that calls other tools (chains, loops, filtering large results)",
+	guidelines = "Use codemode to chain tool calls or to filter large tool output, instead of issuing many individual calls.",
 	func = function(ctx, call)
 		local orange = "\27[38;5;208m"
 		local bold = "\27[1m"
 		local reset = "\27[0m"
 
-		ctx:set_status(orange .. bold .. "(Lua)" .. reset .. " `" .. call.arguments.code .. "`")
+		ctx:set_status(orange .. bold .. "Codemode:" .. reset .. " `" .. call.arguments.code .. "`")
 
-		local fn, err = load(call.arguments.code)
+		local env = setmetatable({ ctx = ctx }, { __index = _G })
+		local fn, err = load(call.arguments.code, "codemode", "t", env)
 		if not fn then
 			error(err)
 		end
@@ -52,7 +58,7 @@ Tools.lua_repl = blitz.register_tool({
 			error(tostring(result))
 		end
 
-		return { msg = tostring(result or "nil") }
+		return { msg = result ~= nil and tostring(result) or nil }
 	end,
 })
 
@@ -215,7 +221,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.SKILL,
 	blitz.tools.START_MCP,
 	blitz.tools.VIEW_IMAGE,
-	Tools.lua_repl,
+	Tools.codemode,
 	Tools.cancel_tool,
 	Tools.message_tool,
 	Tools.idle_tool,
@@ -312,7 +318,7 @@ Process:
 4. Rate every tool already defined in ./blitz.lua: helped, redundant, failed, or forced a workaround. Skip this step silently when there are none.
 5. Improve ./blitz.lua only: fix broken tools, implement accepted candidates, one concern per tool, minimal bodies. Expose each new tool with blitz.add_tool(blitz.AGENT_GENERAL, name).
 6. Run `luac -p blitz.lua`. Fix errors before continuing; a broken file keeps the old config active after the hot reload.
-7. Wait for the hot reload to register the changed tools, then test each new or fixed tool directly with one real call and realistic arguments. Record pass/fail per tool. If the reload lags, fall back: load the file with dofile in lua_repl, use a stub ctx (ctx.cwd real, ctx:set_status no-op), call the tool functions by hand.
+7. Wait for the hot reload to register the changed tools, then test each new or fixed tool directly with one real call and realistic arguments. Record pass/fail per tool. If the reload lags, fall back: load the file with dofile in codemode, use a stub ctx (ctx.cwd real, ctx:set_status no-op), call the tool functions by hand.
 
 Rules:
 - Edit only ./blitz.lua in the cwd.
