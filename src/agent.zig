@@ -298,7 +298,10 @@ pub const Agent = struct {
     pub fn startCompaction(self: *Agent, fallback_cache_key: ?[]const u8) !bool {
         if (self.task != null or self.compact_task != null) return error.RunInProgress;
         const estimate = self.currentContextEstimate();
-        if (!self.compaction.shouldStart(self.history().len, estimate, self.context_limit, self.failureNow())) return false;
+        if (!self.compaction.shouldStart(self.history().len, estimate, self.context_limit, self.failureNow())) {
+            _ = self.compaction.requested.swap(.none, .acq_rel);
+            return false;
+        }
         const request = self.compaction.requested.swap(.none, .acq_rel);
         const force = request == .external;
         const cut_index = if (force) compact.computeForcedCutIndex(self.history()) else compact.computeCutIndex(self.history());
@@ -313,7 +316,7 @@ pub const Agent = struct {
     }
 
     pub fn startModel(self: *Agent, model: sdk.LanguageModel, options: sdk.GenerateOptions) !void {
-        if (self.task != null) return error.RunInProgress;
+        if (self.task != null or self.compact_task != null) return error.RunInProgress;
         const cache_key = if (options.cache_key) |key| try self.alloc.dupe(u8, key) else null;
         if (self.cache_key) |key| self.alloc.free(key);
         self.cache_key = cache_key;
@@ -1508,6 +1511,54 @@ test "overflow recovery falls back to the history estimate when the provider bas
     try std.testing.expect(!agent.context_from_provider);
     try std.testing.expect(agent.compact_task != null);
     try std.testing.expectEqual(true, agent.compaction.continue_after);
+}
+
+test "run cannot start while an async compaction is in flight" {
+    const Fixture = struct {
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generate(_: *anyopaque, a: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            const result = try a.create(sdk.model.GenerateResult);
+            result.* = .{ .text = try a.dupe(u8, "done"), .finish_reason = .stop };
+            return result;
+        }
+
+        fn stream(ctx: *anyopaque, a: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            return generate(ctx, a, io, params, client, retries);
+        }
+    };
+
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.invalid/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .context_limit = 60_000 });
+    defer agent.deinit();
+    const huge = "x" ** 200_000;
+    try agent.setMessages(&.{
+        sdk.SystemMessage("system"),
+        sdk.UserMessage("old turn content"),
+        sdk.UserMessage(huge),
+        sdk.AssistantMessage("recent"),
+    });
+    agent.context_tokens = 55_000;
+    agent.context_from_provider = true;
+
+    try std.testing.expect(try agent.startCompaction(null));
+    try std.testing.expect(agent.compact_task != null);
+
+    var fixture: u8 = 0;
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    try std.testing.expectError(error.RunInProgress, agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .max_steps = 1 }));
+    try std.testing.expect(agent.task == null);
+
+    agent.cancelAndWait();
+    try std.testing.expectEqual(Status.canceled, agent.status);
+    try std.testing.expect(agent.compact_task == null);
 }
 
 test "zero usage step keeps the previous context basis instead of latching zero" {

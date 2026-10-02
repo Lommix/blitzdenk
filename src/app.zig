@@ -2527,8 +2527,10 @@ pub const App = struct {
             const agent = self.registry.get(id).?;
             try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
             self.sdk_run_rendered_steps = 0;
-            try self.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
-            _ = self.event_bus.emit(self, .{ .agent_started = .{ .id = id, .fresh = false } });
+            if (self.registry.state(id) != .active) {
+                try self.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
+                _ = self.event_bus.emit(self, .{ .agent_started = .{ .id = id, .fresh = false } });
+            }
         } else {
             const id = self.registry.reserve().?;
             self.cmd_queue.append(io, .{
