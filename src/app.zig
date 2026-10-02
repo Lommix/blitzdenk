@@ -1865,6 +1865,7 @@ pub const App = struct {
         if (is_welcome) {
             var wp = r.tui.Paragraph{
                 .padding = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
+                .wrap = false,
             };
             r.dash.build_info(app, &wp.lines) catch {};
             content_end_h = wp.totalHeightLong(_timeline_status_area.width);
