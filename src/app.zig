@@ -12,7 +12,7 @@ const COMMAND_COMPLETION_ROWS = 64;
 
 const WIDGET_PAD_X: u16 = 2;
 const COMPOSER_PROMPT: []const u8 = "❯";
-const PASSPHRASE_PROMPT: []const u8 = "❯ Passphrase: ";
+const PASSPHRASE_PROMPT: []const u8 = "❯ Passphrase or password: ";
 
 const FieldStyle = struct {
     prompt: []const u8,
@@ -1399,6 +1399,7 @@ pub const App = struct {
 
     pub fn startSshConnect(self: *App, user: []const u8, host: []const u8, cwd: []const u8) void {
         self.cancelSshConnect();
+        self.exec_pool.clearSsh();
         if (!self.initSshTask(user, host, cwd, false)) return;
         self.toastSshConnecting(user, host);
         self.ssh_connect.?.start();
@@ -1409,7 +1410,7 @@ pub const App = struct {
         if (self.input_mode != .passphrase) return;
         const pp = &self.input_mode.passphrase;
         if (pp.field.isEmpty()) {
-            self.notifications.append(self.gpa, self.nowMillis(), "SSH: empty passphrase, canceled", .{}) catch {};
+            self.notifications.append(self.gpa, self.nowMillis(), "SSH: empty secret, canceled", .{}) catch {};
             self.returnToText();
             return;
         }
@@ -1461,7 +1462,7 @@ pub const App = struct {
         }
         switch (task.outcome) {
             .connected => {
-                self.exec_pool.setSsh(task.user(), task.host(), task.cwd()) catch {
+                self.exec_pool.setSsh(task.user(), task.host(), task.cwd(), task.control()) catch {
                     self.notifications.append(self.gpa, self.nowMillis(), "SSH: failed: failed to allocate target", .{}) catch {};
                     return;
                 };
@@ -1472,7 +1473,7 @@ pub const App = struct {
                 if (self.input_mode == .text) {
                     self.enterPassphrase(task.user(), task.host(), task.cwd());
                 } else {
-                    self.notifications.append(self.gpa, self.nowMillis(), "SSH: auth refused (retry /ssh for passphrase)", .{}) catch {};
+                    self.notifications.append(self.gpa, self.nowMillis(), "SSH: auth refused (retry /ssh for password)", .{}) catch {};
                 }
             },
             .failed => self.notifications.append(self.gpa, self.nowMillis(), "SSH: failed: {s}", .{r.ssh.truncateUtf8(task.reason(), 96)}) catch {},

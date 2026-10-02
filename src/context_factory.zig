@@ -1283,7 +1283,7 @@ test "capability catalogue probes binaries through the exec pool" {
     try std.testing.expectEqualStrings("", factory.capability_catalog_body);
     try std.testing.expect(factory.capability_catalog_route != null);
 
-    try pool.setSsh("u", "h", "/");
+    try pool.setSsh("u", "h", "/", "");
     defer pool.clearSsh();
     try std.testing.expect(route_before != pool.routeKey());
 }

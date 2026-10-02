@@ -52,6 +52,7 @@ pub const SshTarget = struct {
     user: []const u8,
     host: []const u8,
     cwd: []const u8,
+    control: []const u8 = "",
 };
 
 pub const CmdPool = struct {
@@ -82,26 +83,46 @@ pub const CmdPool = struct {
         self.killAgent();
     }
 
-    pub fn setSsh(self: *Self, user: []const u8, host: []const u8, cwd: []const u8) !void {
+    pub fn setSsh(self: *Self, user: []const u8, host: []const u8, cwd: []const u8, control: []const u8) !void {
         const u = try self.alloc.dupe(u8, user);
         errdefer self.alloc.free(u);
         const h = try self.alloc.dupe(u8, host);
         errdefer self.alloc.free(h);
         const c = try self.alloc.dupe(u8, cwd);
         errdefer self.alloc.free(c);
+        const ctl: []const u8 = if (control.len > 0) try self.alloc.dupe(u8, control) else "";
+        errdefer if (ctl.len > 0) self.alloc.free(ctl);
         self.clearSsh();
-        self.ssh_target = .{ .user = u, .host = h, .cwd = c };
+        self.ssh_target = .{ .user = u, .host = h, .cwd = c, .control = ctl };
         self.ssh_active = true;
     }
 
     pub fn clearSsh(self: *Self) void {
         if (self.ssh_target) |t| {
+            self.closeMaster(t);
             self.alloc.free(t.user);
             self.alloc.free(t.host);
             self.alloc.free(t.cwd);
+            if (t.control.len > 0) self.alloc.free(t.control);
         }
         self.ssh_target = null;
         self.ssh_active = false;
+    }
+
+    fn closeMaster(self: *Self, t: SshTarget) void {
+        if (t.control.len == 0) return;
+        const target = std.fmt.allocPrint(self.alloc, "{s}@{s}", .{ t.user, t.host }) catch return;
+        defer self.alloc.free(target);
+        var cp_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cp = std.fmt.bufPrint(&cp_buf, "ControlPath={s}", .{t.control}) catch return;
+        if (self.runAndWaitTimeout(.{
+            .argv = &.{ "ssh", "-o", cp, "-O", "exit", target },
+            .force_local = true,
+        }, 3000)) |res| {
+            self.alloc.free(res.stdout);
+            self.alloc.free(res.stderr);
+            std.Io.Dir.deleteFileAbsolute(self.io, t.control) catch {};
+        } else |_| {}
     }
 
     /// Returns a usable SSH_AUTH_SOCK path. If `inherited_sock` already points
@@ -250,6 +271,7 @@ pub const CmdPool = struct {
 
         const env_box = try self.buildEnvBox(opts);
         errdefer if (env_box) |b| {
+            for (b.values()) |v| @memset(@constCast(v), 0);
             b.deinit();
             self.alloc.destroy(b);
         };
@@ -314,20 +336,14 @@ pub const CmdPool = struct {
         const target_str = try std.fmt.allocPrint(self.alloc, "{s}@{s}", .{ target.user, target.host });
         errdefer self.alloc.free(target_str);
 
-        const wrapped = [_][]const u8{
-            "ssh",
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "PasswordAuthentication=no",
-            "-o",
-            "ConnectTimeout=10",
-            target_str,
-            remote_cmd,
-        };
+        var cp_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cp = std.fmt.bufPrint(&cp_buf, "ControlPath={s}", .{target.control}) catch "";
+        const wrapped: []const []const u8 = if (cp.len > 0)
+            &.{ "ssh", "-T", "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no", "-o", cp, "-o", "ConnectTimeout=10", target_str, remote_cmd }
+        else
+            &.{ "ssh", "-T", "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no", "-o", "ConnectTimeout=10", target_str, remote_cmd };
 
-        const out = try self.dupeArgv(&wrapped);
+        const out = try self.dupeArgv(wrapped);
         self.alloc.free(target_str);
         self.alloc.free(remote_cmd);
         return out;
