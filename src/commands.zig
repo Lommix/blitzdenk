@@ -237,15 +237,18 @@ pub const Command = union(enum) {
             },
             .cd => |path| {
                 if (path.len == 0) return;
-                const base = app.exec_pool.effectiveCwd(app.cwd);
-                if (std.fs.path.resolve(app.appAlloc(), &.{ base, path })) |resolved| {
-                    if (app.exec_pool.ssh_active) {
+                if (app.exec_pool.ssh_active and app.exec_pool.ssh_target != null) {
+                    const base = app.exec_pool.effectiveCwd(app.cwd);
+                    if (std.fs.path.resolve(app.appAlloc(), &.{ base, path })) |resolved| {
                         if (app.exec_pool.ssh_target) |*tar| {
                             const new_remote = app.exec_pool.alloc.dupe(u8, resolved) catch return;
                             app.exec_pool.alloc.free(tar.cwd);
                             tar.cwd = new_remote;
                         }
-                    }
+                    } else |_| {}
+                    return;
+                }
+                if (std.fs.path.resolve(app.appAlloc(), &.{ app.cwd, path })) |resolved| {
                     app.cwd = resolved;
                     app.context_factory.rescanSkills(resolved);
                     if (app.main_agent_id) |id| {
