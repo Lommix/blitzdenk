@@ -31,15 +31,23 @@ blitz.set_capabilities({
 local Tools = {}
 Tools.codemode = blitz.register_tool({
 	name = "codemode",
-	description = [[Execute a Lua script that drives the other tools. Inside the script:
-- ctx:call(name, args) runs one tool of this agent and returns its result text (error text on failure)
-- ctx:batch({ { name = ..., args = ... }, ... }) runs several in parallel (limit 8) and returns one text per request, in input order
-Only the script's printed and returned text enters the chat, so chain, loop and filter tool output at will.]],
+	description = [[Execute a Lua script that drives the other tools instead of calling them one by one.
+In the script:
+- ctx:call(name, args) runs one tool of this agent, returns its result text (error text on failure)
+- ctx:batch({ { name = ..., args = ... }, ... }) runs up to 8 in parallel, returns one text per request in order
+- print(...) and the return value are the only text that enters the chat. Nested tool results never do: filter them inside the script and keep only what you need.
+
+Example, two greps in one step, distilled to one line each:
+local r = ctx:batch({
+	{ name = "bash", args = { command = "rg -c TODO a.zig", description = "count TODOs" } },
+	{ name = "bash", args = { command = "rg -c TODO b.zig", description = "count TODOs" } },
+})
+for i, out in ipairs(r) do print(i, out:match("^%S+") or "0") end]],
 	args = {
-		code = { type = "string", description = "Lua code to execute", required = true },
+		code = { type = "string", description = "Lua source; print(...) output and the return value are the result", required = true },
 	},
-	snippet = "Run Lua that calls other tools (chains, loops, filtering large results)",
-	guidelines = "Use codemode to chain tool calls or to filter large tool output, instead of issuing many individual calls.",
+	snippet = "Batch many tool calls into one Lua script: parallel calls, loops, output filtered before it enters the chat",
+	guidelines = "Prefer codemode over single tool calls whenever a step needs more than two calls, a chain of dependent calls, or a tool with large output (search, build, test logs): run them in one script, keep only the lines you need, and return those. Use a plain tool call for one simple call.",
 	func = function(ctx, call)
 		local orange = "\27[38;5;208m"
 		local bold = "\27[1m"
