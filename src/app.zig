@@ -1794,7 +1794,8 @@ pub const App = struct {
                 .text, .perm_message, .passphrase => {
                     const shown: r.clipboard.Display = switch (app.input_mode) {
                         .text => app.displayInput(frame_alloc),
-                        .perm_message => |pm| .{ .text = pm.field.slice(), .cursor = pm.field.cursor },
+                        .perm_message => |pm| r.clipboard.toDisplay(frame_alloc, pm.field.slice(), pm.field.cursor) catch
+                            .{ .text = pm.field.slice(), .cursor = pm.field.cursor },
                         .passphrase => |pp| .{ .text = pp.field.slice(), .cursor = pp.field.cursor },
                         else => .{ .text = "", .cursor = 0 },
                     };
@@ -2051,15 +2052,8 @@ pub const App = struct {
         const alloc = arena.allocator();
 
         switch (self.input_mode) {
-            .text => {
-                const buf = self.input.slice();
-                if (self.input.cursor > buf.len) self.input.cursor = buf.len;
-                const display = self.displayInput(alloc);
-                if (self.verticalFieldTarget(alloc, display, width, delta)) |target| {
-                    self.input.cursor = r.clipboard.fromDisplayPos(buf, target);
-                }
-            },
-            .perm_message => |*pm| moveFieldVertical(self, alloc, &pm.field, width, delta),
+            .text => self.moveMaskedVertical(alloc, &self.input, width, delta),
+            .perm_message => |*pm| self.moveMaskedVertical(alloc, &pm.field, width, delta),
             .passphrase => |*pp| moveFieldVertical(self, alloc, &pp.field, width, delta),
             .wizard => |*w| {
                 const f = w.activeText() orelse return false;
@@ -2068,6 +2062,16 @@ pub const App = struct {
             else => return false,
         }
         return true;
+    }
+
+    fn moveMaskedVertical(self: *App, alloc: std.mem.Allocator, f: *r.tui.Field(8192), width: usize, delta: i32) void {
+        const buf = f.slice();
+        if (f.cursor > buf.len) f.cursor = buf.len;
+        const display: r.clipboard.Display = r.clipboard.toDisplay(alloc, buf, f.cursor) catch
+            .{ .text = buf, .cursor = f.cursor };
+        if (self.verticalFieldTarget(alloc, display, width, delta)) |target| {
+            f.cursor = r.clipboard.fromDisplayPos(buf, target);
+        }
     }
 
     fn verticalFieldTarget(
@@ -2090,29 +2094,39 @@ pub const App = struct {
         self.syncCompletion();
     }
 
+    pub fn pasteField(self: *App) ?*r.tui.Field(8192) {
+        return switch (self.input_mode) {
+            .text => &self.input,
+            .perm_message => |*pm| &pm.field,
+            else => null,
+        };
+    }
+
     pub fn deleteChar(self: *App) void {
         self.input_desired_col = null;
+        const f = self.pasteField() orelse return;
 
         // Pasted image: deleting anywhere inside (or right after) the masked
         // `[Image]` token removes the whole link.
-        if (r.clipboard.findPasteAt(self.input.slice(), self.input.cursor)) |rg| {
-            self.input.deleteRange(rg.start, rg.end);
+        if (r.clipboard.findPasteAt(f.slice(), f.cursor)) |rg| {
+            f.deleteRange(rg.start, rg.end);
         } else {
-            self.input.backspace();
+            f.backspace();
         }
         self.syncCompletion();
     }
 
     pub fn deleteForwardChar(self: *App) void {
         self.input_desired_col = null;
-        if (r.clipboard.findPasteAt(self.input.slice(), self.input.cursor + 1)) |rg| {
-            if (rg.start == self.input.cursor) {
-                self.input.deleteRange(rg.start, rg.end);
+        const f = self.pasteField() orelse return;
+        if (r.clipboard.findPasteAt(f.slice(), f.cursor + 1)) |rg| {
+            if (rg.start == f.cursor) {
+                f.deleteRange(rg.start, rg.end);
                 self.syncCompletion();
                 return;
             }
         }
-        self.input.deleteForward();
+        f.deleteForward();
         self.syncCompletion();
     }
 
@@ -2138,8 +2152,16 @@ pub const App = struct {
         return self.context_factory.agentVision(&self.config, .general);
     }
 
+    fn pasteVision(self: *App) bool {
+        if (self.active_permission) |perm| {
+            if (self.registry.get(perm.agent_id)) |agent| return agent.flags.vision;
+        }
+        return self.generalAgentVision();
+    }
+
     pub fn pasteImage(self: *App) void {
-        if (!self.generalAgentVision()) {
+        const f = self.pasteField() orelse return;
+        if (!self.pasteVision()) {
             self.notifications.append(self.gpa, self.nowMillis(), "Current model does not support images", .{}) catch {};
             return;
         }
@@ -2148,8 +2170,7 @@ pub const App = struct {
             defer self.sessionAlloc().free(image.data);
             const url = r.clipboard.saveImage(self.io, self.sessionAlloc(), image.data, image.ext) catch null;
             if (url) |u| {
-                self.appendBytes(u);
-                self.dirty = true;
+                self.insertPasteUrl(f, u);
                 self.notifications.append(self.gpa, self.nowMillis(), "Image pasted", .{}) catch {};
                 return;
             }
@@ -2162,20 +2183,36 @@ pub const App = struct {
     /// Terminal paste event handler. Pastes the clipboard image if one is
     /// present, otherwise appends the raw paste `text`.
     pub fn pasteImageOrText(self: *App, text: []const u8) void {
-        if (!self.generalAgentVision()) {
-            self.appendPathRef(text);
+        const f = self.pasteField() orelse return;
+        if (!self.pasteVision()) {
+            self.appendPasteText(f, text);
             return;
         }
         const img = r.clipboard.readImage(self.sessionAlloc(), self.exec_pool) catch null;
         if (img) |image| {
             defer self.sessionAlloc().free(image.data);
             if (r.clipboard.saveImage(self.io, self.sessionAlloc(), image.data, image.ext) catch null) |u| {
-                self.appendBytes(u);
-                self.dirty = true;
+                self.insertPasteUrl(f, u);
             }
             return;
         }
-        self.appendPathRef(text);
+        self.appendPasteText(f, text);
+    }
+
+    fn insertPasteUrl(self: *App, f: *r.tui.Field(8192), url: []const u8) void {
+        self.input_desired_col = null;
+        f.insert(url);
+        self.syncCompletion();
+        self.dirty = true;
+    }
+
+    fn appendPasteText(self: *App, f: *r.tui.Field(8192), text: []const u8) void {
+        if (self.input_mode == .text) {
+            self.appendPathRef(text);
+            return;
+        }
+        self.input_desired_col = null;
+        f.insert(text);
     }
 
     fn appendPathRef(self: *App, text: []const u8) void {
@@ -3188,7 +3225,9 @@ fn renderPassphraseInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, 
 
 fn renderPermMessageContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const pm = &app.input_mode.perm_message;
-    renderFieldWidget(app, arena, pm.field.slice(), pm.field.cursor, area, .{
+    const display: r.clipboard.Display = r.clipboard.toDisplay(arena, pm.field.slice(), pm.field.cursor) catch
+        .{ .text = pm.field.slice(), .cursor = pm.field.cursor };
+    renderFieldWidget(app, arena, display.text, display.cursor, area, .{
         .prompt = COMPOSER_PROMPT,
         .text = fieldTextStyle(app),
     }, buf);
@@ -5801,6 +5840,26 @@ test "completionAnchor points at the completion token" {
     const wrapped = completionAnchor(&app, arena.allocator(), 10);
     try testing.expectEqual(@as(usize, 2), wrapped.row);
     try testing.expectEqual(@as(usize, 0), wrapped.col);
+}
+
+test "deleteChar removes pasted image url from perm message field" {
+    const testing = std.testing;
+    var app: App = undefined;
+    app.io = testing.io;
+    app.gpa = testing.allocator;
+    app.input_mode = .{ .perm_message = .{} };
+
+    const f = &app.input_mode.perm_message.field;
+    f.set(r.clipboard.PREFIX ++ "123.png");
+    f.cursor = f.len - 2;
+    app.deleteChar();
+    try testing.expectEqualStrings("", f.slice());
+    try testing.expectEqual(@as(usize, 0), f.cursor);
+
+    f.set("ab " ++ r.clipboard.PREFIX ++ "9.png cd");
+    f.cursor = 4;
+    app.deleteChar();
+    try testing.expectEqualStrings("ab  cd", f.slice());
 }
 
 test "moveCursorVertical preserves column and clamps to line end" {

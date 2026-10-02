@@ -983,7 +983,7 @@ pub fn run(
                                     continue;
                                 },
                                 .paste_image => {
-                                    if (app.input_mode == .text) app.pasteImage();
+                                    app.pasteImage();
                                     continue;
                                 },
                             }
@@ -1028,7 +1028,7 @@ pub fn run(
                                 else => {},
                             },
                             .backspace => {
-                                if (app.input_mode == .text) {
+                                if (app.input_mode == .text or app.input_mode == .perm_message) {
                                     app.deleteChar();
                                 } else {
                                     _ = app.fieldOp(.backspace, "");
@@ -1045,7 +1045,7 @@ pub fn run(
                                 if (app.input_mode == .text) app.syncCompletion();
                             },
                             .delete => {
-                                if (app.input_mode == .text) {
+                                if (app.input_mode == .text or app.input_mode == .perm_message) {
                                     app.deleteForwardChar();
                                 } else {
                                     _ = app.fieldOp(.delete_forward, "");
@@ -1279,10 +1279,9 @@ pub fn run(
                         }
                     },
                     .paste => |text| {
-                        if (app.input_mode == .text) {
-                            app.pasteImageOrText(text);
-                        } else {
-                            _ = app.fieldOp(.insert, text);
+                        switch (app.input_mode) {
+                            .text, .perm_message => app.pasteImageOrText(text),
+                            else => _ = app.fieldOp(.insert, text),
                         }
                     },
                     .mouse => |m| {
