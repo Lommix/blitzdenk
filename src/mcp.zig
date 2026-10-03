@@ -177,7 +177,12 @@ fn toolTrampoline(ctx: r.tools.ToolContext, call: r.sdk.ToolCall) r.sdk.ToolOutp
     const binding = manager.findBinding(call.name) orelse return errResult(call, "MCP tool binding not found");
     if (binding.client_index >= manager.clients.items.len) return errResult(call, "MCP client missing");
 
-    r.tools.setToolStatusPrint(ctx, call, "MCP {s}", .{binding.remote_name});
+    const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    var status_buf: [r.tools.STATUS_BUF]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&status_buf);
+    w.print("MCP {s} ", .{binding.remote_name});
+    w.styled(.{ .fg = app.theme.muted }, argPreview(call.input));
+    r.tools.setToolStatus(ctx, call, w.finish()) catch {};
     const client = &manager.clients.items[binding.client_index];
     const content = client.callTool(ctx.alloc, binding.remote_name, call.input) catch |err| {
         const msg = std.fmt.allocPrint(ctx.alloc, "MCP tool call failed: {s}", .{@errorName(err)}) catch "MCP tool call failed";
@@ -189,6 +194,27 @@ fn toolTrampoline(ctx: r.tools.ToolContext, call: r.sdk.ToolCall) r.sdk.ToolOutp
 
 fn errResult(_: r.sdk.ToolCall, msg: []const u8) r.sdk.ToolOutput {
     return .{ .content = msg, .is_error = true };
+}
+
+fn argPreview(input: []const u8) []const u8 {
+    var end = @min(input.len, 255);
+    while (end > 0 and end < input.len and (input[end] & 0xC0) == 0x80) end -= 1;
+    return input[0..end];
+}
+
+test "argPreview caps at 255 bytes without splitting utf8" {
+    const short = "{\"path\":\"src/main.zig\"}";
+    try std.testing.expectEqualStrings(short, argPreview(short));
+
+    var long_buf: [600]u8 = undefined;
+    @memset(&long_buf, 'a');
+    const capped = argPreview(&long_buf);
+    try std.testing.expectEqual(@as(usize, 255), capped.len);
+
+    const multi = "é" ** 200;
+    const cut = argPreview(multi);
+    try std.testing.expect(cut.len <= 255);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(cut));
 }
 
 test "MCP load task completes" {
