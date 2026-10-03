@@ -2,13 +2,21 @@
 ---@meta
 ---@class BlitzMcpServerDef
 ---@field name string
----@field command string
----@field transport? string
+---stdio server executable; omit when url is set
+---@field command? string
+---remote server url (streamable http); omit when command is set
+---@field url? string
 ---@field args? string[]
+---bearer token sent as Authorization header; ignored when key_envar resolves
+---@field key? string
+---env var holding the bearer token; preferred over key
+---@field key_envar? string
+---request timeout in seconds for url servers, 0 disables; default 300
+---@field timeout? number
 ---@field tools_prefix? string
 
 ---@class BlitzMcp
----Register an MCP stdio server. Disabled until explicitly enabled.
+---Register an MCP server, stdio command or remote url. Disabled until explicitly enabled.
 ---@field add fun(def: BlitzMcpServerDef): integer
 ---Enable an MCP server for this session.
 ---@field enable fun(mcp_id: integer)

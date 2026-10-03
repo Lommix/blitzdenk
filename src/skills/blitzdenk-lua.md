@@ -609,6 +609,22 @@ local pw = blitz.mcp.add({
 blitz.mcp.enable(pw)
 ```
 
+Remote servers take `url` instead of `command` and speak streamable http.
+`key` or `key_envar` sends a bearer token (`key_envar` wins), `timeout` is
+per-request seconds (0 disables, default 300). Set exactly one of `url` or
+`command`.
+
+```lua
+local ctx = blitz.mcp.add({
+    name = "context7",
+    url = "https://mcp.context7.com/mcp",
+    key_envar = "CONTEXT7_KEY",
+    timeout = 60,
+    tools_prefix = "c7_",
+})
+blitz.mcp.enable(ctx)
+```
+
 ## SSH mode
 
 While ssh routing is on, every call (bash, read, write, edit,

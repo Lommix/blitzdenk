@@ -498,9 +498,12 @@ const FlagsStrings = struct {
 };
 const McpServerDef = LuaType{ .table_def = .{ .name = "BlitzMcpServerDef", .fields = &.{
     .{ .name = "name", .ty = LuaType.string },
-    .{ .name = "command", .ty = LuaType.string },
-    .{ .name = "transport", .ty = LuaType.string, .optional = true },
+    .{ .name = "command", .ty = LuaType.string, .optional = true, .desc = "stdio server executable; omit when url is set" },
+    .{ .name = "url", .ty = LuaType.string, .optional = true, .desc = "remote server url (streamable http); omit when command is set" },
     .{ .name = "args", .ty = StringListDef, .optional = true },
+    .{ .name = "key", .ty = LuaType.string, .optional = true, .desc = "bearer token sent as Authorization header; ignored when key_envar resolves" },
+    .{ .name = "key_envar", .ty = LuaType.string, .optional = true, .desc = "env var holding the bearer token; preferred over key" },
+    .{ .name = "timeout", .ty = LuaType.number, .optional = true, .desc = "request timeout in seconds for url servers, 0 disables; default 300" },
     .{ .name = "tools_prefix", .ty = LuaType.string, .optional = true },
 } } };
 const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fields = &.{
@@ -1912,7 +1915,7 @@ const BlitzMcp = LuaType{
         .fields = &.{
             .{
                 .name = "add",
-                .desc = "Register an MCP stdio server. Disabled until explicitly enabled.",
+                .desc = "Register an MCP server, stdio command or remote url. Disabled until explicitly enabled.",
                 .ty = LuaType{
                     .function = .{
                         .args = &.{.{ .name = "def", .ty = McpServerDef }},
@@ -1920,17 +1923,28 @@ const BlitzMcp = LuaType{
                         .fn_ptr = LuaFnBind((struct {
                             const Args = struct {
                                 name: []const u8,
-                                command: []const u8,
-                                args: [][]const u8,
+                                command: ?[]const u8,
+                                url: ?[]const u8,
+                                args: ?[][]const u8,
+                                key: ?[]const u8,
+                                key_envar: ?[]const u8,
+                                timeout: ?f64,
                                 tools_prefix: []const u8,
                             };
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, args: Args) !u32 {
                                 if (try isToolVm(state)) return 0;
+                                const command = args.command orelse "";
+                                const url = if (args.url) |u| (if (u.len == 0) @as(?[]const u8, null) else u) else null;
+                                if ((url != null) == (command.len != 0)) return error.InvalidMcpServerDef;
                                 try a.lua_vm.mcp_entries.appendBounded(LuaMcpServerEntry{
                                     .name = args.name,
-                                    .command = args.command,
-                                    .args = args.args,
+                                    .command = command,
+                                    .url = url,
+                                    .args = args.args orelse &.{},
+                                    .key = args.key,
+                                    .key_envar = args.key_envar,
+                                    .timeout_s = if (args.timeout) |t| std.math.lossyCast(u64, t) else @import("mcp.zig").DEFAULT_TIMEOUT_S,
                                     .tools_prefix = args.tools_prefix,
                                 });
 
@@ -3494,8 +3508,12 @@ const MAX_STATE_DEPTH: u32 = 64;
 
 pub const LuaMcpServerEntry = struct {
     name: []const u8,
-    command: []const u8,
-    args: [][]const u8,
+    command: []const u8 = "",
+    url: ?[]const u8 = null,
+    args: [][]const u8 = &.{},
+    key: ?[]const u8 = null,
+    key_envar: ?[]const u8 = null,
+    timeout_s: u64 = @import("mcp.zig").DEFAULT_TIMEOUT_S,
     tools_prefix: []const u8,
     enabled: bool = false,
     conf_enabled: bool = false,
@@ -3795,7 +3813,11 @@ pub const LuaVm = struct {
         return .{
             .name = entry.name,
             .command = entry.command,
+            .url = entry.url,
             .args = entry.args,
+            .key = entry.key,
+            .key_envar = entry.key_envar,
+            .timeout_s = entry.timeout_s,
             .tools_prefix = entry.tools_prefix,
         };
     }
@@ -5688,6 +5710,38 @@ test "allocated Lua MCP arguments own strings after Lua closes" {
     try std.testing.expectEqualStrings(expected.tools_prefix, owned.tools_prefix);
     try std.testing.expectEqual(expected.args.len, owned.args.len);
     for (expected.args, owned.args) |want, got| try std.testing.expectEqualStrings(want, got);
+}
+
+test "MCP url server config carries url key and timeout" {
+    var app_state: r.app.App = undefined;
+    app_state.io = std.testing.io;
+    app_state.gpa = std.testing.allocator;
+    app_state.config = .{};
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    app_state.lua_vm = vm;
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.mcp.add({
+        \\    name = "remote",
+        \\    url = "https://example.test/mcp",
+        \\    key_envar = "REMOTE_KEY",
+        \\    timeout = 60,
+        \\    tools_prefix = "rm_",
+        \\})
+    );
+    try std.testing.expect(vm.enableMcp("remote"));
+    const servers = try vm.getEnabledMcpServers(std.testing.allocator);
+    defer std.testing.allocator.free(servers);
+    try std.testing.expectEqual(@as(usize, 1), servers.len);
+    try std.testing.expectEqualStrings("remote", servers[0].name);
+    try std.testing.expectEqualStrings("https://example.test/mcp", servers[0].url.?);
+    try std.testing.expectEqualStrings("", servers[0].command);
+    try std.testing.expectEqual(@as(usize, 0), servers[0].args.len);
+    try std.testing.expectEqualStrings("REMOTE_KEY", servers[0].key_envar.?);
+    try std.testing.expectEqual(@as(u64, 60), servers[0].timeout_s);
+    try std.testing.expectEqualStrings("rm_", servers[0].tools_prefix);
 }
 
 test "MCP registration survives garbage collection across repeated Lua reloads" {
