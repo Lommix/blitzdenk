@@ -89,7 +89,8 @@ pub fn shouldAutoApprove(mode: ApprovalMode, is_ask: bool, ssh_active: bool) boo
 /// first option. Mirrored by the headless resolver in main.zig.
 pub fn recommendedChoice(options: []const []const u8) State {
     for (options, 0..) |opt, i| {
-        if (std.mem.indexOf(u8, opt, "(recommended)") != null) return .{ .choice = @intCast(i) };
+        if (std.mem.indexOf(u8, opt, "(recommended)") != null or
+            std.mem.indexOf(u8, opt, "(Recommended)") != null) return .{ .choice = @intCast(i) };
     }
     return .{ .choice = 0 };
 }

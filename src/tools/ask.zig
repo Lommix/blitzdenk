@@ -8,7 +8,7 @@ pub const AskTool = r.Tool{
         .name = "ask",
         .description =
         \\Ask the user a multiple-choice question when you cannot resolve an ambiguity on your own.
-        \\Mark your recommended option with "(recommended)".
+        \\Put the recommended option first and suffix its label with "(recommended)".
         \\
         ,
         .prompt_snippet = "Ask the user a question",
@@ -18,7 +18,19 @@ pub const AskTool = r.Tool{
         \\  "properties": {
         \\      "header": {"type": "string", "description": "Very short label displayed as a chip/tag. Examples: 'Auth method', 'Library', 'Approach'."},
         \\      "question": {"type": "string", "description": "The complete question to ask the user. Should be clear, specific, and end with a question mark."},
-        \\      "options": {"type": "array", "items": {"type": "string"}, "description": "1-8 short option strings the user can pick from. A custom-message option is always appended by the UI."}
+        \\      "options": {
+        \\          "type": "array",
+        \\          "items": {
+        \\              "type": "object",
+        \\              "properties": {
+        \\                  "label": {"type": "string", "description": "User-facing label (1-5 words)."},
+        \\                  "description": {"type": "string", "description": "One short sentence explaining impact/tradeoff if selected."}
+        \\              },
+        \\              "required": ["label", "description"],
+        \\              "additionalProperties": false
+        \\          },
+        \\          "description": "Provide 1-8 mutually exclusive choices. Do not include an 'Other' option; the UI always appends a custom-message row."
+        \\      }
         \\  },
         \\  "required": ["header", "question", "options"]
         \\}
@@ -27,18 +39,58 @@ pub const AskTool = r.Tool{
     .func = &run,
 };
 
+pub const Option = struct {
+    label: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+};
+
 pub const Args = struct {
     header: []const u8,
     question: []const u8,
-    options: []const []const u8,
+    options: []const Option,
 };
+
+fn optionRow(alloc: std.mem.Allocator, opt: Option) ?[]const u8 {
+    const label = opt.label orelse "";
+    const desc = opt.description orelse "";
+    if (label.len == 0 and desc.len == 0) return null;
+    if (label.len == 0) return desc;
+    if (desc.len == 0) return label;
+    return std.fmt.allocPrint(alloc, "{s} — {s}", .{ label, desc }) catch null;
+}
+
+fn choiceText(opt: Option) []const u8 {
+    const label = opt.label orelse "";
+    if (label.len > 0) return label;
+    return opt.description orelse "";
+}
+
+test "option row and choice text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const both = Option{ .label = "A (recommended)", .description = "pick me" };
+    try std.testing.expectEqualStrings("A (recommended) — pick me", optionRow(a, both).?);
+    try std.testing.expectEqualStrings("A (recommended)", choiceText(both));
+    try std.testing.expectEqualStrings("B", optionRow(a, .{ .label = "B" }).?);
+    try std.testing.expectEqualStrings("yes", choiceText(.{ .label = "", .description = "yes" }));
+    try std.testing.expect(optionRow(a, .{}) == null);
+}
 
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const args = r.parseArgs(Args, ctx.alloc, call) orelse
-        return r.errResult(call, "invalid JSON arguments: expected {header, question, options}");
+        return r.errResult(call, "invalid JSON arguments: expected {header, question, options} with options as [{label, description}]");
 
     if (args.options.len == 0) return r.errResult(call, "options must contain at least one entry");
     if (args.options.len > MAX_OPTIONS) return r.errResult(call, "too many options (max 8)");
+
+    const rows = ctx.alloc.alloc([]const u8, args.options.len) catch
+        return r.errResult(call, "out of memory");
+    for (args.options, 0..) |opt, i| {
+        rows[i] = optionRow(ctx.alloc, opt) orelse
+            return r.errResult(call, "each option needs a label or a description");
+    }
 
     const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var sgr_buf: [r.STATUS_BUF]u8 = undefined;
@@ -51,11 +103,11 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     const decision = ctx.requestPermission(call, .{ .ask = .{
         .header = args.header,
-        .options = args.options,
+        .options = rows,
         .question = args.question,
     } });
     return switch (decision) {
-        .choice => |i| r.okResult(call, args.options[i]),
+        .choice => |i| r.okResult(call, choiceText(args.options[i])),
         .message => |msg| r.okResult(call, msg),
         else => r.errResult(call, "ask canceled"),
     };
