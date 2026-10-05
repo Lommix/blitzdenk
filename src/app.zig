@@ -2023,6 +2023,7 @@ pub const App = struct {
         defer g.unlock();
         const perm = self.active_permission orelse return;
         self.active_permission = null;
+        self.enterPermSelect();
         if (perm.state != .pending) return;
         if (self.registry.state(perm.agent_id) == .active) {
             self.settlePermission(perm, state);
@@ -6847,6 +6848,53 @@ test "finishLuaPermission settles mode-approved tickets and hands the rest to th
     app_state.finishLuaPermission(8);
     try std.testing.expect(yolo_req.state == .approved);
     try std.testing.expectEqual(@as(usize, 1), app_state.pending_permissions.items.len);
+
+    app_state.pending_permissions.deinit(std.testing.allocator);
+}
+
+test "resolveActivePermission leaves select mode for the next queued ask" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    var pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &env);
+
+    var app_state: App = undefined;
+    app_state.io = std.testing.io;
+    app_state.gpa = std.testing.allocator;
+    app_state.mu = .init;
+    app_state.flags = .{};
+    app_state.exec_pool = &pool;
+    app_state.permission_queue = .{};
+    app_state.pending_permissions = .empty;
+    app_state.active_permission = null;
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app_state.registry = &registry;
+    const agent_id = registry.reserve().?;
+    _ = try registry.activate(agent_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .name = "scout", .cwd = "/tmp" } });
+
+    var req = r.permissions.Request{
+        .agent_id = agent_id,
+        .tool_name = "ask",
+        .payload = .{ .ask = .{ .header = "h", .question = "q?", .options = &.{"a"}, .allow_message = true } },
+    };
+    try app_state.pending_permissions.append(std.testing.allocator, &req);
+    app_state.active_permission = &req;
+    app_state.input_mode = .{ .perm_message = .{} };
+    app_state.input_mode.perm_message.field.set("typed answer");
+
+    app_state.resolveActivePermission(.{ .message = "typed answer" });
+
+    try std.testing.expect(app_state.input_mode == .perm_select);
+    try std.testing.expect(app_state.active_permission == null);
+    try std.testing.expect(req.state == .message);
+    try std.testing.expectEqualStrings("typed answer", req.state.message);
+    try std.testing.expectEqual(@as(usize, 0), app_state.pending_permissions.items.len);
 
     app_state.pending_permissions.deinit(std.testing.allocator);
 }
