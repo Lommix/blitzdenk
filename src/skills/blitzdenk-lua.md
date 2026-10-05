@@ -726,6 +726,10 @@ at the project root, and user `~/.config/blitzdenk/skills`. Project skills
 shadow same-named user skills. The project root is the nearest ancestor of the
 working directory containing `.git`.
 
+The `<available_skills>` catalogue names each skill with its file path.
+Agents load a skill with the read tool on that path. Set `skills = false` in
+`blitz.add_agent` to keep the catalogue from an agent type.
+
 Frontmatter keys: `name` (kebab-case), `description`, optional `whenToUse`,
 `user-invocable` (default true), and `disable-model-invocation` (default
 false). Unknown keys are ignored. Keys and values may be single- or

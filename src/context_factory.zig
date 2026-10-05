@@ -53,7 +53,6 @@ pub const general_default_tool_set = .{
     r.tools.search.GlobTool,
     r.tools.search.GrepTool,
     r.tools.start.StartMcpTool,
-    r.tools.skill.SkillTool,
 };
 
 pub const AgentDef = struct {
@@ -61,6 +60,7 @@ pub const AgentDef = struct {
     description: []const u8,
     prompt: []const u8,
     in_agent_tool: bool = true,
+    skills: bool = true,
     tools: AgentTools = .{},
     model: ?AgentModelConfig = null,
 };
@@ -138,6 +138,7 @@ pub const NewAgentDef = struct {
     description: []const u8,
     prompt: []const u8,
     in_agent_tool: bool = true,
+    skills: bool = true,
     tools: []const []const u8 = &.{},
     model: ?AgentModelConfig = null,
 };
@@ -351,6 +352,7 @@ pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: NewAgentDef
         .description = try alloc.dupe(u8, def.description),
         .prompt = try alloc.dupe(u8, def.prompt),
         .in_agent_tool = def.in_agent_tool,
+        .skills = def.skills,
         .model = if (def.model) |model| blk: {
             _ = cfg.getModel(model.model) orelse return error.UnknownModel;
             break :blk .{
@@ -599,7 +601,6 @@ pub fn resetDefs(self: *Self) void {
             r.tools.read.ViewImageTool.def.name,
             r.tools.ask.AskTool.def.name,
             r.tools.start.StartMcpTool.def.name,
-            r.tools.skill.SkillTool.def.name,
         }),
     });
 

@@ -246,8 +246,6 @@
 ---@field GREP string
 ---load a registered mcp tools into session
 ---@field START_MCP string
----load a skill
----@field SKILL string
 
 ---@class BlitzAgentCreatedEvent
 ---packed AgentId of the new agent
@@ -561,6 +559,8 @@
 ---@field model? integer
 ---@field effort? string
 ---@field in_agent_tool? boolean
+---false disables the available_skills catalogue injection for this agent type
+---@field skills? boolean
 
 ---@class BlitzTokenUsage
 ---@field input integer

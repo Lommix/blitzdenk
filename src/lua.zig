@@ -483,6 +483,7 @@ const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
     .{ .name = "model", .ty = LuaType.integer, .optional = true, .desc = "model handle from add_model" },
     .{ .name = "effort", .ty = LuaType.string, .optional = true },
     .{ .name = "in_agent_tool", .ty = LuaType.boolean, .optional = true },
+    .{ .name = "skills", .ty = LuaType.boolean, .optional = true, .desc = "false disables the available_skills catalogue injection for this agent type" },
 } } };
 const AppFlagsDef = LuaType{ .table_def = .{ .name = "BlitzAppFlags", .fields = &.{
     .{ .name = "show_thinking", .ty = LuaType.boolean, .optional = true },
@@ -882,6 +883,7 @@ pub const Blitz = LuaType{
                                 model: ?u32 = null,
                                 effort: ?[]const u8,
                                 in_agent_tool: ?bool,
+                                skills: ?bool,
                             };
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, def: Args) !u32 {
@@ -899,6 +901,7 @@ pub const Blitz = LuaType{
                                     .description = def.description,
                                     .prompt = def.prompt,
                                     .in_agent_tool = def.in_agent_tool orelse true,
+                                    .skills = def.skills orelse true,
                                     .tools = def.tools,
                                     .model = if (def.model) |handle| .{
                                         .model = @enumFromInt(handle),
@@ -1425,7 +1428,6 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "GLOB", .desc = "read only file search", .ty = LuaType.string, .value = .{ .string = tl.search.GlobTool.def.name } },
             .{ .name = "GREP", .desc = "read only text serach", .ty = LuaType.string, .value = .{ .string = tl.search.GrepTool.def.name } },
             .{ .name = "START_MCP", .desc = "load a registered mcp tools into session", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },
-            .{ .name = "SKILL", .desc = "load a skill", .ty = LuaType.string, .value = .{ .string = tl.skill.SkillTool.def.name } },
         },
     },
 };
@@ -3286,17 +3288,22 @@ fn readAnyValueAlloc(
             const abs = c.lua_absindex(state, idx);
             const len = c.lua_rawlen(state, abs);
             const result = alloc.alloc(ptr.child, len) catch return .Err("oom");
-            for (result, 0..) |*item, i| {
+            var n: usize = 0;
+            for (0..len) |i| {
                 _ = c.lua_rawgeti(state, abs, @intCast(i + 1));
                 defer c.lua_pop(state, 1);
+                if (c.lua_type(state, -1) == c.LUA_TNIL) continue;
 
                 const res = readAnyValueAlloc(ptr.child, state, @typeName(ptr.child), -1, allocator);
                 switch (res) {
-                    .ok => |v| item.* = v,
+                    .ok => |v| {
+                        result[n] = v;
+                        n += 1;
+                    },
                     .err => |msg| return .Err(msg),
                 }
             }
-            return .Ok(result);
+            return .Ok(result[0..n]);
         },
         .int, .comptime_int => {
             if (c.lua_type(state, idx) != c.LUA_TNUMBER) return .Err(name ++ " not a number");
@@ -6782,6 +6789,35 @@ test "has_tool reports the effective tool set of an agent type" {
         \\assert(blitz.has_tool(0, "write") == false)
     );
     try std.testing.expectError(error.LuaExecFailed, vm.exec("blitz.has_tool(9999, \"read\")"));
+}
+
+test "set_agent_tools drops nil entries from stale configs" {
+    var app_state = permissionTestApp();
+    var factory = r.ContextFactory{
+        .alloc = std.testing.allocator,
+        .prompt_arena = .init(std.testing.allocator),
+        .io = std.testing.io,
+        .config_dir = null,
+        .skill_dir = null,
+    };
+    defer factory.prompt_arena.deinit();
+    defer factory.loaded_tools.deinit(std.testing.allocator);
+    factory.agents.set(.general, .{ .name = "general", .description = "", .prompt = "" });
+    try factory.add(r.tools.read.ReadTool, .all);
+    try factory.add(r.tools.write.WriteTool, .all);
+    try factory.setAgentTools(.general, &.{r.tools.read.ReadTool.def.name});
+    app_state.context_factory = &factory;
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\assert(blitz.tools.SKILL == nil)
+        \\blitz.set_agent_tools(0, { blitz.tools.READ, blitz.tools.SKILL, blitz.tools.WRITE })
+        \\assert(blitz.has_tool(0, "read") == true)
+        \\assert(blitz.has_tool(0, "write") == true)
+    );
 }
 
 test "agent.get_model and get_effort read the live agent" {

@@ -172,6 +172,9 @@ fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.A
 }
 
 fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    const def = app.context_factory.agentTypeAt(agent.type_idx) orelse return;
+    if (!def.skills) return;
+
     const alloc = app.gpa;
     const reg = &app.context_factory.skills;
     var rows = std.Io.Writer.Allocating.init(alloc);
@@ -180,7 +183,7 @@ fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.A
     for (reg.entries.items) |entry| {
         if (!entry.meta.model_invocable) continue;
         count += 1;
-        try rows.writer.print("- `{s}`: ", .{entry.meta.name});
+        try rows.writer.print("- `{s}` ({s}): ", .{ entry.meta.name, entry.path });
         try writeCatalogField(&rows.writer, entry.meta.description);
         try rows.writer.writeByte('\n');
     }
