@@ -254,9 +254,11 @@ pub fn parseSkillCommand(raw: []const u8) ?SkillCommand {
     return .{ .name = parsed.name, .prompt = std.mem.trim(u8, parsed.rest, " \t\r\n") };
 }
 
-pub fn skillSendText(alloc: std.mem.Allocator, body: []const u8, prompt: []const u8) ![]const u8 {
-    if (prompt.len == 0) return body;
-    return std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ body, prompt });
+pub fn skillSendText(alloc: std.mem.Allocator, name: []const u8, path: []const u8, body: []const u8, prompt: []const u8) ![]const u8 {
+    if (prompt.len == 0) {
+        return std.fmt.allocPrint(alloc, "<skill>\n<name>{s}</name>\n<path>{s}</path>\n\n{s}\n</skill>", .{ name, path, body });
+    }
+    return std.fmt.allocPrint(alloc, "<skill>\n<name>{s}</name>\n<path>{s}</path>\n\n{s}\n</skill>\n\n{s}", .{ name, path, body, prompt });
 }
 
 pub fn skillTimelineText(alloc: std.mem.Allocator, name: []const u8, prompt: []const u8) ![]const u8 {
@@ -478,10 +480,12 @@ test "skill command parse" {
 
 test "skill send and timeline text" {
     const body = "BODY";
-    try std.testing.expectEqualStrings(body, try skillSendText(std.testing.allocator, body, ""));
-    const joined = try skillSendText(std.testing.allocator, body, "do it");
+    const bare = try skillSendText(std.testing.allocator, "zig", "/s/zig.md", body, "");
+    defer std.testing.allocator.free(bare);
+    try std.testing.expectEqualStrings("<skill>\n<name>zig</name>\n<path>/s/zig.md</path>\n\nBODY\n</skill>", bare);
+    const joined = try skillSendText(std.testing.allocator, "zig", "/s/zig.md", body, "do it");
     defer std.testing.allocator.free(joined);
-    try std.testing.expectEqualStrings("BODY\n\ndo it", joined);
+    try std.testing.expectEqualStrings("<skill>\n<name>zig</name>\n<path>/s/zig.md</path>\n\nBODY\n</skill>\n\ndo it", joined);
 
     const tag = try skillTimelineText(std.testing.allocator, "zig", "");
     defer std.testing.allocator.free(tag);

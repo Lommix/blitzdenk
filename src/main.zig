@@ -1197,7 +1197,7 @@ pub fn run(
                                                 app.input.clear();
                                                 break;
                                             };
-                                            send_text = skills.skillSendText(app.sessionAlloc(), loaded.body, sc.prompt) catch break;
+                                            send_text = skills.skillSendText(app.sessionAlloc(), entry.meta.name, entry.path, loaded.body, sc.prompt) catch break;
                                             timeline_text = skills.skillTimelineText(app.sessionAlloc(), entry.meta.name, sc.prompt) catch break;
                                         } else {
                                             break;
