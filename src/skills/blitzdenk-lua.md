@@ -62,9 +62,9 @@ blitz.set_agent_model(blitz.AGENT_GENERAL, deepseek)
 blitz.set_agent_effort(blitz.AGENT_GENERAL, "max")
 ```
 
-`add_provider` and `add_model` return integer handles. `vision` gates the
-`view_image` tool, image pasting and every tool marked `requires_vision`. Set
-`replay_reasoning` on chat models that
+`add_provider` and `add_model` return integer handles. `vision` gates image
+pasting, image reads in the read tool, and every tool marked `requires_vision`.
+Set `replay_reasoning` on chat models that
 return reasoning but reject replayed history without that field (DeepSeek, GLM).
 Every agent needs a bound model; unbound agents fail to spawn. Bind with
 `blitz.set_agent_model(agent_type, handle)` or `model = handle` in

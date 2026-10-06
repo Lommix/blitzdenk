@@ -228,10 +228,8 @@
 ---@class BlitzToolDef
 ---execute bash scripts
 ---@field BASH string
----reading text files
+---reading text files and images
 ---@field READ string
----view images, skipped, if vision flag on model is missing
----@field VIEW_IMAGE string
 ---write new files
 ---@field WRITE string
 ---default string replace edit

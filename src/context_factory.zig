@@ -47,7 +47,6 @@ pub const general_default_tool_set = .{
     r.tools.edit.EditTool,
     r.tools.bash.BashTool,
     r.tools.read.ReadTool,
-    r.tools.read.ViewImageTool,
     r.tools.patch.PatchTool,
     r.tools.ask.AskTool,
     r.tools.search.GlobTool,
@@ -598,7 +597,6 @@ pub fn resetDefs(self: *Self) void {
             r.tools.edit.EditTool.def.name,
             r.tools.bash.BashTool.def.name,
             r.tools.read.ReadTool.def.name,
-            r.tools.read.ViewImageTool.def.name,
             r.tools.ask.AskTool.def.name,
             r.tools.start.StartMcpTool.def.name,
         }),
@@ -1352,10 +1350,17 @@ test "vision tools gated by the agent model vision flag" {
     defer factory.capability_arena.deinit();
     defer factory.prompt_arena.deinit();
 
+    try factory.add(.{
+        .def = .{ .name = "needs_eyes", .prompt_snippet = "vision only tool", .requires_vision = true },
+        .func = undefined,
+    }, .{ .allowed_agents = .initFull(), .add_to_agents = true });
+    try factory.setAgentTools(.general, &.{ r.tools.read.ReadTool.def.name, "needs_eyes" });
+
     const blind = try factory.build_system_prompt(alloc, .general, false);
-    try std.testing.expect(std.mem.indexOf(u8, blind, "view_image") == null);
+    try std.testing.expect(std.mem.indexOf(u8, blind, "needs_eyes") == null);
+    try std.testing.expect(std.mem.indexOf(u8, blind, "- read: Read file contents and images") != null);
     const sighted = try factory.build_system_prompt(alloc, .general, true);
-    try std.testing.expect(std.mem.indexOf(u8, sighted, "- view_image: Load an image into the context") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sighted, "- needs_eyes: vision only tool") != null);
 
     var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
     defer env.deinit();
@@ -1379,14 +1384,14 @@ test "vision tools gated by the agent model vision flag" {
     };
 
     try factory.refreshAgentTools(agent, base);
-    for (agent.tools) |tool| try std.testing.expect(!std.mem.eql(u8, tool.name, "view_image"));
+    for (agent.tools) |tool| try std.testing.expect(!std.mem.eql(u8, tool.name, "needs_eyes"));
 
     var cfg: r.config.BlitzdenkCfg = .{};
     cfg.model_count = 1;
     cfg.models[0] = .{ .provider = @enumFromInt(0), .vision = true };
     try factory.setAgentModel(&cfg, .general, @enumFromInt(0));
     try factory.refreshAgentTools(agent, base);
-    for (agent.tools) |tool| try std.testing.expect(!std.mem.eql(u8, tool.name, "view_image"));
+    for (agent.tools) |tool| try std.testing.expect(!std.mem.eql(u8, tool.name, "needs_eyes"));
 
     try agent.updateModel(.{
         .api_key = "key",
@@ -1397,7 +1402,7 @@ test "vision tools gated by the agent model vision flag" {
     });
     try factory.refreshAgentTools(agent, base);
     var installed = false;
-    for (agent.tools) |tool| installed = installed or std.mem.eql(u8, tool.name, "view_image");
+    for (agent.tools) |tool| installed = installed or std.mem.eql(u8, tool.name, "needs_eyes");
     try std.testing.expect(installed);
 }
 

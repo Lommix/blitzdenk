@@ -6,16 +6,16 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 pub const ReadTool = r.Tool{
     .def = .{
         .name = "read",
-        .description = "Read the contents of a file. For text files, output is truncated to " ++ r.DISPLAY_CAP_TEXT ++
+        .description = "Read the contents of a file. Supports text files and images (png, jpeg, gif, webp) from a local path or HTTP(S) URL. Images are sent as attachments. For text files, output is truncated to " ++ r.DISPLAY_CAP_TEXT ++
             \\ (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
         ,
-        .prompt_snippet = "Read file contents",
+        .prompt_snippet = "Read file contents and images",
         .prompt_guidelines = "Use read to examine files instead of cat or sed. You can read many files in parallel",
         .parameters_schema =
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\      "file_path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
+        \\      "file_path": {"type": "string", "description": "Path to the file to read (relative or absolute), or an HTTP(S) URL to load an image"},
         \\      "offset": {"type": "number", "description": "Line number to start reading from (1-indexed)"},
         \\      "limit": {"type": "number", "description": "Maximum number of lines to read"}
         \\  },
@@ -24,25 +24,6 @@ pub const ReadTool = r.Tool{
         ,
     },
     .func = &run,
-};
-
-pub const ViewImageTool = r.Tool{
-    .def = .{
-        .name = "view_image",
-        .description = "Load an image from a local path or HTTP(S) URL into the context (PNG, JPEG, GIF, WebP)",
-        .prompt_snippet = "Load an image into the context",
-        .requires_vision = true,
-        .parameters_schema =
-        \\{
-        \\  "type": "object",
-        \\  "properties": {
-        \\      "file_path": {"type": "string", "description": "Local image path (relative to cwd or absolute) or HTTP(S) URL"}
-        \\  },
-        \\  "required": ["file_path"]
-        \\}
-        ,
-    },
-    .func = &viewImage,
 };
 
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
@@ -84,6 +65,24 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     r.setToolStatus(ctx, call, w.finish()) catch {};
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
+
+    const is_url = std.mem.startsWith(u8, args.file_path, "http://") or
+        std.mem.startsWith(u8, args.file_path, "https://");
+
+    const sniffed_type = if (is_url)
+        null
+    else
+        sniffImageType(ctx, resolved);
+    if (is_url) {
+        if (!ctx.agent().flags.vision)
+            return r.errResult(call, "URL reads load images, but this model has no vision; use bash with curl to fetch the content");
+        return viewImage(ctx, call, args.file_path, true, resolved);
+    }
+    if (sniffed_type) |_| {
+        if (!ctx.agent().flags.vision)
+            return nonVisionResult(ctx, call, sniffed_type);
+        return viewImage(ctx, call, args.file_path, false, resolved);
+    }
 
     const start_line: u64 = if (args.offset) |o| (if (o > 0) o else 1) else 1;
     const max_lines: u64 = if (args.limit) |l| l else r.MAX_DISPLAY_LINES;
@@ -144,7 +143,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     }
     if (looksBinary(out)) {
         ctx.alloc.free(out);
-        return r.errResult(call, "binary file (NUL byte or invalid UTF-8); use view_image for images, or bash with xxd/strings/base64 to inspect");
+        return r.errResult(call, "binary file (NUL byte or invalid UTF-8); use bash with xxd/strings/base64 to inspect");
     }
     const truncated = r.truncateOutputToOwned(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES);
     if (truncated.ptr != out.ptr) ctx.alloc.free(out);
@@ -155,37 +154,33 @@ fn looksBinary(data: []const u8) bool {
     return std.mem.indexOfScalar(u8, data, 0) != null or !std.unicode.utf8ValidateSlice(data);
 }
 
-fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
-    const Args = struct { file_path: []const u8 };
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"file_path\": \"...\"}");
+const SNIFF_BYTES = "4100";
 
-    if (args.file_path.len == 0) return r.errResult(call, "path is empty");
+fn sniffImageType(ctx: r.ToolContext, resolved: []const u8) ?[]const u8 {
+    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "head", "-c", SNIFF_BYTES, "--", resolved } }) catch
+        return null;
+    defer ctx.base.exec_pool.alloc.free(res.stdout);
+    defer ctx.base.exec_pool.alloc.free(res.stderr);
+    if (res.ty != .success) return null;
+    return detectImageMediaType(res.stdout);
+}
 
-    const is_url = std.mem.startsWith(u8, args.file_path, "http://") or
-        std.mem.startsWith(u8, args.file_path, "https://");
+const NON_VISION_NOTE = "[Current model does not support images. The image will be omitted from this request.]";
 
-    var display_buf: [r.STATUS_BUF]u8 = undefined;
-    const display_path = if (!is_url and ctx.base.cwd.len > 0)
-        r.replaceAll(args.file_path, ctx.base.cwd, ".", &display_buf)
+fn nonVisionResult(ctx: r.ToolContext, call: r.r.sdk.ToolCall, media_type: ?[]const u8) r.r.sdk.ToolOutput {
+    const msg = if (media_type) |mt|
+        std.fmt.allocPrint(ctx.alloc, "Read image file [{s}]\n" ++ NON_VISION_NOTE, .{mt}) catch
+            return r.errResult(call, "out of memory")
     else
-        args.file_path;
+        NON_VISION_NOTE;
+    return r.okResult(call, msg);
+}
 
-    const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    var status_buf: [r.STATUS_BUF]u8 = undefined;
-    var w = r.tui.AnsiWriter.init(&status_buf);
-    w.styled(.{ .modifier = .{ .bold = true } }, "view image ");
-    w.styled(.{ .fg = app.theme.muted }, display_path);
-    r.setToolStatus(ctx, call, w.finish()) catch {};
-
+fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall, file_path: []const u8, is_url: bool, resolved: []const u8) r.r.sdk.ToolOutput {
     const raw = if (is_url)
-        loadRemoteImage(ctx, args.file_path) catch |err| return r.errResult(call, imageLoadError(err, true))
-    else blk: {
-        const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, args.file_path }) catch
-            return r.errResult(call, "failed to resolve image path");
-        break :blk loadLocalImage(ctx, resolved) catch |err| return r.errResult(call, imageLoadError(err, false));
-    };
+        loadRemoteImage(ctx, file_path) catch |err| return r.errResult(call, imageLoadError(err, true))
+    else
+        loadLocalImage(ctx, resolved) catch |err| return r.errResult(call, imageLoadError(err, false));
     defer ctx.base.exec_pool.alloc.free(raw);
 
     const media_type = detectImageMediaType(raw) orelse
@@ -195,7 +190,10 @@ fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const encoded = ctx.alloc.alloc(u8, encoded_len) catch return r.errResult(call, "out of memory");
     _ = std.base64.standard.Encoder.encode(encoded, raw);
 
-    return .{ .content = "Loaded image", .image = .{
+    const note = std.fmt.allocPrint(ctx.alloc, "Read image file [{s}]", .{media_type}) catch
+        return r.errResult(call, "out of memory");
+
+    return .{ .content = note, .image = .{
         .url = std.fmt.allocPrint(ctx.alloc, "data:{s};base64,{s}", .{ media_type, encoded }) catch return r.errResult(call, "out of memory"),
         .media_type = media_type,
     } };

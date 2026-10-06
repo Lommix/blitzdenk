@@ -1,7 +1,9 @@
 # Blitzdenk
 
 A minimal self improving coding harness for POSIX. No dependencies, vendored Lua.
-Ships as a single 1.7MB binary using less then 99MB of ram.
+Ships as a single <2MB binary using less then 99MB of ram.
+
+> Goal: Becoming the Neovim of harnesses
 
 ![demo](docs/assets/screenshot.png)
 
@@ -17,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 - MCP and Skill support.
 - Multi-provider: any OpenAI or Anthropic chat/response schema supported, including local AI.
 - Mermaid diagram render in tui.
-- Lua hot reload: Agents can extend themself and debug them at the same time.
+- Hot reload: Agents can extend themself and debug what at the same time.
 - Version management: run `blitz update` on new releases. (pulls release bin from github)
 - Sessions management per project: `blitz continue <?session_id>` resumes, `blitz sessions` list all
 - Render custom widgets from Lua

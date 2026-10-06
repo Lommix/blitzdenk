@@ -1419,8 +1419,7 @@ pub const BlitzToolDef = LuaType{
         .name = "BlitzToolDef",
         .fields = &.{
             .{ .name = "BASH", .desc = "execute bash scripts", .ty = LuaType.string, .value = .{ .string = tl.bash.BashTool.def.name } },
-            .{ .name = "READ", .desc = "reading text files", .ty = LuaType.string, .value = .{ .string = tl.read.ReadTool.def.name } },
-            .{ .name = "VIEW_IMAGE", .desc = "view images, skipped, if vision flag on model is missing", .ty = LuaType.string, .value = .{ .string = tl.read.ViewImageTool.def.name } },
+            .{ .name = "READ", .desc = "reading text files and images", .ty = LuaType.string, .value = .{ .string = tl.read.ReadTool.def.name } },
             .{ .name = "WRITE", .desc = "write new files", .ty = LuaType.string, .value = .{ .string = tl.write.WriteTool.def.name } },
             .{ .name = "EDIT", .desc = "default string replace edit", .ty = LuaType.string, .value = .{ .string = tl.edit.EditTool.def.name } },
             .{ .name = "PATCH", .desc = "patch DSL tool. Replaces edit and write. GPT loves it", .ty = LuaType.string, .value = .{ .string = tl.patch.PatchTool.def.name } },

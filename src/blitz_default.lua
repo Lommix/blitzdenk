@@ -227,7 +227,6 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.WRITE,
 	blitz.tools.ASK,
 	blitz.tools.START_MCP,
-	blitz.tools.VIEW_IMAGE,
 	Tools.codemode,
 	Tools.cancel_tool,
 	Tools.message_tool,
@@ -478,7 +477,6 @@ Keep it under 10 lines unless the question genuinely needs more.
 	tools = {
 		blitz.tools.READ,
 		blitz.tools.BASH,
-		blitz.tools.VIEW_IMAGE,
 	},
 })
 
@@ -540,6 +538,5 @@ items. Do not overstate severity. Tone: matter-of-fact, no flattery, no filler.
 	tools = {
 		blitz.tools.READ,
 		blitz.tools.BASH,
-		blitz.tools.VIEW_IMAGE,
 	},
 })
