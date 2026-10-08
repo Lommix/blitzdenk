@@ -827,7 +827,7 @@ pub const App = struct {
             const agent = self.registry.get(id) orelse continue;
             const finished_run = agent.task != null;
             if (self.registry.reap(id)) {
-                if (finished_run and agent.status == .complete) _ = self.event_bus.emit(self, .{ .agent_complete = id });
+                if (finished_run and agent.status == .complete and self.registry.state(id) == .complete) _ = self.event_bus.emit(self, .{ .agent_complete = id });
                 try self.handleReapedAgent(id);
             }
         }
@@ -1100,7 +1100,7 @@ pub const App = struct {
                 const wrapped = try std.fmt.allocPrint(self.gpa, "<system-reminder>\n{s}\n</system-reminder>", .{notice});
                 defer self.gpa.free(wrapped);
                 try parent.queueReminder(wrapped);
-                if (parent.task == null and parent.compact_task == null and parent.status != .retrying and parent.status != .compacting) {
+                if (!parent.isBusy()) {
                     try self.registry.run(parent_id, .{ .max_steps = std.math.maxInt(usize) });
                     _ = self.event_bus.emit(self, .{ .agent_started = .{ .id = parent_id, .fresh = false } });
                 }
@@ -2529,12 +2529,12 @@ pub const App = struct {
             const agent = self.registry.get(id).?;
             try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
             self.sdk_run_rendered_steps = 0;
-            if (self.registry.state(id) != .active) {
+            if (!agent.isBusy()) {
                 try self.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
                 _ = self.event_bus.emit(self, .{ .agent_started = .{ .id = id, .fresh = false } });
             }
         } else {
-            const id = self.registry.reserve().?;
+            const id = self.registry.reserve(null).?;
             self.cmd_queue.append(io, .{
                 .spawn_agent = .{
                     .agent_id = id,
@@ -3993,31 +3993,7 @@ fn buildToolGroupParagraph(
             }
 
             if (entry.child_id) |child_id| {
-                if (app.registry.get(child_id)) |child| {
-                    const activity = child.activity;
-                    if (activity != .idle) try line.pushSpan(arena, .{ .content = switch (activity) {
-                        .idle => "",
-                        .thinking => "  thinking",
-                        .processing => "  processing",
-                        .writing => "  writing",
-                        .calling => "  calling",
-                        .retrying => "  retrying",
-                    }, .style = .{ .fg = app.theme.muted } });
-                    if (activity != .idle) {
-                        try line.pushSpan(arena, .{ .content = " " });
-                        try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
-                    }
-                }
-            }
-
-            if (entry.child_id) |child_id| {
-                if (app.registry.get(child_id)) |child| {
-                    if (child.tokens_per_second > 0) {
-                        try line.pushSpan(arena, .{ .content = "  " });
-                        line.pushSpanPrint(arena, "{d}", .{@as(u32, @intFromFloat(child.tokens_per_second))}, .{ .fg = app.theme.text, .modifier = .{ .bold = true } }) catch {};
-                        line.pushSpanPrint(arena, " T/s", .{}, .{ .fg = app.theme.info }) catch {};
-                    }
-                }
+                try pushChildActivity(app, arena, &line, child_id);
             }
         } else {
             try line.pushSpan(arena, .{ .content = call.tool_name });
@@ -4035,33 +4011,25 @@ fn buildToolGroupParagraph(
             }
 
             const child_id = entry.child_id orelse continue;
-            if (child_id.index >= r.agent_registry.max_agents) continue;
-            const child_status = &statuses.ptr.agents[child_id.index];
-            if (child_status.generation != child_id.generation) continue;
+            var rail_nodes: std.ArrayList(RailNode) = .empty;
+            try walkAgentRail(arena, statuses.ptr, child_id, &.{}, 0, &rail_nodes);
 
-            var child_lines: std.ArrayList(r.tui.Line) = .empty;
-            var entry_starts: std.ArrayList(usize) = .empty;
-            var it = child_status.entries.iterator();
-            const skip = if (child_status.entries.count() > 3) child_status.entries.count() - 3 else 0;
-            var i: usize = 0;
-            while (it.next()) |child_entry| {
-                i += 1;
-                if (i <= skip) continue;
-                try entry_starts.append(arena, child_lines.items.len);
-                for (child_entry.value_ptr.lines.items) |child_line| try child_lines.append(arena, child_line);
-            }
-
-            const total_child_lines = child_lines.items.len;
-            var start_cursor: usize = 0;
-            for (child_lines.items, 0..) |child_line, n| {
-                var nested = r.tui.Line{ .style = child_line.style };
-
-                const is_last = n + 1 == total_child_lines;
-                const starts_entry = start_cursor < entry_starts.items.len and n == entry_starts.items[start_cursor];
-                if (starts_entry) start_cursor += 1;
-                const glyph: []const u8 = if (is_last) r.tui.icon.box_bl else if (starts_entry) r.tui.icon.box_t_right else r.tui.icon.box_v;
-                try nested.pushSpanPrint(arena, " {s} ", .{glyph}, .{});
-                for (child_line.spans.items) |span| try nested.pushSpan(arena, span);
+            for (rail_nodes.items) |node| {
+                var nested = r.tui.Line{ .style = node.line.style };
+                const connector: []const u8 = if (node.rail_end) r.tui.icon.box_bl else if (node.entry_start) r.tui.icon.box_t_right else r.tui.icon.box_v;
+                var rail: std.ArrayList(u8) = .empty;
+                try rail.append(arena, ' ');
+                for (node.prefix) |continues| {
+                    try rail.appendSlice(arena, if (continues) r.tui.icon.box_v else " ");
+                    try rail.append(arena, ' ');
+                }
+                try rail.appendSlice(arena, connector);
+                try rail.append(arena, ' ');
+                try nested.pushSpan(arena, .{ .content = rail.items });
+                for (node.line.spans.items) |span| try nested.pushSpan(arena, span);
+                if (node.entry_start) {
+                    if (node.child_id) |node_child_id| try pushChildActivity(app, arena, &nested, node_child_id);
+                }
                 try p.lines.append(arena, nested);
             }
         }
@@ -4072,6 +4040,93 @@ fn buildToolGroupParagraph(
         .p = p,
         .is_tool_block = true,
     };
+}
+
+const rail_depth_cap = r.agent_registry.max_agents;
+
+const RailNode = struct {
+    line: r.tui.Line,
+    entry_start: bool,
+    rail_end: bool = false,
+    child_id: ?r.AgentId,
+    prefix: []const bool,
+};
+
+fn pushChildActivity(app: *App, arena: std.mem.Allocator, line: *r.tui.Line, child_id: r.AgentId) !void {
+    const child = app.registry.get(child_id) orelse return;
+    const activity = child.activity;
+    if (activity != .idle) {
+        try line.pushSpan(arena, .{ .content = switch (activity) {
+            .idle => "",
+            .thinking => "  thinking",
+            .processing => "  processing",
+            .writing => "  writing",
+            .calling => "  calling",
+            .retrying => "  retrying",
+        }, .style = .{ .fg = app.theme.muted } });
+        try line.pushSpan(arena, .{ .content = " " });
+        try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
+    }
+    if (child.tokens_per_second > 0) {
+        try line.pushSpan(arena, .{ .content = "  " });
+        line.pushSpanPrint(arena, "{d}", .{@as(u32, @intFromFloat(child.tokens_per_second))}, .{ .fg = app.theme.text, .modifier = .{ .bold = true } }) catch {};
+        line.pushSpanPrint(arena, " T/s", .{}, .{ .fg = app.theme.info }) catch {};
+    }
+}
+
+fn walkAgentRail(
+    arena: std.mem.Allocator,
+    store: *ToolStatusStore,
+    agent_id: r.AgentId,
+    prefix: []const bool,
+    depth: u32,
+    out: *std.ArrayList(RailNode),
+) !void {
+    if (depth >= rail_depth_cap) return;
+    if (agent_id.index >= r.agent_registry.max_agents) return;
+    const agent_status = &store.agents[agent_id.index];
+    if (agent_status.generation != agent_id.generation) return;
+
+    const count = agent_status.entries.count();
+    const skip = if (count > 3) count - 3 else 0;
+    var visible: std.ArrayList(*ToolStatusEntry) = .empty;
+    var it = agent_status.entries.iterator();
+    var i: usize = 0;
+    while (it.next()) |kv| {
+        i += 1;
+        if (i <= skip) continue;
+        try visible.append(arena, kv.value_ptr);
+    }
+
+    var last_row: ?usize = null;
+    for (visible.items, 0..) |tool_entry, vi| {
+        var continues = false;
+        var j = vi + 1;
+        while (j < visible.items.len) : (j += 1) {
+            if (visible.items[j].lines.items.len > 0 or visible.items[j].child_id != null) {
+                continues = true;
+                break;
+            }
+        }
+        const child_prefix = try arena.alloc(bool, prefix.len + 1);
+        @memcpy(child_prefix[0..prefix.len], prefix);
+        child_prefix[prefix.len] = continues;
+
+        for (tool_entry.lines.items, 0..) |entry_line, li| {
+            last_row = out.items.len;
+            try out.append(arena, .{
+                .line = entry_line,
+                .entry_start = li == 0,
+                .child_id = tool_entry.child_id,
+                .prefix = prefix,
+            });
+        }
+        if (tool_entry.child_id) |entry_child_id| {
+            try walkAgentRail(arena, store, entry_child_id, child_prefix, depth + 1, out);
+        }
+    }
+    // Each agent closes its own rail, even when descendants follow its last row.
+    if (last_row) |row| out.items[row].rail_end = true;
 }
 
 /// Scan the conversation for a tool_result with the given call_id. Source of
@@ -4639,7 +4694,7 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
 
     const agent = if (slot.agent) |*value| value else return null;
     const active_agent_count = app.registry.countActive();
-    const waiting = active_agent_count > 0;
+    const waiting = !agent.isBusy() and active_agent_count > 0;
     const secs = app.sessionRunSecs();
 
     const hl: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .bold = true } };
@@ -4652,7 +4707,7 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
     const ssh_suffix: []const u8 = if (exec_pool.ssh_active and exec_pool.ssh_target != null) " (SSH ON)" else "";
 
     var l = r.tui.Line{};
-    if (state == .active) {
+    if (state == .active and !waiting) {
         const spinner_str = text_utils.spinnerDots(app.frame_count);
         if (agent.status == .compacting) {
             l.pushSpanPrint(alloc, "{s} compacting", .{spinner_str}, info) catch {};
@@ -4697,10 +4752,10 @@ fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
         } else if (state_str.len > 0) {
             l.pushSpanPrint(alloc, "{s}", .{state_str}, hl) catch {};
         }
-    } else if (waiting and state == .complete) {
+    } else if (waiting and (state == .active or state == .complete)) {
         pushGradientWave(&l, alloc, "waiting", app.theme.text_hl, app.theme.info, app.frame_count);
         l.pushSpanPrint(alloc, " for ", .{}, info) catch {};
-        l.pushSpanPrint(alloc, "{d}", .{active_agent_count}, hl) catch {};
+        l.pushSpanPrint(alloc, "{d}", .{active_agent_count -| @as(u32, if (state == .active) 1 else 0)}, hl) catch {};
         l.pushSpanPrint(alloc, " agents (", .{}, info) catch {};
         l.pushSpanPrint(alloc, "{s}", .{dur}, hl) catch {};
         l.pushSpanPrint(alloc, ") {s}", .{ssh_suffix}, info) catch {};
@@ -5208,7 +5263,7 @@ fn undoTestAgent(app: *App) !*r.agent.Agent {
     errdefer std.testing.allocator.destroy(registry);
     registry.* = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
     errdefer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -5490,7 +5545,7 @@ test "background agent stays silent without a main agent" {
     var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
     app.registry = &registry;
-    const agent_id = registry.reserve().?;
+    const agent_id = registry.reserve(null).?;
     const agent = try registry.activate(agent_id, .{
         .api_key = "key",
         .model = "model",
@@ -5584,7 +5639,7 @@ test "finished retained agents survive reaping and take queued messages" {
     const Fixture = struct {
         fn discard(_: ?*anyopaque, _: r.agent_run.Event) void {}
     };
-    const child_id = registry.reserve().?;
+    const child_id = registry.reserve(null).?;
     const child = try registry.activate(child_id, .{
         .api_key = "key",
         .model = "model",
@@ -5719,8 +5774,8 @@ test "tool group rail: nested list ends with exactly one corner" {
     defer registry.deinit();
     app.registry = &registry;
 
-    const parent_id = registry.reserve().?;
-    const child_id = registry.reserve().?;
+    const parent_id = registry.reserve(null).?;
+    const child_id = registry.reserve(null).?;
     _ = try registry.activate(parent_id, .{
         .api_key = "key",
         .model = "model",
@@ -5772,6 +5827,222 @@ fn collectRailGlyphs(alloc: std.mem.Allocator, p: r.tui.Paragraph) !std.ArrayLis
 
 fn decodeCp(text: *const [3:0]u8) u21 {
     return std.unicode.utf8Decode(text[0..3]) catch 0;
+}
+
+fn lineText(arena: std.mem.Allocator, line: r.tui.Line) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (line.spans.items) |span| try out.appendSlice(arena, span.content);
+    return out.items;
+}
+
+fn findLineContaining(lines: []r.tui.Line, arena: std.mem.Allocator, needle: []const u8) ![]const u8 {
+    for (lines) |line| {
+        const text = try lineText(arena, line);
+        if (std.mem.indexOf(u8, text, needle) != null) return text;
+    }
+    return "";
+}
+
+fn activateTestAgent(reg: *r.agent_registry.Registry, name: []const u8) !r.AgentId {
+    const id = reg.reserve(null).?;
+    _ = try reg.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .name = name, .cwd = "/tmp" } });
+    return id;
+}
+
+test "tool group rail: nested agent tree draws grandchild rows" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.timeline = .empty;
+    app.tool_status_entries = .{};
+    app.dirty = false;
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app.registry = &registry;
+
+    const parent_id = try activateTestAgent(&registry, "main");
+    const child_id = try activateTestAgent(&registry, "child");
+    const grandchild_id = try activateTestAgent(&registry, "grandchild");
+    const grandchild = registry.get(grandchild_id).?;
+    grandchild.activity = .processing;
+    grandchild.tokens_per_second = 42;
+
+    try app.setToolChild(parent_id, "call_1", child_id);
+    try app.setToolStatus(parent_id, "call_1", "challenger -> task");
+    try app.setToolChild(child_id, "spawn_1", grandchild_id);
+    try app.setToolStatus(child_id, "spawn_1", "scout -> task");
+    try app.setToolStatus(child_id, "work_1", "bash list files");
+    try app.setToolStatus(grandchild_id, "gc_1", "bash gc one");
+    try app.setToolStatus(grandchild_id, "gc_2", "bash gc two");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const rendered = try buildToolGroupParagraph(&app, arena.allocator(), &.{
+        .{ .agent_id = parent_id, .call_id = "call_1", .tool_name = "agent" },
+    }, 80);
+
+    const spawn_row = try findLineContaining(rendered.p.lines.items, arena.allocator(), "scout -> task");
+    try std.testing.expect(std.mem.startsWith(u8, spawn_row, " ├ "));
+    try std.testing.expect(std.mem.indexOf(u8, spawn_row, "processing") != null);
+    try std.testing.expect(std.mem.indexOf(u8, spawn_row, "42 T/s") != null);
+
+    const gc_one = try findLineContaining(rendered.p.lines.items, arena.allocator(), "bash gc one");
+    try std.testing.expectEqualStrings(" │ ├ bash gc one", gc_one);
+    const gc_two = try findLineContaining(rendered.p.lines.items, arena.allocator(), "bash gc two");
+    try std.testing.expectEqualStrings(" │ └ bash gc two", gc_two);
+    const child_row = try findLineContaining(rendered.p.lines.items, arena.allocator(), "bash list files");
+    try std.testing.expect(std.mem.startsWith(u8, child_row, " └ "));
+
+    var glyphs = try collectRailGlyphs(std.testing.allocator, rendered.p);
+    defer glyphs.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), glyphs.items.len);
+    const corner = decodeCp("└");
+    var corner_count: usize = 0;
+    for (rendered.p.lines.items) |line| {
+        corner_count += std.mem.count(u8, try lineText(arena.allocator(), line), "└");
+    }
+    try std.testing.expectEqual(@as(usize, 2), corner_count);
+    try std.testing.expectEqual(corner, glyphs.items[glyphs.items.len - 1]);
+}
+
+test "tool group rail: each nested rail closes on its final status line" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.timeline = .empty;
+    app.tool_status_entries = .{};
+    app.dirty = false;
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app.registry = &registry;
+    const ids = [_]r.AgentId{
+        try activateTestAgent(&registry, "main"),
+        try activateTestAgent(&registry, "child"),
+        try activateTestAgent(&registry, "grandchild"),
+        try activateTestAgent(&registry, "great-grandchild"),
+    };
+    for (ids[0..3], ids[1..]) |parent, child| {
+        try app.setToolChild(parent, "spawn", child);
+        try app.setToolStatus(parent, "spawn", "general -> task");
+    }
+    for (ids[1..]) |id| {
+        try app.setToolStatus(id, "wait", "waiting\nstill waiting");
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const calls = [_]TimelinePart.ToolCallEntry{
+        .{ .agent_id = ids[0], .call_id = "spawn", .tool_name = "agent" },
+    };
+    const rendered = try buildToolGroupParagraph(&app, arena.allocator(), &calls, 80);
+    const expected = [_][]const u8{
+        " ├ general -> task",
+        " │ ├ general -> task",
+        " │ │ ├ waiting",
+        " │ │ └ still waiting",
+        " │ ├ waiting",
+        " │ └ still waiting",
+        " ├ waiting",
+        " └ still waiting",
+    };
+    try std.testing.expectEqual(expected.len + 1, rendered.p.lines.items.len);
+    for (expected, rendered.p.lines.items[1..]) |text, line| {
+        try std.testing.expectEqualStrings(text, try lineText(arena.allocator(), line));
+    }
+
+    // A final spawn row closes its rail before its child's indented rows.
+    app.tool_status_entries = .{};
+    for (ids[0..3], ids[1..]) |parent, child| {
+        try app.setToolChild(parent, "spawn", child);
+        try app.setToolStatus(parent, "spawn", "general -> task");
+    }
+    try app.setToolStatus(ids[3], "wait", "waiting\nstill waiting");
+    const spawn_rendered = try buildToolGroupParagraph(&app, arena.allocator(), &calls, 80);
+    const spawn_expected = [_][]const u8{
+        " └ general -> task",
+        "   └ general -> task",
+        "     ├ waiting",
+        "     └ still waiting",
+    };
+    try std.testing.expectEqual(spawn_expected.len + 1, spawn_rendered.p.lines.items.len);
+    for (spawn_expected, spawn_rendered.p.lines.items[1..]) |text, line| {
+        try std.testing.expectEqualStrings(text, try lineText(arena.allocator(), line));
+    }
+}
+
+test "tool group rail: cycles terminate at the depth cap" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.timeline = .empty;
+    app.tool_status_entries = .{};
+    app.dirty = false;
+
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app.registry = &registry;
+
+    const parent_id = try activateTestAgent(&registry, "main");
+    const child_id = try activateTestAgent(&registry, "child");
+    const grandchild_id = try activateTestAgent(&registry, "grandchild");
+
+    try app.setToolChild(parent_id, "call_1", child_id);
+    try app.setToolStatus(parent_id, "call_1", "challenger -> task");
+
+    try app.setToolChild(child_id, "loop_1", grandchild_id);
+    try app.setToolStatus(child_id, "loop_1", "bash loop");
+    try app.setToolChild(grandchild_id, "loop_2", child_id);
+    try app.setToolStatus(grandchild_id, "loop_2", "bash loop back");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const rendered = try buildToolGroupParagraph(&app, arena.allocator(), &.{
+        .{ .agent_id = parent_id, .call_id = "call_1", .tool_name = "agent" },
+    }, 80);
+    var glyphs = try collectRailGlyphs(std.testing.allocator, rendered.p);
+    defer glyphs.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, r.agent_registry.max_agents), glyphs.items.len);
+    var corner_total: usize = 0;
+    var corner_line: ?usize = null;
+    for (rendered.p.lines.items, 0..) |line, li| {
+        const hits = std.mem.count(u8, try lineText(arena.allocator(), line), "└");
+        corner_total += hits;
+        if (hits > 0) corner_line = li;
+    }
+    try std.testing.expectEqual(@as(usize, r.agent_registry.max_agents), corner_total);
+    try std.testing.expectEqual(rendered.p.lines.items.len - 1, corner_line.?);
+
+    app.tool_status_entries = .{};
+    try app.setToolChild(parent_id, "call_1", child_id);
+    try app.setToolStatus(parent_id, "call_1", "challenger -> task");
+    try app.setToolChild(child_id, "self_1", child_id);
+    try app.setToolStatus(child_id, "self_1", "bash self");
+
+    const self_rendered = try buildToolGroupParagraph(&app, arena.allocator(), &.{
+        .{ .agent_id = parent_id, .call_id = "call_1", .tool_name = "agent" },
+    }, 80);
+    var self_glyphs = try collectRailGlyphs(std.testing.allocator, self_rendered.p);
+    defer self_glyphs.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, r.agent_registry.max_agents), self_glyphs.items.len);
+    var self_corner_total: usize = 0;
+    var self_corner_line: ?usize = null;
+    for (self_rendered.p.lines.items, 0..) |line, li| {
+        const hits = std.mem.count(u8, try lineText(arena.allocator(), line), "└");
+        self_corner_total += hits;
+        if (hits > 0) self_corner_line = li;
+    }
+    try std.testing.expectEqual(@as(usize, r.agent_registry.max_agents), self_corner_total);
+    try std.testing.expectEqual(self_rendered.p.lines.items.len - 1, self_corner_line.?);
 }
 
 test "appendMarkdownText fills headline to width" {
@@ -6356,7 +6627,7 @@ fn timelineCacheTestDeinit(app: *App) void {
 
 fn timelineCacheTestAgent(app: *App, registry: *r.agent_registry.Registry) !r.AgentId {
     app.registry = registry;
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     _ = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -6765,7 +7036,7 @@ test "tool entries with live children stay uncached and keep updating" {
     var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
     const id = try timelineCacheTestAgent(&app, &registry);
-    const child_id = registry.reserve().?;
+    const child_id = registry.reserve(null).?;
     _ = try registry.activate(child_id, .{
         .api_key = "key",
         .model = "model",
@@ -6870,7 +7141,7 @@ test "resolveActivePermission leaves select mode for the next queued ask" {
     var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
     app_state.registry = &registry;
-    const agent_id = registry.reserve().?;
+    const agent_id = registry.reserve(null).?;
     _ = try registry.activate(agent_id, .{
         .api_key = "key",
         .model = "model",
@@ -6904,4 +7175,146 @@ test "pathInsideDir keeps the boundary strict" {
     try std.testing.expect(pathInsideDir("/a/b/c", "/a/b"));
     try std.testing.expect(!pathInsideDir("/a/bc", "/a/b"));
     try std.testing.expect(!pathInsideDir("/a", "/a/b"));
+}
+
+fn finishWaitingTestTurn(registry: *r.agent_registry.Registry, id: r.AgentId) !void {
+    try registry.run(id, .{ .max_steps = 0 });
+    registry.get(id).?.task.?.wait();
+    while (registry.drain(id, 64, null, struct {
+        fn discard(_: ?*anyopaque, _: r.agent_run.Event) void {}
+    }.discard) != 0) {}
+    try std.testing.expect(registry.reap(id));
+}
+
+test "reaped waiting agent sends no parent notice or spawn callback" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.gpa = std.testing.allocator;
+    app.event_bus = .{};
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app.registry = &registry;
+    const root_id = try activateTestAgent(&registry, "root");
+    const root = registry.get(root_id).?;
+    // Hold the ancestor between retries so a final reminder remains observable.
+    root.status = .retrying;
+    const parent_id = registry.reserve(root_id).?;
+    const parent = try registry.activate(parent_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .name = "parent", .parent = root_id.pack(), .depth = 1 } });
+    parent.background = true;
+    const child_id = registry.reserve(parent_id).?;
+    _ = try registry.activate(child_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .parent = parent_id.pack(), .depth = 2 } });
+
+    const vm = try r.lua.LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    app.lua_vm = vm;
+    try vm.exec(
+        \\callback_count = 0
+        \\function on_done(id, status)
+        \\    callback_count = callback_count + 1
+        \\    callback_id = id
+        \\    callback_status = status
+        \\end
+    );
+    _ = r.c.lua_getglobal(vm.L, "on_done");
+    const callback_ref = r.c.luaL_ref(vm.L, r.c.LUA_REGISTRYINDEX);
+    try vm.spawn_callbacks.put(std.testing.allocator, parent_id.pack(), callback_ref);
+
+    try finishWaitingTestTurn(&registry, parent_id);
+    try app.handleReapedAgent(parent_id);
+    try app.handleReapedAgent(parent_id);
+    try std.testing.expectEqual(r.agent_registry.SlotState.active, registry.state(parent_id).?);
+    try std.testing.expect(!parent.reported_task_done);
+    try std.testing.expectEqual(@as(usize, 0), root.queued_messages.items.len);
+    try std.testing.expect(vm.spawn_callbacks.contains(parent_id.pack()));
+    try vm.exec("assert(callback_count == 0)");
+
+    try finishWaitingTestTurn(&registry, child_id);
+    try parent.setMessages(&.{r.sdk.AssistantMessage("final nested answer")});
+    try finishWaitingTestTurn(&registry, parent_id);
+    var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
+    defer env.deinit();
+    var pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &env);
+    defer pool.deinit();
+    app.exec_pool = &pool;
+    try app.handleReapedAgent(parent_id);
+    try app.handleReapedAgent(parent_id);
+    try std.testing.expect(parent.reported_task_done);
+    try std.testing.expectEqual(@as(usize, 1), root.queued_messages.items.len);
+    const notice = root.queued_messages.items[0].text();
+    try std.testing.expect(std.mem.startsWith(u8, notice, "<system-reminder>\nAgent result done: "));
+    const path_start = std.mem.indexOf(u8, notice, "/tmp/blitzdenk/").?;
+    const path_end = std.mem.indexOfScalarPos(u8, notice, path_start, '\n').?;
+    const path = notice[path_start..path_end];
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, path) catch {};
+    const content = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited64(1024));
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("final nested answer", content);
+    const script = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "assert(callback_count == 1 and callback_id == {d} and callback_status == blitz.AWAIT_COMPLETE)",
+        .{parent_id.pack()},
+    );
+    defer std.testing.allocator.free(script);
+    try vm.exec(script);
+}
+
+test "waiting main agent shows waiting progress and cancel stops the tree" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.gpa = std.testing.allocator;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.arena_streaming_preview = .init(std.testing.allocator);
+    defer app.arena_streaming_preview.deinit();
+    app.arena_streaming_snapshot = .init(std.testing.allocator);
+    defer app.arena_streaming_snapshot.deinit();
+    app.timeline = .empty;
+    app.sdk_run_rendered_steps = 0;
+    app.event_bus = .{};
+    app.active_permission = null;
+    app.permission_queue = .{ .value = .empty };
+    app.pending_permissions = .empty;
+    app.active_selection = null;
+    app.selection_queue = .{ .value = .empty };
+    app.input_mode = .{ .text = .{} };
+    app.session_run_ns = 0;
+    app.session_run_started_ns = 0;
+    app.frame_count = 0;
+    app.theme = .default;
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app.registry = &registry;
+    const parent_id = try activateTestAgent(&registry, "main");
+    app.main_agent_id = parent_id;
+    const child_id = registry.reserve(parent_id).?;
+    const child = try registry.activate(child_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .parent = parent_id.pack(), .depth = 1 } });
+    try finishWaitingTestTurn(&registry, parent_id);
+    var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
+    defer env.deinit();
+    var pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &env);
+    defer pool.deinit();
+    app.exec_pool = &pool;
+    const line = mainProgressLine(&app, app.sessionAlloc()).?;
+    const text = try lineText(app.sessionAlloc(), line);
+    try std.testing.expect(std.mem.startsWith(u8, text, "waiting for 1 agents ("));
+    var command: r.cmd.Command = .cancel;
+    try command.execute(&app);
+    try std.testing.expectEqual(r.agent.Status.canceled, registry.get(parent_id).?.status);
+    try std.testing.expectEqual(r.agent.Status.canceled, child.status);
+    try std.testing.expectEqual(@as(u32, 0), registry.countActive());
 }

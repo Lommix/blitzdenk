@@ -133,7 +133,7 @@ test "SDK tool trampoline preserves call context and output" {
     defer exec_pool.deinit();
     var registry = registry_mod.Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",

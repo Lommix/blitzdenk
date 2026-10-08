@@ -13,6 +13,7 @@ pub const AgentId = agent_id.AgentId;
 pub const SlotState = enum(u8) {
     free,
     reserved,
+    /// Live: running a task or parked while its children work.
     active,
     complete,
     failed,
@@ -21,6 +22,7 @@ pub const SlotState = enum(u8) {
 pub const Slot = struct {
     state: std.atomic.Value(SlotState) = .init(.free),
     generation: u16 = 0,
+    parent: ?u32 = null,
     finish_seq: u64 = 0,
     pinned: bool = false,
     agent: ?agent_mod.Agent = null,
@@ -91,9 +93,10 @@ pub const Registry = struct {
         self.total_usage = .{};
     }
 
-    pub fn reserve(self: *Registry) ?AgentId {
+    pub fn reserve(self: *Registry, parent: ?AgentId) ?AgentId {
         for (&self.slots, 0..) |*slot, index| {
             if (slot.state.cmpxchgStrong(.free, .reserved, .acq_rel, .monotonic) == null) {
+                slot.parent = if (parent) |id| id.pack() else null;
                 slot.generation +%= 1;
                 slot.event.reset();
                 return .{ .index = @intCast(index), .generation = slot.generation };
@@ -114,11 +117,12 @@ pub const Registry = struct {
         const index = victim orelse return null;
         const slot = &self.slots[index];
         if (slot.state.cmpxchgStrong(.complete, .reserved, .acq_rel, .monotonic) != null) {
-            if (slot.state.cmpxchgStrong(.failed, .reserved, .acq_rel, .monotonic) != null) return self.reserve();
+            if (slot.state.cmpxchgStrong(.failed, .reserved, .acq_rel, .monotonic) != null) return self.reserve(parent);
         }
         self.retire(slot);
         slot.accounted_usage = .{};
         slot.finish_seq = 0;
+        slot.parent = if (parent) |id| id.pack() else null;
         slot.generation +%= 1;
         slot.event.set(self.io);
         return .{ .index = @intCast(index), .generation = slot.generation };
@@ -157,6 +161,7 @@ pub const Registry = struct {
         const slot = self.reservedSlot(id) orelse return error.InvalidReservation;
         var agent = try agent_mod.Agent.init(self.alloc, self.io, config, options);
         errdefer agent.deinit();
+        slot.parent = agent.parent;
         slot.agent = agent;
         slot.state.store(.active, .release);
         return &slot.agent.?;
@@ -217,7 +222,8 @@ pub const Registry = struct {
         const agent = if (slot.agent) |*value| value else return false;
         if (!agent.reap()) return false;
         const state_value: SlotState = switch (agent.status) {
-            .complete, .canceled => .complete,
+            .complete => if (self.hasLiveChildren(id)) .active else .complete,
+            .canceled => .complete,
             .failed => .failed,
             .idle, .running, .retrying, .compacting => .active,
         };
@@ -245,7 +251,7 @@ pub const Registry = struct {
     pub fn retry(self: *Registry, id: AgentId, options: sdk.GenerateOptions) !void {
         const slot = self.slotFor(id) orelse return error.AgentNotFound;
         const agent = if (slot.agent) |*value| value else return error.AgentNotFound;
-        if (slot.state.load(.acquire) == .active and (agent.status != .retrying or agent.task != null)) return error.RunInProgress;
+        if (slot.state.load(.acquire) == .active and agent.isBusy() and (agent.status != .retrying or agent.task != null or agent.compact_task != null)) return error.RunInProgress;
         var retry_options = options;
         retry_options.prompt = "";
         try self.run(id, retry_options);
@@ -307,6 +313,17 @@ pub const Registry = struct {
         const slot = self.slotFor(id) orelse return error.AgentNotFound;
         try slot.event.wait(self.io);
         return self.state(id) orelse error.AgentNotFound;
+    }
+
+    /// Reservations belong to the parent before the spawn command is applied.
+    /// A parent's finished task orders its reservation writes before reap scans.
+    pub fn hasLiveChildren(self: *const Registry, id: AgentId) bool {
+        for (&self.slots) |*slot| {
+            const value = slot.state.load(.acquire);
+            if (value != .reserved and value != .active) continue;
+            if (slot.parent == id.pack()) return true;
+        }
+        return false;
     }
 
     pub fn countActive(self: *const Registry) u32 {
@@ -435,7 +452,7 @@ test "reap fires once per run for a finished retained agent" {
     const io = io_state.io();
     var registry = Registry.init(std.testing.allocator, io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     _ = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -470,11 +487,11 @@ test "registry keeps fixed generation-safe slots" {
     var registry = Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
     var ids: [max_agents]AgentId = undefined;
-    for (&ids) |*id| id.* = registry.reserve().?;
-    try std.testing.expect(registry.reserve() == null);
+    for (&ids) |*id| id.* = registry.reserve(null).?;
+    try std.testing.expect(registry.reserve(null) == null);
     const stale = ids[0];
     registry.releaseReservation(stale);
-    const reused = registry.reserve().?;
+    const reused = registry.reserve(null).?;
     try std.testing.expectEqual(stale.index, reused.index);
     try std.testing.expect(stale.generation != reused.generation);
     registry.releaseReservation(stale);
@@ -486,30 +503,30 @@ test "reserve evicts the oldest finished agent when full" {
     defer registry.deinit();
     var ids: [max_agents]AgentId = undefined;
     for (&ids, 0..) |*id, index| {
-        id.* = registry.reserve().?;
+        id.* = registry.reserve(null).?;
         registry.slots[index].state.store(if (index == 3) .failed else .complete, .release);
         registry.slots[index].finish_seq = index;
     }
     registry.pin(ids[0]);
     registry.slots[0].finish_seq = 0;
 
-    const evicted = registry.reserve().?;
+    const evicted = registry.reserve(null).?;
     try std.testing.expectEqual(ids[1].index, evicted.index);
     try std.testing.expect(ids[1].generation != evicted.generation);
     try std.testing.expectEqual(SlotState.reserved, registry.state(evicted).?);
 
     try std.testing.expectEqual(SlotState.complete, registry.state(ids[0]).?);
     try std.testing.expectEqual(SlotState.failed, registry.state(ids[3]).?);
-    const next = registry.reserve().?;
+    const next = registry.reserve(null).?;
     try std.testing.expectEqual(ids[2].index, next.index);
 }
 
 test "registry reset preserves queued reservations" {
     var registry = Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
-    const existing = registry.reserve().?;
+    const existing = registry.reserve(null).?;
     registry.slots[existing.index].state.store(.complete, .release);
-    const queued = registry.reserve().?;
+    const queued = registry.reserve(null).?;
     registry.reset();
     try std.testing.expect(registry.state(existing) == null);
     try std.testing.expectEqual(SlotState.reserved, registry.state(queued).?);
@@ -524,7 +541,7 @@ test "starting a reserved agent preserves an existing waiter" {
     const io = io_state.io();
     var registry = Registry.init(std.testing.allocator, io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     var waiting = std.Io.async(io, Registry.wait, .{ &registry, id });
     while (@atomicLoad(std.Io.Event, &registry.slots[id.index].event, .acquire) != .waiting) try std.Io.sleep(io, .fromMilliseconds(1), .awake);
     _ = try registry.activate(id, .{
@@ -546,7 +563,7 @@ test "starting a reserved agent preserves an existing waiter" {
 test "usageByModel includes live unaccounted slot usage" {
     var registry = Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const parent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -567,7 +584,7 @@ test "usageByModel includes live unaccounted slot usage" {
 test "registry reports empty explicit idle compaction without history" {
     var registry = Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -582,7 +599,7 @@ test "registry reports empty explicit idle compaction without history" {
 test "registry reports and completes standalone compaction" {
     var registry = Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -611,7 +628,7 @@ test "registry queues explicit compaction while agent runs" {
     const io = io_state.io();
     var registry = Registry.init(std.testing.allocator, io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -634,7 +651,7 @@ test "registry retry is allowed while an agent is retrying" {
     const io = io_state.io();
     var registry = Registry.init(std.testing.allocator, io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -660,7 +677,7 @@ test "turn checkpoint follows the wake trigger and resets on history replacement
     const io = io_state.io();
     var registry = Registry.init(std.testing.allocator, io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -697,7 +714,7 @@ test "registry completes a canceled retry-waiting agent" {
     const io = io_state.io();
     var registry = Registry.init(std.testing.allocator, io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -709,4 +726,130 @@ test "registry completes a canceled retry-waiting agent" {
     try std.testing.expect(registry.reap(id));
     try std.testing.expectEqual(SlotState.complete, registry.state(id).?);
     registry.release(id);
+}
+
+const WaitingTest = struct {
+    fn activate(registry: *Registry, parent: ?AgentId) !AgentId {
+        const id = registry.reserve(parent).?;
+        _ = try registry.activate(id, .{
+            .api_key = "key",
+            .model = "model",
+            .base_url = "https://example.com/v1",
+            .provider = .{ .openai = .{} },
+        }, .{ .identity = .{ .parent = if (parent) |pid| pid.pack() else null } });
+        return id;
+    }
+
+    fn discard(_: ?*anyopaque, _: agent_run.Event) void {}
+
+    fn finishTurn(registry: *Registry, id: AgentId) !void {
+        try registry.run(id, .{ .max_steps = 0 });
+        registry.get(id).?.task.?.wait();
+        while (registry.drain(id, 64, null, discard) != 0) {}
+        try std.testing.expect(registry.reap(id));
+    }
+
+    fn expectWaiting(registry: *Registry, id: AgentId) !void {
+        try std.testing.expectEqual(SlotState.active, registry.state(id).?);
+        try std.testing.expect(!registry.slots[id.index].event.isSet());
+        try std.testing.expect(!registry.get(id).?.reported_task_done);
+        try std.testing.expect(!registry.get(id).?.isBusy());
+        try std.testing.expect(!registry.reap(id));
+    }
+};
+
+test "reap waits for live children and completes nested agents bottom up" {
+    var registry = Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const root = try WaitingTest.activate(&registry, null);
+    const parent = try WaitingTest.activate(&registry, root);
+    const child = try WaitingTest.activate(&registry, parent);
+    // A waiting turn must leave even an existing finish stamp untouched.
+    registry.slots[parent.index].finish_seq = 99;
+    try WaitingTest.finishTurn(&registry, parent);
+    try WaitingTest.finishTurn(&registry, root);
+    try WaitingTest.expectWaiting(&registry, parent);
+    try WaitingTest.expectWaiting(&registry, root);
+    try std.testing.expectEqual(@as(u64, 99), registry.slots[parent.index].finish_seq);
+    try std.testing.expectEqual(@as(u64, 0), registry.finish_counter);
+
+    try WaitingTest.finishTurn(&registry, child);
+    try std.testing.expectEqual(SlotState.complete, registry.state(child).?);
+    try WaitingTest.expectWaiting(&registry, parent);
+    try WaitingTest.finishTurn(&registry, parent);
+    try std.testing.expectEqual(SlotState.complete, registry.state(parent).?);
+    try WaitingTest.finishTurn(&registry, root);
+    try std.testing.expectEqual(SlotState.complete, registry.state(root).?);
+    try std.testing.expect(registry.slots[child.index].finish_seq < registry.slots[parent.index].finish_seq);
+    try std.testing.expect(registry.slots[parent.index].finish_seq < registry.slots[root.index].finish_seq);
+    try std.testing.expectEqual(@as(u64, 3), registry.finish_counter);
+}
+
+test "reap counts reserved children and keeps await blocked until the next final turn" {
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer io_state.deinit();
+    const io = io_state.io();
+    var registry = Registry.init(std.testing.allocator, io);
+    defer registry.deinit();
+    const parent = try WaitingTest.activate(&registry, null);
+    const child = registry.reserve(parent).?;
+    try std.testing.expect(registry.get(child) == null);
+    var waiting = std.Io.async(io, Registry.wait, .{ &registry, parent });
+    defer _ = waiting.cancel(io) catch SlotState.complete;
+    while (@atomicLoad(std.Io.Event, &registry.slots[parent.index].event, .acquire) != .waiting)
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    try WaitingTest.finishTurn(&registry, parent);
+    try WaitingTest.expectWaiting(&registry, parent);
+    try std.testing.expectEqual(std.Io.Event.waiting, @atomicLoad(std.Io.Event, &registry.slots[parent.index].event, .acquire));
+    try std.testing.expectEqual(@as(u64, 0), registry.finish_counter);
+
+    try registry.wake(parent, .{ .max_steps = 0 });
+    registry.get(parent).?.task.?.wait();
+    while (registry.drain(parent, 64, null, WaitingTest.discard) != 0) {}
+    try std.testing.expect(registry.reap(parent));
+    try WaitingTest.expectWaiting(&registry, parent);
+
+    // A full registry cannot evict the waiting parent or its reservation.
+    while (registry.reserve(null)) |_| {}
+    try std.testing.expectEqual(SlotState.active, registry.state(parent).?);
+    registry.releaseReservation(child);
+    try WaitingTest.finishTurn(&registry, parent);
+    try std.testing.expectEqual(SlotState.complete, try waiting.await(io));
+    try std.testing.expectEqual(@as(u64, 1), registry.finish_counter);
+}
+
+test "failed and canceled agents bypass the live child completion gate" {
+    const Fixture = struct {
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+        fn generate(_: *anyopaque, _: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            return error.InvalidResponse;
+        }
+        fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            return generate(ctx, alloc, io, params, client, retries);
+        }
+    };
+    var registry = Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    const failed = try WaitingTest.activate(&registry, null);
+    _ = registry.reserve(failed).?;
+    const agent = registry.get(failed).?;
+    var fixture: u8 = 0;
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = "fail" });
+    agent.task.?.wait();
+    while (registry.drain(failed, 64, null, WaitingTest.discard) != 0) {}
+    try std.testing.expect(registry.reap(failed));
+    try std.testing.expectEqual(SlotState.failed, registry.state(failed).?);
+    try std.testing.expect(registry.slots[failed.index].event.isSet());
+
+    const canceled = try WaitingTest.activate(&registry, null);
+    _ = registry.reserve(canceled).?;
+    try WaitingTest.finishTurn(&registry, canceled);
+    registry.cancel(canceled);
+    try std.testing.expect(registry.reap(canceled));
+    try std.testing.expectEqual(SlotState.complete, registry.state(canceled).?);
+    try std.testing.expectEqual(agent_mod.Status.canceled, registry.get(canceled).?.status);
+    try std.testing.expect(registry.slots[canceled.index].event.isSet());
 }

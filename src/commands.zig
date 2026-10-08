@@ -145,7 +145,7 @@ pub const Command = union(enum) {
                 var main_active = false;
                 if (main_id) |id| {
                     if (app.registry.get(id)) |agent| {
-                        main_active = (app.registry.state(id) orelse .complete) == .active and agent.status != .canceled;
+                        main_active = (app.registry.state(id) orelse .complete) == .active and agent.isBusy() and agent.status != .canceled;
                     }
                 }
                 const checkpoint_start = if (main_id) |id|
@@ -224,8 +224,7 @@ pub const Command = union(enum) {
                 app.auto_scroll = true;
                 app.scroll_offset = 0;
 
-                const state = app.registry.state(arg.agent_id);
-                if (state != .active) {
+                if (!agent.isBusy()) {
                     if (app.main_agent_id == arg.agent_id) app.sdk_run_rendered_steps = 0;
                     try app.registry.run(arg.agent_id, .{ .max_steps = std.math.maxInt(usize) });
                     _ = app.event_bus.emit(app, .{ .agent_started = .{ .id = arg.agent_id, .fresh = false } });

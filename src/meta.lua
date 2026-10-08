@@ -94,7 +94,7 @@
 ---@field task? string
 ---bare agent: no system-reminder injections and no AGENTS.md context, so the blitz.hooks.inject hook never runs for it
 ---@field clean? boolean
----runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside
+---runs once on the main thread when the spawned agent completes after its children; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside
 ---@field on_complete? fun(agent_id: integer, status: integer)
 
 ---@class BlitzHistoryRow
@@ -470,7 +470,7 @@
 ---@field name string
 ---task description set at spawn time
 ---@field task string
----running|thinking|writing|calling|processing|retrying|compacting|idle|complete|canceled|failed
+---running|thinking|writing|calling|processing|retrying|compacting|waiting|idle|complete|canceled|failed
 ---@field state string
 ---context fill in percent
 ---@field ctx integer
@@ -486,6 +486,8 @@
 ---@field background boolean
 ---parent agent id, nil on roots
 ---@field parent integer|nil
+---agent depth (0 = main)
+---@field depth integer
 ---output tokens per second, live while a run streams
 ---@field tps number
 ---messages waiting in the agent queue

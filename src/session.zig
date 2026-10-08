@@ -405,7 +405,7 @@ fn restoreMain(a: *app.App, save: *const SaveState, alloc: std.mem.Allocator) !r
         const id = r.AgentId.unpack(packed_main);
         break :claimed .{ .id = id, .agent = try a.registry.restoreAt(id, model_config, options) };
     } else claimed: {
-        const id = a.registry.reserve() orelse return error.RegistryFull;
+        const id = a.registry.reserve(null) orelse return error.RegistryFull;
         errdefer a.registry.releaseReservation(id);
         break :claimed .{ .id = id, .agent = try a.registry.activate(id, model_config, options) };
     };
@@ -454,7 +454,9 @@ fn setRestoredChat(agent: *r.agent.Agent, chat: []const WireMessage, alloc: std.
 fn nullMissingParents(a: *app.App, main_id: r.AgentId, save: *const SaveState) void {
     const main_pack = main_id.pack();
     for (save.agents) |*entry| {
-        const agent = a.registry.get(r.AgentId.unpack(entry.id)) orelse continue;
+        const id = r.AgentId.unpack(entry.id);
+        const agent = a.registry.get(id) orelse continue;
+        defer a.registry.slots[id.index].parent = agent.parent;
         const parent = agent.parent orelse continue;
         if (parent == main_pack) continue;
         const parent_agent = a.registry.get(r.AgentId.unpack(parent)) orelse {
@@ -630,7 +632,7 @@ const SessionTestRig = struct {
             .config => |config| config,
             .diagnostic => return error.InvalidProviderConfiguration,
         };
-        const id = self.registry.reserve() orelse return error.RegistryFull;
+        const id = self.registry.reserve(parent) orelse return error.RegistryFull;
         const agent = try self.registry.activate(id, model_config, .{ .identity = .{
             .type_idx = @intFromEnum(r.ContextFactory.AgentType.general),
             .name = name,
@@ -713,6 +715,7 @@ test "sub-agents survive a checkpoint, journal round-trip, and resume with froze
     try testing.expectEqualStrings("child", child.name);
     try testing.expectEqualStrings("fix the bug", child.task_description);
     try testing.expectEqual(main_id.pack(), child.parent.?);
+    try testing.expectEqual(child.parent, resumed.registry.slots[child_id.index].parent);
     try testing.expectEqual(@as(u16, 1), child.depth);
     try testing.expectEqualStrings(rig.a.cwd, child.cwd);
     try testing.expect(!child.background);

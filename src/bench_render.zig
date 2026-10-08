@@ -143,7 +143,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     app.reset();
-    const agent_id = registry.reserve().?;
+    const agent_id = registry.reserve(null).?;
     const agent = try registry.activate(agent_id, .{
         .api_key = "bench",
         .model = "bench-model",

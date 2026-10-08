@@ -1369,7 +1369,7 @@ test "vision tools gated by the agent model vision flag" {
     defer exec_pool.deinit();
     var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",

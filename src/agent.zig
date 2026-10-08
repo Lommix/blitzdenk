@@ -432,6 +432,11 @@ pub const Agent = struct {
         }
     }
 
+    /// A live slot may be parked between turns while its children work.
+    pub fn isBusy(self: *const Agent) bool {
+        return self.task != null or self.compact_task != null or self.status == .retrying or self.status == .compacting;
+    }
+
     pub fn reap(self: *Agent) bool {
         if (self.reapCompaction()) return true;
         const task = if (self.task) |*value| value else {

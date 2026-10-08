@@ -947,6 +947,57 @@ test "default config loads without provider.lua and binds on require success" {
         \\assert(agent_def.snippet == "Launch a subagent", "agent snippet missing")
     );
 
+    try execTestLua(L,
+        \\blitz.list_agents = function()
+        \\  return {
+        \\    { agent_id = 10, depth = 0 },
+        \\    { agent_id = 11, depth = 1 },
+        \\    { agent_id = 12, depth = 2 },
+        \\  }
+        \\end
+        \\blitz.agent = { spawn = function() return 99 end }
+        \\local agent_func = nil
+        \\for _, d in ipairs(registered_tools) do
+        \\  if d.name == "agent" then agent_func = d.func end
+        \\end
+        \\assert(agent_func, "agent tool func not captured")
+        \\local mk_ctx = function(id)
+        \\  return { agent_id = id, set_child_id = function() end, set_status = function() end }
+        \\end
+        \\local call = { arguments = { description = "d", prompt = "p", agent_type = "general" } }
+        \\local ok0, r0 = pcall(agent_func, mk_ctx(10), call)
+        \\assert(ok0, "depth 0 spawner failed: " .. tostring(r0))
+        \\assert(r0.msg:find("99", 1, true), "spawn id missing from result")
+        \\local ok1, e1 = pcall(agent_func, mk_ctx(11), call)
+        \\assert(not ok1, "depth 1 spawner passed at limit 0")
+        \\assert(tostring(e1):find("agent depth limit reached", 1, true), "wrong error: " .. tostring(e1))
+    );
+
+    const depth_needle = "local agent_spawn_depth = 0";
+    const default_source = defaultConfigLua();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, default_source, depth_needle));
+    const raised_source = try std.mem.replaceOwned(u8, std.testing.allocator, default_source, depth_needle, "local agent_spawn_depth = 1");
+    defer std.testing.allocator.free(raised_source);
+    try execTestLua(L, raised_source);
+
+    try execTestLua(L,
+        \\local agent_func = nil
+        \\for _, d in ipairs(registered_tools) do
+        \\  if d.name == "agent" then agent_func = d.func end
+        \\end
+        \\assert(agent_func, "raised agent tool func not captured")
+        \\local mk_ctx = function(id)
+        \\  return { agent_id = id, set_child_id = function() end, set_status = function() end }
+        \\end
+        \\local call = { arguments = { description = "d", prompt = "p", agent_type = "general" } }
+        \\local ok1, r1 = pcall(agent_func, mk_ctx(11), call)
+        \\assert(ok1, "depth 1 spawner failed at limit 1: " .. tostring(r1))
+        \\assert(r1.msg:find("99", 1, true), "spawn id missing from raised result")
+        \\local ok2, e2 = pcall(agent_func, mk_ctx(12), call)
+        \\assert(not ok2, "depth 2 spawner passed at limit 1")
+        \\assert(tostring(e2):find("agent depth limit reached", 1, true), "wrong error: " .. tostring(e2))
+    );
+
     try std.testing.expectEqual(@as(i64, 0), tracker.model_handle);
     try std.testing.expectEqual(@as(i64, 0), tracker.bound_model);
 

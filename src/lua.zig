@@ -294,7 +294,7 @@ const AgentRowDef = LuaType{ .table_def = .{ .name = "BlitzAgentRow", .fields = 
     .{ .name = "agent_id", .ty = AgentIdDef, .desc = "packed agent id" },
     .{ .name = "name", .ty = LuaType.string, .desc = "agent type name" },
     .{ .name = "task", .ty = LuaType.string, .desc = "task description set at spawn time" },
-    .{ .name = "state", .ty = LuaType.string, .desc = "running|thinking|writing|calling|processing|retrying|compacting|idle|complete|canceled|failed" },
+    .{ .name = "state", .ty = LuaType.string, .desc = "running|thinking|writing|calling|processing|retrying|compacting|waiting|idle|complete|canceled|failed" },
     .{ .name = "ctx", .ty = LuaType.integer, .desc = "context fill in percent" },
     .{ .name = "context_tokens", .ty = LuaType.integer, .desc = "tokens used in the context window" },
     .{ .name = "context_limit", .ty = LuaType.integer, .desc = "context window size in tokens" },
@@ -302,6 +302,7 @@ const AgentRowDef = LuaType{ .table_def = .{ .name = "BlitzAgentRow", .fields = 
     .{ .name = "main", .ty = LuaType.boolean, .desc = "true when this is the main agent" },
     .{ .name = "background", .ty = LuaType.boolean, .desc = "true when the agent runs detached from the timeline" },
     .{ .name = "parent", .ty = AgentIdOrNilDef, .desc = "parent agent id, nil on roots" },
+    .{ .name = "depth", .ty = LuaType.integer, .desc = "agent depth (0 = main)" },
     .{ .name = "tps", .ty = LuaType.number, .desc = "output tokens per second, live while a run streams" },
     .{ .name = "queued", .ty = LuaType.integer, .desc = "messages waiting in the agent queue" },
 } } };
@@ -515,7 +516,7 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "background", .ty = LuaType.boolean, .optional = true, .desc = "run detached from the timeline: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of timeline entries. Use with on_complete to build silent subagents" },
     .{ .name = "task", .ty = LuaType.string, .optional = true, .desc = "short task description shown in agent listings" },
     .{ .name = "clean", .ty = LuaType.boolean, .optional = true, .desc = "bare agent: no system-reminder injections and no AGENTS.md context, so the blitz.hooks.inject hook never runs for it" },
-    .{ .name = "on_complete", .ty = LuaType{ .raw = "fun(agent_id: integer, status: integer)" }, .optional = true, .desc = "runs once on the main thread when the spawned run ends; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside" },
+    .{ .name = "on_complete", .ty = LuaType{ .raw = "fun(agent_id: integer, status: integer)" }, .optional = true, .desc = "runs once on the main thread when the spawned agent completes after its children; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside" },
 } } };
 const SelectRequestDef = LuaType{ .table_def = .{ .name = "BlitzSelectRequest", .fields = &.{
     .{ .name = "header", .ty = LuaType.string, .desc = "very short label shown as a chip" },
@@ -651,6 +652,7 @@ pub const Blitz = LuaType{
                         main: bool,
                         background: bool,
                         parent: ?r.AgentId,
+                        depth: u16,
                         tps: f32,
                         queued: u32,
                     };
@@ -662,7 +664,7 @@ pub const Blitz = LuaType{
                             .active => switch (agent.status) {
                                 .compacting => "compacting",
                                 .retrying => "retrying",
-                                .complete => "complete",
+                                .complete => if (agent.isBusy()) "complete" else "waiting",
                                 .failed => "failed",
                                 .canceled => "canceled",
                                 .idle => "idle",
@@ -702,6 +704,7 @@ pub const Blitz = LuaType{
                                 .main = if (a.main_agent_id) |main| main.pack() == id.pack() else false,
                                 .background = agent.background,
                                 .parent = parent,
+                                .depth = agent.depth,
                                 .tps = agent.tokens_per_second,
                                 .queued = @intCast(agent.queued_messages.items.len),
                             };
@@ -2515,7 +2518,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                             .timeline_entry = entry,
                         } });
                     } else {
-                        const id = a.registry.reserve() orelse return;
+                        const id = a.registry.reserve(null) orelse return;
                         a.cmd_queue.append(a.io, .{ .spawn_agent = .{
                             .agent_id = id,
                             .agent_type = @intFromEnum(r.ContextFactory.AgentType.general),
@@ -2710,7 +2713,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                     const parts = [_]r.sdk.Part{.{ .text = spawn.prompt }};
                     args.prompt = &parts;
 
-                    const id = a.registry.reserve() orelse {
+                    const id = a.registry.reserve(spawn.parent_id) orelse {
                         unrefSpawnCb(state, spawn.on_complete);
                         c.lua_pushnil(state);
                         return 1;
@@ -6016,7 +6019,7 @@ test "agent history bindings expose rows and the turn checkpoint" {
     var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
     app_state.registry = &registry;
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -6658,7 +6661,7 @@ test "list_agents snapshots occupied slots" {
     defer registry.deinit();
     app_state.registry = &registry;
 
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -6677,7 +6680,7 @@ test "list_agents snapshots occupied slots" {
     agent.background = true;
     app_state.main_agent_id = id;
 
-    const child_id = registry.reserve().?;
+    const child_id = registry.reserve(null).?;
     const child = try registry.activate(child_id, .{
         .api_key = "key",
         .model = "model",
@@ -6691,6 +6694,7 @@ test "list_agents snapshots occupied slots" {
         .cwd = "/tmp",
     } });
     child.status = .complete;
+    registry.slots[child_id.index].state.store(.complete, .release);
     try child.queueMessages(&.{.{ .role = .user, .content = &.{.{ .text = "x" }} }});
 
     const vm = try LuaVm.init(std.testing.allocator);
@@ -6713,6 +6717,7 @@ test "list_agents snapshots occupied slots" {
         \\assert(root.main == true)
         \\assert(root.background == true)
         \\assert(root.parent == nil)
+        \\assert(root.depth == 0)
         \\assert(root.queued == 0)
         \\assert(root.tps == 12.5)
         \\assert(child.name == "worker")
@@ -6722,9 +6727,22 @@ test "list_agents snapshots occupied slots" {
         \\assert(child.background == false)
         \\assert(child.queued == 1)
         \\assert(child.parent == {d})
+        \\assert(child.depth == 1)
     , .{id.pack()});
     defer std.testing.allocator.free(script);
     try vm.exec(script);
+    const grandchild = registry.reserve(child_id).?;
+    defer registry.releaseReservation(grandchild);
+    try registry.run(child_id, .{ .max_steps = 0 });
+    child.task.?.wait();
+    while (registry.drain(child_id, 64, null, struct {
+        fn discard(_: ?*anyopaque, _: r.agent_run.Event) void {}
+    }.discard) != 0) {}
+    try std.testing.expect(registry.reap(child_id));
+    try vm.exec(
+        \\local list = blitz.list_agents()
+        \\assert(list[2].state == "waiting", list[2].state)
+    );
 }
 
 test "list_agent_types snapshots configured types in slot order" {
@@ -6825,7 +6843,7 @@ test "agent.get_model and get_effort read the live agent" {
     defer registry.deinit();
     app_state.registry = &registry;
 
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model-a",
@@ -6879,7 +6897,7 @@ test "agent task description and turn prompt bindings" {
     defer registry.deinit();
     app_state.registry = &registry;
 
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model",
@@ -6955,7 +6973,7 @@ test "agent.get_model and get_effort stay truthful while a run parks a swap" {
     defer registry.deinit();
     app_state.registry = &registry;
 
-    const id = registry.reserve().?;
+    const id = registry.reserve(null).?;
     const agent = try registry.activate(id, .{
         .api_key = "key",
         .model = "model-a",
