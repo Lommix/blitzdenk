@@ -162,6 +162,16 @@ pub const Registry = struct {
         return &slot.agent.?;
     }
 
+    pub fn restoreAt(self: *Registry, id: AgentId, config: models.Config, options: agent_mod.InitOptions) !*agent_mod.Agent {
+        if (id.index >= max_agents) return error.SlotOutOfRange;
+        const slot = &self.slots[id.index];
+        if (slot.state.cmpxchgStrong(.free, .reserved, .acq_rel, .monotonic) != null) return error.SlotOccupied;
+        slot.generation = id.generation;
+        slot.event.reset();
+        errdefer self.releaseReservation(id);
+        return self.activate(id, config, options);
+    }
+
     pub fn releaseReservation(self: *Registry, id: AgentId) void {
         const slot = self.slotFor(id) orelse return;
         if (slot.state.cmpxchgStrong(.reserved, .free, .acq_rel, .monotonic) == null) slot.event.set(self.io);

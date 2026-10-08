@@ -4,7 +4,10 @@ const r = @import("root.zig");
 const app = @import("app.zig");
 const util = @import("util.zig");
 const sdk = @import("blitz-sdk");
+const models = @import("models");
 const agent_run = @import("agent_run.zig");
+
+const log = std.log.scoped(.session);
 
 pub const WireRole = enum { system, user, agent };
 
@@ -184,6 +187,20 @@ pub const SaveState = struct {
     /// `agent == null` entries belong to the main agent; child agents keep
     /// their packed id.
     tool_status: []const WireToolStatus = &.{},
+    agents: []const WireAgent = &.{},
+};
+
+pub const WireAgent = struct {
+    id: u32,
+    type_idx: u8 = 0,
+    name: []const u8 = "",
+    task_description: []const u8 = "",
+    parent: ?u32 = null,
+    depth: u16 = 0,
+    cwd: []const u8 = "",
+    background: bool = false,
+    clean: bool = false,
+    chat: []const WireMessage = &.{},
 };
 
 pub const WireToolStatus = struct {
@@ -213,18 +230,53 @@ test "encodeMessage replaces invalid UTF-8 so saved sessions stay loadable" {
 /// Encodes the current session into a `SaveState`; `alloc` must outlive the
 /// returned value (callers typically use an arena). Reminders are skipped.
 pub fn buildSaveState(a: *app.App, agent: *const r.agent.Agent, alloc: std.mem.Allocator) !SaveState {
-    var out: std.ArrayList(WireMessage) = .empty;
-    for (agent.history()) |message| {
-        if (isReminder(message)) continue;
-        try out.append(alloc, try encodeMessage(alloc, message));
-    }
     return .{
-        .chat = out.items,
+        .chat = try encodeChat(agent.history(), alloc),
         .timeline = a.timeline.items,
         .main_agent = if (a.main_agent_id) |main| main.pack() else null,
         .clean = agent.clean,
         .tool_status = try encodeToolStatus(a, alloc),
+        .agents = try encodeAgents(a, alloc),
     };
+}
+
+fn encodeChat(history: []const sdk.Message, alloc: std.mem.Allocator) ![]const WireMessage {
+    var out: std.ArrayList(WireMessage) = .empty;
+    for (history) |message| {
+        if (isReminder(message)) continue;
+        try out.append(alloc, try encodeMessage(alloc, message));
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+fn encodeAgents(a: *app.App, alloc: std.mem.Allocator) ![]const WireAgent {
+    var out: std.ArrayList(WireAgent) = .empty;
+    for (&a.registry.slots, 0..) |*slot, index| {
+        switch (slot.state.load(.acquire)) {
+            .free, .reserved => continue,
+            .active, .complete, .failed => {},
+        }
+        const agent = if (slot.agent) |*value| value else continue;
+        const id = r.AgentId{ .index = @intCast(index), .generation = slot.generation };
+        if (a.main_agent_id) |main| {
+            if (id.pack() == main.pack()) continue;
+        }
+        const chat = try encodeChat(agent.history(), alloc);
+        if (chat.len == 0) continue;
+        try out.append(alloc, .{
+            .id = id.pack(),
+            .type_idx = agent.type_idx,
+            .name = agent.name,
+            .task_description = agent.task_description,
+            .parent = agent.parent,
+            .depth = agent.depth,
+            .cwd = agent.cwd,
+            .background = agent.background,
+            .clean = agent.clean,
+            .chat = chat,
+        });
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 /// Serializes the tool status table. The main agent's entries are stored with
@@ -288,24 +340,24 @@ fn isReminder(message: sdk.Message) bool {
 pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
     const session_alloc = a.sessionAlloc();
 
-    const id = a.registry.reserve() orelse return error.RegistryFull;
-    errdefer a.registry.releaseReservation(id);
-    const model_config = switch (a.context_factory.buildAgentApiConfig(.general, &a.config, a.exec_pool.env)) {
-        .config => |config| config,
-        .diagnostic => return error.InvalidProviderConfiguration,
-    };
-    const agent = try a.registry.activate(id, model_config, .{ .identity = .{
-        .type_idx = @intFromEnum(r.ContextFactory.AgentType.general),
-        .name = a.context_factory.agentName(.general),
-        .cwd = a.cwd,
-        .clean = save.clean,
-    }, .context_limit = a.default_context_limit });
-    errdefer a.registry.release(id);
-    try a.configureAgent(id, agent);
+    const main_id = try restoreMain(a, save, session_alloc);
+    var restored: std.ArrayList(u32) = .empty;
+    errdefer {
+        a.registry.release(main_id);
+        for (restored.items) |packed_id| {
+            if (packed_id == main_id.pack()) continue;
+            a.registry.release(r.AgentId.unpack(packed_id));
+        }
+    }
 
-    const messages = try session_alloc.alloc(sdk.Message, save.chat.len);
-    for (save.chat, messages) |wire, *message| message.* = try decodeMessage(session_alloc, wire);
-    try agent.setMessages(messages);
+    for (save.agents) |*entry| {
+        restoreSubAgent(a, entry, session_alloc) catch |err| {
+            log.warn("session agent {d} not restored: {s}", .{ entry.id, @errorName(err) });
+            continue;
+        };
+        try restored.append(session_alloc, entry.id);
+    }
+    nullMissingParents(a, main_id, save);
 
     // Re-key restored tool_call stamps: the main agent's id changed across
     // the save/load boundary, and the renderer looks statuses up by the id
@@ -316,7 +368,7 @@ pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
         for (entry.parts) |*part| switch (part.*) {
             .tool_call => |*call| {
                 if (save.main_agent) |main| {
-                    if (call.agent_id.pack() == main) call.agent_id = id;
+                    if (call.agent_id.pack() == main) call.agent_id = main_id;
                 }
             },
             else => {},
@@ -326,18 +378,91 @@ pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
 
     // Restore rich call-block status, keyed to the fresh agent ids.
     for (save.tool_status) |status| {
-        const agent_id: r.AgentId = if (status.agent) |packed_id| .unpack(packed_id) else id;
+        const agent_id: r.AgentId = if (status.agent) |packed_id| .unpack(packed_id) else main_id;
         if (agent_id.index >= r.agent_registry.max_agents) continue;
         if (status.ansi.len > 0) a.setToolStatus(agent_id, status.call_id, status.ansi) catch {};
         if (status.is_error) |is_error| a.setToolResult(agent_id, status.call_id, is_error) catch {};
         if (status.child) |child| a.setToolChild(agent_id, status.call_id, .unpack(child)) catch {};
     }
 
-    a.main_agent_id = id;
-    a.registry.pin(id);
-    a.registry.slots[id.index].state.store(.complete, .release);
+    a.main_agent_id = main_id;
+    a.registry.pin(main_id);
+    a.registry.slots[main_id.index].state.store(.complete, .release);
     a.dirty = true;
     a.running = false;
+}
+
+fn restoreMain(a: *app.App, save: *const SaveState, alloc: std.mem.Allocator) !r.AgentId {
+    const options: r.agent.InitOptions = .{ .identity = .{
+        .type_idx = @intFromEnum(r.ContextFactory.AgentType.general),
+        .name = a.context_factory.agentName(.general),
+        .cwd = a.cwd,
+        .clean = save.clean,
+    }, .context_limit = a.default_context_limit };
+    const model_config = try mainModelConfig(a);
+    const Claimed = struct { id: r.AgentId, agent: *r.agent.Agent };
+    const claimed: Claimed = if (save.main_agent) |packed_main| claimed: {
+        const id = r.AgentId.unpack(packed_main);
+        break :claimed .{ .id = id, .agent = try a.registry.restoreAt(id, model_config, options) };
+    } else claimed: {
+        const id = a.registry.reserve() orelse return error.RegistryFull;
+        errdefer a.registry.releaseReservation(id);
+        break :claimed .{ .id = id, .agent = try a.registry.activate(id, model_config, options) };
+    };
+    errdefer a.registry.release(claimed.id);
+    try a.configureAgent(claimed.id, claimed.agent);
+    try setRestoredChat(claimed.agent, save.chat, alloc);
+    return claimed.id;
+}
+
+fn mainModelConfig(a: *app.App) !models.Config {
+    return switch (a.context_factory.buildAgentApiConfig(.general, &a.config, a.exec_pool.env)) {
+        .config => |config| config,
+        .diagnostic => error.InvalidProviderConfiguration,
+    };
+}
+
+fn restoreSubAgent(a: *app.App, entry: *const WireAgent, alloc: std.mem.Allocator) !void {
+    if (entry.type_idx > std.math.maxInt(u6)) return error.UnknownAgentType;
+    const model_config = switch (a.context_factory.buildAgentApiConfig(@enumFromInt(@as(u6, @intCast(entry.type_idx))), &a.config, a.exec_pool.env)) {
+        .config => |config| config,
+        .diagnostic => return error.InvalidProviderConfiguration,
+    };
+    const id = r.AgentId.unpack(entry.id);
+    const agent = try a.registry.restoreAt(id, model_config, .{ .identity = .{
+        .type_idx = entry.type_idx,
+        .name = entry.name,
+        .task_description = entry.task_description,
+        .parent = entry.parent,
+        .depth = @min(entry.depth, r.agent_registry.max_agents),
+        .cwd = entry.cwd,
+        .clean = entry.clean,
+    }, .context_limit = a.default_context_limit });
+    errdefer a.registry.release(id);
+    agent.background = entry.background;
+    try setRestoredChat(agent, entry.chat, alloc);
+    try a.configureAgent(id, agent);
+    a.registry.slots[id.index].state.store(.complete, .release);
+}
+
+fn setRestoredChat(agent: *r.agent.Agent, chat: []const WireMessage, alloc: std.mem.Allocator) !void {
+    const messages = try alloc.alloc(sdk.Message, chat.len);
+    for (chat, messages) |wire, *message| message.* = try decodeMessage(alloc, wire);
+    try agent.setMessages(messages);
+}
+
+fn nullMissingParents(a: *app.App, main_id: r.AgentId, save: *const SaveState) void {
+    const main_pack = main_id.pack();
+    for (save.agents) |*entry| {
+        const agent = a.registry.get(r.AgentId.unpack(entry.id)) orelse continue;
+        const parent = agent.parent orelse continue;
+        if (parent == main_pack) continue;
+        const parent_agent = a.registry.get(r.AgentId.unpack(parent)) orelse {
+            agent.parent = null;
+            continue;
+        };
+        if (parent_agent.depth >= agent.depth) agent.parent = null;
+    }
 }
 
 test "old session messages decode into SDK history" {
@@ -432,4 +557,265 @@ test "tool status roundtrips through WireToolStatus with re-keyed main agent" {
     try testing.expectEqualStrings("call_2", parsed.value.tool_status[1].call_id);
     try testing.expectEqual((r.AgentId{ .index = 3, .generation = 7 }).pack(), parsed.value.tool_status[1].agent.?);
     try testing.expectEqual((r.AgentId{ .index = 4, .generation = 1 }).pack(), parsed.value.tool_status[1].child.?);
+}
+
+const SessionTestRig = struct {
+    io_state: std.Io.Threaded,
+    env: std.process.Environ.Map,
+    pool: r.exec.CmdPool,
+    factory: r.ContextFactory,
+    registry: r.agent_registry.Registry,
+    cfg: r.config.BlitzdenkCfg,
+    a: app.App,
+
+    fn init(self: *SessionTestRig) !void {
+        self.io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+        const io = self.io_state.io();
+        self.env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
+        self.pool = r.exec.CmdPool.init(std.testing.allocator, io, &self.env);
+        self.factory = .{
+            .alloc = std.testing.allocator,
+            .prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+            .capability_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+            .io = io,
+            .config_dir = null,
+            .skill_dir = null,
+        };
+        self.factory.resetDefs();
+        self.cfg = .{};
+        _ = self.cfg.reserveProvider("http://localhost:8080/v1", "", "").?;
+        const provider = self.cfg.commitProvider();
+        const model = try self.cfg.addModel("local-model", provider, false, false, null);
+        try self.factory.setAgentModel(&self.cfg, .general, model);
+        self.registry = r.agent_registry.Registry.init(std.testing.allocator, io);
+
+        self.a = undefined;
+        self.a.io = io;
+        self.a.gpa = std.testing.allocator;
+        self.a.arena_session = .init(std.testing.allocator);
+        self.a.arena_streaming_preview = .init(std.testing.allocator);
+        self.a.arena_streaming_snapshot = .init(std.testing.allocator);
+        self.a.registry = &self.registry;
+        self.a.context_factory = &self.factory;
+        self.a.config = self.cfg;
+        self.a.exec_pool = &self.pool;
+        self.a.cwd = "/tmp/blitzdenk-persist";
+        self.a.default_context_limit = app.CONTEXT_LIMIT;
+        self.a.lua_reload_generation = .init(0);
+        self.a.timeline = .empty;
+        self.a.tool_status_entries = .{};
+        self.a.pending_diffs = .{};
+        self.a.streaming_entry = null;
+        self.a.main_agent_id = null;
+        self.a.event_bus = .{};
+        self.a.session_store = null;
+        self.a.dirty = false;
+        self.a.running = false;
+    }
+
+    fn deinit(self: *SessionTestRig) void {
+        self.registry.deinit();
+        self.pool.deinit();
+        self.env.deinit();
+        self.factory.prompt_arena.deinit();
+        self.factory.capability_arena.deinit();
+        self.a.arena_session.deinit();
+        self.a.arena_streaming_preview.deinit();
+        self.a.arena_streaming_snapshot.deinit();
+        self.io_state.deinit();
+    }
+
+    fn spawn(self: *SessionTestRig, name: []const u8, task: []const u8, parent: ?r.AgentId, background: bool, messages: []const sdk.Message) !r.AgentId {
+        const model_config = switch (self.factory.buildAgentApiConfig(.general, &self.cfg, self.pool.env)) {
+            .config => |config| config,
+            .diagnostic => return error.InvalidProviderConfiguration,
+        };
+        const id = self.registry.reserve() orelse return error.RegistryFull;
+        const agent = try self.registry.activate(id, model_config, .{ .identity = .{
+            .type_idx = @intFromEnum(r.ContextFactory.AgentType.general),
+            .name = name,
+            .task_description = task,
+            .parent = if (parent) |p| p.pack() else null,
+            .depth = if (parent != null) 1 else 0,
+            .cwd = self.a.cwd,
+        }, .context_limit = self.a.default_context_limit });
+        agent.background = background;
+        try self.a.configureAgent(id, agent);
+        if (messages.len > 0) try agent.setMessages(messages);
+        return id;
+    }
+};
+
+test "sub-agents survive a checkpoint, journal round-trip, and resume with frozen ids" {
+    const testing = std.testing;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = std.Io.Dir{ .handle = tmp.dir.handle };
+
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const main_id = try rig.spawn("main", "", null, false, &.{
+        sdk.UserMessage("plan the work"),
+        sdk.AssistantMessage("spawning helpers"),
+    });
+    rig.a.main_agent_id = main_id;
+    rig.registry.pin(main_id);
+    rig.registry.slots[main_id.index].state.store(.complete, .release);
+
+    const child_id = try rig.spawn("child", "fix the bug", main_id, false, &.{
+        sdk.UserMessage("fix the bug"),
+        sdk.AssistantMessage("done fixing"),
+    });
+    const bg_id = try rig.spawn("scout", "watch the logs", null, true, &.{
+        sdk.UserMessage("watch the logs"),
+        sdk.AssistantMessage("log stable"),
+    });
+    _ = try rig.spawn("empty", "", null, false, &.{});
+
+    const alloc = rig.a.sessionAlloc();
+    const parts = try alloc.alloc(app.TimelinePart, 1);
+    parts[0] = .{ .tool_call = .{
+        .agent_id = child_id,
+        .call_id = "call_spawn_child",
+        .tool_name = "agent",
+    } };
+    try rig.a.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
+    try rig.a.setToolStatus(child_id, "call_spawn_child", "agent tool line");
+
+    var store = r.session_store.Store{ .io = rig.a.io, .gpa = testing.allocator, .base = base };
+    defer store.deinit();
+    try store.create("/tmp/project");
+    rig.a.session_store = &store;
+    rig.a.checkpoint();
+    try testing.expect(store.file_name != null);
+
+    var load_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer load_arena.deinit();
+    const loaded = (try r.session_store.load(load_arena.allocator(), rig.a.io, base, store.file_name.?)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), loaded.save.agents.len);
+
+    var resumed: SessionTestRig = undefined;
+    try resumed.init();
+    defer resumed.deinit();
+    try applySaveState(&resumed.a, &loaded.save);
+
+    try testing.expectEqual(main_id, resumed.a.main_agent_id.?);
+    const main = resumed.registry.get(main_id).?;
+    try testing.expectEqual(@as(usize, 2), main.history().len);
+    try testing.expectEqualStrings("plan the work", main.history()[0].text());
+    try testing.expectEqualStrings("spawning helpers", main.history()[1].text());
+
+    try testing.expectEqual(child_id.generation, resumed.registry.slots[child_id.index].generation);
+    const child = resumed.registry.get(child_id).?;
+    try testing.expectEqualStrings("child", child.name);
+    try testing.expectEqualStrings("fix the bug", child.task_description);
+    try testing.expectEqual(main_id.pack(), child.parent.?);
+    try testing.expectEqual(@as(u16, 1), child.depth);
+    try testing.expectEqualStrings(rig.a.cwd, child.cwd);
+    try testing.expect(!child.background);
+    try testing.expectEqual(@as(usize, 2), child.history().len);
+    try testing.expectEqualStrings("done fixing", child.history()[1].text());
+    try testing.expectEqual(r.agent_registry.SlotState.complete, resumed.registry.state(child_id).?);
+    try testing.expectEqual(r.agent.Status.idle, child.status);
+    try testing.expect(child.task == null);
+    try testing.expectEqual(@as(usize, 0), child.queued_messages.items.len);
+    try testing.expect(!resumed.registry.slots[child_id.index].pinned);
+
+    const bg = resumed.registry.get(bg_id).?;
+    try testing.expect(bg.background);
+    try testing.expect(bg.parent == null);
+    try testing.expectEqualStrings("log stable", bg.history()[1].text());
+
+    try testing.expectEqual(@as(usize, 1), resumed.a.timeline.items.len);
+    try testing.expectEqual(child_id, resumed.a.timeline.items[0].parts[0].tool_call.agent_id);
+    try testing.expect(resumed.a.tool_status_entries.value.agents[child_id.index].entries.get("call_spawn_child") != null);
+
+    const Fixture = struct {
+        fn discard(_: ?*anyopaque, _: agent_run.Event) void {}
+    };
+    try child.queueMessages(&.{sdk.UserMessage("wake up")});
+    try resumed.registry.run(child_id, .{ .max_steps = 0 });
+    try testing.expectEqual(r.agent_registry.SlotState.active, resumed.registry.state(child_id).?);
+    while (resumed.registry.state(child_id) == .active) {
+        _ = resumed.registry.drain(child_id, 64, null, Fixture.discard);
+        _ = resumed.registry.reap(child_id);
+        if (resumed.registry.state(child_id) == .active) try std.Io.sleep(resumed.a.io, .fromMilliseconds(1), .awake);
+    }
+}
+
+test "legacy journal without agents and main_agent still resumes" {
+    const testing = std.testing;
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const legacy_json =
+        \\{"chat":[{"role":"user","parts":[{"text":"legacy prompt"}]}],"timeline":[]}
+    ;
+    const parsed = try std.json.parseFromSlice(SaveState, testing.allocator, legacy_json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try testing.expectEqual(@as(usize, 0), parsed.value.agents.len);
+    try testing.expect(parsed.value.main_agent == null);
+
+    try applySaveState(&rig.a, &parsed.value);
+
+    try testing.expect(rig.a.main_agent_id != null);
+    const agent = rig.registry.get(rig.a.main_agent_id.?).?;
+    try testing.expectEqual(@as(usize, 1), agent.history().len);
+    try testing.expectEqualStrings("legacy prompt", agent.history()[0].text());
+}
+
+test "occupied and out-of-range agent entries are skipped while the rest restore" {
+    const testing = std.testing;
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const squatter_id = try rig.spawn("squatter", "", null, false, &.{});
+
+    const main_chat = [_]WireMessage{.{ .role = .user, .parts = &.{.{ .text = "main" }} }};
+    const agent_chat = [_]WireMessage{.{ .role = .user, .parts = &.{.{ .text = "work" }} }};
+    const agents = [_]WireAgent{
+        .{ .id = (r.AgentId{ .index = squatter_id.index, .generation = 90 }).pack(), .name = "squatted", .cwd = "/x", .chat = &agent_chat },
+        .{ .id = (r.AgentId{ .index = 200, .generation = 1 }).pack(), .name = "far", .cwd = "/x", .chat = &agent_chat },
+        .{ .id = (r.AgentId{ .index = 7, .generation = 3 }).pack(), .name = "kept", .cwd = "/x", .chat = &agent_chat },
+    };
+    const save = SaveState{
+        .chat = &main_chat,
+        .timeline = &.{},
+        .main_agent = (r.AgentId{ .index = 3, .generation = 2 }).pack(),
+        .agents = &agents,
+    };
+    try applySaveState(&rig.a, &save);
+
+    try testing.expectEqual(@as(u16, 3), rig.a.main_agent_id.?.index);
+    try testing.expectEqual(@as(u16, 2), rig.a.main_agent_id.?.generation);
+    const kept_id = r.AgentId{ .index = 7, .generation = 3 };
+    const kept = rig.registry.get(kept_id) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("work", kept.history()[0].text());
+    try testing.expect(rig.registry.get(.{ .index = squatter_id.index, .generation = 90 }) == null);
+    try testing.expect(rig.registry.get(squatter_id) != null);
+}
+
+test "agents with empty history are not persisted" {
+    const testing = std.testing;
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    const main_id = try rig.spawn("main", "", null, false, &.{sdk.UserMessage("hello")});
+    rig.a.main_agent_id = main_id;
+    rig.registry.pin(main_id);
+    _ = try rig.spawn("child", "task", main_id, false, &.{sdk.UserMessage("child work")});
+    _ = try rig.spawn("empty", "", null, false, &.{});
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const save = try buildSaveState(&rig.a, rig.a.mainAgent().?, arena.allocator());
+    try testing.expectEqual(@as(usize, 1), save.agents.len);
+    try testing.expectEqualStrings("child", save.agents[0].name);
+    try testing.expectEqual(main_id.pack(), save.agents[0].parent.?);
 }

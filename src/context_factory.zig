@@ -1328,7 +1328,8 @@ test "system_prompt" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- read: Read file contents") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "- bash: Execute a bash command") != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# Guidelines:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, prompt, "- Use read to examine files instead of cat or sed.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "- Always prefer edit over bash for editing files") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "instead of cat or sed") == null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# User context (AGENTS.md):") == null);
 
     try factory.setAgentTools(.general, &.{});
