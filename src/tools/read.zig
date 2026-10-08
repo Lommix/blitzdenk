@@ -10,7 +10,6 @@ pub const ReadTool = r.Tool{
             \\ (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
         ,
         .prompt_snippet = "Read file contents and images",
-        .prompt_guidelines = "Use read to examine files instead of cat or sed. You can read many files in parallel",
         .parameters_schema =
         \\{
         \\  "type": "object",
