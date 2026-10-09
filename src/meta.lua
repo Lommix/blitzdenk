@@ -503,7 +503,7 @@
 ---@field in_agent_tool boolean
 
 ---@class BlitzProviderDef
----'openai' | 'response' | 'anthropic' | 'ollama'
+---'openai' | 'response' | 'anthropic'
 ---@field type string
 ---the endpoint url
 ---@field url string

@@ -392,7 +392,7 @@ const ModelDef = LuaType{ .table_def = .{ .name = "BlitzModelDef", .fields = &.{
     .{ .name = "cost", .ty = ModelCostDef, .optional = true, .desc = "price per 1M tokens; absent = free" },
 } } };
 const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields = &.{
-    .{ .name = "type", .ty = LuaType.string, .desc = "'openai' | 'response' | 'anthropic' | 'ollama'" },
+    .{ .name = "type", .ty = LuaType.string, .desc = "'openai' | 'response' | 'anthropic'" },
     .{ .name = "url", .ty = LuaType.string, .desc = "the endpoint url" },
     .{ .name = "key_envar", .ty = LuaType.string, .optional = true, .desc = "the ENVAR holding the api key (not the key itself!)" },
     .{ .name = "key", .ty = LuaType.string, .optional = true, .desc = "stored api key; the envar wins when both are set" },
@@ -796,7 +796,6 @@ pub const Blitz = LuaType{
                                     if (std.mem.eql(u8, args.type, "openai")) break :blk .openai;
                                     if (std.mem.eql(u8, args.type, "response")) break :blk .response;
                                     if (std.mem.eql(u8, args.type, "anthropic")) break :blk .anthropic;
-                                    if (std.mem.eql(u8, args.type, "ollama")) break :blk .ollama;
                                     return error.UnknownProviderType;
                                 };
                                 slot.kind = ptype;
@@ -859,12 +858,6 @@ pub const Blitz = LuaType{
                                         .max_tokens = args.max_tokens orelse 16_384,
                                         .thinking = args.thinking,
                                         .temperature = args.temperature,
-                                        .top_p = args.top_p,
-                                        .top_k = args.top_k,
-                                    } },
-                                    .ollama => .{ .ollama = .{
-                                        .temperature = args.temperature,
-                                        .max_tokens = args.max_tokens,
                                         .top_p = args.top_p,
                                         .top_k = args.top_k,
                                     } },

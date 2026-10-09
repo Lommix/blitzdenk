@@ -4,7 +4,7 @@ const root = @import("root.zig");
 pub const PROVIDER_LUA = "provider.lua";
 pub const DONE_MARKER = "setup.done";
 pub const PENDING_MARKER = "setup.pending";
-pub const provider_types = [_][]const u8{ "openai", "response", "anthropic", "ollama" };
+pub const provider_types = [_][]const u8{ "openai", "response", "anthropic" };
 const SKIP_PROVIDER_TYPE = "openai";
 const SKIP_URL = "https://opencode.ai/zen/go/v1";
 const SKIP_KEY_ENVAR = "OPENCODE_API_KEY";
@@ -27,8 +27,6 @@ pub const CatalogEntry = struct {
     provider_type: []const u8,
     default_url: []const u8,
     key_envar: []const u8,
-    key_step: bool = true,
-    url_step: bool = false,
     free_text_model_only: bool = false,
     session_key_header: []const u8 = "",
     models: []const CatalogModel = &.{},
@@ -111,15 +109,6 @@ pub const catalog = [_]CatalogEntry{
             .{ .name = "deepseek-flash", .vision = true },
             .{ .name = "qwen3.8-flash", .vision = true },
         },
-    },
-    .{
-        .name = "Ollama",
-        .provider_type = "ollama",
-        .default_url = "http://localhost:11434/v1",
-        .key_envar = "",
-        .key_step = false,
-        .url_step = true,
-        .models = &.{},
     },
     .{
         .name = "Custom endpoint",
@@ -295,9 +284,9 @@ pub const Selection = struct {
 pub fn nextStep(current: Step, entry: CatalogEntry, model: []const u8) Step {
     return switch (current) {
         .welcome => .provider,
-        .provider => if (entry.free_text_model_only) .provider_type else if (entry.url_step) .url else if (entry.key_step) .key else .model,
+        .provider => if (entry.free_text_model_only) .provider_type else .key,
         .provider_type => .url,
-        .url => if (entry.key_step) .key else .model,
+        .url => .key,
         .key => .model,
         .model => if (entry.models.len > 0 and !modelIsCurated(entry, model)) .vision else .confirm,
         .vision => .confirm,
@@ -628,26 +617,6 @@ test "renderProviderLua emits gateway session headers" {
     try std.testing.expect(std.mem.indexOf(u8, xai_rendered, "\tsession_key_header = \"x-grok-conv-id\",\n") != null);
 }
 
-test "renderProviderLua ollama omits key lines and keeps url" {
-    const ollama_idx = catalogIndex("Ollama");
-    const rendered = try renderProviderLua(std.testing.allocator, .{
-        .entry = catalog[ollama_idx],
-        .provider_type = catalog[ollama_idx].provider_type,
-        .url = "http://mynas:11434/v1",
-        .key = "",
-        .model = "llama4:scout",
-        .vision = true,
-    });
-    defer std.testing.allocator.free(rendered);
-
-    try std.testing.expectEqualStrings("", catalog[ollama_idx].key_envar);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "key_envar") == null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "\tkey = ") == null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "http://mynas:11434/v1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "\ttype = \"ollama\",\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "\tvision = true,\n") != null);
-}
-
 test "renderProviderLua never writes replay_reasoning" {
     const entry = catalog[catalogIndex("OpenAI")];
     const plain = try renderProviderLua(std.testing.allocator, .{
@@ -780,7 +749,7 @@ test "done marker write is idempotent" {
     try std.testing.expectEqual(@as(u64, 0), stat.size);
 }
 
-test "state machine walks the custom flow and skips key for ollama" {
+test "state machine walks the custom flow" {
     const custom = catalog[catalogIndex("Custom endpoint")];
     var step: Step = .welcome;
     step = nextStep(step, custom, "");
@@ -797,13 +766,6 @@ test "state machine walks the custom flow and skips key for ollama" {
     try std.testing.expectEqual(Step.confirm, step);
     step = nextStep(step, custom, "my-model");
     try std.testing.expectEqual(Step.done, step);
-
-    const ollama = catalog[catalogIndex("Ollama")];
-    step = .provider;
-    step = nextStep(step, ollama, "");
-    try std.testing.expectEqual(Step.url, step);
-    step = nextStep(step, ollama, "");
-    try std.testing.expectEqual(Step.model, step);
 
     const anthropic = catalog[0];
     step = .provider;

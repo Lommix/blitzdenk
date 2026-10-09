@@ -43,7 +43,7 @@ the user, and do not guess. `blitz help` shows CLI capabilities.
 
 ```lua
 local novita = blitz.add_provider({
-    type = "openai",               -- "openai" | "response" | "anthropic" | "ollama"
+    type = "openai",               -- "openai" | "response" | "anthropic"
     url = "https://api.novita.ai/openai/v1",
     key_envar = "NOVITA_API_KEY",
     max_tokens = 32000,
@@ -155,7 +155,7 @@ Tool function rules:
   `img = { media_type = "image/png", data = blitz.base64.encode(raw) }`.
   Set `exit_loop = true` to end the agent loop.
 - Every provider sends `msg` as tool result text. Images follow as user
-  content: a `user` message on `openai`/`ollama`/`response`, an image block in
+  content: a `user` message on `openai`/`response`, an image block in
   the same user message on `anthropic`. Strict endpoints such as DeepSeek
   reject images inside tool messages.
 

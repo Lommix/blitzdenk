@@ -2,7 +2,6 @@ const std = @import("std");
 const sdk = @import("blitz-sdk");
 
 pub const Kind = enum {
-    ollama,
     openai,
     response,
     anthropic,
@@ -24,14 +23,6 @@ pub fn parseReasoningEffort(value: []const u8) ?ReasoningEffort {
 pub const Thinking = struct {
     type: []const u8,
     budget_tokens: ?u32 = null,
-};
-
-pub const OllamaOptions = struct {
-    temperature: ?f32 = null,
-    max_tokens: ?u32 = null,
-    top_p: ?f32 = null,
-    top_k: ?u32 = null,
-    stop: ?[]const []const u8 = null,
 };
 
 pub const OpenAIOptions = struct {
@@ -63,7 +54,6 @@ pub const AnthropicOptions = struct {
 };
 
 pub const ModelParams = union(Kind) {
-    ollama: OllamaOptions,
     openai: OpenAIOptions,
     response: ResponseOptions,
     anthropic: AnthropicOptions,
@@ -124,13 +114,6 @@ pub fn applyParams(params: ModelParams, effort: ?ReasoningEffort, reasoning: boo
             if (p.stop) |value| opts.stop_sequences = value;
             if (p.thinking) |value| opts.thinking = .{ .type = value.type, .budget_tokens = value.budget_tokens };
         },
-        .ollama => |p| {
-            if (p.max_tokens) |value| opts.max_output_tokens = value;
-            if (p.temperature) |value| opts.temperature = @floatCast(value);
-            if (p.top_p) |value| opts.top_p = @floatCast(value);
-            if (p.top_k) |value| opts.top_k = value;
-            if (p.stop) |value| opts.stop_sequences = value;
-        },
     }
 }
 
@@ -148,20 +131,12 @@ pub const Config = struct {
 };
 
 pub const Model = union(Kind) {
-    ollama: sdk.compat.Chat,
     openai: sdk.openai.Chat,
     response: sdk.responses.Chat,
     anthropic: sdk.anthropic.Chat,
 
     pub fn init(alloc: std.mem.Allocator, config: Config) !Model {
         return switch (config.params) {
-            .ollama => .{ .ollama = try sdk.compat.Chat.init(alloc, config.model, .{
-                .api_key = config.api_key,
-                .base_url = config.base_url,
-                .rate_limit = config.rate_limit,
-                .replay_reasoning = config.replay_reasoning,
-                .session_key_header = config.session_key_header,
-            }) },
             .openai => .{ .openai = try sdk.openai.Chat.init(alloc, config.model, .{
                 .api_key = config.api_key,
                 .base_url = config.base_url,
@@ -224,24 +199,19 @@ test "models own sdk provider chats" {
 }
 
 test "replay_reasoning reaches the sdk chat" {
-    for ([_]ModelParams{ .{ .openai = .{} }, .{ .ollama = .{} } }) |params| {
-        var model = try Model.init(std.testing.allocator, .{
-            .api_key = "key",
-            .model = "model",
-            .base_url = "https://example.com/v1",
-            .replay_reasoning = true,
-            .params = params,
-        });
-        defer model.deinit(std.testing.allocator);
-        const chat_replays = switch (model) {
-            inline else => |*chat| chat.replay_reasoning,
-        };
-        try std.testing.expect(chat_replays);
-    }
+    var model = try Model.init(std.testing.allocator, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .replay_reasoning = true,
+        .params = .{ .openai = .{} },
+    });
+    defer model.deinit(std.testing.allocator);
+    try std.testing.expect(model.openai.replay_reasoning);
 }
 
 test "model params copy nested slices for every provider" {
-    for ([_]Kind{ .openai, .anthropic, .ollama, .response }) |kind| {
+    for ([_]Kind{ .openai, .anthropic, .response }) |kind| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         var thinking_type = "enabled".*;
@@ -250,7 +220,6 @@ test "model params copy nested slices for every provider" {
         const params: ModelParams = switch (kind) {
             .openai => .{ .openai = .{ .thinking = .{ .type = &thinking_type, .budget_tokens = 2048 }, .stop = &stops, .max_completion_tokens = 8192 } },
             .anthropic => .{ .anthropic = .{ .thinking = .{ .type = &thinking_type, .budget_tokens = 2048 }, .stop = &stops, .max_tokens = 8192 } },
-            .ollama => .{ .ollama = .{ .stop = &stops, .max_tokens = 8192 } },
             .response => .{ .response = .{ .max_output_tokens = 8192 } },
         };
         const copied = try params.clone(arena.allocator());

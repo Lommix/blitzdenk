@@ -28,13 +28,13 @@ test "provider chats deinit owned configuration" {
 }
 
 test "compat retains arbitrary OpenAI endpoints" {
-    var chat = try sdk.compat.Chat.init(std.testing.allocator, "llama3", .{
-        .base_url = "http://127.0.0.1:11434/v1",
-        .api_key = "ollama",
+    var chat = try sdk.compat.Chat.init(std.testing.allocator, "local-model", .{
+        .base_url = "http://127.0.0.1:8080/v1",
+        .api_key = "key",
     });
     defer chat.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("llama3", chat.languageModel().modelId());
-    try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1", chat.base_url);
+    try std.testing.expectEqualStrings("local-model", chat.languageModel().modelId());
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080/v1", chat.base_url);
 }
 
 test "sdk smoke: tool loop with fake model" {

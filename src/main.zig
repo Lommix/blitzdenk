@@ -1331,14 +1331,14 @@ fn wizardCatalogIndexOf(name: []const u8) usize {
 test "provider step enter commits the selected catalog row" {
     var w: r.app.InputMode.Wizard = .{};
     w.step = .provider;
-    w.list_selected = wizardCatalogIndexOf("Ollama");
+    w.list_selected = wizardCatalogIndexOf("Anthropic");
 
     w.enterProvider();
 
-    const ollama = r.wizard.catalog[wizardCatalogIndexOf("Ollama")];
-    try std.testing.expectEqualStrings(ollama.provider_type, w.provider_type_buf[0..w.provider_type_len]);
-    try std.testing.expectEqualStrings(ollama.default_url, w.url.slice());
-    try std.testing.expectEqual(r.wizard.Step.url, w.step);
+    const entry = r.wizard.catalog[wizardCatalogIndexOf("Anthropic")];
+    try std.testing.expectEqualStrings(entry.provider_type, w.provider_type_buf[0..w.provider_type_len]);
+    try std.testing.expectEqualStrings(entry.default_url, w.url.slice());
+    try std.testing.expectEqual(r.wizard.Step.key, w.step);
 }
 
 test "model selection change preserves typed free text across row moves" {
