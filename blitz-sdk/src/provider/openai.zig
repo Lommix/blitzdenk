@@ -477,7 +477,7 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
                 sctx.send(.{ .type = .text, .text = c.string });
             }
         }
-        if (delta.object.get("reasoning_content")) |c| {
+        if (delta.object.get("reasoning_content") orelse delta.object.get("reasoning")) |c| {
             if (c == .string and c.string.len > 0) {
                 try reasoning.appendSlice(a, c.string);
                 sctx.send(.{ .type = .reasoning, .text = c.string });
