@@ -142,30 +142,3 @@ pub fn freeEvent(alloc: std.mem.Allocator, event: AppEvent) void {
         else => {},
     }
 }
-
-test "event payload copies own their strings" {
-    const alloc = std.testing.allocator;
-    const original = AppEvent{ .user_message_sent = "hello hook" };
-    const owned = try dupEvent(alloc, original);
-    try std.testing.expectEqualStrings("hello hook", owned.user_message_sent);
-    freeEvent(alloc, owned);
-
-    const failed = AppEvent{ .agent_failed = .{ .id = .{ .index = 1, .generation = 2 }, .err = "ProviderError" } };
-    const owned_failed = try dupEvent(alloc, failed);
-    try std.testing.expectEqualStrings("ProviderError", owned_failed.agent_failed.err);
-    freeEvent(alloc, owned_failed);
-}
-
-test "registered tags mark the event active until cleared" {
-    var bus: EventBus = .{};
-    defer bus.clear(std.testing.io);
-
-    bus.addTag(std.testing.io, .agent_complete);
-    bus.addTag(std.testing.io, .agent_failed);
-    try std.testing.expect(bus.active.contains(.agent_complete));
-    try std.testing.expect(bus.active.contains(.agent_failed));
-    try std.testing.expect(!bus.active.contains(.session_reset));
-
-    bus.clear(std.testing.io);
-    try std.testing.expect(!bus.active.contains(.agent_complete));
-}

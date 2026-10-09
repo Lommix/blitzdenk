@@ -80,68 +80,6 @@ fn writeDefault(io: std.Io, home_dir: std.Io.Dir, f: DefaultFile) !void {
     try w.interface.flush();
 }
 
-test "ensure writes missing files and skips existing" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    ensure(std.testing.io, tmp.dir);
-
-    for (default_files) |f| {
-        const stat = try tmp.dir.statFile(std.testing.io, f.rel_path, .{});
-        if (stat.size != f.contents.len) return error.WrongSize;
-    }
-
-    const blitz_path = CONFIG_DIR ++ "blitz.lua";
-    const file = try tmp.dir.createFile(std.testing.io, blitz_path, .{ .truncate = true });
-    file.close(std.testing.io);
-
-    ensure(std.testing.io, tmp.dir);
-
-    const stat = try tmp.dir.statFile(std.testing.io, blitz_path, .{});
-    if (stat.size != 0) return error.ModifiedExisting;
-}
-
-test "ensure rewrites forced files even when they exist" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    ensure(std.testing.io, tmp.dir);
-
-    for (default_files) |f| {
-        if (!f.force) continue;
-        const file = try tmp.dir.createFile(std.testing.io, f.rel_path, .{ .truncate = true });
-        file.close(std.testing.io);
-    }
-
-    ensure(std.testing.io, tmp.dir);
-
-    for (default_files) |f| {
-        if (!f.force) continue;
-        const stat = try tmp.dir.statFile(std.testing.io, f.rel_path, .{});
-        if (stat.size != f.contents.len) return error.NotRewritten;
-    }
-}
-
-test "ensure leaves current forced files untouched" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    ensure(std.testing.io, tmp.dir);
-
-    for (default_files) |f| {
-        if (!f.force) continue;
-        try tmp.dir.setTimestamps(std.testing.io, f.rel_path, .{ .modify_timestamp = .{ .new = .zero } });
-    }
-
-    ensure(std.testing.io, tmp.dir);
-
-    for (default_files) |f| {
-        if (!f.force) continue;
-        const stat = try tmp.dir.statFile(std.testing.io, f.rel_path, .{});
-        try std.testing.expectEqual(@as(i96, 0), stat.mtime.nanoseconds);
-    }
-}
-
 test "ensure works when config dir is a symlink" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -95,10 +95,6 @@ pub const Command = union(enum) {
         name: []const u8,
     };
 
-    pub const PlanArgs = struct {
-        plan_prompt: []const u8,
-    };
-
     pub const SpawnArgs = struct {
         parent_id: ?r.AgentId = null,
         agent_id: r.AgentId,

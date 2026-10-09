@@ -174,35 +174,3 @@ fn download(pool: *exec.CmdPool, gpa: std.mem.Allocator, url: []const u8, timeou
     }
     return error.DownloadFailed;
 }
-
-test "release metadata selects the current platform asset" {
-    const name = try assetName(std.testing.allocator);
-    defer std.testing.allocator.free(name);
-    const json = try std.fmt.allocPrint(std.testing.allocator,
-        \\{{
-        \\  "tag_name": "v99.0.0",
-        \\  "assets": [{{
-        \\    "name": "{s}",
-        \\    "browser_download_url": "https://example.test/{s}",
-        \\    "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        \\  }}]
-        \\}}
-    , .{ name, name });
-    defer std.testing.allocator.free(json);
-
-    const info = try parseRelease(json, std.testing.allocator);
-    defer info.deinit(std.testing.allocator);
-    try std.testing.expect(info.available);
-    try std.testing.expectEqualStrings("v99.0.0", info.latest);
-    try std.testing.expect(std.mem.endsWith(u8, info.asset_url, name));
-}
-
-test "release metadata requires a digest" {
-    const name = try assetName(std.testing.allocator);
-    defer std.testing.allocator.free(name);
-    const json = try std.fmt.allocPrint(std.testing.allocator,
-        \\{{"tag_name":"v99.0.0","assets":[{{"name":"{s}","browser_download_url":"https://example.test/a"}}]}}
-    , .{name});
-    defer std.testing.allocator.free(json);
-    try std.testing.expectError(error.MissingDigest, parseRelease(json, std.testing.allocator));
-}

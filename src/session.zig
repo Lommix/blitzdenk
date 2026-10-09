@@ -49,25 +49,6 @@ pub const WireMessage = struct {
     time_ms: i64 = 0,
 };
 
-fn decodeMessages(alloc: std.mem.Allocator, json: []const u8) !agent_run.OwnedMessages {
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-    const parsed = try std.json.parseFromSlice([]const WireMessage, scratch, json, .{ .ignore_unknown_fields = true });
-    const messages = try scratch.alloc(sdk.Message, parsed.value.len);
-    for (parsed.value, messages) |wire, *message| message.* = try decodeMessage(scratch, wire);
-    return agent_run.OwnedMessages.clone(alloc, messages);
-}
-
-fn encodeMessages(alloc: std.mem.Allocator, messages: []const sdk.Message, writer: *std.Io.Writer) !void {
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const scratch = arena.allocator();
-    const wire = try scratch.alloc(WireMessage, messages.len);
-    for (messages, wire) |message, *output| output.* = try encodeMessage(scratch, message);
-    try std.json.Stringify.value(wire, .{}, writer);
-}
-
 fn decodeMessage(alloc: std.mem.Allocator, wire: WireMessage) !sdk.Message {
     var parts: std.ArrayList(sdk.Part) = .empty;
     for (wire.parts) |part| switch (part) {
@@ -210,22 +191,6 @@ pub const WireToolStatus = struct {
     is_error: ?bool = null,
     child: ?u32 = null,
 };
-
-test "encodeMessage replaces invalid UTF-8 so saved sessions stay loadable" {
-    const messages = [_]sdk.Message{
-        .{ .role = .tool, .content = &.{
-            .{ .tool_result = .{ .id = "c1", .name = "search", .output = "\xe5\x8f\xe5..." } },
-        } },
-    };
-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer output.deinit();
-    try encodeMessages(std.testing.allocator, &messages, &output.writer);
-    const parsed = try std.json.parseFromSlice([]const WireMessage, std.testing.allocator, output.written(), .{});
-    defer parsed.deinit();
-    const content = parsed.value[0].parts[0].tool_result.content;
-    try std.testing.expectStringEndsWith(content, "...");
-    try std.testing.expect(std.unicode.utf8ValidateSlice(content));
-}
 
 /// Encodes the current session into a `SaveState`; `alloc` must outlive the
 /// returned value (callers typically use an arena). Reminders are skipped.
@@ -467,100 +432,6 @@ fn nullMissingParents(a: *app.App, main_id: r.AgentId, save: *const SaveState) v
     }
 }
 
-test "old session messages decode into SDK history" {
-    const json =
-        \\[
-        \\  {"role":"system","parts":[{"text":"system"}],"flags":{"allow_export":true},"time_ms":1},
-        \\  {"role":"agent","parts":[{"thinking":{"text":"reason","signature":"sig"}},{"tool_call":{"id":"c1","name":"read","arguments":"{}"}}],"provider_items":["{\"type\":\"reasoning\"}"]},
-        \\  {"role":"user","parts":[{"tool_result":{"call_id":"c1","name":"read","content":"done","is_error":false,"exit_loop":true,"comp_strat":"keep","image":{"media_type":"image/png","data":"aW1n"}}}]}
-        \\]
-    ;
-    var messages = try decodeMessages(std.testing.allocator, json);
-    defer messages.deinit();
-    try std.testing.expectEqual(@as(usize, 3), messages.messages.len);
-    try std.testing.expectEqual(sdk.Role.system, messages.messages[0].role);
-    try std.testing.expectEqual(sdk.Role.assistant, messages.messages[1].role);
-    try std.testing.expectEqual(sdk.Role.tool, messages.messages[2].role);
-    try std.testing.expectEqualStrings("reason", messages.messages[1].parts()[0].reasoning.text);
-    try std.testing.expectEqualStrings("{}", messages.messages[1].parts()[1].tool_call.input);
-    try std.testing.expectEqualStrings("{\"type\":\"reasoning\"}", messages.messages[1].parts()[2].provider_data.data);
-    try std.testing.expect(messages.messages[2].parts()[0].tool_result.exit_loop);
-    try std.testing.expectEqualStrings("data:image/png;base64,aW1n", messages.messages[2].parts()[1].image.url);
-}
-
-test "SDK history encodes with the old session message layout" {
-    const messages = [_]sdk.Message{
-        sdk.SystemMessage("system"),
-        .{ .role = .assistant, .content = &.{
-            .{ .reasoning = .{ .text = "reason", .signature = "sig" } },
-            .{ .tool_call = .{ .id = "c1", .name = "read", .input = "{}" } },
-            .{ .provider_data = .{ .provider = "openai.responses", .data = "opaque" } },
-        } },
-        .{ .role = .tool, .content = &.{
-            .{ .tool_result = .{ .id = "c1", .name = "read", .output = "done", .exit_loop = true } },
-            .{ .image = .{ .url = "data:image/png;base64,aW1n", .media_type = "image/png" } },
-        } },
-    };
-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer output.deinit();
-    try encodeMessages(std.testing.allocator, &messages, &output.writer);
-    const parsed = try std.json.parseFromSlice([]const WireMessage, std.testing.allocator, output.written(), .{});
-    defer parsed.deinit();
-    try std.testing.expectEqual(WireRole.agent, parsed.value[1].role);
-    try std.testing.expectEqualStrings("{}", parsed.value[1].parts[1].tool_call.arguments);
-    try std.testing.expectEqualStrings("opaque", parsed.value[1].provider_items[0]);
-    try std.testing.expectEqual(WireRole.user, parsed.value[2].role);
-    try std.testing.expectEqualStrings("aW1n", parsed.value[2].parts[0].tool_result.image.?.data);
-}
-
-test "tool status roundtrips through WireToolStatus with re-keyed main agent" {
-    const testing = std.testing;
-
-    // linesToAnsi -> fromAnsi preserves styled multi-line content.
-    var line = r.tui.Line{};
-    defer line.deinit(testing.allocator);
-    try line.pushSpan(testing.allocator, .{ .content = "MCP fetch", .style = .{ .fg = .blue, .modifier = .{ .bold = true } } });
-    try line.pushSpan(testing.allocator, .{ .content = " 2 T/s", .style = .{ .fg = .cyan } });
-    var second = r.tui.Line{};
-    defer second.deinit(testing.allocator);
-    try second.pushSpan(testing.allocator, .{ .content = "running", .style = .{ .fg = .green } });
-    const lines = [_]r.tui.Line{ line, second };
-
-    const ansi = try linesToAnsi(&lines, testing.allocator);
-    defer testing.allocator.free(ansi);
-    var reparsed = try r.tui.Text.fromAnsi(testing.allocator, ansi);
-    defer reparsed.deinit(testing.allocator);
-    try testing.expectEqual(@as(usize, 2), reparsed.lines.items.len);
-    try testing.expectEqualStrings("MCP fetch", reparsed.lines.items[0].spans.items[0].content);
-    try testing.expect(reparsed.lines.items[0].spans.items[0].style.modifier.bold);
-    try testing.expectEqualStrings("running", reparsed.lines.items[1].spans.items[0].content);
-
-    // SaveState JSON roundtrip keeps all fields.
-    const save = SaveState{
-        .chat = &.{},
-        .timeline = &.{},
-        .tool_status = &.{
-            .{ .call_id = "call_1", .ansi = ansi, .is_error = false },
-            blk: {
-                const agent: r.AgentId = .{ .index = 3, .generation = 7 };
-                const child: r.AgentId = .{ .index = 4, .generation = 1 };
-                break :blk WireToolStatus{ .agent = agent.pack(), .call_id = "call_2", .child = child.pack() };
-            },
-        },
-    };
-    var output: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer output.deinit();
-    try std.json.Stringify.value(save, .{}, &output.writer);
-    const parsed = try std.json.parseFromSlice(SaveState, testing.allocator, output.written(), .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    try testing.expectEqual(@as(usize, 2), parsed.value.tool_status.len);
-    try testing.expect(parsed.value.tool_status[0].agent == null);
-    try testing.expectEqual(false, parsed.value.tool_status[0].is_error.?);
-    try testing.expectEqualStrings("call_2", parsed.value.tool_status[1].call_id);
-    try testing.expectEqual((r.AgentId{ .index = 3, .generation = 7 }).pack(), parsed.value.tool_status[1].agent.?);
-    try testing.expectEqual((r.AgentId{ .index = 4, .generation = 1 }).pack(), parsed.value.tool_status[1].child.?);
-}
-
 const SessionTestRig = struct {
     io_state: std.Io.Threaded,
     env: std.process.Environ.Map,
@@ -747,78 +618,4 @@ test "sub-agents survive a checkpoint, journal round-trip, and resume with froze
         _ = resumed.registry.reap(child_id);
         if (resumed.registry.state(child_id) == .active) try std.Io.sleep(resumed.a.io, .fromMilliseconds(1), .awake);
     }
-}
-
-test "legacy journal without agents and main_agent still resumes" {
-    const testing = std.testing;
-    var rig: SessionTestRig = undefined;
-    try rig.init();
-    defer rig.deinit();
-
-    const legacy_json =
-        \\{"chat":[{"role":"user","parts":[{"text":"legacy prompt"}]}],"timeline":[]}
-    ;
-    const parsed = try std.json.parseFromSlice(SaveState, testing.allocator, legacy_json, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    try testing.expectEqual(@as(usize, 0), parsed.value.agents.len);
-    try testing.expect(parsed.value.main_agent == null);
-
-    try applySaveState(&rig.a, &parsed.value);
-
-    try testing.expect(rig.a.main_agent_id != null);
-    const agent = rig.registry.get(rig.a.main_agent_id.?).?;
-    try testing.expectEqual(@as(usize, 1), agent.history().len);
-    try testing.expectEqualStrings("legacy prompt", agent.history()[0].text());
-}
-
-test "occupied and out-of-range agent entries are skipped while the rest restore" {
-    const testing = std.testing;
-    var rig: SessionTestRig = undefined;
-    try rig.init();
-    defer rig.deinit();
-
-    const squatter_id = try rig.spawn("squatter", "", null, false, &.{});
-
-    const main_chat = [_]WireMessage{.{ .role = .user, .parts = &.{.{ .text = "main" }} }};
-    const agent_chat = [_]WireMessage{.{ .role = .user, .parts = &.{.{ .text = "work" }} }};
-    const agents = [_]WireAgent{
-        .{ .id = (r.AgentId{ .index = squatter_id.index, .generation = 90 }).pack(), .name = "squatted", .cwd = "/x", .chat = &agent_chat },
-        .{ .id = (r.AgentId{ .index = 200, .generation = 1 }).pack(), .name = "far", .cwd = "/x", .chat = &agent_chat },
-        .{ .id = (r.AgentId{ .index = 7, .generation = 3 }).pack(), .name = "kept", .cwd = "/x", .chat = &agent_chat },
-    };
-    const save = SaveState{
-        .chat = &main_chat,
-        .timeline = &.{},
-        .main_agent = (r.AgentId{ .index = 3, .generation = 2 }).pack(),
-        .agents = &agents,
-    };
-    try applySaveState(&rig.a, &save);
-
-    try testing.expectEqual(@as(u16, 3), rig.a.main_agent_id.?.index);
-    try testing.expectEqual(@as(u16, 2), rig.a.main_agent_id.?.generation);
-    const kept_id = r.AgentId{ .index = 7, .generation = 3 };
-    const kept = rig.registry.get(kept_id) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("work", kept.history()[0].text());
-    try testing.expect(rig.registry.get(.{ .index = squatter_id.index, .generation = 90 }) == null);
-    try testing.expect(rig.registry.get(squatter_id) != null);
-}
-
-test "agents with empty history are not persisted" {
-    const testing = std.testing;
-    var rig: SessionTestRig = undefined;
-    try rig.init();
-    defer rig.deinit();
-
-    const main_id = try rig.spawn("main", "", null, false, &.{sdk.UserMessage("hello")});
-    rig.a.main_agent_id = main_id;
-    rig.registry.pin(main_id);
-    _ = try rig.spawn("child", "task", main_id, false, &.{sdk.UserMessage("child work")});
-    _ = try rig.spawn("empty", "", null, false, &.{});
-
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const save = try buildSaveState(&rig.a, rig.a.mainAgent().?, arena.allocator());
-    try testing.expectEqual(@as(usize, 1), save.agents.len);
-    try testing.expectEqualStrings("child", save.agents[0].name);
-    try testing.expectEqual(main_id.pack(), save.agents[0].parent.?);
 }

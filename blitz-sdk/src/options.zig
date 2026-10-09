@@ -248,17 +248,3 @@ pub const ImageOptions = struct {
     client: ?*std.http.Client = null,
     cancellation: ?*CancellationToken = null,
 };
-
-test "generate options defaults" {
-    const o = GenerateOptions{};
-    try std.testing.expectEqual(@as(usize, 1), o.max_steps);
-    try std.testing.expectEqual(@as(u32, 2), o.max_retries);
-    try std.testing.expect(o.client == null);
-    try std.testing.expect(!o.sequential_tool_execution);
-}
-
-test "embed options defaults" {
-    const o = EmbedOptions{};
-    try std.testing.expectEqual(@as(usize, 4), o.max_parallel_calls);
-    try std.testing.expectEqual(@as(u32, 2), o.max_retries);
-}

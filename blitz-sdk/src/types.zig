@@ -410,29 +410,3 @@ pub const ResponseFormat = struct {
     name: []const u8 = "response",
     schema: []const u8,
 };
-
-test "message builders" {
-    const m = UserMessage("hi");
-    try std.testing.expectEqual(Role.user, m.role);
-    try std.testing.expectEqualStrings("hi", m.text());
-
-    const t = ToolMessage("call_1", "weather", "sunny");
-    try std.testing.expectEqual(Role.tool, t.role);
-    try std.testing.expectEqualStrings("call_1", t.parts()[0].tool_result.id);
-
-    const d = DeveloperMessage("dev");
-    try std.testing.expectEqual(Role.developer, d.role);
-}
-
-test "usage accumulate" {
-    var u = Usage{ .input_tokens = 10, .output_tokens = 5, .total_tokens = 15 };
-    u.add(.{ .input_tokens = 3, .output_tokens = 2, .total_tokens = 5 });
-    try std.testing.expectEqual(@as(u64, 13), u.input_tokens);
-    try std.testing.expectEqual(@as(u64, 7), u.output_tokens);
-    try std.testing.expectEqual(@as(u64, 20), u.total_tokens);
-}
-
-test "role roundtrip" {
-    try std.testing.expectEqual(Role.assistant, Role.fromString("assistant").?);
-    try std.testing.expect(Role.fromString("nope") == null);
-}

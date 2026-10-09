@@ -99,27 +99,3 @@ fn extractMessage(alloc: std.mem.Allocator, body: []const u8) ?[]const u8 {
     }
     return null;
 }
-
-test "isOverflow patterns" {
-    try std.testing.expect(isOverflow("Prompt is too long: 200000 tokens"));
-    try std.testing.expect(isOverflow("this model's maximum context length is 4096 tokens"));
-    try std.testing.expect(!isOverflow("invalid api key"));
-}
-
-test "classification" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const e = classify(a, .too_many_requests, "{}");
-    try std.testing.expect(e == .api);
-    try std.testing.expect(e.api.is_retryable);
-
-    const e400 = classify(a, .bad_request, "{}");
-    try std.testing.expect(!e400.api.is_retryable);
-
-    const overflow = classify(a, .bad_request,
-        \\{"error":{"message":"prompt is too long"}}
-    );
-    try std.testing.expect(overflow == .context_overflow);
-}

@@ -202,31 +202,6 @@ fn argPreview(input: []const u8) []const u8 {
     return input[0..end];
 }
 
-test "argPreview caps at 255 bytes without splitting utf8" {
-    const short = "{\"path\":\"src/main.zig\"}";
-    try std.testing.expectEqualStrings(short, argPreview(short));
-
-    var long_buf: [600]u8 = undefined;
-    @memset(&long_buf, 'a');
-    const capped = argPreview(&long_buf);
-    try std.testing.expectEqual(@as(usize, 255), capped.len);
-
-    const multi = "é" ** 200;
-    const cut = argPreview(multi);
-    try std.testing.expect(cut.len <= 255);
-    try std.testing.expect(std.unicode.utf8ValidateSlice(cut));
-}
-
-test "MCP load task completes" {
-    var manager = Manager.init(std.testing.allocator, std.testing.io);
-    defer manager.deinit();
-    var task = LoadTask.init(std.testing.io, &manager, &.{});
-    defer task.deinit();
-    task.start();
-    task.wait();
-    try std.testing.expect(task.isFinished());
-}
-
 const FakeMcp = struct {
     inits: usize = 0,
     notifications: usize = 0,

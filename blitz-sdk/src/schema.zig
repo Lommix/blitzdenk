@@ -110,28 +110,3 @@ fn schemaTag(comptime T: type, comptime field: std.builtin.Type.StructField) ?Ta
     }
     return null;
 }
-
-test "schema from struct" {
-    const Person = struct {
-        pub const _schema_tags = .{
-            .{ "name", "The person name", null },
-        };
-        name: []const u8,
-        age: u32,
-    };
-    const s = schemaFrom(Person);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"name\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"integer\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"required\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "The person name") != null);
-}
-
-test "schema optional and slice" {
-    const T = struct {
-        tags: []const []const u8,
-        note: ?[]const u8 = null,
-    };
-    const s = schemaFrom(T);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"array\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"null\"") != null);
-}

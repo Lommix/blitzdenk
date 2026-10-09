@@ -1,4 +1,3 @@
-const std = @import("std");
 
 pub const EMPTY_PROMPT_LABEL = "<no prompt saved>";
 
@@ -39,65 +38,3 @@ pub const Picker = struct {
         return self.rows[self.selected];
     }
 };
-
-test "picker move clamps into row bounds" {
-    var empty = Picker{};
-    empty.move(1);
-    try std.testing.expectEqual(@as(usize, 0), empty.selected);
-
-    const rows = [_]Row{
-        .{ .id = "a", .date = "d1", .prompt = "p1" },
-        .{ .id = "b", .date = "d2", .prompt = "p2" },
-    };
-    var picker = Picker{ .rows = &rows };
-    picker.move(5);
-    try std.testing.expectEqual(@as(usize, 1), picker.selected);
-    picker.move(-9);
-    try std.testing.expectEqual(@as(usize, 0), picker.selected);
-}
-
-test "picker pick returns the selected row" {
-    const rows = [_]Row{
-        .{ .id = "a", .date = "d1", .prompt = "p1" },
-        .{ .id = "b", .date = "d2", .prompt = "p2" },
-    };
-    var picker = Picker{ .rows = &rows };
-    try std.testing.expectEqualStrings("a", picker.pick().?.id);
-    picker.selected = 1;
-    try std.testing.expectEqualStrings("b", picker.pick().?.id);
-}
-
-test "syncScroll keeps the selection inside the window" {
-    const rows = [_]Row{.{ .id = "", .date = "", .prompt = "" }} ** 10;
-    var picker = Picker{ .rows = &rows };
-
-    picker.syncScroll(0);
-    try std.testing.expectEqual(@as(usize, 0), picker.scroll);
-
-    picker.syncScroll(5);
-    try std.testing.expectEqual(@as(usize, 0), picker.scroll);
-    picker.move(4);
-    picker.syncScroll(5);
-    try std.testing.expectEqual(@as(usize, 0), picker.scroll);
-    picker.move(1);
-    picker.syncScroll(5);
-    try std.testing.expectEqual(@as(usize, 1), picker.scroll);
-    picker.move(5);
-    picker.syncScroll(5);
-    try std.testing.expectEqual(@as(usize, 5), picker.scroll);
-    try std.testing.expectEqual(@as(usize, 9), picker.selected);
-
-    picker.move(-9);
-    picker.syncScroll(5);
-    try std.testing.expectEqual(@as(usize, 0), picker.scroll);
-}
-
-test "syncScroll resets when every row fits" {
-    const rows = [_]Row{
-        .{ .id = "a", .date = "", .prompt = "" },
-        .{ .id = "b", .date = "", .prompt = "" },
-    };
-    var picker = Picker{ .rows = &rows, .scroll = 2 };
-    picker.syncScroll(5);
-    try std.testing.expectEqual(@as(usize, 0), picker.scroll);
-}

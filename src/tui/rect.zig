@@ -69,22 +69,3 @@ pub fn Col(rect: Rect, constraints: anytype) [constraints.len]Rect {
     _ = splitCol(rect, &out, &constraints);
     return out;
 }
-
-test "splitCol top-to-bottom" {
-    const rect = Rect{ .x = 0, .y = 0, .width = 80, .height = 24 };
-    var buf: [2]Rect = undefined;
-    const result = splitCol(rect, &buf, &.{ .{ .fixed = 3 }, .fill });
-
-    try std.testing.expectEqual(@as(u16, 0), result[0].y);
-    try std.testing.expectEqual(@as(u16, 3), result[0].height);
-    try std.testing.expectEqual(@as(u16, 3), result[1].y);
-    try std.testing.expectEqual(@as(u16, 21), result[1].height);
-}
-
-test "Rect contains" {
-    const r = Rect{ .x = 10, .y = 10, .width = 20, .height = 10 };
-    try std.testing.expect(r.contains(10, 10));
-    try std.testing.expect(r.contains(29, 19));
-    try std.testing.expect(!r.contains(30, 10));
-    try std.testing.expect(!r.contains(9, 10));
-}

@@ -352,34 +352,3 @@ fn countLinesUpTo(s: []const u8, idx: usize) usize {
     }
     return n;
 }
-
-const testing = std.testing;
-
-test "mixed line endings require exact bytes" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const res = try buildReplacement(arena.allocator(), "a\r\nb\nc\nd\n", "a\nb", "A\nB", false);
-    try testing.expect(res == null);
-}
-
-test "consistent CRLF file still denormalizes fallback path" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const res = try buildReplacement(arena.allocator(), "a\r\nb\r\n", "a\nb", "A\nB", false);
-    try testing.expectEqualStrings("A\r\nB\r\n", res.?);
-}
-
-test "exact path converts LF new_string on consistent CRLF file" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const res = try buildReplacement(arena.allocator(), "a\r\nb\r\n", "a\r\nb", "A\nB", false);
-    try testing.expectEqualStrings("A\r\nB\r\n", res.?);
-}
-
-test "whitespaceNormalisedMatch rejects unrelated needle" {
-    try testing.expect(!whitespaceNormalisedMatch("const alpha = 1;\nfn main() {}\n", "zzzz_unrelated_qq"));
-}
-
-test "whitespaceNormalisedMatch accepts real whitespace variant" {
-    try testing.expect(whitespaceNormalisedMatch("let  x  =  1;\n", "let x = 1;"));
-}

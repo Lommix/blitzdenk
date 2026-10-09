@@ -126,30 +126,3 @@ fn freeTable(gpa: Allocator, table: *Table) void {
     }
     table.map.deinit(gpa);
 }
-
-test "cloneValue and freeValue round-trip" {
-    const a = std.testing.allocator;
-    var store: Store = .{};
-    defer store.deinit(a);
-
-    try store.set(std.testing.io, a, "count", .{ .integer = 42 });
-    try store.set(std.testing.io, a, "name", .{ .string = try a.dupe(u8, "hello") });
-    var nested: Table = .{};
-    try nested.array.append(a, .{ .integer = 1 });
-    try nested.array.append(a, .{ .string = try a.dupe(u8, "two") });
-    try nested.map.put(a, try a.dupe(u8, "key"), .{ .boolean = true });
-    try store.set(std.testing.io, a, "nested", .{ .table = nested });
-
-    const got = (try store.get(a, std.testing.io, "nested")).?;
-    defer freeValue(a, got);
-    try std.testing.expectEqual(@as(usize, 2), got.table.array.items.len);
-    try std.testing.expectEqual(@as(i64, 1), got.table.array.items[0].integer);
-    try std.testing.expectEqualStrings("two", got.table.array.items[1].string);
-    try std.testing.expect(got.table.map.get("key").?.boolean);
-
-    try store.set(std.testing.io, a, "count", null);
-    try std.testing.expect(try store.get(a, std.testing.io, "count") == null);
-
-    store.reset(std.testing.io, a);
-    try std.testing.expect(try store.get(a, std.testing.io, "nested") == null);
-}

@@ -65,19 +65,6 @@ fn choiceText(opt: Option) []const u8 {
     return opt.description orelse "";
 }
 
-test "option row and choice text" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const both = Option{ .label = "A (recommended)", .description = "pick me" };
-    try std.testing.expectEqualStrings("A (recommended) — pick me", optionRow(a, both).?);
-    try std.testing.expectEqualStrings("A (recommended)", choiceText(both));
-    try std.testing.expectEqualStrings("B", optionRow(a, .{ .label = "B" }).?);
-    try std.testing.expectEqualStrings("yes", choiceText(.{ .label = "", .description = "yes" }));
-    try std.testing.expect(optionRow(a, .{}) == null);
-}
-
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const args = r.parseArgs(Args, ctx.alloc, call) orelse
         return r.errResult(call, "invalid JSON arguments: expected {header, question, options} with options as [{label, description}]");

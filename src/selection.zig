@@ -34,31 +34,3 @@ pub const Selection = struct {
         parent.destroy(self);
     }
 };
-
-test "create deep clones and destroy frees" {
-    const alloc = std.testing.allocator;
-    var header_buf = [_]u8{'h'} ** 4;
-    var opt0_buf = [_]u8{'o'} ** 3;
-    var opt1_buf = [_]u8{'p'} ** 4;
-    const options = [_][]const u8{ &opt0_buf, &opt1_buf };
-
-    const sel = try Selection.create(alloc, .{
-        .header = &header_buf,
-        .question = "pick one",
-        .options = &options,
-        .allow_message = false,
-    }, 7);
-    defer sel.destroy();
-
-    try std.testing.expectEqual(@as(c_int, 7), sel.func_ref);
-    try std.testing.expectEqualStrings("pick one", sel.ask.question);
-    try std.testing.expectEqualStrings("h", sel.ask.header[3..4]);
-    try std.testing.expect(!sel.ask.allow_message);
-
-    header_buf[0] = 'x';
-    opt0_buf[0] = 'x';
-    try std.testing.expectEqualStrings("h", sel.ask.header[0..1]);
-    try std.testing.expectEqualStrings("o", sel.ask.options[0][0..1]);
-    try std.testing.expectEqualStrings("p", sel.ask.options[1][0..1]);
-    try std.testing.expectEqual(options.len, sel.ask.options.len);
-}

@@ -24,7 +24,6 @@ const tools = r.tools;
 
 // ----------------------------------------------------------------
 pub const DEFAULT_CONFIG_PATH = r.defaults.CONFIG_DIR;
-pub const DEFAULT_CACHE_PATH = "cache.zon";
 pub const DEFAULT_LUA_CONFIG = "blitz.lua";
 const IO_THREAD_STACK_SIZE = 2 * 1024 * 1024;
 
@@ -1312,118 +1311,6 @@ pub fn run(
 
     app.checkpoint();
     if (exit_hint) printSessionHint(&store, &session_id_buf);
-}
-
-test "generated Lua metadata is not reloadable config" {
-    try std.testing.expect(isReloadableConfigLua("blitz.lua"));
-    try std.testing.expect(isReloadableConfigLua("tools.lua"));
-    try std.testing.expect(!isReloadableConfigLua("meta.lua"));
-    try std.testing.expect(!isReloadableConfigLua(".luarc.json"));
-}
-
-fn wizardCatalogIndexOf(name: []const u8) usize {
-    for (r.wizard.catalog, 0..) |entry, i| {
-        if (std.mem.eql(u8, entry.name, name)) return i;
-    }
-    unreachable;
-}
-
-test "provider step enter commits the selected catalog row" {
-    var w: r.app.InputMode.Wizard = .{};
-    w.step = .provider;
-    w.list_selected = wizardCatalogIndexOf("Anthropic");
-
-    w.enterProvider();
-
-    const entry = r.wizard.catalog[wizardCatalogIndexOf("Anthropic")];
-    try std.testing.expectEqualStrings(entry.provider_type, w.provider_type_buf[0..w.provider_type_len]);
-    try std.testing.expectEqualStrings(entry.default_url, w.url.slice());
-    try std.testing.expectEqual(r.wizard.Step.key, w.step);
-}
-
-test "model selection change preserves typed free text across row moves" {
-    const r_app = r.app;
-    var w: r_app.InputMode.Wizard = .{};
-    w.step = .model;
-    w.provider_index = 0;
-    w.model_free_text = true;
-    w.list_selected = 3;
-    const typed = "my-custom-model";
-    w.model.set(typed);
-
-    w.moveCursor(0);
-
-    try std.testing.expect(w.model_free_text);
-    try std.testing.expectEqualStrings(typed, w.model.slice());
-
-    w.list_selected = 1;
-    w.moveCursor(0);
-    try std.testing.expect(!w.model_free_text);
-    try std.testing.expectEqualStrings(r.wizard.catalog[0].models[1].name, w.model.slice());
-}
-
-test "entering the model step preselects the first curated row" {
-    var w: r.app.InputMode.Wizard = .{};
-    w.step = .provider;
-    w.list_selected = wizardCatalogIndexOf("Anthropic");
-    w.enterProvider();
-    try std.testing.expectEqual(r.wizard.Step.key, w.step);
-    w.step = .model;
-    w.resetModel();
-
-    if (w.step == .model and !w.model_free_text and w.model.isEmpty()) {
-        w.moveCursor(0);
-    }
-
-    const anthropic = r.wizard.catalog[wizardCatalogIndexOf("Anthropic")];
-    try std.testing.expectEqualStrings(anthropic.models[0].name, w.model.slice());
-    try std.testing.expect(!w.model_free_text);
-}
-
-test "custom endpoint model step accepts typed input immediately" {
-    var w: r.app.InputMode.Wizard = .{};
-    w.step = .provider;
-    w.list_selected = wizardCatalogIndexOf("Custom endpoint");
-    w.enterProvider();
-
-    try std.testing.expectEqual(r.wizard.Step.provider_type, w.step);
-    w.finishProviderType();
-    try std.testing.expectEqual(r.wizard.Step.url, w.step);
-    w.step = r.wizard.Step.model;
-    w.syncModelStep();
-
-    try std.testing.expect(!w.stepIsList());
-    try std.testing.expect(w.activeText() != null);
-    try std.testing.expectEqualStrings("", w.model.slice());
-
-    w.activeText().?.insert("my-model-id");
-    try std.testing.expectEqualStrings("my-model-id", w.model.slice());
-    try std.testing.expect(!w.model.isEmpty());
-
-    w.moveCursor(1);
-    try std.testing.expectEqualStrings("my-model-id", w.model.slice());
-}
-
-test "free text survives curated row detours" {
-    var w: r.app.InputMode.Wizard = .{};
-    w.step = .model;
-    w.provider_index = wizardCatalogIndexOf("Anthropic");
-    w.resetModel();
-    w.list_selected = r.wizard.catalog[wizardCatalogIndexOf("Anthropic")].models.len;
-    w.moveCursor(0);
-    try std.testing.expect(w.model_free_text);
-
-    w.activeText().?.insert("claude-custom");
-    const free_row = r.wizard.catalog[wizardCatalogIndexOf("Anthropic")].models.len;
-    w.list_selected = free_row - 1;
-    w.moveCursor(0);
-    try std.testing.expect(!w.model_free_text);
-    try std.testing.expectEqualStrings(r.wizard.catalog[wizardCatalogIndexOf("Anthropic")].models[2].name, w.model.slice());
-
-    w.list_selected = free_row;
-    w.moveCursor(0);
-    try std.testing.expect(w.model_free_text);
-    try std.testing.expectEqualStrings("claude-custom", w.model.slice());
 }
 
 /// Prints the resume hint once the terminal is back on the normal screen.

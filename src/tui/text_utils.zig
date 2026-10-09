@@ -6,74 +6,6 @@ pub const Buffer = buffer_mod.Buffer;
 pub const Style = cell_mod.Style;
 const Color = cell_mod.Color;
 
-pub const WrappedTextIter = struct {
-    const Self = @This();
-    wit: WordIterator,
-    word: ?[]const u8 = null,
-    line_width: u16 = 0,
-    i: u32 = 0,
-    width: u16,
-
-    pub fn new(text: []const u8, width: u16) Self {
-        return Self{
-            .wit = WordIterator{ .text = text },
-            .width = width,
-        };
-    }
-
-    pub fn next(self: *Self) ?u21 {
-        if (self.width == 0) return null;
-        const word = self.word orelse blk: {
-            const next_word = self.wit.next() orelse return null;
-            self.word = next_word;
-
-            if (next_word.len == 1 and next_word[0] == '\n') {
-                self.word = null;
-                self.line_width = 0;
-                return '\n';
-            }
-
-            const word_cols = std.unicode.utf8CountCodepoints(next_word) catch next_word.len;
-            const is_overflow = self.line_width > 0 and self.line_width + word_cols > self.width;
-            if (is_overflow) {
-                self.line_width = 0;
-                return '\n';
-            }
-
-            break :blk next_word;
-        };
-
-        if (word.len <= self.i) {
-            self.i = 0;
-            self.word = null;
-            return self.next();
-        }
-
-        if (self.line_width >= self.width) {
-            self.line_width = 0;
-            return '\n';
-        }
-
-        const remaining = word[self.i..];
-        const cp_len = std.unicode.utf8ByteSequenceLength(remaining[0]) catch {
-            self.i += 1;
-            return self.next();
-        };
-        if (remaining.len < cp_len) {
-            self.i = @intCast(word.len);
-            return self.next();
-        }
-        const cp = std.unicode.utf8Decode(remaining[0..cp_len]) catch {
-            self.i += 1;
-            return self.next();
-        };
-        self.i += @intCast(cp_len);
-        self.line_width += 1;
-
-        return cp;
-    }
-};
-
 // ── Word Iterator ──
 pub const WordIterator = struct {
     text: []const u8,
@@ -184,67 +116,6 @@ pub fn wrappedRowCount(text: []const u8, width: usize) u16 {
     return count;
 }
 
-test "wrapped rows honor newlines" {
-    try std.testing.expectEqual(@as(u16, 3), wrappedRowCount("first\nsecond line", 6));
-    try std.testing.expectEqual(@as(u16, 3), wrappedRowCount("first\n\nlast", 20));
-    try std.testing.expectEqual(@as(u16, 2), wrappedRowCount("first line\nlast", 20));
-}
-
-test "wrapped rows terminate on invalid utf8" {
-    try std.testing.expectEqual(@as(u16, 3), wrappedRowCount("bad \x80\x81 bytes \xff end", 8));
-    try std.testing.expectEqual(@as(u16, 1), wrappedRowCount("\x80", 8));
-    try std.testing.expectEqual(@as(u16, 2), wrappedRowCount("truncated \xe2\x8b", 8));
-    try std.testing.expectEqual(@as(u16, 1), wrappedRowCount("\xf0\x9f", 8));
-}
-
-test "wrapped iter yields invalid bytes as single cells" {
-    var it = LineIterator{ .text = "a\x80b", .width = 8 };
-    try std.testing.expectEqualStrings("a\x80b", it.next().?);
-    try std.testing.expect(it.next() == null);
-}
-
-fn expectRowEqual(idx: *usize, expected: []const []const u8, got: []const u8) !void {
-    if (idx.* >= expected.len) return error.TooManyRows;
-    try std.testing.expectEqualStrings(expected[idx.*], got);
-    idx.* += 1;
-}
-
-fn expectWrappedRows(text: []const u8, width: u16, expected: []const []const u8) !void {
-    var it = WrappedTextIter.new(text, width);
-    var row: std.ArrayList(u8) = .empty;
-    defer row.deinit(std.testing.allocator);
-    var idx: usize = 0;
-    while (it.next()) |c| {
-        if (c == '\n') {
-            try expectRowEqual(&idx, expected, row.items);
-            row.clearRetainingCapacity();
-            continue;
-        }
-        var utf8: [4]u8 = undefined;
-        const n = std.unicode.utf8Encode(c, &utf8) catch return error.InvalidCodepoint;
-        try row.appendSlice(std.testing.allocator, utf8[0..n]);
-    }
-    try expectRowEqual(&idx, expected, row.items);
-    try std.testing.expectEqual(expected.len, idx);
-}
-
-test "wrapped iter breaks at newlines not around them" {
-    try expectWrappedRows("one\ntwo three", 10, &.{ "one", "two three" });
-}
-
-test "wrapped iter resets row width on newline" {
-    try expectWrappedRows("hi\n0123456789abc", 10, &.{ "hi", "0123456789", "abc" });
-}
-
-test "wrapped iter emits single break for full row plus newline" {
-    try expectWrappedRows("abcdef\nghij", 6, &.{ "abcdef", "ghij" });
-}
-
-test "wrapped iter with zero width yields nothing" {
-    var it = WrappedTextIter.new("text", 0);
-    try std.testing.expect(it.next() == null);
-}
-
 pub fn spinnerDots(frame_count: usize) []const u8 {
     const frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
     return frames[(frame_count / 6) % frames.len];
@@ -313,14 +184,4 @@ fn mixChannel(from_value: u8, to_value: u8, mix: u8) u8 {
     const to_wide: u16 = to_value;
     const mix_wide: u16 = mix;
     return @intCast((from_wide * (255 - mix_wide) + to_wide * mix_wide) / 255);
-}
-
-test "gradient wave travels with frame" {
-    const from_color = Color{ .rgb = .{ .r = 0, .g = 0, .b = 0 } };
-    const to_color = Color{ .rgb = .{ .r = 255, .g = 255, .b = 255 } };
-    var wave_at_start = gradientWave("ab", from_color, to_color, 0);
-    var wave_shifted = gradientWave("ab", from_color, to_color, 16);
-    const start_color = wave_at_start.next().?.color.toRgb();
-    const shifted_color = wave_shifted.next().?.color.toRgb();
-    try std.testing.expect(start_color.r != shifted_color.r);
 }

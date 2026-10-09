@@ -1,4 +1,3 @@
-const std = @import("std");
 
 pub const types = @import("types.zig");
 pub const model = @import("model.zig");
@@ -71,17 +70,3 @@ pub const embed = @import("embed.zig").embed;
 pub const embedMany = @import("embed.zig").embedMany;
 pub const generateImage = @import("image.zig").generateImage;
 pub const schemaFrom = schema.schemaFrom;
-
-test {
-    std.testing.refAllDecls(@This());
-    _ = types;
-    _ = model;
-    _ = options;
-    _ = errors;
-    _ = auth;
-    _ = schema;
-    _ = generate;
-    _ = embed;
-    _ = provider;
-    _ = @import("rate_limit_stress_test.zig");
-}

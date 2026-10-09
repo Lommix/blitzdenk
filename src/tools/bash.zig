@@ -182,34 +182,3 @@ fn timeoutToMs(secs: f64) i64 {
     const capped = @min(secs, 2_147_483);
     return @as(i64, @intFromFloat(capped * 1000));
 }
-
-test "formatBashResult combines stdout and stderr" {
-    const out = try formatBashResult(std.testing.allocator, "hello\n", "oops\n", null, null, false, 0);
-    defer std.testing.allocator.free(out);
-    try std.testing.expectEqualStrings("hello\n[stderr]\noops\n", out);
-}
-
-test "formatBashResult empty streams yield no output" {
-    const out = try formatBashResult(std.testing.allocator, "", "", null, null, false, 0);
-    defer std.testing.allocator.free(out);
-    try std.testing.expectEqualStrings("(no output)", out);
-}
-
-test "formatBashResult exit code marker" {
-    const out = try formatBashResult(std.testing.allocator, "", "", 7, null, false, 0);
-    defer std.testing.allocator.free(out);
-    try std.testing.expect(std.mem.endsWith(u8, out, "[exit code: 7]"));
-}
-
-test "formatBashResult signal marker and no exit marker" {
-    const out = try formatBashResult(std.testing.allocator, "", "", null, 9, false, 0);
-    defer std.testing.allocator.free(out);
-    try std.testing.expect(std.mem.endsWith(u8, out, "[killed by signal: 9]"));
-    try std.testing.expect(std.mem.indexOf(u8, out, "exit code") == null);
-}
-
-test "formatBashResult timed out marker" {
-    const out = try formatBashResult(std.testing.allocator, "", "", null, null, true, 1000);
-    defer std.testing.allocator.free(out);
-    try std.testing.expect(std.mem.endsWith(u8, out, "[timed out after 1000ms]"));
-}

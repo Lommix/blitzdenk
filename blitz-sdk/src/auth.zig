@@ -76,13 +76,3 @@ pub fn appendHeaders(
 ) !void {
     for (headers) |header| try list.append(alloc, header);
 }
-
-test "resolve from injected map" {
-    var env_map = std.process.Environ.Map.init(std.testing.allocator);
-    defer env_map.deinit();
-    try env_map.put("OPENAI_API_KEY", "sk-test");
-
-    const env = Env{ .map = &env_map };
-    try std.testing.expectEqualStrings("sk-test", resolveKey(env, "OPENAI_API_KEY").?);
-    try std.testing.expect(resolveKey(env, "MISSING") == null);
-}

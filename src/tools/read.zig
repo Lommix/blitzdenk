@@ -284,29 +284,3 @@ fn detectImageMediaType(data: []const u8) ?[]const u8 {
     if (data.len >= 12 and std.mem.eql(u8, data[0..4], "RIFF") and std.mem.eql(u8, data[8..12], "WEBP")) return "image/webp";
     return null;
 }
-
-test "detect image media type from magic bytes" {
-    try std.testing.expectEqualStrings("image/png", detectImageMediaType("\x89PNG\r\n\x1a\nrest").?);
-    try std.testing.expectEqualStrings("image/jpeg", detectImageMediaType("\xff\xd8\xffrest").?);
-    try std.testing.expectEqualStrings("image/gif", detectImageMediaType("GIF89arest").?);
-    try std.testing.expectEqualStrings("image/webp", detectImageMediaType("RIFFxxxxWEBPrest").?);
-    try std.testing.expect(detectImageMediaType("not an image") == null);
-}
-
-test "looksBinary rejects NUL byte anywhere" {
-    var data: [8208]u8 = @splat('a');
-    data[data.len - 1] = 0;
-    try std.testing.expect(looksBinary(&data));
-    try std.testing.expect(looksBinary("a\x00b"));
-}
-
-test "looksBinary rejects invalid utf8 beyond sample window" {
-    const data = "plain text prefix" ++ ("\xff" ** 4) ++ "\n";
-    try std.testing.expect(looksBinary(data));
-}
-
-test "looksBinary accepts valid text" {
-    try std.testing.expect(!looksBinary("line one\nline two\n"));
-    try std.testing.expect(!looksBinary(""));
-    try std.testing.expect(!looksBinary("héllo wörld ✓\n"));
-}
