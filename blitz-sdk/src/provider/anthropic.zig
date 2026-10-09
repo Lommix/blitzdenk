@@ -262,31 +262,45 @@ fn buildRequest(
     }
     try s.endArray();
 
-    try s.objectField("max_tokens");
-    try s.write(if (params.max_output_tokens > 0) params.max_output_tokens else 4096);
+    const thinking_type: []const u8 = if (params.thinking) |t| (if (t.type.len > 0) t.type else "enabled") else "";
+    const thinking_on = thinking_type.len > 0 and !std.mem.eql(u8, thinking_type, "disabled");
+    const manual_thinking = std.mem.eql(u8, thinking_type, "enabled");
+    var max_tokens: u32 = if (params.max_output_tokens > 0) params.max_output_tokens else 4096;
+    var budget: u32 = 0;
+    if (manual_thinking) {
+        if (max_tokens < 2048) max_tokens = 2048;
+        budget = @min(@max(params.thinking.?.budget_tokens orelse 8192, 1024), max_tokens - 1);
+    }
 
-    if (params.temperature) |t| {
-        try s.objectField("temperature");
-        try s.write(t);
+    try s.objectField("max_tokens");
+    try s.write(max_tokens);
+
+    if (!thinking_on) {
+        if (params.temperature) |t| {
+            try s.objectField("temperature");
+            try s.write(t);
+        }
     }
     if (params.top_p) |t| {
         try s.objectField("top_p");
         try s.write(t);
     }
-    if (params.top_k) |t| {
-        try s.objectField("top_k");
-        try s.write(t);
+    if (!thinking_on) {
+        if (params.top_k) |t| {
+            try s.objectField("top_k");
+            try s.write(t);
+        }
     }
     if (params.stop_sequences.len > 0) {
         try s.objectField("stop_sequences");
         try s.write(params.stop_sequences);
     }
-    if (params.thinking) |thinking| {
+    if (params.thinking) |_| {
         try s.objectField("thinking");
         try s.beginObject();
         try s.objectField("type");
-        try s.write(if (thinking.type.len > 0) thinking.type else "enabled");
-        if (thinking.budget_tokens) |budget| {
+        try s.write(thinking_type);
+        if (manual_thinking) {
             try s.objectField("budget_tokens");
             try s.write(budget);
         }

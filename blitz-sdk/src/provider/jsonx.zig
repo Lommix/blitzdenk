@@ -137,11 +137,13 @@ pub fn buildChatRequest(
                 else => {},
             };
             if (replay_reasoning) {
-                try s.objectField("reasoning_content");
-                try s.write(reasoning_text.items);
-            } else if (reasoning_signature.len > 0) {
-                try s.objectField("reasoning_details");
-                try writeRaw(&s, reasoning_signature);
+                if (reasoning_signature.len > 0) {
+                    try s.objectField("reasoning_details");
+                    try writeRaw(&s, reasoning_signature);
+                } else {
+                    try s.objectField("reasoning_content");
+                    try s.write(reasoning_text.items);
+                }
             }
         }
         try s.endObject();
@@ -1167,11 +1169,11 @@ test "chat replays provider reasoning fields" {
 
     const replayed = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false, true);
     defer std.testing.allocator.free(replayed);
-    try std.testing.expect(std.mem.indexOf(u8, replayed, "\"reasoning_content\":\"inspect the file\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, replayed, "reasoning_details") == null);
+    try std.testing.expect(std.mem.indexOf(u8, replayed, "\"reasoning_details\":[{\"type\":\"reasoning.text\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, replayed, "reasoning_content") == null);
 
     const signed = try buildChatRequest(std.testing.allocator, "gpt-test", .{ .messages = &messages }, false, false);
     defer std.testing.allocator.free(signed);
-    try std.testing.expect(std.mem.indexOf(u8, signed, "\"reasoning_details\":[{\"type\":\"reasoning.text\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, signed, "reasoning_details") == null);
     try std.testing.expect(std.mem.indexOf(u8, signed, "reasoning_content") == null);
 }
