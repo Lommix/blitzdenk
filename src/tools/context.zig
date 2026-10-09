@@ -138,7 +138,7 @@ test "SDK tool trampoline preserves call context and output" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     try install(agent, .{
         .registry = &registry,

@@ -47,6 +47,7 @@ pub const ImageOptions = options.ImageOptions;
 pub const StreamCallbacks = options.StreamCallbacks;
 pub const Hooks = options.Hooks;
 pub const ToolChoice = options.ToolChoice;
+pub const Thinking = options.Thinking;
 pub const CancellationToken = options.CancellationToken;
 
 pub const APIError = errors.APIError;

@@ -402,6 +402,11 @@ fn cloneOptions(alloc: std.mem.Allocator, value: sdk.GenerateOptions) !sdk.Gener
     };
     cloned.headers = headers;
     cloned.provider_options = if (value.provider_options) |options| try cloneJson(alloc, options) else null;
+    cloned.reasoning_effort = try alloc.dupe(u8, value.reasoning_effort);
+    cloned.thinking = if (value.thinking) |thinking| .{
+        .type = try alloc.dupe(u8, thinking.type),
+        .budget_tokens = thinking.budget_tokens,
+    } else null;
     cloned.cache_ttl = if (value.cache_ttl) |ttl| try alloc.dupe(u8, ttl) else null;
     cloned.cache_key = if (value.cache_key) |key| try alloc.dupe(u8, key) else null;
     cloned.schema_name = try alloc.dupe(u8, value.schema_name);
@@ -586,7 +591,7 @@ test "silent tool-only step emits no stale activity" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "worker", .cwd = "/tmp", .type_idx = 0 } });
     defer agent.deinit();
     try agent.setTools(&.{.{ .name = "test", .execute = null }});

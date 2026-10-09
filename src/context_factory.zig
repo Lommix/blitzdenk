@@ -296,8 +296,9 @@ pub fn buildAgentApiConfig(
             .api_key = key,
             .base_url = provider.getUrl(),
             .model = model.getName(),
-            .provider = provider.provider_config,
+            .params = model.params,
             .reasoning_effort = ag_cfg.effort,
+            .reasoning = model.reasoning,
             .rate_limit = provider.rate_limit,
             .replay_reasoning = model.replay_reasoning,
             .session_key_header = provider.getSessionKeyHeader(),
@@ -1041,7 +1042,7 @@ test "tool refresh keeps registered metadata after its source is reused" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
@@ -1148,7 +1149,7 @@ test "agent config reports the missing API key environment variable" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "").?;
     const provider = cfg.commitProvider();
-    const model = try cfg.addModel("example-model", provider, false, false, null);
+    const model = try cfg.addModel(.{ .name = "example-model", .provider = provider });
     try factory.setAgentModel(&cfg, .general, model);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
@@ -1170,7 +1171,7 @@ test "agent config permits keyless providers" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("http://localhost:8080/v1", "", "").?;
     const provider = cfg.commitProvider();
-    const model = try cfg.addModel("local-model", provider, false, false, null);
+    const model = try cfg.addModel(.{ .name = "local-model", .provider = provider });
     try factory.setAgentModel(&cfg, .general, model);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
@@ -1192,7 +1193,7 @@ test "agent config carries the replay_reasoning model capability" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("http://localhost:8080/v1", "", "").?;
     const provider = cfg.commitProvider();
-    const deepseek = try cfg.addModel("deepseek-model", provider, false, true, null);
+    const deepseek = try cfg.addModel(.{ .name = "deepseek-model", .provider = provider, .replay_reasoning = true });
     try factory.setAgentModel(&cfg, .general, deepseek);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
@@ -1211,7 +1212,7 @@ test "agent config uses the stored key when the envar is absent" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "stored-key").?;
     const provider = cfg.commitProvider();
-    const model = try cfg.addModel("example-model", provider, false, false, null);
+    const model = try cfg.addModel(.{ .name = "example-model", .provider = provider });
     try factory.setAgentModel(&cfg, .general, model);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
@@ -1230,7 +1231,7 @@ test "agent config prefers the envar value over the stored key" {
     var cfg: r.config.BlitzdenkCfg = .{};
     _ = cfg.reserveProvider("https://example.test/v1", "EXAMPLE_API_KEY", "stored-key").?;
     const provider = cfg.commitProvider();
-    const model = try cfg.addModel("example-model", provider, false, false, null);
+    const model = try cfg.addModel(.{ .name = "example-model", .provider = provider });
     try factory.setAgentModel(&cfg, .general, model);
     var env = std.process.Environ.Map.init(std.testing.allocator);
     defer env.deinit();
@@ -1375,7 +1376,7 @@ test "vision tools gated by the agent model vision flag" {
         .model = "model",
         .base_url = "https://example.com/v1",
         .vision = false,
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     const base: r.tools.context.BaseContext = .{
         .registry = &registry,
@@ -1399,7 +1400,7 @@ test "vision tools gated by the agent model vision flag" {
         .model = "model",
         .base_url = "https://example.com/v1",
         .vision = true,
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     });
     try factory.refreshAgentTools(agent, base);
     var installed = false;

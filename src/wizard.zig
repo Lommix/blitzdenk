@@ -37,7 +37,6 @@ pub const CatalogEntry = struct {
 pub const CatalogModel = struct {
     name: []const u8,
     vision: bool = false,
-    replay_reasoning: bool = false,
 };
 
 pub const catalog = [_]CatalogEntry{
@@ -77,7 +76,7 @@ pub const catalog = [_]CatalogEntry{
         .default_url = "https://api.novita.ai/openai/v1",
         .key_envar = "NOVITA_API_KEY",
         .models = &.{
-            .{ .name = "zai-org/glm-5.3-flash", .vision = true, .replay_reasoning = true },
+            .{ .name = "zai-org/glm-5.3-flash", .vision = true },
         },
     },
 
@@ -87,8 +86,8 @@ pub const catalog = [_]CatalogEntry{
         .default_url = "https://api.z.ai/api/coding/paas/v4",
         .key_envar = "Z_AI_KEY",
         .models = &.{
-            .{ .name = "glm-5.3-flash", .vision = true, .replay_reasoning = true },
-            .{ .name = "glm-5.3", .vision = false, .replay_reasoning = true },
+            .{ .name = "glm-5.3-flash", .vision = true },
+            .{ .name = "glm-5.3", .vision = false },
         },
     },
     .{
@@ -98,7 +97,7 @@ pub const catalog = [_]CatalogEntry{
         .key_envar = "XAI_API_KEY",
         .session_key_header = "x-grok-conv-id",
         .models = &.{
-            .{ .name = "grok-4.6", .vision = true, .replay_reasoning = true },
+            .{ .name = "grok-4.6", .vision = true },
         },
     },
     .{
@@ -108,9 +107,9 @@ pub const catalog = [_]CatalogEntry{
         .key_envar = "OPENCODE_API_KEY",
         .session_key_header = "x-opencode-session",
         .models = &.{
-            .{ .name = "glm-5.3-flash", .vision = true, .replay_reasoning = true },
-            .{ .name = "deepseek-flash", .vision = true, .replay_reasoning = true },
-            .{ .name = "qwen3.8-flash", .vision = true, .replay_reasoning = true },
+            .{ .name = "glm-5.3-flash", .vision = true },
+            .{ .name = "deepseek-flash", .vision = true },
+            .{ .name = "qwen3.8-flash", .vision = true },
         },
     },
     .{
@@ -278,7 +277,6 @@ pub const Wizard = struct {
             .key = w.key.slice(),
             .model = w.model.slice(),
             .vision = if (w.vision_override) |v| v else model.vision,
-            .replay_reasoning = model.replay_reasoning,
             .session_key_header = entry.session_key_header,
         };
     }
@@ -291,7 +289,6 @@ pub const Selection = struct {
     key: []const u8,
     model: []const u8,
     vision: bool,
-    replay_reasoning: bool = false,
     session_key_header: []const u8 = "",
 };
 
@@ -364,9 +361,6 @@ pub fn renderProviderLua(allocator: std.mem.Allocator, selection: Selection) ![]
     try w.writeAll("\",\n\tprovider = provider,\n\tvision = ");
     try w.writeAll(if (selection.vision) "true" else "false");
     try w.writeAll(",\n");
-    if (selection.replay_reasoning) {
-        try w.writeAll("\treplay_reasoning = true,\n");
-    }
     try w.writeAll("})\n\nreturn model\n");
 
     return out.toOwnedSlice();
@@ -380,7 +374,6 @@ pub fn skipProviderLua(allocator: std.mem.Allocator) ![]u8 {
         .key = "",
         .model = SKIP_MODEL,
         .vision = true,
-        .replay_reasoning = true,
         .session_key_header = "x-opencode-session",
     });
 }
@@ -567,18 +560,16 @@ test "renderProviderLua anthropic with key and curated model" {
     });
     defer std.testing.allocator.free(rendered);
 
-    const expected = try std.fmt.allocPrint(std.testing.allocator,
-        "local provider = blitz.add_provider({{\n" ++
-            "\ttype = \"{s}\",\n" ++
-            "\turl = \"{s}\",\n" ++
-            "\t--key_envar = \"{s}\",\n" ++
-            "\tkey = \"sk-ant-secret\",\n" ++
-            "}})\n\nlocal model = blitz.add_model({{\n" ++
-            "\tname = \"{s}\",\n" ++
-            "\tprovider = provider,\n" ++
-            "\tvision = {s},\n" ++
-            "}})\n\nreturn model\n",
-        .{ entry.provider_type, entry.default_url, entry.key_envar, model.name, if (model.vision) "true" else "false" });
+    const expected = try std.fmt.allocPrint(std.testing.allocator, "local provider = blitz.add_provider({{\n" ++
+        "\ttype = \"{s}\",\n" ++
+        "\turl = \"{s}\",\n" ++
+        "\t--key_envar = \"{s}\",\n" ++
+        "\tkey = \"sk-ant-secret\",\n" ++
+        "}})\n\nlocal model = blitz.add_model({{\n" ++
+        "\tname = \"{s}\",\n" ++
+        "\tprovider = provider,\n" ++
+        "\tvision = {s},\n" ++
+        "}})\n\nreturn model\n", .{ entry.provider_type, entry.default_url, entry.key_envar, model.name, if (model.vision) "true" else "false" });
     defer std.testing.allocator.free(expected);
     try std.testing.expectEqualStrings(expected, rendered);
 }
@@ -657,7 +648,7 @@ test "renderProviderLua ollama omits key lines and keeps url" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "\tvision = true,\n") != null);
 }
 
-test "renderProviderLua omits replay_reasoning when the selection is flagless" {
+test "renderProviderLua never writes replay_reasoning" {
     const entry = catalog[catalogIndex("OpenAI")];
     const plain = try renderProviderLua(std.testing.allocator, .{
         .entry = entry,
@@ -722,7 +713,7 @@ test "skip writer creates the default combo" {
     defer std.testing.allocator.free(expected_model_line);
     try std.testing.expect(std.mem.indexOf(u8, contents, expected_model_line) != null);
     try std.testing.expect(std.mem.indexOf(u8, contents, "\tvision = true,\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, contents, "\treplay_reasoning = true,\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "replay_reasoning") == null);
 }
 
 test "skip writer no-ops when provider.lua exists" {
@@ -872,9 +863,7 @@ test "selectModel matches curated entries and falls back to free text" {
     const opencode = catalog[catalogIndex("opencode go")];
     for (opencode.models) |m| {
         try std.testing.expect(modelIsCurated(opencode, m.name));
-        try std.testing.expectEqual(m.replay_reasoning, selectModel(opencode, m.name).replay_reasoning);
     }
-    try std.testing.expect(!selectModel(opencode, "unlisted-model").replay_reasoning);
 }
 
 test "writer rejects quote in model and leaves provider.lua untouched" {

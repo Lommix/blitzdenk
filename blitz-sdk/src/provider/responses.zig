@@ -412,6 +412,13 @@ fn buildRequest(
         try s.objectField("top_p");
         try s.write(t);
     }
+    if (params.reasoning_effort.len > 0) {
+        try s.objectField("reasoning");
+        try s.beginObject();
+        try s.objectField("effort");
+        try s.write(params.reasoning_effort);
+        try s.endObject();
+    }
     switch (params.tool_choice) {
         .auto => {},
         .none => {

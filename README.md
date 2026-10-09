@@ -66,7 +66,6 @@ local opencode_ds_flash = blitz.add_model({
 	name = "deepseek-flash",
 	provider = opencode,
 	vision = true,
-	replay_reasoning = true,
 	cost = { input = 0.15, output = 0.6, cache = 0.006 },
 })
 

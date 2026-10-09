@@ -178,6 +178,11 @@ pub const StreamCallbacks = struct {
     on_error_ctx: ?*anyopaque = null,
 };
 
+pub const Thinking = struct {
+    type: []const u8 = "",
+    budget_tokens: ?u32 = null,
+};
+
 pub const GenerateOptions = struct {
     system: []const u8 = "",
     prompt: []const u8 = "",
@@ -190,6 +195,7 @@ pub const GenerateOptions = struct {
     max_parallel_calls: usize = 4,
 
     max_output_tokens: u32 = 0,
+    max_completion_tokens: ?u32 = null,
     temperature: ?f64 = null,
     top_p: ?f64 = null,
     top_k: ?u32 = null,
@@ -197,6 +203,9 @@ pub const GenerateOptions = struct {
     presence_penalty: ?f64 = null,
     seed: ?i64 = null,
     stop_sequences: []const []const u8 = &.{},
+    reasoning_effort: []const u8 = "",
+    enable_thinking: ?bool = null,
+    thinking: ?Thinking = null,
 
     max_retries: u32 = 2,
     timeout_ms: ?u64 = null,

@@ -502,10 +502,6 @@
 ---false keeps the type out of the agent tool list
 ---@field in_agent_tool boolean
 
----@class BlitzThinking
----@field type string
----@field budget_tokens? integer
-
 ---@class BlitzProviderDef
 ---'openai' | 'response' | 'anthropic' | 'ollama'
 ---@field type string
@@ -517,18 +513,12 @@
 ---@field key? string
 ---header name for the session cache key; empty = disabled
 ---@field session_key_header? string
----@field temperature? number
----@field max_tokens? integer
----@field max_completion_tokens? integer
----@field max_output_tokens? integer
----@field top_p? number
----@field top_k? integer
----@field frequency_penalty? number
----@field presence_penalty? number
----@field enable_thinking? boolean
----@field thinking? BlitzThinking
 ---requests per minute; 0 = unlimited
 ---@field rate_limit? integer
+
+---@class BlitzThinking
+---@field type string
+---@field budget_tokens? integer
 
 ---@class BlitzModelCost
 ---price per 1M input tokens
@@ -545,8 +535,20 @@
 ---@field provider integer
 ---model supports images
 ---@field vision? boolean
----replay reasoning text as reasoning_content (deepseek/glm style)
+---replay reasoning text as reasoning_content (deepseek/glm style); defaults true, set false to opt out
 ---@field replay_reasoning? boolean
+---model accepts the agent reasoning effort; defaults true, set false to opt out
+---@field reasoning? boolean
+---@field temperature? number
+---@field max_tokens? integer
+---@field max_completion_tokens? integer
+---@field max_output_tokens? integer
+---@field top_p? number
+---@field top_k? integer
+---@field frequency_penalty? number
+---@field presence_penalty? number
+---@field enable_thinking? boolean
+---@field thinking? BlitzThinking
 ---price per 1M tokens; absent = free
 ---@field cost? BlitzModelCost
 

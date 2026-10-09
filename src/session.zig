@@ -587,7 +587,7 @@ const SessionTestRig = struct {
         self.cfg = .{};
         _ = self.cfg.reserveProvider("http://localhost:8080/v1", "", "").?;
         const provider = self.cfg.commitProvider();
-        const model = try self.cfg.addModel("local-model", provider, false, false, null);
+        const model = try self.cfg.addModel(.{ .name = "local-model", .provider = provider });
         try self.factory.setAgentModel(&self.cfg, .general, model);
         self.registry = r.agent_registry.Registry.init(std.testing.allocator, io);
 

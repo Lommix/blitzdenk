@@ -17,9 +17,7 @@ pub const Provider = struct {
     key_envar_len: usize = 0,
     key: [256]u8 = undefined,
     key_len: usize = 0,
-    provider_config: models.ProviderOptions = .{ .openai = .{} },
-    thinking_type_buf: [16]u8 = undefined,
-    thinking_type_len: usize = 0,
+    kind: models.Kind = .openai,
     session_key_header_buf: [128]u8 = undefined,
     session_key_header_len: usize = 0,
     rate_limit: u32 = 0,
@@ -45,17 +43,6 @@ pub const Provider = struct {
         return self.getKey();
     }
 
-    pub fn setThinkingType(self: *Provider, value: []const u8) bool {
-        if (value.len > self.thinking_type_buf.len) return false;
-        @memcpy(self.thinking_type_buf[0..value.len], value);
-        self.thinking_type_len = value.len;
-        return true;
-    }
-
-    pub fn getThinkingType(self: *const Provider) []const u8 {
-        return self.thinking_type_buf[0..self.thinking_type_len];
-    }
-
     pub fn setSessionKeyHeader(self: *Provider, value: []const u8) bool {
         if (value.len > self.session_key_header_buf.len) return false;
         @memcpy(self.session_key_header_buf[0..value.len], value);
@@ -74,12 +61,24 @@ pub const ModelCost = struct {
     cache: f64 = 0,
 };
 
+pub const ModelSpec = struct {
+    name: []const u8,
+    provider: ProviderHandle,
+    vision: bool = false,
+    replay_reasoning: bool = true,
+    reasoning: bool = true,
+    params: models.ModelParams = .{ .openai = .{} },
+    cost: ?ModelCost = null,
+};
+
 pub const ModelEntry = struct {
     name: [256]u8 = undefined,
     name_len: usize = 0,
     provider: ProviderHandle = @enumFromInt(0),
     vision: bool = false,
-    replay_reasoning: bool = false,
+    replay_reasoning: bool = true,
+    reasoning: bool = true,
+    params: models.ModelParams = .{ .openai = .{} },
     cost: ?ModelCost = null,
 
     pub fn getName(self: *const ModelEntry) []const u8 {
@@ -120,19 +119,21 @@ pub const BlitzdenkCfg = struct {
         return &self.providers[index];
     }
 
-    pub fn addModel(self: *BlitzdenkCfg, name: []const u8, provider: ProviderHandle, vision: bool, replay_reasoning: bool, cost: ?ModelCost) !ModelHandle {
+    pub fn addModel(self: *BlitzdenkCfg, spec: ModelSpec) !ModelHandle {
         if (self.model_count >= MAX_MODELS) return error.MaxModelsReached;
-        const provider_idx = @intFromEnum(provider);
+        const provider_idx = @intFromEnum(spec.provider);
         if (provider_idx >= self.provider_count or !self.providers[provider_idx].active) return error.UnknownProvider;
-        if (name.len > 256) return error.NameTooLong;
+        if (spec.name.len > 256) return error.NameTooLong;
         const slot = &self.models[self.model_count];
         slot.* = .{};
-        @memcpy(slot.name[0..name.len], name);
-        slot.name_len = name.len;
-        slot.provider = provider;
-        slot.vision = vision;
-        slot.replay_reasoning = replay_reasoning;
-        slot.cost = cost;
+        @memcpy(slot.name[0..spec.name.len], spec.name);
+        slot.name_len = spec.name.len;
+        slot.provider = spec.provider;
+        slot.vision = spec.vision;
+        slot.replay_reasoning = spec.replay_reasoning;
+        slot.reasoning = spec.reasoning;
+        slot.params = spec.params;
+        slot.cost = spec.cost;
         self.model_count += 1;
         return @enumFromInt(self.model_count - 1);
     }

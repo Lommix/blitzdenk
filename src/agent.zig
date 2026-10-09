@@ -69,6 +69,8 @@ pub const Agent = struct {
     io: std.Io,
     model: models.Model,
     reasoning_effort: models.ReasoningEffort = .medium,
+    reasoning: bool = true,
+    params: models.ModelParams = .{ .openai = .{} },
     metadata: std.heap.ArenaAllocator,
     tool_arena: std.heap.ArenaAllocator,
     injection_arena: std.heap.ArenaAllocator,
@@ -126,26 +128,30 @@ pub const Agent = struct {
     pending_model: ?models.Model = null,
     pending_vision: ?bool = null,
     pending_effort: ?models.ReasoningEffort = null,
+    pending_reasoning: ?bool = null,
+    pending_params: ?models.ModelParams = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, config: models.Config, options: InitOptions) !Agent {
-        var model = try models.Model.init(alloc, config);
-        errdefer model.deinit(alloc);
-        var agent = try initModel(alloc, io, model, options);
+        var agent = try initModel(alloc, io, config, options);
         agent.reasoning_effort = config.reasoning_effort orelse agent.reasoning_effort;
+        agent.reasoning = config.reasoning;
         agent.flags.vision = config.vision;
         return agent;
     }
 
-    fn initModel(alloc: std.mem.Allocator, io: std.Io, model: models.Model, options: InitOptions) !Agent {
+    fn initModel(alloc: std.mem.Allocator, io: std.Io, config: models.Config, options: InitOptions) !Agent {
         var metadata = std.heap.ArenaAllocator.init(alloc);
         errdefer metadata.deinit();
         const name = try metadata.allocator().dupe(u8, options.identity.name);
         const task_description = try metadata.allocator().dupe(u8, options.identity.task_description);
         const cwd = try metadata.allocator().dupe(u8, options.identity.cwd);
+        const params = try config.params.clone(metadata.allocator());
+        const model = try models.Model.init(metadata.allocator(), config);
         return .{
             .alloc = alloc,
             .io = io,
             .model = model,
+            .params = params,
             .metadata = metadata,
             .tool_arena = std.heap.ArenaAllocator.init(alloc),
             .injection_arena = std.heap.ArenaAllocator.init(alloc),
@@ -167,8 +173,8 @@ pub const Agent = struct {
         if (self.compact_task) |*task| task.deinit();
         if (self.task) |*task| task.deinit();
         if (self.messages) |*messages| messages.deinit();
-        if (self.pending_model) |*model| model.deinit(self.alloc);
-        self.model.deinit(self.alloc);
+        if (self.pending_model) |*model| model.deinitClient();
+        self.model.deinitClient();
         if (self.cache_key) |key| self.alloc.free(key);
         self.state_arena.deinit();
         self.step_arena.deinit();
@@ -226,16 +232,21 @@ pub const Agent = struct {
     }
 
     pub fn updateModel(self: *Agent, config: models.Config) !void {
-        const replacement = try models.Model.init(self.alloc, config);
+        const params = try config.params.clone(self.metadata.allocator());
+        const replacement = try models.Model.init(self.metadata.allocator(), config);
         const effort = config.reasoning_effort orelse self.reasoning_effort;
         if (self.task != null or self.compact_task != null) {
-            if (self.pending_model) |*stale| stale.deinit(self.alloc);
+            if (self.pending_model) |*stale| stale.deinitClient();
             self.pending_model = replacement;
             self.pending_effort = effort;
             self.pending_vision = config.vision;
+            self.pending_reasoning = config.reasoning;
+            self.pending_params = params;
             return;
         }
         self.reasoning_effort = effort;
+        self.reasoning = config.reasoning;
+        self.params = params;
         self.flags.vision = config.vision;
         self.installModel(replacement);
         self.markToolsDirty();
@@ -243,7 +254,7 @@ pub const Agent = struct {
 
     fn installModel(self: *Agent, replacement: models.Model) void {
         self.run_model = null;
-        self.model.deinit(self.alloc);
+        self.model.deinitClient();
         self.model = replacement;
     }
 
@@ -256,6 +267,10 @@ pub const Agent = struct {
         self.pending_model = null;
         if (self.pending_effort) |effort| self.reasoning_effort = effort;
         self.pending_effort = null;
+        if (self.pending_reasoning) |reasoning| self.reasoning = reasoning;
+        self.pending_reasoning = null;
+        if (self.pending_params) |params| self.params = params;
+        self.pending_params = null;
         self.markToolsDirty();
     }
 
@@ -332,6 +347,7 @@ pub const Agent = struct {
         self.tokens_per_second = 0;
         self.activity = .processing;
         var run_options = options;
+        models.applyParams(self.params, self.reasoning_effort, self.reasoning, &run_options);
         run_options.cache_key = self.cache_key;
         if (run_options.timeout_ms == null) run_options.timeout_ms = stream_timeout_ms;
         if (run_options.idle_timeout_ms == null) run_options.idle_timeout_ms = stream_idle_timeout_ms;
@@ -769,7 +785,7 @@ test "wake after cancel keeps the turn checkpoint" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
 
@@ -827,7 +843,7 @@ test "agent owns SDK state and adopts completed history" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "worker", .cwd = "/tmp", .type_idx = 2 } });
     defer agent.deinit();
     try agent.setMessages(&.{sdk.UserMessage("old")});
@@ -856,6 +872,110 @@ test "agent owns SDK state and adopts completed history" {
     try std.testing.expectEqualStrings("/tmp", agent.cwd);
     Agent.toolCall(&agent, .{ .tool_call_id = "call", .tool_name = "run", .step = 1 });
     try std.testing.expect(!Agent.stopWhen(&agent, .{ .step = 1, .messages = &.{}, .tool_results = &.{} }));
+}
+
+test "agent model configuration survives source arena reset" {
+    var source = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer source.deinit();
+    const alloc = source.allocator();
+    var stops = [_][]const u8{try alloc.dupe(u8, "stop-a")};
+    var agent = try Agent.init(std.testing.allocator, std.testing.io, .{
+        .api_key = try alloc.dupe(u8, "key-a"),
+        .model = try alloc.dupe(u8, "model-a"),
+        .base_url = try alloc.dupe(u8, "https://example.com/v1"),
+        .session_key_header = try alloc.dupe(u8, "x-session"),
+        .params = .{ .openai = .{
+            .thinking = .{ .type = try alloc.dupe(u8, "enabled"), .budget_tokens = 2048 },
+            .stop = &stops,
+        } },
+    }, .{});
+    defer agent.deinit();
+    stops[0] = "changed";
+    _ = source.reset(.free_all);
+    try std.testing.expectEqualStrings("model-a", agent.model.languageModel().modelId());
+    try std.testing.expectEqualStrings("key-a", agent.model.openai.api_key);
+    try std.testing.expectEqualStrings("https://example.com/v1", agent.model.openai.base_url);
+    try std.testing.expectEqualStrings("x-session", agent.model.openai.session_key_header);
+    try std.testing.expectEqualStrings("enabled", agent.params.openai.thinking.?.type);
+    try std.testing.expectEqualStrings("stop-a", agent.params.openai.stop.?[0]);
+    const original = agent.params;
+    const original_model = agent.model;
+    const client = try std.testing.allocator.create(std.http.Client);
+    client.* = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    agent.model.openai.client = client;
+
+    stops[0] = try alloc.dupe(u8, "stop-b");
+    try agent.updateModel(.{
+        .api_key = try alloc.dupe(u8, "key-b"),
+        .model = try alloc.dupe(u8, "model-b"),
+        .base_url = try alloc.dupe(u8, "https://example.com/v2"),
+        .params = .{ .anthropic = .{
+            .thinking = .{ .type = try alloc.dupe(u8, "adaptive") },
+            .stop = &stops,
+        } },
+    });
+    stops[0] = "changed";
+    _ = source.reset(.free_all);
+    try std.testing.expectEqualStrings("model-b", agent.model.languageModel().modelId());
+    try std.testing.expectEqualStrings("key-b", agent.model.anthropic.api_key);
+    try std.testing.expectEqualStrings("https://example.com/v2", agent.model.anthropic.base_url);
+    try std.testing.expectEqualStrings("adaptive", agent.params.anthropic.thinking.?.type);
+    try std.testing.expectEqualStrings("stop-b", agent.params.anthropic.stop.?[0]);
+    try std.testing.expectEqualStrings("enabled", original.openai.thinking.?.type);
+    try std.testing.expectEqualStrings("stop-a", original.openai.stop.?[0]);
+    try std.testing.expectEqualStrings("model-a", original_model.openai.model_id);
+    try std.testing.expectEqualStrings("key-a", original_model.openai.api_key);
+    const replacement_client = try std.testing.allocator.create(std.http.Client);
+    replacement_client.* = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    agent.model.anthropic.client = replacement_client;
+}
+
+test "queued model configuration copies on write and survives replacement" {
+    var agent = try Agent.init(std.testing.allocator, std.testing.io, .{
+        .api_key = "key",
+        .model = "initial",
+        .base_url = "https://example.com/v1",
+        .reasoning_effort = .low,
+        .params = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    try agent.start(.{ .max_steps = 0 });
+    var source = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer source.deinit();
+    const alloc = source.allocator();
+    var superseded: ?models.ModelParams = null;
+    for ([_]models.ReasoningEffort{ .xhigh, .max }) |effort| {
+        var stops = [_][]const u8{try alloc.dupe(u8, @tagName(effort))};
+        try agent.updateModel(.{
+            .api_key = try alloc.dupe(u8, "key"),
+            .model = try alloc.dupe(u8, @tagName(effort)),
+            .base_url = try alloc.dupe(u8, "https://example.com/v1"),
+            .reasoning_effort = effort,
+            .reasoning = true,
+            .params = .{ .openai = .{
+                .thinking = .{ .type = try alloc.dupe(u8, "enabled") },
+                .stop = &stops,
+            } },
+        });
+        stops[0] = "changed";
+        _ = source.reset(.free_all);
+        try std.testing.expectEqualStrings(@tagName(effort), agent.pending_model.?.languageModel().modelId());
+        try std.testing.expectEqualStrings("enabled", agent.pending_params.?.openai.thinking.?.type);
+        try std.testing.expectEqualStrings(@tagName(effort), agent.pending_params.?.openai.stop.?[0]);
+        if (superseded == null) superseded = agent.pending_params;
+    }
+    try std.testing.expectEqualStrings("initial", agent.model.languageModel().modelId());
+    try std.testing.expectEqual(models.ReasoningEffort.low, agent.reasoning_effort);
+    try std.testing.expectEqualStrings("xhigh", superseded.?.openai.stop.?[0]);
+    agent.task.?.wait();
+    while (agent.drain(8, null, discardEvent) != 0) {}
+    try std.testing.expect(agent.reap());
+    try std.testing.expectEqualStrings("max", agent.model.languageModel().modelId());
+    try std.testing.expectEqual(models.ReasoningEffort.max, agent.reasoning_effort);
+    try std.testing.expect(agent.reasoning);
+    try std.testing.expectEqualStrings("enabled", agent.params.openai.thinking.?.type);
+    try std.testing.expectEqualStrings("max", agent.params.openai.stop.?[0]);
+    try std.testing.expect(agent.pending_params == null);
 }
 
 test "forced model update swaps idle agents and defers busy agents" {
@@ -891,7 +1011,7 @@ test "forced model update swaps idle agents and defers busy agents" {
         .model = "model-a",
         .base_url = "https://example.com/v1",
         .reasoning_effort = .low,
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     try std.testing.expectEqual(models.ReasoningEffort.low, agent.reasoning_effort);
@@ -901,7 +1021,7 @@ test "forced model update swaps idle agents and defers busy agents" {
         .model = "model-b",
         .base_url = "https://example.com/v1",
         .reasoning_effort = .medium,
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     });
     try std.testing.expectEqualStrings("model-b", agent.model.languageModel().modelId());
     try std.testing.expectEqual(models.ReasoningEffort.medium, agent.reasoning_effort);
@@ -915,7 +1035,7 @@ test "forced model update swaps idle agents and defers busy agents" {
         .model = "model-c",
         .base_url = "https://example.com/v1",
         .reasoning_effort = .max,
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     });
     try std.testing.expectEqualStrings("model-b", agent.model.languageModel().modelId());
     try std.testing.expectEqual(models.ReasoningEffort.medium, agent.reasoning_effort);
@@ -944,7 +1064,7 @@ test "prepare step merges queued messages and reminder" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     agent.lifetime.reminder = Fixture.reminder;
@@ -961,7 +1081,7 @@ test "agent adopts compacted SDK history and preserves durable tool state" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     const big = "x" ** 70_000;
@@ -1024,7 +1144,7 @@ test "agent schedules auto retry on retryable provider failure and resets on suc
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
@@ -1077,7 +1197,7 @@ test "agent fails after exhausting the auto retry budget" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     agent.max_retries = 2;
@@ -1136,7 +1256,7 @@ test "cancel during the retry wait completes the agent" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
@@ -1183,7 +1303,7 @@ test "non-provider failures do not auto retry after a retryable provider error" 
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
@@ -1222,7 +1342,7 @@ test "stream connection failures schedule auto retry" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     agent.max_retries = 1;
@@ -1270,7 +1390,7 @@ test "explicit cancel does not auto retry on stream failure" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
@@ -1326,7 +1446,7 @@ test "explicit cancel adopts the latest valid request checkpoint" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     try agent.setTools(&.{.{ .name = "test", .execute = Fixture.tool }});
@@ -1352,7 +1472,7 @@ test "retry guard blocks auto retry near context limit" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     agent.max_retries = 10;
@@ -1390,7 +1510,7 @@ test "compaction trigger uses provider usage and ignores inflated history bytes"
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .context_limit = 300_000 });
     defer agent.deinit();
 
@@ -1413,7 +1533,7 @@ test "estimate path still drives the trigger before first step and after compact
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .context_limit = 100_000 });
     defer agent.deinit();
 
@@ -1437,7 +1557,7 @@ test "display and trigger share the same basis after a step" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .context_limit = 300_000 });
     defer agent.deinit();
 
@@ -1494,7 +1614,7 @@ test "overflow recovery falls back to the history estimate when the provider bas
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.invalid/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .context_limit = 300_000 });
     defer agent.deinit();
 
@@ -1540,7 +1660,7 @@ test "run cannot start while an async compaction is in flight" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.invalid/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .context_limit = 60_000 });
     defer agent.deinit();
     const huge = "x" ** 200_000;
@@ -1571,7 +1691,7 @@ test "zero usage step keeps the previous context basis instead of latching zero"
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .context_limit = 300_000 });
     defer agent.deinit();
 

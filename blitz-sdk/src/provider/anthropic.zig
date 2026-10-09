@@ -281,6 +281,17 @@ fn buildRequest(
         try s.objectField("stop_sequences");
         try s.write(params.stop_sequences);
     }
+    if (params.thinking) |thinking| {
+        try s.objectField("thinking");
+        try s.beginObject();
+        try s.objectField("type");
+        try s.write(if (thinking.type.len > 0) thinking.type else "enabled");
+        if (thinking.budget_tokens) |budget| {
+            try s.objectField("budget_tokens");
+            try s.write(budget);
+        }
+        try s.endObject();
+    }
 
     if (params.tools.len > 0) {
         try s.objectField("tools");

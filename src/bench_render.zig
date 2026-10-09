@@ -148,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
         .api_key = "bench",
         .model = "bench-model",
         .base_url = "https://bench.invalid/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     app.main_agent_id = agent_id;
     app.running = true;

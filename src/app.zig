@@ -3336,13 +3336,11 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
             const selection = app.wizardSelection(w);
             const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
             const vision_text = if (selection) |sel| (if (sel.vision) "true" else "false") else "unknown";
-            const replay_text = if (selection) |sel| (if (sel.replay_reasoning) "true" else "false") else "unknown";
             wizardAppendKeyValue(app, arena, &para, "schema", w.provider_type_buf[0..w.provider_type_len]);
             wizardAppendKeyValue(app, arena, &para, "provider", entry.name);
             wizardAppendKeyValue(app, arena, &para, "url", w.url.slice());
             wizardAppendKeyValue(app, arena, &para, "key", if (!w.key.isEmpty()) "<set>" else "");
             wizardAppendKeyValue(app, arena, &para, "vision", vision_text);
-            wizardAppendKeyValue(app, arena, &para, "replay_reasoning", replay_text);
             wizardAppendKeyValue(app, arena, &para, "model", w.model.slice());
             wizardAppendHeading(arena, &para, "");
             wizardAppendOption(arena, &para, "Write provider.lua", w.accept_selected);
@@ -5294,7 +5292,7 @@ fn undoTestAgent(app: *App) !*r.agent.Agent {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "main", .cwd = "/tmp" } });
     app.registry = registry;
     app.main_agent_id = id;
@@ -5576,7 +5574,7 @@ test "background agent stays silent without a main agent" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "scout", .cwd = "/tmp" } });
     agent.background = true;
 
@@ -5670,7 +5668,7 @@ test "finished retained agents survive reaping and take queued messages" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .type_idx = 1, .name = "child", .cwd = "/tmp" } });
     try registry.run(child_id, .{ .max_steps = 0 });
     while (registry.state(child_id) == .active) {
@@ -5706,7 +5704,7 @@ test "background agent result is written for read" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
     const parts = [_]r.sdk.Part{ r.sdk.Part.textPart("result"), r.sdk.Part.textPart(" done") };
@@ -5806,13 +5804,13 @@ test "tool group rail: nested list ends with exactly one corner" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "main", .cwd = "/tmp" } });
     _ = try registry.activate(child_id, .{
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "child", .cwd = "/tmp" } });
 
     try app.setToolChild(parent_id, "call_1", child_id);
@@ -5879,7 +5877,7 @@ fn activateTestAgentWithParent(reg: *r.agent_registry.Registry, name: []const u8
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = name, .cwd = "/tmp", .parent = if (parent) |pid| pid.pack() else null } });
     return id;
 }
@@ -6049,7 +6047,7 @@ test "tool group rail: empty anchors show labels activity and pending reservatio
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "scout", .task_description = "find clues", .parent = parent.pack() } });
     child.status = .running;
     child.activity = .processing;
@@ -6974,7 +6972,7 @@ fn timelineCacheTestAgent(app: *App, registry: *r.agent_registry.Registry) !r.Ag
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     app.main_agent_id = id;
     return id;
@@ -7383,7 +7381,7 @@ test "tool entries with live children stay uncached and keep updating" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     const agent = registry.get(id).?;
     try agent.setMessages(&.{
@@ -7488,7 +7486,7 @@ test "resolveActivePermission leaves select mode for the next queued ask" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "scout", .cwd = "/tmp" } });
 
     var req = r.permissions.Request{
@@ -7545,7 +7543,7 @@ test "reaped waiting agent sends no parent notice or spawn callback" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "parent", .parent = root_id.pack(), .depth = 1 } });
     parent.background = true;
     const child_id = registry.reserve(parent_id).?;
@@ -7553,7 +7551,7 @@ test "reaped waiting agent sends no parent notice or spawn callback" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .parent = parent_id.pack(), .depth = 2 } });
 
     const vm = try r.lua.LuaVm.init(std.testing.allocator);
@@ -7643,7 +7641,7 @@ test "waiting main agent shows waiting progress and cancel stops the tree" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .parent = parent_id.pack(), .depth = 1 } });
     try finishWaitingTestTurn(&registry, parent_id);
     var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);

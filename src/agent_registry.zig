@@ -487,7 +487,7 @@ test "reap fires once per run for a finished retained agent" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     try registry.run(id, .{ .max_steps = 0 });
     while (registry.state(id) == .active) {
@@ -578,7 +578,7 @@ test "starting a reserved agent preserves an existing waiter" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     try registry.run(id, .{ .max_steps = 0 });
     while (registry.state(id) == .active) {
@@ -598,7 +598,7 @@ test "usageByModel includes live unaccounted slot usage" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{ .name = "parent", .cwd = "/tmp" } });
     parent.usage = .{ .input_tokens = 5, .output_tokens = 2, .total_tokens = 7 };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -619,7 +619,7 @@ test "registry reports empty explicit idle compaction without history" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     try std.testing.expectEqual(CompactRequestResult.empty, try registry.compact(id));
     try std.testing.expectEqual(compact.Request.none, agent.compaction.requested.load(.acquire));
@@ -634,7 +634,7 @@ test "registry reports and completes standalone compaction" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     const big = "x" ** 70_000;
     try agent.setMessages(&.{ sdk.UserMessage(big), sdk.UserMessage("recent") });
@@ -663,7 +663,7 @@ test "registry queues explicit compaction while agent runs" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     try registry.run(id, .{ .max_steps = 0 });
     try std.testing.expectEqual(CompactRequestResult.queued, try registry.compact(id));
@@ -686,7 +686,7 @@ test "registry retry is allowed while an agent is retrying" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     agent.status = agent_mod.Status.retrying;
     try registry.retry(id, .{ .max_steps = 0 });
@@ -712,7 +712,7 @@ test "turn checkpoint follows the wake trigger and resets on history replacement
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     try agent.setMessages(&.{ sdk.UserMessage("one"), sdk.AssistantMessage("two") });
     try agent.queueMessages(&.{sdk.UserMessage("turn two")});
@@ -749,7 +749,7 @@ test "registry completes a canceled retry-waiting agent" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     agent.status = agent_mod.Status.retrying;
     agent.cancel();
@@ -765,7 +765,7 @@ const WaitingTest = struct {
             .api_key = "key",
             .model = "model",
             .base_url = "https://example.com/v1",
-            .provider = .{ .openai = .{} },
+            .params = .{ .openai = .{} },
         }, .{ .identity = .{ .parent = if (parent) |pid| pid.pack() else null } });
         return id;
     }

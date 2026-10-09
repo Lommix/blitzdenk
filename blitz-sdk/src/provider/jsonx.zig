@@ -169,7 +169,10 @@ pub fn buildChatRequest(
         try s.endArray();
     }
 
-    if (params.max_output_tokens > 0) {
+    if (params.max_completion_tokens) |t| {
+        try s.objectField("max_completion_tokens");
+        try s.write(t);
+    } else if (params.max_output_tokens > 0) {
         try s.objectField("max_tokens");
         try s.write(params.max_output_tokens);
     }
@@ -196,6 +199,27 @@ pub fn buildChatRequest(
     if (params.seed) |value| {
         try s.objectField("seed");
         try s.write(value);
+    }
+    if (params.reasoning_effort.len > 0) {
+        try s.objectField("reasoning_effort");
+        try s.write(params.reasoning_effort);
+    }
+    if (params.enable_thinking) |enabled| {
+        try s.objectField("enable_thinking");
+        try s.write(enabled);
+    }
+    if (params.thinking) |thinking| {
+        try s.objectField("thinking");
+        try s.beginObject();
+        if (thinking.type.len > 0) {
+            try s.objectField("type");
+            try s.write(thinking.type);
+        }
+        if (thinking.budget_tokens) |budget| {
+            try s.objectField("budget_tokens");
+            try s.write(budget);
+        }
+        try s.endObject();
     }
     try writeToolChoice(&s, params.tool_choice);
     if (params.response_format) |format| {

@@ -377,15 +377,8 @@ const ModelDef = LuaType{ .table_def = .{ .name = "BlitzModelDef", .fields = &.{
     .{ .name = "name", .ty = LuaType.string, .desc = "the API model id" },
     .{ .name = "provider", .ty = LuaType.integer, .desc = "provider handle from add_provider" },
     .{ .name = "vision", .ty = LuaType.boolean, .optional = true, .desc = "model supports images" },
-    .{ .name = "replay_reasoning", .ty = LuaType.boolean, .optional = true, .desc = "replay reasoning text as reasoning_content (deepseek/glm style)" },
-    .{ .name = "cost", .ty = ModelCostDef, .optional = true, .desc = "price per 1M tokens; absent = free" },
-} } };
-const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields = &.{
-    .{ .name = "type", .ty = LuaType.string, .desc = "'openai' | 'response' | 'anthropic' | 'ollama'" },
-    .{ .name = "url", .ty = LuaType.string, .desc = "the endpoint url" },
-    .{ .name = "key_envar", .ty = LuaType.string, .optional = true, .desc = "the ENVAR holding the api key (not the key itself!)" },
-    .{ .name = "key", .ty = LuaType.string, .optional = true, .desc = "stored api key; the envar wins when both are set" },
-    .{ .name = "session_key_header", .ty = LuaType.string, .optional = true, .desc = "header name for the session cache key; empty = disabled" },
+    .{ .name = "replay_reasoning", .ty = LuaType.boolean, .optional = true, .desc = "replay reasoning text as reasoning_content (deepseek/glm style); defaults true, set false to opt out" },
+    .{ .name = "reasoning", .ty = LuaType.boolean, .optional = true, .desc = "model accepts the agent reasoning effort; defaults true, set false to opt out" },
     .{ .name = "temperature", .ty = LuaType.number, .optional = true },
     .{ .name = "max_tokens", .ty = LuaType.integer, .optional = true },
     .{ .name = "max_completion_tokens", .ty = LuaType.integer, .optional = true },
@@ -396,6 +389,14 @@ const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields
     .{ .name = "presence_penalty", .ty = LuaType.number, .optional = true },
     .{ .name = "enable_thinking", .ty = LuaType.boolean, .optional = true },
     .{ .name = "thinking", .ty = ThinkingDef, .optional = true },
+    .{ .name = "cost", .ty = ModelCostDef, .optional = true, .desc = "price per 1M tokens; absent = free" },
+} } };
+const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields = &.{
+    .{ .name = "type", .ty = LuaType.string, .desc = "'openai' | 'response' | 'anthropic' | 'ollama'" },
+    .{ .name = "url", .ty = LuaType.string, .desc = "the endpoint url" },
+    .{ .name = "key_envar", .ty = LuaType.string, .optional = true, .desc = "the ENVAR holding the api key (not the key itself!)" },
+    .{ .name = "key", .ty = LuaType.string, .optional = true, .desc = "stored api key; the envar wins when both are set" },
+    .{ .name = "session_key_header", .ty = LuaType.string, .optional = true, .desc = "header name for the session cache key; empty = disabled" },
     .{ .name = "rate_limit", .ty = LuaType.integer, .optional = true, .desc = "requests per minute; 0 = unlimited" },
 } } };
 
@@ -782,16 +783,6 @@ pub const Blitz = LuaType{
                                 key_envar: ?[]const u8 = null,
                                 key: ?[]const u8 = null,
                                 session_key_header: ?[]const u8 = null,
-                                temperature: ?f32 = null,
-                                max_tokens: ?u32 = null,
-                                max_completion_tokens: ?u32 = null,
-                                max_output_tokens: ?u32 = null,
-                                top_p: ?f32 = null,
-                                top_k: ?u32 = null,
-                                frequency_penalty: ?f32 = null,
-                                presence_penalty: ?f32 = null,
-                                enable_thinking: ?bool = true,
-                                thinking: ?r.models.Thinking = null,
                                 rate_limit: ?u32 = null,
                             };
 
@@ -808,37 +799,7 @@ pub const Blitz = LuaType{
                                     if (std.mem.eql(u8, args.type, "ollama")) break :blk .ollama;
                                     return error.UnknownProviderType;
                                 };
-
-                                slot.provider_config = switch (ptype) {
-                                    .openai => .{ .openai = .{
-                                        .temperature = args.temperature,
-                                        .max_tokens = args.max_tokens orelse 32000,
-                                        .max_completion_tokens = args.max_completion_tokens,
-                                        .enable_thinking = args.enable_thinking,
-                                        .top_p = args.top_p,
-                                        .top_k = args.top_k,
-                                        .frequency_penalty = args.frequency_penalty,
-                                        .presence_penalty = args.presence_penalty,
-                                    } },
-                                    .response => .{ .response = .{
-                                        .temperature = args.temperature,
-                                        .max_output_tokens = args.max_output_tokens orelse args.max_tokens orelse 32000,
-                                        .top_p = args.top_p,
-                                    } },
-                                    .anthropic => .{ .anthropic = .{
-                                        .max_tokens = args.max_tokens orelse 32000,
-                                        .thinking = args.thinking,
-                                        .temperature = args.temperature,
-                                        .top_p = args.top_p,
-                                        .top_k = args.top_k,
-                                    } },
-                                    .ollama => .{ .ollama = .{
-                                        .temperature = args.temperature,
-                                        .max_tokens = args.max_tokens orelse 32000,
-                                        .top_p = args.top_p,
-                                        .top_k = args.top_k,
-                                    } },
-                                };
+                                slot.kind = ptype;
 
                                 return a.config.commitProvider();
                             }
@@ -859,12 +820,64 @@ pub const Blitz = LuaType{
                                 provider: u32,
                                 vision: ?bool = null,
                                 replay_reasoning: ?bool = null,
+                                reasoning: ?bool = null,
+                                temperature: ?f32 = null,
+                                max_tokens: ?u32 = null,
+                                max_completion_tokens: ?u32 = null,
+                                max_output_tokens: ?u32 = null,
+                                top_p: ?f32 = null,
+                                top_k: ?u32 = null,
+                                frequency_penalty: ?f32 = null,
+                                presence_penalty: ?f32 = null,
+                                enable_thinking: ?bool = null,
+                                thinking: ?r.models.Thinking = null,
                                 cost: ?r.config.ModelCost = null,
                             };
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, args: Arg) !r.config.ModelHandle {
                                 if (try isToolVm(state)) return @enumFromInt(0);
-                                return a.config.addModel(args.name, @enumFromInt(args.provider), args.vision orelse false, args.replay_reasoning orelse false, args.cost);
+                                const handle: r.config.ProviderHandle = @enumFromInt(args.provider);
+                                const provider = a.config.getProvider(handle) orelse return error.UnknownProvider;
+                                const params: r.models.ModelParams = switch (provider.kind) {
+                                    .openai => .{ .openai = .{
+                                        .temperature = args.temperature,
+                                        .max_tokens = args.max_tokens orelse args.max_output_tokens,
+                                        .max_completion_tokens = args.max_completion_tokens,
+                                        .enable_thinking = args.enable_thinking,
+                                        .thinking = args.thinking,
+                                        .top_p = args.top_p,
+                                        .top_k = args.top_k,
+                                        .frequency_penalty = args.frequency_penalty,
+                                        .presence_penalty = args.presence_penalty,
+                                    } },
+                                    .response => .{ .response = .{
+                                        .temperature = args.temperature,
+                                        .max_output_tokens = args.max_output_tokens orelse args.max_tokens,
+                                        .top_p = args.top_p,
+                                    } },
+                                    .anthropic => .{ .anthropic = .{
+                                        .max_tokens = args.max_tokens orelse 16_384,
+                                        .thinking = args.thinking,
+                                        .temperature = args.temperature,
+                                        .top_p = args.top_p,
+                                        .top_k = args.top_k,
+                                    } },
+                                    .ollama => .{ .ollama = .{
+                                        .temperature = args.temperature,
+                                        .max_tokens = args.max_tokens,
+                                        .top_p = args.top_p,
+                                        .top_k = args.top_k,
+                                    } },
+                                };
+                                return a.config.addModel(.{
+                                    .name = args.name,
+                                    .provider = handle,
+                                    .vision = args.vision orelse false,
+                                    .replay_reasoning = args.replay_reasoning orelse true,
+                                    .reasoning = args.reasoning orelse true,
+                                    .params = params,
+                                    .cost = args.cost,
+                                });
                             }
                         }).lua_fn, "add_model"),
                     },
@@ -6024,7 +6037,7 @@ test "agent history bindings expose rows and the turn checkpoint" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{});
     try agent.setMessages(&.{
         r.sdk.UserMessage("old turn"),
@@ -6666,7 +6679,7 @@ test "list_agents snapshots occupied slots" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{
         .name = "scout",
         .task_description = "list the agents",
@@ -6685,7 +6698,7 @@ test "list_agents snapshots occupied slots" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{
         .name = "worker",
         .task_description = "child task",
@@ -6849,7 +6862,7 @@ test "agent.get_model and get_effort read the live agent" {
         .model = "model-a",
         .base_url = "https://example.com/v1",
         .reasoning_effort = .low,
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{
         .name = "scout",
         .task_description = "probe",
@@ -6875,7 +6888,7 @@ test "agent.get_model and get_effort read the live agent" {
         .model = "model-b",
         .base_url = "https://example.com/v1",
         .reasoning_effort = .max,
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     });
 
     const script_after = try std.fmt.allocPrint(std.testing.allocator,
@@ -6902,7 +6915,7 @@ test "agent task description and turn prompt bindings" {
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{
         .name = "general",
         .task_description = "spawned task",
@@ -6979,7 +6992,7 @@ test "agent.get_model and get_effort stay truthful while a run parks a swap" {
         .model = "model-a",
         .base_url = "https://example.com/v1",
         .reasoning_effort = .low,
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     }, .{ .identity = .{
         .name = "scout",
         .task_description = "probe",
@@ -6996,7 +7009,7 @@ test "agent.get_model and get_effort stay truthful while a run parks a swap" {
         .model = "model-b",
         .base_url = "https://example.com/v1",
         .reasoning_effort = .max,
-        .provider = .{ .openai = .{} },
+        .params = .{ .openai = .{} },
     });
 
     const script = try std.fmt.allocPrint(std.testing.allocator,
