@@ -828,8 +828,10 @@ pub const App = struct {
             const finished_run = agent.task != null;
             if (self.registry.reap(id)) {
                 if (finished_run and agent.status == .complete and self.registry.state(id) == .complete) _ = self.event_bus.emit(self, .{ .agent_complete = id });
-                try self.handleReapedAgent(id);
             }
+            // Finished parents can defer their result notice until a live
+            // descendant finishes, even when their own turn is already reaped.
+            try self.handleReapedAgent(id);
         }
         self.registry.retryDue();
         self.running = self.registry.countActive() > 0;
@@ -1058,6 +1060,7 @@ pub const App = struct {
             return;
         }
         if (agent.reported_task_done) return;
+        if (!self.registry.subtreeDone(agent_id)) return;
         agent.reported_task_done = true;
         switch (agent.status) {
             .complete => self.lua_vm.invokeSpawnCallback(self.io, agent_id.pack(), r.lua.AWAIT_COMPLETE),
@@ -4012,7 +4015,7 @@ fn buildToolGroupParagraph(
 
             const child_id = entry.child_id orelse continue;
             var rail_nodes: std.ArrayList(RailNode) = .empty;
-            try walkAgentRail(arena, statuses.ptr, child_id, &.{}, 0, &rail_nodes);
+            try walkAgentRail(arena, statuses.ptr, app.registry, child_id, &.{}, 0, &rail_nodes);
 
             for (rail_nodes.items) |node| {
                 var nested = r.tui.Line{ .style = node.line.style };
@@ -4043,6 +4046,7 @@ fn buildToolGroupParagraph(
 }
 
 const rail_depth_cap = r.agent_registry.max_agents;
+const rail_recent_entries = 3;
 
 const RailNode = struct {
     line: r.tui.Line,
@@ -4077,6 +4081,7 @@ fn pushChildActivity(app: *App, arena: std.mem.Allocator, line: *r.tui.Line, chi
 fn walkAgentRail(
     arena: std.mem.Allocator,
     store: *ToolStatusStore,
+    registry: *r.agent_registry.Registry,
     agent_id: r.AgentId,
     prefix: []const bool,
     depth: u32,
@@ -4087,27 +4092,30 @@ fn walkAgentRail(
     const agent_status = &store.agents[agent_id.index];
     if (agent_status.generation != agent_id.generation) return;
 
-    const count = agent_status.entries.count();
-    const skip = if (count > 3) count - 3 else 0;
-    var visible: std.ArrayList(*ToolStatusEntry) = .empty;
+    const Candidate = struct { entry: *ToolStatusEntry, anchored: bool };
+    var candidates: std.ArrayList(Candidate) = .empty;
+    var recent_count: usize = 0;
     var it = agent_status.entries.iterator();
-    var i: usize = 0;
     while (it.next()) |kv| {
-        i += 1;
-        if (i <= skip) continue;
-        try visible.append(arena, kv.value_ptr);
+        const entry = kv.value_ptr;
+        const anchored = if (entry.child_id) |child| !registry.subtreeDone(child) else false;
+        if (!anchored and entry.lines.items.len == 0) continue;
+        if (!anchored) recent_count += 1;
+        try candidates.append(arena, .{ .entry = entry, .anchored = anchored });
+    }
+    var skip = recent_count -| rail_recent_entries;
+    var visible: std.ArrayList(*ToolStatusEntry) = .empty;
+    for (candidates.items) |candidate| {
+        if (!candidate.anchored and skip > 0) {
+            skip -= 1;
+            continue;
+        }
+        try visible.append(arena, candidate.entry);
     }
 
     var last_row: ?usize = null;
     for (visible.items, 0..) |tool_entry, vi| {
-        var continues = false;
-        var j = vi + 1;
-        while (j < visible.items.len) : (j += 1) {
-            if (visible.items[j].lines.items.len > 0 or visible.items[j].child_id != null) {
-                continues = true;
-                break;
-            }
-        }
+        const continues = vi + 1 < visible.items.len;
         const child_prefix = try arena.alloc(bool, prefix.len + 1);
         @memcpy(child_prefix[0..prefix.len], prefix);
         child_prefix[prefix.len] = continues;
@@ -4121,8 +4129,26 @@ fn walkAgentRail(
                 .prefix = prefix,
             });
         }
+        // An empty visible entry is anchored; give its child an identifiable
+        // first row for activity indicators, connectors, and recursion.
+        if (tool_entry.lines.items.len == 0) {
+            const child_id = tool_entry.child_id.?;
+            var anchor = r.tui.Line{};
+            const child = registry.get(child_id);
+            const name = if (child) |agent| agent.name else "";
+            const task = if (child) |agent| agent.task_description else "";
+            const label = if (name.len > 0) name else try std.fmt.allocPrint(arena, "agent {d}", .{child_id.pack()});
+            try anchor.pushSpan(arena, .{ .content = if (task.len > 0) try std.fmt.allocPrint(arena, "{s} -> {s}", .{ label, task }) else label });
+            last_row = out.items.len;
+            try out.append(arena, .{
+                .line = anchor,
+                .entry_start = true,
+                .child_id = child_id,
+                .prefix = prefix,
+            });
+        }
         if (tool_entry.child_id) |entry_child_id| {
-            try walkAgentRail(arena, store, entry_child_id, child_prefix, depth + 1, out);
+            try walkAgentRail(arena, store, registry, entry_child_id, child_prefix, depth + 1, out);
         }
     }
     // Each agent closes its own rail, even when descendants follow its last row.
@@ -5844,14 +5870,330 @@ fn findLineContaining(lines: []r.tui.Line, arena: std.mem.Allocator, needle: []c
 }
 
 fn activateTestAgent(reg: *r.agent_registry.Registry, name: []const u8) !r.AgentId {
-    const id = reg.reserve(null).?;
+    return activateTestAgentWithParent(reg, name, null);
+}
+
+fn activateTestAgentWithParent(reg: *r.agent_registry.Registry, name: []const u8, parent: ?r.AgentId) !r.AgentId {
+    const id = reg.reserve(parent).?;
     _ = try reg.activate(id, .{
         .api_key = "key",
         .model = "model",
         .base_url = "https://example.com/v1",
         .provider = .{ .openai = .{} },
-    }, .{ .identity = .{ .name = name, .cwd = "/tmp" } });
+    }, .{ .identity = .{ .name = name, .cwd = "/tmp", .parent = if (parent) |pid| pid.pack() else null } });
     return id;
+}
+
+fn initRailTestApp(app: *App, registry: *r.agent_registry.Registry) void {
+    app.* = undefined;
+    app.io = std.testing.io;
+    app.gpa = std.testing.allocator;
+    app.arena_session = .init(std.testing.allocator);
+    app.timeline = .empty;
+    app.tool_status_entries = .{};
+    app.dirty = false;
+    app.registry = registry;
+    app.theme = .default;
+    app.frame_count = 0;
+    app.main_agent_id = null;
+}
+
+fn expectRailLines(app: *App, arena: std.mem.Allocator, root: r.AgentId, expected: []const []const u8) !void {
+    const rendered = try buildToolGroupParagraph(app, arena, &.{
+        .{ .agent_id = root, .call_id = "spawn", .tool_name = "agent" },
+    }, 80);
+    try std.testing.expectEqual(expected.len + 1, rendered.p.lines.items.len);
+    for (expected, rendered.p.lines.items[1..]) |text, line| {
+        try std.testing.expectEqualStrings(text, try lineText(arena, line));
+    }
+}
+
+fn addRailRecentWork(app: *App, id: r.AgentId) !void {
+    try app.setToolStatus(id, "a", "work a");
+    try app.setToolStatus(id, "b", "work b");
+    try app.setToolStatus(id, "c", "work c");
+    try app.setToolStatus(id, "d", "work d");
+}
+
+test "tool group rail: old anchors keep subtrees and three ordinary entries in chronological order" {
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    var app: App = undefined;
+    initRailTestApp(&app, &registry);
+    defer app.arena_session.deinit();
+    const root = try activateTestAgent(&registry, "root");
+    const parent = try activateTestAgentWithParent(&registry, "parent", root);
+    const child = try activateTestAgentWithParent(&registry, "child", parent);
+    registry.get(child).?.status = .running;
+    try app.setToolChild(root, "spawn", parent);
+    try app.setToolChild(parent, "spawn", child);
+    try app.setToolStatus(parent, "spawn", "spawn child\nspawn detail");
+    try app.setToolStatus(child, "one", "leaf one");
+    try app.setToolStatus(child, "two", "leaf two");
+    try addRailRecentWork(&app, parent);
+    try app.setToolStatus(parent, "c", "work c\ncontinuation c");
+    // Hidden entries, including entries after all real rows, use no slots.
+    try app.setToolStatus(parent, "empty one", "");
+    try app.setToolStatus(parent, "empty two", "");
+    try app.setToolStatus(parent, "empty three", "");
+    try app.setToolStatus(parent, "empty four", "");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const live = &.{
+        " ├ spawn child",
+        " │ spawn detail",
+        " │ ├ leaf one",
+        " │ └ leaf two",
+        " ├ work b",
+        " ├ work c",
+        " │ continuation c",
+        " └ work d",
+    };
+    try expectRailLines(&app, arena.allocator(), root, live);
+
+    registry.get(child).?.status = .idle;
+    try expectRailLines(&app, arena.allocator(), root, &.{ " ├ work b", " ├ work c", " │ continuation c", " └ work d" });
+    // Slot state alone neither keeps idle agents anchored nor hides new work.
+    registry.slots[child.index].state.store(.complete, .release);
+    registry.get(child).?.status = .retrying;
+    try expectRailLines(&app, arena.allocator(), root, live);
+    registry.get(child).?.activity = .writing;
+    registry.get(child).?.tokens_per_second = 99;
+    const rendered = try buildToolGroupParagraph(&app, arena.allocator(), &.{
+        .{ .agent_id = root, .call_id = "spawn", .tool_name = "agent" },
+    }, 80);
+    const anchor = try findLineContaining(rendered.p.lines.items, arena.allocator(), "spawn child");
+    try std.testing.expect(std.mem.indexOf(u8, anchor, "writing") != null);
+    try std.testing.expect(std.mem.indexOf(u8, anchor, "99 T/s") != null);
+}
+
+test "tool group rail: deep resumed work restores anchors behind idle failed and canceled ancestors" {
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    var app: App = undefined;
+    initRailTestApp(&app, &registry);
+    defer app.arena_session.deinit();
+    var tree: [5]r.AgentId = undefined;
+    tree[0] = try activateTestAgent(&registry, "root");
+    for (1..tree.len) |i| tree[i] = try activateTestAgentWithParent(&registry, "child", tree[i - 1]);
+    for (tree[0 .. tree.len - 1], tree[1..]) |parent, child| {
+        try app.setToolChild(parent, "spawn", child);
+        try app.setToolStatus(parent, "spawn", "spawn child");
+        registry.get(parent).?.status = .complete;
+        registry.slots[parent.index].state.store(.complete, .release);
+    }
+    for (tree[1..4]) |id| try addRailRecentWork(&app, id);
+    try app.setToolStatus(tree[4], "leaf", "deep leaf");
+    registry.slots[tree[4].index].state.store(.complete, .release);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const finished = &.{ " ├ work b", " ├ work c", " └ work d" };
+    try expectRailLines(&app, arena.allocator(), tree[0], finished);
+    // Only the leaf resumes; every ancestor keeps its finished registry slot.
+    registry.get(tree[4]).?.status = .retrying;
+    const live = &.{
+        " ├ spawn child",
+        " │ ├ spawn child",
+        " │ │ ├ spawn child",
+        " │ │ │ └ deep leaf",
+        " │ │ ├ work b",
+        " │ │ ├ work c",
+        " │ │ └ work d",
+        " │ ├ work b",
+        " │ ├ work c",
+        " │ └ work d",
+        " ├ work b",
+        " ├ work c",
+        " └ work d",
+    };
+    const intermediate = registry.get(tree[2]).?;
+    for ([_]r.agent.Status{ .idle, .complete, .failed, .canceled }) |status| {
+        intermediate.status = status;
+        registry.slots[tree[2].index].state.store(if (status == .failed) .failed else .complete, .release);
+        try expectRailLines(&app, arena.allocator(), tree[0], live);
+        // Completion notices use the same recursive decision and must wait.
+        try app.handleReapedAgent(tree[2]);
+        try std.testing.expect(!intermediate.reported_task_done);
+        try std.testing.expectEqual(if (status == .failed) r.agent_registry.SlotState.failed else .complete, registry.state(tree[2]).?);
+    }
+    registry.get(tree[4]).?.status = .idle;
+    try expectRailLines(&app, arena.allocator(), tree[0], finished);
+    const vm = try r.lua.LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    app.lua_vm = vm;
+    intermediate.status = .complete;
+    try app.handleReapedAgent(tree[2]);
+    try std.testing.expect(intermediate.reported_task_done);
+}
+
+test "tool group rail: empty anchors show labels activity and pending reservations" {
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    var app: App = undefined;
+    initRailTestApp(&app, &registry);
+    defer app.arena_session.deinit();
+    const root = try activateTestAgent(&registry, "root");
+    const parent = try activateTestAgentWithParent(&registry, "parent", root);
+    const child_id = registry.reserve(parent).?;
+    try app.setToolChild(root, "spawn", parent);
+    try app.setToolChild(parent, "spawn", child_id);
+    try addRailRecentWork(&app, parent);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const fallback = try std.fmt.allocPrint(arena.allocator(), " ├ agent {d}", .{child_id.pack()});
+    try expectRailLines(&app, arena.allocator(), root, &.{ fallback, " ├ work b", " ├ work c", " └ work d" });
+    // A reservation becomes live before it has emitted any status rows.
+    const child = try registry.activate(child_id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .provider = .{ .openai = .{} },
+    }, .{ .identity = .{ .name = "scout", .task_description = "find clues", .parent = parent.pack() } });
+    child.status = .running;
+    child.activity = .processing;
+    child.tokens_per_second = 42;
+    const rendered = try buildToolGroupParagraph(&app, arena.allocator(), &.{
+        .{ .agent_id = root, .call_id = "spawn", .tool_name = "agent" },
+    }, 80);
+    try std.testing.expectEqual(@as(usize, 5), rendered.p.lines.items.len);
+    const anchor = try findLineContaining(rendered.p.lines.items, arena.allocator(), "scout -> find clues");
+    try std.testing.expect(std.mem.startsWith(u8, anchor, " ├ scout -> find clues"));
+    try std.testing.expect(std.mem.indexOf(u8, anchor, "processing") != null);
+    try std.testing.expect(std.mem.indexOf(u8, anchor, text_utils.spinnerBar(app.frame_count)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, anchor, "42 T/s") != null);
+    try app.setToolStatus(child_id, "work", "first child row");
+    child.activity = .idle;
+    child.tokens_per_second = 0;
+    try expectRailLines(&app, arena.allocator(), root, &.{
+        " ├ scout -> find clues",
+        " │ └ first child row",
+        " ├ work b",
+        " ├ work c",
+        " └ work d",
+    });
+    child.status = .idle;
+    try expectRailLines(&app, arena.allocator(), root, &.{ " ├ work b", " ├ work c", " └ work d" });
+    // Empty finished spawn entries never synthesize a fallback, even inside
+    // the recent window or at the end of a rail.
+    try app.setToolChild(parent, "empty finished", child_id);
+    try expectRailLines(&app, arena.allocator(), root, &.{ " ├ work b", " ├ work c", " └ work d" });
+}
+
+test "tool group rail: outstanding lifecycle work anchors even with idle activity" {
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    var app: App = undefined;
+    initRailTestApp(&app, &registry);
+    defer app.arena_session.deinit();
+    const root = try activateTestAgent(&registry, "root");
+    const parent = try activateTestAgentWithParent(&registry, "parent", root);
+    const child_id = try activateTestAgentWithParent(&registry, "child", parent);
+    const child = registry.get(child_id).?;
+    try app.setToolChild(root, "spawn", parent);
+    try app.setToolChild(parent, "spawn", child_id);
+    try app.setToolStatus(parent, "spawn", "spawn child");
+    try addRailRecentWork(&app, parent);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const live = &.{ " ├ spawn child", " ├ work b", " ├ work c", " └ work d" };
+    for ([_]r.agent.Status{ .running, .retrying, .compacting }) |status| {
+        child.status = status;
+        try expectRailLines(&app, arena.allocator(), root, live);
+    }
+    child.status = .idle;
+    try child.queueReminder("queued work");
+    try expectRailLines(&app, arena.allocator(), root, live);
+    child.queued_messages.clearRetainingCapacity();
+    child.requestCompaction(.external, false);
+    try expectRailLines(&app, arena.allocator(), root, live);
+    child.compaction.requested.store(.none, .release);
+    child.compact_task = r.compact.Task.init(child.alloc, child.io, &child.model, child.tools, child.history(), false);
+    try expectRailLines(&app, arena.allocator(), root, live);
+    child.compact_task.?.deinit();
+    child.compact_task = null;
+    // Registry descendants need not have a visible child_id display link.
+    const reservation = registry.reserve(child_id).?;
+    try expectRailLines(&app, arena.allocator(), root, live);
+    registry.releaseReservation(reservation);
+    try registry.run(child_id, .{ .max_steps = 0 });
+    child.task.?.wait();
+    // Even a finished turn still has outstanding work until drained/reaped.
+    child.status = .complete;
+    child.activity = .idle;
+    try expectRailLines(&app, arena.allocator(), root, live);
+    while (registry.drain(child_id, 64, null, struct {
+        fn discard(_: ?*anyopaque, _: r.agent_run.Event) void {}
+    }.discard) != 0) {}
+    try std.testing.expect(registry.reap(child_id));
+    try expectRailLines(&app, arena.allocator(), root, &.{ " ├ work b", " ├ work c", " └ work d" });
+}
+
+test "tool group rail: stale generations do not anchor and completion cycles terminate" {
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    var app: App = undefined;
+    initRailTestApp(&app, &registry);
+    defer app.arena_session.deinit();
+    const root = try activateTestAgent(&registry, "root");
+    const parent = try activateTestAgentWithParent(&registry, "parent", root);
+    const old_child = try activateTestAgentWithParent(&registry, "old child", parent);
+    try app.setToolChild(root, "spawn", parent);
+    try app.setToolChild(parent, "spawn", old_child);
+    try app.setToolStatus(parent, "spawn", "old spawn");
+    try addRailRecentWork(&app, parent);
+    registry.release(old_child);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const finished = &.{ " ├ work b", " ├ work c", " └ work d" };
+    try expectRailLines(&app, arena.allocator(), root, finished);
+    const child = try activateTestAgentWithParent(&registry, "new child", parent);
+    try std.testing.expectEqual(old_child.index, child.index);
+    try std.testing.expect(old_child.generation != child.generation);
+    registry.get(child).?.status = .retrying;
+    try app.setToolStatus(child, "leaf", "new leaf");
+    try expectRailLines(&app, arena.allocator(), root, finished);
+
+    // Both registry ancestry and display links cycle, independently bounded
+    // by the visited set and the unchanged rail depth cap.
+    try app.setToolChild(parent, "spawn", child);
+    registry.slots[parent.index].parent = child.pack();
+    registry.get(parent).?.parent = child.pack();
+    try app.setToolChild(child, "spawn", parent);
+    try app.setToolStatus(child, "spawn", "back edge");
+    registry.get(child).?.status = .idle;
+    try expectRailLines(&app, arena.allocator(), root, finished);
+    registry.get(child).?.status = .retrying;
+    const rendered = try buildToolGroupParagraph(&app, arena.allocator(), &.{
+        .{ .agent_id = root, .call_id = "spawn", .tool_name = "agent" },
+    }, 80);
+    try std.testing.expect((try findLineContaining(rendered.p.lines.items, arena.allocator(), "old spawn")).len > 0);
+    try std.testing.expect((try findLineContaining(rendered.p.lines.items, arena.allocator(), "back edge")).len > 0);
+    try std.testing.expect((try findLineContaining(rendered.p.lines.items, arena.allocator(), "new leaf")).len > 0);
+    try std.testing.expect(rendered.p.lines.items.len <= 1 + rail_depth_cap * 4);
+}
+
+test "tool group rail: top level remains unlimited" {
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    var app: App = undefined;
+    initRailTestApp(&app, &registry);
+    defer app.arena_session.deinit();
+    const root = try activateTestAgent(&registry, "root");
+    const names = [_][]const u8{ "a", "b", "c", "d", "e" };
+    var calls: [names.len]TimelinePart.ToolCallEntry = undefined;
+    for (names, &calls) |name, *call| {
+        try app.setToolStatus(root, name, name);
+        call.* = .{ .agent_id = root, .call_id = name, .tool_name = "bash" };
+    }
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const rendered = try buildToolGroupParagraph(&app, arena.allocator(), &calls, 80);
+    try std.testing.expectEqual(names.len, rendered.p.lines.items.len);
+    for (names, rendered.p.lines.items) |name, line| {
+        try std.testing.expect(std.mem.endsWith(u8, try lineText(arena.allocator(), line), name));
+    }
 }
 
 test "tool group rail: nested agent tree draws grandchild rows" {

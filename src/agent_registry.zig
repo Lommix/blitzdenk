@@ -326,6 +326,36 @@ pub const Registry = struct {
         return false;
     }
 
+    /// Read-only completion decision shared by result notices and rail anchors.
+    /// Slot state alone cannot describe parked parents or revived descendants.
+    pub fn subtreeDone(self: *const Registry, id: AgentId) bool {
+        var visited = [_]bool{false} ** max_agents;
+        return self.subtreeDoneVisit(id, &visited);
+    }
+
+    fn subtreeDoneVisit(self: *const Registry, id: AgentId, visited: *[max_agents]bool) bool {
+        if (id.index >= max_agents) return true;
+        const slot = &self.slots[id.index];
+        if (slot.generation != id.generation) return true;
+        const value = slot.state.load(.acquire);
+        if (value == .free) return true;
+        // Validate the full ID before marking its slot: only the current
+        // generation can be reached, and cycles inspect each agent once.
+        if (visited[id.index]) return true;
+        visited[id.index] = true;
+        if (value == .reserved) return false;
+        const agent = if (slot.agent) |*agent| agent else return true;
+        if (agent.isBusy() or agent.status == .running or
+            agent.queued_messages.items.len > 0 or
+            agent.compaction.requested.load(.acquire) != .none) return false;
+
+        for (&self.slots, 0..) |*child, index| {
+            if (child.state.load(.acquire) == .free or child.parent != id.pack()) continue;
+            if (!self.subtreeDoneVisit(.{ .index = @intCast(index), .generation = child.generation }, visited)) return false;
+        }
+        return true;
+    }
+
     pub fn countActive(self: *const Registry) u32 {
         var count: u32 = 0;
         for (&self.slots) |*slot| {
