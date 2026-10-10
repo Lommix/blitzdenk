@@ -490,12 +490,14 @@ const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
 const AppFlagsDef = LuaType{ .table_def = .{ .name = "BlitzAppFlags", .fields = &.{
     .{ .name = "show_thinking", .ty = LuaType.boolean, .optional = true },
     .{ .name = "show_diffs", .ty = LuaType.boolean, .optional = true },
+    .{ .name = "notify_on_reload", .ty = LuaType.boolean, .optional = true },
     .{ .name = "debug_log", .ty = LuaType.boolean, .optional = true },
     .{ .name = "approval_mode", .ty = LuaType.string, .optional = true, .desc = "strict|default|yolo|smart" },
 } } };
 const FlagsStrings = struct {
     show_thinking: ?bool = null,
     show_diffs: ?bool = null,
+    notify_on_reload: ?bool = null,
     debug_log: ?bool = null,
     approval_mode: ?[]const u8 = null,
 };
@@ -1211,6 +1213,7 @@ pub const Blitz = LuaType{
                             return .{
                                 .show_thinking = a.flags.show_thinking,
                                 .show_diffs = a.flags.show_diffs,
+                                .notify_on_reload = a.flags.notify_on_reload,
                                 .debug_log = a.flags.debug_log,
                                 .approval_mode = @tagName(a.flags.approval_mode),
                             };
@@ -1229,6 +1232,7 @@ pub const Blitz = LuaType{
                             defer a.mu.unlock(a.io);
                             if (flags.show_thinking) |v| a.flags.show_thinking = v;
                             if (flags.show_diffs) |v| a.flags.show_diffs = v;
+                            if (flags.notify_on_reload) |v| a.flags.notify_on_reload = v;
                             if (flags.debug_log) |v| a.flags.debug_log = v;
                             if (flags.approval_mode) |str|
                                 a.flags.approval_mode = r.permissions.parseApprovalMode(str) orelse return error.UnknownApprovalMode;

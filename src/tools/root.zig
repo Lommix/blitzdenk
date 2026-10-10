@@ -126,7 +126,7 @@ pub fn markConfigTouched(ctx: ToolContext, resolved: []const u8) void {
         }
     }
     if (app.lua_config_dir) |dir| {
-        if (std.mem.startsWith(u8, resolved, dir)) {
+        if (r.app.pathInsideDir(resolved, dir)) {
             app.requestLuaReload();
             ctx.agent().markToolsDirty();
         }

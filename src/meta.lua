@@ -581,6 +581,7 @@
 ---@class BlitzAppFlags
 ---@field show_thinking? boolean
 ---@field show_diffs? boolean
+---@field notify_on_reload? boolean
 ---@field debug_log? boolean
 ---strict|default|yolo|smart
 ---@field approval_mode? string

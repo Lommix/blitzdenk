@@ -21,6 +21,7 @@ const session = r.session;
 const session_store = r.session_store;
 const tui = r.tui;
 const tools = r.tools;
+const config_watch = @import("config_watch.zig");
 
 // ----------------------------------------------------------------
 pub const DEFAULT_CONFIG_PATH = r.defaults.CONFIG_DIR;
@@ -86,24 +87,6 @@ fn ensureConfigLua(alloc: std.mem.Allocator, io: std.Io, env: *const std.process
     const dir_path: []const u8 = std.Io.Dir.cwd().realPathFileAlloc(io, raw_dir, alloc) catch raw_dir;
     const abs_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_path, DEFAULT_LUA_CONFIG });
     return .{ .abs_path = abs_path, .dir_path = dir_path };
-}
-
-fn scanDirMaxMtime(io: std.Io, path: []const u8) i128 {
-    var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch return 0;
-    defer dir.close(io);
-    var max_mtime: i128 = 0;
-    var it = dir.iterate();
-    while (it.next(io) catch null) |entry| {
-        if (entry.kind != .file) continue;
-        if (!isReloadableConfigLua(entry.name)) continue;
-        const stat = dir.statFile(io, entry.name, .{}) catch continue;
-        if (stat.mtime.nanoseconds > max_mtime) max_mtime = stat.mtime.nanoseconds;
-    }
-    return max_mtime;
-}
-
-fn isReloadableConfigLua(name: []const u8) bool {
-    return std.mem.endsWith(u8, name, ".lua") and !std.mem.eql(u8, name, "meta.lua");
 }
 
 fn handleWizardEnter(app: *App) void {
@@ -603,11 +586,15 @@ pub fn run(
         try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn }, .description = bind.description });
     }
 
-    var cwd_lua_mtime: i128 = blk: {
-        const stat = std.Io.Dir.cwd().statFile(io, "blitz.lua", .{}) catch break :blk 0;
-        break :blk stat.mtime.nanoseconds;
-    };
-    var config_lua_mtime: i128 = if (config_lua) |info| scanDirMaxMtime(io, info.dir_path) else 0;
+    var watch = config_watch.Watch.init(gpa);
+    defer watch.deinit();
+    {
+        var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const cwd_len = std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buf) catch 0;
+        if (cwd_len > 0) watch.blitz_path = try std.fmt.allocPrint(arena, "{s}/blitz.lua", .{cwd_buf[0..cwd_len]});
+    }
+    if (config_lua) |info| watch.config_dir = info.dir_path;
+    watch.refreshAfterReload(io);
     var reload_tick: u32 = 0;
 
     app.reset();
@@ -798,26 +785,20 @@ pub fn run(
                 .passphrase, .wizard, .session_picker => {},
             }
 
-            // Lua hot-reload: poll mtime every ~1s (cwd blitz.lua + config dir)
             reload_tick +%= 1;
             const reload_requested = app.lua_reload_requested.load(.acquire);
             if (reload_tick >= 60 or reload_requested) {
                 reload_tick = 0;
-                const new_cwd_mtime: i128 = blk: {
-                    const stat = std.Io.Dir.cwd().statFile(io, "blitz.lua", .{}) catch break :blk 0;
-                    break :blk stat.mtime.nanoseconds;
-                };
-                const new_config_mtime: i128 = if (config_lua) |info| scanDirMaxMtime(io, info.dir_path) else 0;
+                const changed = if (reload_requested) false else watch.pollCycle(io);
 
-                if (reload_requested or new_cwd_mtime != cwd_lua_mtime or new_config_mtime != config_lua_mtime) blk: {
+                var reload_completed = false;
+                var reload_failed = false;
+                if (reload_requested or changed) blk: {
                     try app.waitForMcpTools();
-                    // Tool worker may currently hold
-                    // vm_mu. Skip this tick if busy — mtime stays unchanged so we retry.
                     if (!app.lua_vm.vm_mu.tryLock()) break :blk;
                     defer app.lua_vm.vm_mu.unlock(io);
 
-                    cwd_lua_mtime = new_cwd_mtime;
-                    config_lua_mtime = new_config_mtime;
+                    var reset_failed = false;
 
                     app.lua_vm.clearLastError();
                     app.event_bus.clear(io);
@@ -825,7 +806,9 @@ pub fn run(
                     var lua_reload_failed = false;
 
                     app.lua_vm.reset() catch |err| {
+                        reset_failed = true;
                         lua_reload_failed = true;
+                        reload_failed = true;
                         std.log.scoped(.lua).err("hot-reload: failed to reset lua vm ({any})", .{err});
                     };
                     app.clearSelections(false);
@@ -836,16 +819,19 @@ pub fn run(
                         const inject = std.fmt.allocPrint(arena, "package.path = \"{s}/?.lua;\" .. package.path", .{info.dir_path}) catch null;
                         if (inject) |code| app.lua_vm.exec(code) catch |err| {
                             lua_reload_failed = true;
+                            reload_failed = true;
                             std.log.scoped(.lua).err("hot-reload: failed to configure lua package.path: {s} ({any})", .{ app.lua_vm.getLastError(), err });
                         };
                         app.lua_vm.load(info.abs_path) catch |err| {
                             lua_reload_failed = true;
+                            reload_failed = true;
                             std.log.scoped(.lua).err("hot-reload: failed to load {s}: {s} ({any})", .{ info.abs_path, app.lua_vm.getLastError(), err });
                         };
                     }
                     if (cwdBlitzLuaExists(io) and !app.localLuaIsGlobal()) {
                         app.lua_vm.load("blitz.lua") catch |err| {
                             lua_reload_failed = true;
+                            reload_failed = true;
                             std.log.scoped(.lua).err("hot-reload: failed to load blitz.lua: {s} ({any})", .{ app.lua_vm.getLastError(), err });
                         };
                     }
@@ -882,11 +868,14 @@ pub fn run(
                         try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn }, .description = bind.description });
                     }
 
-                    if (reload_requested) app.lua_reload_failed.store(false, .release);
+                    if (reload_requested) app.lua_reload_failed.store(reload_failed, .release);
                     try app.refreshLiveAgentTools();
                     _ = app.lua_reload_generation.fetchAdd(1, .monotonic);
                     if (reload_requested) app.markLuaReloadDone();
+                    if (!reset_failed) watch.refreshAfterReload(io);
+                    reload_completed = !reload_failed;
                 }
+                if (reload_completed and app.flags.notify_on_reload) app.cmd_queue.append(io, .{ .push_notification = "Lua sandbox reloaded" }) catch {};
             }
 
             term.pollAndEnqueue(16);

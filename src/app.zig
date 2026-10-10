@@ -54,7 +54,7 @@ fn moveFieldVertical(app: *App, alloc: std.mem.Allocator, field: anytype, width:
     field.cursor = target;
 }
 
-fn pathInsideDir(path: []const u8, dir: []const u8) bool {
+pub fn pathInsideDir(path: []const u8, dir: []const u8) bool {
     if (!std.mem.startsWith(u8, path, dir)) return false;
     return path.len == dir.len or path[dir.len] == '/';
 }
@@ -73,6 +73,7 @@ const builtin_command_completions: []const CommandCompletion = &.{
 pub const AppFlags = packed struct {
     show_thinking: bool = false,
     show_diffs: bool = true,
+    notify_on_reload: bool = true,
     debug_log: bool = true,
     approval_mode: r.permissions.ApprovalMode = .default,
 };
@@ -5244,6 +5245,61 @@ test "wizard skip writes defaults, honors marker, and existing provider.lua wins
     const preserved = try tmp.dir.readFileAlloc(std.testing.io, r.wizard.PROVIDER_LUA, std.testing.allocator, .limited(64 * 1024));
     defer std.testing.allocator.free(preserved);
     try std.testing.expectEqualStrings(existing, preserved);
+}
+
+test "markConfigTouched flags only paths inside the lua config dir" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const config_dir = try tmp.dir.realPathFileAlloc(io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(config_dir);
+    const blitz_abs = try std.fmt.allocPrint(std.testing.allocator, "{s}/blitz.lua", .{config_dir});
+    defer std.testing.allocator.free(blitz_abs);
+    var app: App = undefined;
+    app.io = io;
+    app.gpa = std.testing.allocator;
+    app.lua_config_dir = config_dir;
+    app.lua_config_abs = blitz_abs;
+    app.lua_reload_requested = .init(false);
+
+    var env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
+    defer env.deinit();
+    var exec_pool = r.exec.CmdPool.init(std.testing.allocator, io, &env);
+    defer exec_pool.deinit();
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, io);
+    defer registry.deinit();
+    const id = registry.reserve(null).?;
+    _ = try registry.activate(id, .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .params = .{ .openai = .{} },
+    }, .{});
+    const ctx: r.tools.ToolContext = .{
+        .alloc = std.testing.allocator,
+        .io = io,
+        .base = .{
+            .registry = &registry,
+            .exec_pool = &exec_pool,
+            .self_id = id,
+            .cwd = "/tmp",
+            .display = .{ .ctx = &app },
+        },
+    };
+
+    const sibling = try std.fmt.allocPrint(std.testing.allocator, "{s}-backup/x.lua", .{config_dir});
+    defer std.testing.allocator.free(sibling);
+    r.tools.markConfigTouched(ctx, sibling);
+    try std.testing.expectEqual(false, app.lua_reload_requested.load(.acquire));
+
+    const inside = try std.fmt.allocPrint(std.testing.allocator, "{s}/x.lua", .{config_dir});
+    defer std.testing.allocator.free(inside);
+    r.tools.markConfigTouched(ctx, inside);
+    try std.testing.expectEqual(true, app.lua_reload_requested.load(.acquire));
+
+    app.markLuaReloadDone();
+    r.tools.markConfigTouched(ctx, blitz_abs);
+    try std.testing.expectEqual(true, app.lua_reload_requested.load(.acquire));
 }
 
 fn finishWaitingTestTurn(registry: *r.agent_registry.Registry, id: r.AgentId) !void {
