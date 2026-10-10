@@ -419,7 +419,6 @@ fn sessionsTui(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env
     defer {
         app.cancelPermissions(null);
         registry.cancelAll();
-        r.artifact.cleanup(&exec_pool);
         app.deinit();
         registry.deinit();
         exec_pool.deinit();
@@ -545,7 +544,6 @@ pub fn run(
     defer {
         app.cancelPermissions(null);
         registry.cancelAll();
-        r.artifact.cleanup(&exec_pool);
         app.deinit();
         registry.deinit();
         exec_pool.deinit();

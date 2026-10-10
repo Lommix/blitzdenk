@@ -850,7 +850,6 @@ pub const App = struct {
         self.clearPendingDiffs();
         self.cancelPermissions(null);
         self.registry.cancelAll();
-        r.artifact.cleanup(self.exec_pool);
 
         self.main_agent_id = null;
         self.running = false;

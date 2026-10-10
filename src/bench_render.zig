@@ -136,7 +136,6 @@ pub fn main(init: std.process.Init) !void {
     defer {
         app.cancelPermissions(null);
         registry.cancelAll();
-        r.artifact.cleanup(&exec_pool);
         app.deinit();
         registry.deinit();
         exec_pool.deinit();
