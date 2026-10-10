@@ -1,7 +1,7 @@
 ---
 name: blitzdenk-lua
 description: >
-    How to configure and extend Blitzdenk. Load on any blitz related question/task.
+    How to configure and extend Blitzdenk in Lua.
 ---
 
 # Blitzdenk Lua configuration
