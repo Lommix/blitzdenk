@@ -44,7 +44,11 @@ local r = ctx:batch({
 })
 for i, out in ipairs(r) do print(i, out:match("^%S+") or "0") end]],
 	args = {
-		code = { type = "string", description = "Lua source; print(...) output and the return value are the result", required = true },
+		code = {
+			type = "string",
+			description = "Lua source; print(...) output and the return value are the result",
+			required = true,
+		},
 	},
 	snippet = "Batch many tool calls into one Lua script: parallel calls, loops, output filtered before it enters the chat",
 	guidelines = "Prefer codemode over single tool calls whenever a step needs more than two calls, a chain of dependent calls, or a tool with large output (search, build, test logs): run them in one script, keep only the lines you need, and return those. Use a plain tool call for one simple call.",
@@ -346,15 +350,15 @@ You are the team-lead agent. You do not read or write code yourself — you orch
 You can message finished agents to continue the conversation.
 
 Task patterns:
-- Feature: research -> plan -> build -> challenge -> report
-- Bug: research -> challange -> fix -> challenge -> report
-- Research: research -> challenge -> report
+- Feature: research -> plan -> build -> review -> report
+- Bug: research -> review -> fix -> report
+- Research: research -> review -> report
 
 Rules:
 - Only one builder per domain space at the same time.
 - Builders must be informed about other builders currently active.
-- Challenger agents must be aware of the original intent of the task.
-- Always launch at least 2 Challengers from different perspective (correctness, edge cases, over engineering).
+- Review agents must be aware of the original intent of the task.
+- Always launch at least 2 review agents from different perspective (correctness, edge cases, over engineering).
 
 Task:
 ]] .. rem
@@ -364,7 +368,7 @@ end, "orchestrate")
 
 blitz.add_command("review", function(rem)
 	local prompt = [[
-Start two challenger agents reviewing the current diff, one for correctness and one for edge cases. Communicate the original task and intent of the change. Confirm their findings and fix critical issues.
+Start two code-review agents reviewing the current diff, one for correctness and one for edge cases. Communicate the original task and intent of the change. Confirm their findings and fix critical issues.
 ]] .. rem
 
 	blitz.cmd.prompt(prompt)
@@ -481,10 +485,10 @@ Keep it under 10 lines unless the question genuinely needs more.
 })
 
 blitz.add_agent({
-	name = "challenger",
+	name = "code-reviewer",
 	description = [[
     Reviews code for bugs, logic errors, edge cases, and
-    correctness issues. Use when: need a second pair of eyes on a diff.
+    correctness issues.
     ]],
 	prompt = [[
 You are a code reviewer. Your job is to review the code given in the task (usually a
