@@ -117,6 +117,7 @@ pub const PrepareStepInfo = struct {
 pub const PrepareStepResult = struct {
     messages: []const types.Message = &.{},
     replace: bool = false,
+    replacement_kind: HistoryChange = .history_replace,
     tools: ?[]const types.Tool = null,
 };
 
@@ -126,7 +127,11 @@ pub const StopInfo = struct {
     tool_results: []const types.ToolResult,
 };
 
+pub const HistoryChange = enum { append, history_replace, compaction, interrupted_exchange, rewind };
+
 pub const Hooks = struct {
+    on_history: ?*const fn (ctx: ?*anyopaque, change: HistoryChange, messages: []const types.Message) anyerror!void = null,
+    on_history_ctx: ?*anyopaque = null,
     on_checkpoint: ?*const fn (ctx: ?*anyopaque, messages: []const types.Message) void = null,
     on_checkpoint_ctx: ?*anyopaque = null,
 

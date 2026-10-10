@@ -20,6 +20,8 @@ const LifetimeHooks = struct {
 };
 
 const RunHooks = struct {
+    history: ?*const fn (?*anyopaque, sdk.options.HistoryChange, []const sdk.Message) anyerror!void = null,
+    history_ctx: ?*anyopaque = null,
     prepare: ?PrepareHook = null,
     prepare_ctx: ?*anyopaque = null,
     tool_call: ?ToolCallHook = null,
@@ -82,6 +84,8 @@ pub const Agent = struct {
     compaction: compact.State = .{},
     messages: ?agent_run.OwnedMessages = null,
     history_gen: u64 = 0,
+    journal: ?*@import("session_store.zig").Store = null,
+    journal_id: u32 = 0,
     turn_checkpoint: usize = 0,
     tools: []const sdk.Tool = &.{},
     flags: Flags = .{},
@@ -185,8 +189,14 @@ pub const Agent = struct {
     }
 
     pub fn setMessages(self: *Agent, messages: []const sdk.Message) !void {
+        try self.replaceMessages(messages, .history_replace);
+    }
+
+    pub fn replaceMessages(self: *Agent, messages: []const sdk.Message, change: sdk.options.HistoryChange) !void {
         if (self.task != null) return error.RunInProgress;
-        const owned = try agent_run.OwnedMessages.clone(self.alloc, messages);
+        var owned = try agent_run.OwnedMessages.clone(self.alloc, messages);
+        errdefer owned.deinit();
+        try self.publishHistory(change, messages);
         if (self.messages) |*previous| previous.deinit();
         self.messages = owned;
         self.history_gen +%= 1;
@@ -199,10 +209,12 @@ pub const Agent = struct {
 
     pub fn setTaskDescription(self: *Agent, task: []const u8) !void {
         self.task_description = try self.metadata.allocator().dupe(u8, task);
+        try self.publishMetadata(.agent_update);
     }
 
     pub fn setCwd(self: *Agent, cwd: []const u8) !void {
         self.cwd = try self.metadata.allocator().dupe(u8, cwd);
+        try self.publishMetadata(.agent_update);
         self.flags.cwd_seen = false;
         self.flags.agents_context_files_seen = false;
     }
@@ -363,6 +375,8 @@ pub const Agent = struct {
         run_options.messages = self.history();
         run_options.tools = self.tools;
         self.run_hooks = .{
+            .history = run_options.hooks.on_history,
+            .history_ctx = run_options.hooks.on_history_ctx,
             .prepare = run_options.hooks.on_prepare_step,
             .prepare_ctx = run_options.hooks.on_prepare_step_ctx,
             .tool_call = run_options.hooks.on_tool_call,
@@ -376,6 +390,8 @@ pub const Agent = struct {
         run_options.hooks.on_tool_call_ctx = self;
         run_options.hooks.stop_when = stopWhen;
         run_options.hooks.stop_when_ctx = self;
+        run_options.hooks.on_history = historyChanged;
+        run_options.hooks.on_history_ctx = self;
         self.task = agent_run.RunTask.init(self.alloc, self.io, model, run_options) catch |err| {
             self.clearRunHooks();
             return err;
@@ -572,10 +588,6 @@ pub const Agent = struct {
         _ = self.reap();
     }
 
-    pub fn requestStop(self: *Agent) void {
-        self.stop_requested.store(true, .release);
-    }
-
     pub fn contextPercent(self: *const Agent) u8 {
         if (self.context_limit == 0) return 0;
         return @intCast(@min(100, self.context_tokens * 100 / self.context_limit));
@@ -593,10 +605,12 @@ pub const Agent = struct {
 
         var base = upstream.messages;
         var replace = upstream.replace;
+        var replacement_kind = upstream.replacement_kind;
         if (!replace) {
             if (self.maybeCompactForStep(info.messages)) |compacted| {
                 base = compacted;
                 replace = true;
+                replacement_kind = .compaction;
             }
         }
 
@@ -615,7 +629,7 @@ pub const Agent = struct {
         else
             null;
         if (self.queued_messages.items.len == 0 and reminder == null) {
-            return .{ .messages = base, .replace = replace, .tools = refreshed_tools };
+            return .{ .messages = base, .replace = replace, .replacement_kind = replacement_kind, .tools = refreshed_tools };
         }
         const alloc = self.step_arena.allocator();
         const combined = try alloc.alloc(sdk.Message, base.len + @intFromBool(reminder != null) + self.queued_messages.items.len);
@@ -623,7 +637,7 @@ pub const Agent = struct {
         if (reminder) |text| combined[base.len] = sdk.UserMessage(text);
         @memcpy(combined[combined.len - self.queued_messages.items.len ..], self.queued_messages.items);
         self.queued_messages.clearRetainingCapacity();
-        return .{ .messages = combined, .replace = replace, .tools = refreshed_tools };
+        return .{ .messages = combined, .replace = replace, .replacement_kind = replacement_kind, .tools = refreshed_tools };
     }
 
     fn currentContextEstimate(self: *Agent) u64 {
@@ -702,6 +716,14 @@ pub const Agent = struct {
         if (outcome) |value| {
             self.compaction.noteSuccess();
             self.compaction.completed_continue_after = self.compaction.continue_after;
+            self.publishHistory(.compaction, value.messages.messages) catch |err| {
+                var orphan = value.messages;
+                orphan.deinit();
+                self.compaction.resetInFlight();
+                self.last_error = err;
+                self.status = .failed;
+                return true;
+            };
             if (self.messages) |*previous| previous.deinit();
             self.messages = value.messages;
             self.history_gen +%= 1;
@@ -742,6 +764,7 @@ pub const Agent = struct {
 
     fn appendHistory(self: *Agent, messages: []const sdk.Message) !void {
         if (messages.len == 0) return;
+        try self.publishHistory(.append, messages);
         if (self.messages) |*owned| {
             const alloc = owned.arena.allocator();
             const appended = try agent_run.cloneMessages(alloc, messages);
@@ -752,6 +775,28 @@ pub const Agent = struct {
         } else {
             self.messages = try agent_run.OwnedMessages.clone(self.alloc, messages);
         }
+    }
+
+    pub fn publishMetadata(self: *Agent, kind: @import("session_store.zig").Kind) !void {
+        const store = self.journal orelse return;
+        try store.enqueue(.{ .kind = kind, .agentID = self.journal_id, .name = self.name, .type_idx = self.type_idx, .parent = self.parent, .depth = self.depth, .cwd = self.cwd, .background = self.background, .clean = self.clean, .task_description = self.task_description });
+    }
+
+    fn historyChanged(ctx: ?*anyopaque, change: sdk.options.HistoryChange, messages: []const sdk.Message) !void {
+        const self: *Agent = @ptrCast(@alignCast(ctx.?));
+        try self.publishHistory(change, messages);
+        if (self.run_hooks.history) |hook| try hook(self.run_hooks.history_ctx, change, messages);
+    }
+
+    fn publishHistory(self: *Agent, change: sdk.options.HistoryChange, messages: []const sdk.Message) !void {
+        if (self.journal) |store| try store.publish(self.journal_id, change, messages);
+    }
+
+    pub fn removeFromJournal(self: *Agent) void {
+        if (self.journal) |store| store.enqueue(.{ .kind = .agent_remove, .agentID = self.journal_id }) catch |err| {
+            std.log.scoped(.session).err("agent removal: {s}", .{@errorName(err)});
+        };
+        self.journal = null;
     }
 
     fn recordOutput(self: *Agent, bytes: usize) void {

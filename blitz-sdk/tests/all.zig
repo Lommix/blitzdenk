@@ -87,7 +87,10 @@ test "sdk smoke: tool loop with fake model" {
     };
 
     const FixtureTool = struct {
-        fn exec(_: ?*anyopaque, alloc: std.mem.Allocator, _: std.Io, call: sdk.ToolCall) anyerror!sdk.ToolOutput {
+        fn exec(ctx: ?*anyopaque, alloc: std.mem.Allocator, _: std.Io, call: sdk.ToolCall) anyerror!sdk.ToolOutput {
+            const trace: *HistoryTrace = @ptrCast(@alignCast(ctx.?));
+            try std.testing.expectEqual(@as(usize, 2), trace.count);
+            try std.testing.expectEqual(sdk.types.Role.assistant, trace.roles[1]);
             return .{
                 .content = std.fmt.allocPrint(alloc, "echo:{s}", .{call.input}) catch "echo",
                 .image = .{ .url = "data:image/png;base64,aW1n", .media_type = "image/png" },
@@ -103,8 +106,9 @@ test "sdk smoke: tool loop with fake model" {
     };
     const chat = model.LanguageModel{ .ctx = &fixture, .vtable = &vtable };
 
+    var trace = HistoryTrace{};
     var tools = [_]types.Tool{
-        .{ .name = "echo", .description = "echoes", .execute = FixtureTool.exec },
+        .{ .name = "echo", .description = "echoes", .execute = FixtureTool.exec, .execute_ctx = &trace },
     };
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -116,9 +120,13 @@ test "sdk smoke: tool loop with fake model" {
         .prompt = "hi",
         .tools = &tools,
         .max_steps = 2,
+        .hooks = .{ .on_history = HistoryTrace.notify, .on_history_ctx = &trace },
     });
     defer result.deinit(arena.allocator());
 
+    try std.testing.expectEqual(@as(usize, 4), trace.count);
+    for (trace.lengths[0..trace.count]) |length| try std.testing.expectEqual(@as(usize, 1), length);
+    try std.testing.expectEqual(sdk.types.Role.assistant, trace.roles[3]);
     try std.testing.expectEqualStrings("done", result.text);
     try std.testing.expectEqual(@as(usize, 2), result.steps.len);
     try std.testing.expect(!result.steps_exhausted);
@@ -200,6 +208,7 @@ test "sdk steps survive prepare hook history replacement" {
         }
     };
 
+    var trace = HistoryTrace{};
     var fixture = Fixture{};
     const vtable = model.ModelVTable{
         .model_id = Fixture.modelId,
@@ -211,12 +220,17 @@ test "sdk steps survive prepare hook history replacement" {
 
     var result = try sdk.complete(std.testing.allocator, std.testing.io, chat, .{
         .prompt = "hi",
+        .messages = &.{sdk.UserMessage("already persisted")},
         .tools = &tools,
         .max_steps = 2,
-        .hooks = .{ .on_prepare_step = Hooks.prepare },
+        .hooks = .{ .on_prepare_step = Hooks.prepare, .on_history = HistoryTrace.notify, .on_history_ctx = &trace },
     });
     defer result.deinit(std.testing.allocator);
 
+    try std.testing.expectEqual(@as(usize, 5), trace.count);
+    try std.testing.expectEqual(sdk.options.HistoryChange.history_replace, trace.changes[3]);
+    try std.testing.expectEqual(sdk.options.HistoryChange.append, trace.changes[4]);
+    for (trace.lengths[0..trace.count]) |length| try std.testing.expectEqual(@as(usize, 1), length);
     try std.testing.expectEqualStrings("beforeafter", result.text);
     try std.testing.expectEqual(@as(usize, 2), result.steps.len);
     try std.testing.expectEqualStrings("before", result.steps[0].text);
@@ -556,3 +570,19 @@ test "sdk successful tool execution does not wait for cancellation" {
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("done", result.text);
 }
+
+const HistoryTrace = struct {
+    changes: [16]sdk.options.HistoryChange = undefined,
+    lengths: [16]usize = undefined,
+    roles: [16]sdk.types.Role = undefined,
+    count: usize = 0,
+
+    fn notify(ctx: ?*anyopaque, change: sdk.options.HistoryChange, messages: []const sdk.Message) !void {
+        const self: *HistoryTrace = @ptrCast(@alignCast(ctx.?));
+        if (self.count == self.changes.len) return error.TooManyEvents;
+        self.changes[self.count] = change;
+        self.lengths[self.count] = messages.len;
+        self.roles[self.count] = if (messages.len > 0) messages[0].role else .system;
+        self.count += 1;
+    }
+};

@@ -1,201 +1,315 @@
 const std = @import("std");
 const session = @import("session.zig");
-
+const sdk = @import("blitz-sdk");
+const app = @import("app.zig");
 const DIR_NAME = "sessions";
 pub const GC_AGE_MS: i64 = 16 * 24 * 60 * 60 * std.time.ms_per_s;
-const FORMAT_VERSION = 1;
-const MAX_CHECKPOINTS = 4;
 const ID_RANDOM_LEN = 4;
 const NAME_EXTENSION = ".jsonl";
 const HEX = "0123456789abcdef";
 pub const ID_LEN = "20250827-184000-".len + ID_RANDOM_LEN;
 pub const PROMPT_CLIP: usize = 80;
-pub const LEGACY_PROMPT = "<legacy format>";
-const PROMPT_FIELD_MAX = 512;
+pub const Header = struct { kind: []const u8, v: u32, id: []const u8, created_ms: i64 = 0, cwd: []const u8 = "" };
+pub const Entry = struct { id: []const u8, modified_ms: i64 };
+pub const Kind = enum { agent, main_agent, message, compaction, reset, timeline_append, timeline_truncate, tool_status, agent_update, agent_remove };
+pub const Record = struct {
+    kind: Kind,
+    agentID: ?u32 = null,
+    name: ?[]const u8 = null,
+    type_idx: ?u8 = null,
+    parent: ?u32 = null,
+    depth: ?u16 = null,
+    cwd: ?[]const u8 = null,
+    background: ?bool = null,
+    clean: ?bool = null,
+    task_description: ?[]const u8 = null,
+    message: ?session.WireMessage = null,
+    history: ?[]const session.WireMessage = null,
+    reason: ?[]const u8 = null,
+    entry: ?app.TimelineEntry = null,
+    length: ?usize = null,
+    call_id: ?[]const u8 = null,
+    ansi: []const u8 = "",
+    state: session.ToolState = .pending,
+    child: ?u32 = null,
 
-pub const Header = struct {
-    id: []const u8,
-    created_ms: i64 = 0,
-    cwd: []const u8 = "",
+    pub fn jsonStringify(self: Record, j: anytype) !void {
+        switch (self.kind) {
+            .agent, .agent_update => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .name = self.name, .type_idx = self.type_idx, .parent = self.parent, .depth = self.depth, .cwd = self.cwd, .background = self.background, .clean = self.clean, .task_description = self.task_description }),
+            .main_agent, .agent_remove => try j.write(.{ .kind = self.kind, .agentID = self.agentID }),
+            .message => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .message = self.message }),
+            .compaction => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .history = self.history }),
+            .reset => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .history = self.history, .reason = self.reason }),
+            .timeline_append => try j.write(.{ .kind = self.kind, .entry = self.entry }),
+            .timeline_truncate => try j.write(.{ .kind = self.kind, .length = self.length }),
+            .tool_status => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .call_id = self.call_id, .ansi = self.ansi, .state = self.state, .child = self.child }),
+        }
+    }
 };
 
-pub const Entry = struct {
-    id: []const u8,
-    modified_ms: i64,
-};
-
-/// Header plus the newest parseable checkpoint, all allocated in the caller's
-/// arena. Freed by dropping that arena.
-pub const Loaded = struct {
-    header: Header,
-    save: session.SaveState,
-};
-
-/// Append-only JSONL journal: header line, then full-snapshot checkpoint
-/// lines. `base` is the per-project cache directory; every call in `main.zig`
-/// opens it through `sessionProjectDir`, so a session started via
-/// `blitz /path/to/proj` is discoverable by `blitz continue` inside that
-/// project. `create` only arms the store; the journal file materializes with
-/// the first `appendCheckpoint`, so launches without a first message leave no
-/// journal behind. Loads tolerate torn or corrupt tail lines by falling back
-/// to the last parseable checkpoint; a file without a usable checkpoint counts
-/// as absent.
+const Display = struct { arena: std.heap.ArenaAllocator, entry: app.TimelineEntry };
+const Pending = struct { bytes: []u8, chat: bool };
 pub const Store = struct {
     io: std.Io,
     gpa: std.mem.Allocator,
     base: std.Io.Dir,
     file_name: ?[]const u8 = null,
-    checkpoint_count: u32 = 0,
+    file: ?std.Io.File = null,
+    offset: u64 = 0,
+    holds_chat: bool = false,
     cwd: []const u8 = "",
+    mutex: std.Io.Mutex = .init,
+    pending: std.ArrayList(Pending) = .empty,
+    batch: std.ArrayList(Pending) = .empty,
+    blocked: bool = false,
+    write_batch: ?*const fn (std.Io.File, std.Io, []const u8, u64) anyerror!void = null,
+    main: ?u32 = null,
+    displays: std.ArrayList(Display) = .empty,
+    interruptions: std.ArrayList(u32) = .empty,
+    declared: std.AutoHashMapUnmanaged(u32, void) = .empty,
 
     pub fn deinit(self: *Store) void {
-        if (self.file_name) |name| self.gpa.free(name);
-        self.file_name = null;
-        if (self.cwd.len > 0) self.gpa.free(self.cwd);
-        self.cwd = "";
+        self.flush() catch {};
+        self.bump();
+        self.pending.deinit(self.gpa);
+        self.batch.deinit(self.gpa);
+        self.displays.deinit(self.gpa);
+        self.interruptions.deinit(self.gpa);
+        self.declared.deinit(self.gpa);
+        self.gpa.free(self.cwd);
     }
 
-    /// Arms the store so the first `appendCheckpoint` materializes the journal file.
     pub fn create(self: *Store, cwd: []const u8) !void {
-        try self.setCwd(cwd);
-        self.checkpoint_count = 0;
-    }
-
-    fn setCwd(self: *Store, cwd: []const u8) !void {
-        if (self.cwd.len > 0) self.gpa.free(self.cwd);
-        self.cwd = try self.gpa.dupe(u8, cwd);
-    }
-
-    fn createJournal(self: *Store) !void {
-        const cwd = if (self.cwd.len > 0) self.cwd else ".";
-        var sessions_dir = try openSessionsDir(self.base, self.io);
-        defer sessions_dir.close(self.io);
-
-        const now = wallMillis(self.io);
-        var id_buf: [ID_LEN]u8 = undefined;
-        formatId(&id_buf, now, self.io);
-        const file_name = try std.fmt.allocPrint(self.gpa, "{s}" ++ NAME_EXTENSION, .{id_buf});
-        errdefer self.gpa.free(file_name);
-
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const header_line = try headerLine(arena.allocator(), &id_buf, now, cwd);
-
-        var buffer: [512]u8 = undefined;
-        const file = try sessions_dir.createFile(self.io, file_name, .{});
-        errdefer sessions_dir.deleteFile(self.io, file_name) catch {};
-        defer file.close(self.io);
-        var writer = file.writer(self.io, &buffer);
-        try writer.interface.writeAll(header_line);
-        try writer.interface.flush();
-
-        if (self.file_name) |old| self.gpa.free(old);
-        self.file_name = file_name;
-        self.checkpoint_count = 0;
+        try self.flush();
+        self.bump();
+        const copy = try self.gpa.dupe(u8, cwd);
+        self.gpa.free(self.cwd);
+        self.cwd = copy;
     }
 
     pub fn bump(self: *Store) void {
+        if (self.file) |file| file.close(self.io);
+        self.file = null;
         if (self.file_name) |name| self.gpa.free(name);
         self.file_name = null;
-        self.checkpoint_count = 0;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (self.pending.items) |item| self.gpa.free(item.bytes);
+        for (self.batch.items) |item| self.gpa.free(item.bytes);
+        self.pending.clearRetainingCapacity();
+        self.batch.clearRetainingCapacity();
+        for (self.displays.items) |*display| display.arena.deinit();
+        self.displays.clearRetainingCapacity();
+        self.interruptions.clearRetainingCapacity();
+        self.declared.clearRetainingCapacity();
+        self.main = null;
+        self.holds_chat = false;
+        self.blocked = false;
+        self.offset = 0;
     }
 
-    /// Opens an existing journal; the next append may compact immediately.
-    pub fn open(self: *Store, cwd: []const u8, file_name: []const u8) !void {
-        try self.setCwd(cwd);
-        const copy = try self.gpa.dupe(u8, file_name);
-        if (self.file_name) |old| self.gpa.free(old);
-        self.file_name = copy;
-        self.checkpoint_count = MAX_CHECKPOINTS;
+    pub fn enqueue(self: *Store, record: Record) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.enqueueLocked(record);
     }
 
-    /// Copies the current session id into `buf`, null when no file is open.
+    fn enqueueLocked(self: *Store, record: Record) !void {
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try std.json.Stringify.value(record, .{}, &out.writer);
+        try out.writer.writeByte('\n');
+        const bytes = try out.toOwnedSlice();
+        errdefer self.gpa.free(bytes);
+        try self.pending.append(self.gpa, .{ .bytes = bytes, .chat = record.kind == .message or (record.history != null and record.history.?.len > 0) });
+        if (record.kind == .main_agent) self.main = record.agentID;
+        if (record.kind == .agent_remove and self.main == record.agentID) self.main = null;
+        if (record.kind == .agent) if (record.agentID) |id| try self.declared.put(self.gpa, id, {});
+    }
+
+    pub fn declares(self: *const Store, id: u32) bool {
+        return self.declared.contains(id);
+    }
+
+    pub fn publish(self: *Store, id: u32, change: sdk.options.HistoryChange, messages: []const sdk.Message) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const wire = try session.encodeChat(messages, arena.allocator());
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (change == .interrupted_exchange) try self.interruptions.append(self.gpa, id);
+        switch (change) {
+            .append => {
+                for (wire) |message| try self.enqueueLocked(.{ .kind = .message, .agentID = id, .message = message });
+                if (self.main == id) for (messages) |message| {
+                    if (message.role != .assistant) continue;
+                    var display_arena = std.heap.ArenaAllocator.init(self.gpa);
+                    errdefer display_arena.deinit();
+                    const parts = app.renderSdkParts(display_arena.allocator(), .unpack(id), message.parts()) orelse {
+                        display_arena.deinit();
+                        continue;
+                    };
+                    const entry = app.TimelineEntry{ .role = .agent, .parts = parts };
+                    try self.displays.ensureUnusedCapacity(self.gpa, 1);
+                    try self.enqueueLocked(.{ .kind = .timeline_append, .entry = entry });
+                    self.displays.appendAssumeCapacity(.{ .arena = display_arena, .entry = entry });
+                };
+            },
+            .compaction, .history_replace, .interrupted_exchange, .rewind => try self.enqueueLocked(.{
+                .kind = if (change == .compaction) .compaction else .reset,
+                .agentID = id,
+                .history = wire,
+                .reason = @tagName(change),
+            }),
+        }
+    }
+
+    fn createJournal(self: *Store) !void {
+        var dir = try openSessionsDir(self.base, self.io);
+        defer dir.close(self.io);
+        const now = wallMillis(self.io);
+        var id: [ID_LEN]u8 = undefined;
+        formatId(&id, now, self.io);
+        const name = try fileName(self.gpa, &id);
+        errdefer self.gpa.free(name);
+        const file = try dir.createFile(self.io, name, .{ .read = true, .exclusive = true });
+        errdefer file.close(self.io);
+        errdefer dir.deleteFile(self.io, name) catch {};
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        try std.json.Stringify.value(Header{ .kind = "header", .v = 2, .id = &id, .created_ms = now, .cwd = self.cwd }, .{}, &out.writer);
+        try out.writer.writeByte('\n');
+        try file.writePositionalAll(self.io, out.written(), 0);
+        self.file = file;
+        self.file_name = name;
+        self.offset = out.written().len;
+    }
+
+    pub fn flush(self: *Store) !void {
+        if (self.blocked) return error.JournalNeedsRecovery;
+        {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            if (self.batch.items.len == 0) {
+                std.mem.swap(std.ArrayList(Pending), &self.pending, &self.batch);
+            } else {
+                try self.batch.appendSlice(self.gpa, self.pending.items);
+                self.pending.clearRetainingCapacity();
+            }
+        }
+        if (self.batch.items.len == 0) return;
+        if (self.file == null) try self.createJournal();
+        var out: std.Io.Writer.Allocating = .init(self.gpa);
+        defer out.deinit();
+        for (self.batch.items) |item| try out.writer.writeAll(item.bytes);
+        const file = self.file.?;
+        (if (self.write_batch) |write| write(file, self.io, out.written(), self.offset) else file.writePositionalAll(self.io, out.written(), self.offset)) catch |err| {
+            self.reconcile() catch {
+                self.blocked = true;
+                return error.JournalNeedsRecovery;
+            };
+            return err;
+        };
+        self.acknowledge(self.batch.items.len);
+    }
+
+    fn reconcile(self: *Store) !void {
+        const size = (try self.file.?.stat(self.io)).size;
+        if (size < self.offset) return error.InvalidJournalOffset;
+        var end = self.offset;
+        var count: usize = 0;
+        for (self.batch.items) |item| {
+            if (end + item.bytes.len > size) break;
+            end += item.bytes.len;
+            count += 1;
+        }
+        try self.file.?.setLength(self.io, end);
+        self.acknowledge(count);
+    }
+
+    fn acknowledge(self: *Store, count: usize) void {
+        for (self.batch.items[0..count]) |item| {
+            self.offset += item.bytes.len;
+            self.holds_chat = self.holds_chat or item.chat;
+            self.gpa.free(item.bytes);
+        }
+        self.batch.replaceRangeAssumeCapacity(0, count, &.{});
+    }
+
+    pub fn open(self: *Store, cwd: []const u8, name: []const u8) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const loaded = (try load(arena.allocator(), self.io, self.base, name)) orelse return error.SessionNotFound;
+        var dir = try openSessionsDir(self.base, self.io);
+        defer dir.close(self.io);
+        if (loaded.problem != null) try repair(self.gpa, self.io, dir, name, loaded.accepted_bytes);
+        try self.create(cwd);
+        for (loaded.save.archived_ids) |id| try self.declared.put(self.gpa, id, {});
+        self.file_name = try self.gpa.dupe(u8, name);
+        self.file = try dir.openFile(self.io, name, .{ .mode = .read_write });
+        self.offset = loaded.accepted_bytes;
+        self.holds_chat = loaded.holds_chat;
+        self.main = loaded.save.main_agent;
+        for (loaded.repairs) |record| try self.enqueue(record);
+        try self.flush();
+    }
+
+    pub fn drainDisplay(self: *Store, target: *app.App) !void {
+        self.mutex.lockUncancelable(self.io);
+        var displays = self.displays;
+        self.displays = .empty;
+        var interruptions = self.interruptions;
+        self.interruptions = .empty;
+        self.mutex.unlock(self.io);
+        defer interruptions.deinit(self.gpa);
+        for (interruptions.items) |id| target.interruptToolStatuses(.unpack(id));
+        defer displays.deinit(self.gpa);
+        defer for (displays.items) |*display| display.arena.deinit();
+        for (displays.items) |display| {
+            const entry = try @import("util.zig").deepClone(app.TimelineEntry, display.entry, target.sessionAlloc());
+            try target.timeline.append(target.sessionAlloc(), entry);
+        }
+        if (displays.items.len > 0) {
+            target.dropStreamingPreview();
+            target.sdk_preview_flushed = true;
+            target.dirty = true;
+        }
+    }
+
+    pub fn holdsChat(self: *const Store) bool {
+        return self.holds_chat;
+    }
     pub fn currentId(self: *Store, buf: []u8) ?[]const u8 {
         const name = self.file_name orelse return null;
-        const stem_len = name.len - NAME_EXTENSION.len;
-        if (stem_len > buf.len) return null;
-        @memcpy(buf[0..stem_len], name[0..stem_len]);
-        return buf[0..stem_len];
-    }
-
-    /// Appends one snapshot line; compacts (rewrite via temp+rename) past the cap.
-    /// The 512-byte writer buffer streams fine even for multi-MB checkpoint
-    /// lines — do not "optimize" it to line size.
-    pub fn appendCheckpoint(self: *Store, save: session.SaveState) !void {
-        if (self.file_name == null) try self.createJournal();
-        const name = self.file_name.?;
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const line = try checkpointLine(arena.allocator(), self.io, save);
-
-        var buffer: [512]u8 = undefined;
-        var sessions_dir = try openSessionsDir(self.base, self.io);
-        defer sessions_dir.close(self.io);
-        const file = try sessions_dir.openFile(self.io, name, .{ .mode = .read_write });
-        defer file.close(self.io);
-        const end = try endOffset(file, self.io);
-        var writer = file.writer(self.io, &buffer);
-        try writer.seekTo(end);
-        // Heal a torn tail (crash/ENOSPC mid-write): never fuse the fresh
-        // checkpoint onto a line missing its '\n'.
-        if (end > 0) {
-            var tail: [1]u8 = undefined;
-            const got = try file.readPositionalAll(self.io, &tail, end - 1);
-            if (got == 1 and tail[0] != '\n') try writer.interface.writeByte('\n');
-        }
-        try writer.interface.writeAll(line);
-        try writer.interface.flush();
-        self.checkpoint_count += 1;
-
-        if (self.checkpoint_count > MAX_CHECKPOINTS) self.compact() catch |err| {
-            std.log.scoped(.session).warn("checkpoint compaction failed: {s}", .{@errorName(err)});
-        };
-    }
-
-    /// Rewrites header + newest checkpoint through a temp file and rename.
-    /// State (`checkpoint_count`) is only committed after the rename succeeds,
-    /// so a failure leaves the Store consistent with the on-disk journal.
-    fn compact(self: *Store) !void {
-        const name = self.file_name orelse return error.NoSessionOpen;
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const alloc = arena.allocator();
-
-        const loaded = (try load(alloc, self.io, self.base, name)) orelse return error.NoCheckpoint;
-
-        const tmp_name = try std.fmt.allocPrint(self.gpa, "{s}.tmp", .{name});
-        defer self.gpa.free(tmp_name);
-
-        var sessions_dir = try openSessionsDir(self.base, self.io);
-        defer sessions_dir.close(self.io);
-
-        const header_line = try headerLine(alloc, loaded.header.id, loaded.header.created_ms, loaded.header.cwd);
-        const line = try checkpointLine(alloc, self.io, loaded.save);
-
-        var buffer: [512]u8 = undefined;
-        const tmp = try sessions_dir.createFile(self.io, tmp_name, .{});
-        defer tmp.close(self.io);
-        var writer = tmp.writer(self.io, &buffer);
-        try writer.interface.writeAll(header_line);
-        try writer.interface.writeAll(line);
-        try writer.interface.flush();
-
-        try std.Io.Dir.rename(sessions_dir, tmp_name, sessions_dir, name, self.io);
-        self.checkpoint_count = 1;
+        const n = name.len - NAME_EXTENSION.len;
+        if (n > buf.len) return null;
+        @memcpy(buf[0..n], name[0..n]);
+        return buf[0..n];
     }
 };
 
-fn endOffset(file: std.Io.File, io: std.Io) !u64 {
-    const stat = try file.stat(io);
-    return stat.size;
-}
-
-fn headerLine(alloc: std.mem.Allocator, id: []const u8, created_ms: i64, cwd: []const u8) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    try out.writer.print("{{\"kind\":\"header\",\"v\":{d},\"id\":\"{s}\",\"created_ms\":{d},\"cwd\":", .{ FORMAT_VERSION, id, created_ms });
-    try std.json.Stringify.value(cwd, .{}, &out.writer);
-    try out.writer.writeAll("}\n");
-    return out.toOwnedSlice();
+fn repair(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, length: u64) !void {
+    const backup = try std.fmt.allocPrint(gpa, "{s}.{d}.bak", .{ name, wallMillis(io) });
+    defer gpa.free(backup);
+    const temp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{name});
+    defer gpa.free(temp);
+    const source = try dir.openFile(io, name, .{});
+    defer source.close(io);
+    const saved = try dir.createFile(io, backup, .{ .exclusive = true });
+    defer saved.close(io);
+    const target = try dir.createFile(io, temp, .{});
+    defer target.close(io);
+    errdefer dir.deleteFile(io, temp) catch {};
+    var buffer: [8192]u8 = undefined;
+    var offset: u64 = 0;
+    while (true) {
+        const n = try source.readPositionalAll(io, &buffer, offset);
+        if (n == 0) break;
+        try saved.writePositionalAll(io, buffer[0..n], offset);
+        if (offset < length) try target.writePositionalAll(io, buffer[0..@intCast(@min(n, length - offset))], offset);
+        offset += n;
+    }
+    try std.Io.Dir.rename(dir, temp, dir, name, io);
 }
 
 pub fn wallMillis(io: std.Io) i64 {
@@ -243,6 +357,7 @@ pub fn list(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir) ![]Entry {
         if (item.kind != .file) continue;
         if (!std.mem.endsWith(u8, item.name, NAME_EXTENSION)) continue;
         if (std.mem.endsWith(u8, item.name, ".tmp")) continue;
+        if (!supported(alloc, io, sessions_dir, item.name)) continue;
         const stat = sessions_dir.statFile(io, item.name, .{}) catch continue;
         try entries.append(alloc, .{
             .id = try alloc.dupe(u8, item.name[0 .. item.name.len - NAME_EXTENSION.len]),
@@ -263,154 +378,33 @@ pub fn freeList(alloc: std.mem.Allocator, entries: []Entry) void {
     alloc.free(entries);
 }
 
-/// Resolves an id prefix to exactly one session in `base`. Null when none
-/// matches; `error.AmbiguousSessionId` when several do.
 pub fn resolve(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, prefix: []const u8) !?[]const u8 {
-    const entries = try list(alloc, io, base);
-    defer freeList(alloc, entries);
+    var dir = base.openDir(io, DIR_NAME, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer dir.close(io);
+    var it = dir.iterateAssumeFirstIteration();
     var found: ?[]const u8 = null;
-    for (entries) |entry| {
-        if (!std.mem.startsWith(u8, entry.id, prefix)) continue;
+    errdefer if (found) |id| alloc.free(id);
+    var unsupported = false;
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, NAME_EXTENSION)) continue;
+        const id = entry.name[0 .. entry.name.len - NAME_EXTENSION.len];
+        if (!std.mem.startsWith(u8, id, prefix)) continue;
+        if (!supported(alloc, io, dir, entry.name)) {
+            unsupported = true;
+            continue;
+        }
         if (found != null) return error.AmbiguousSessionId;
-        found = try alloc.dupe(u8, entry.id);
+        found = try alloc.dupe(u8, id);
     }
+    if (found == null and unsupported) return error.UnsupportedSessionFormat;
     return found;
 }
 
-/// Journal file name for a session id (owns the extension knowledge).
 pub fn fileName(alloc: std.mem.Allocator, id: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "{s}" ++ NAME_EXTENSION, .{id});
-}
-
-/// Full read: header + last parseable checkpoint line, allocated in `alloc`
-/// (use an arena and drop it to free). Null when the file is missing or has
-/// no usable checkpoint. Scans backwards from the end of file so the cost is
-/// one checkpoint line, not the whole journal; a corrupt or torn line walks
-/// back to the previous one. A corrupt or missing header line does not
-/// disable the scan; the id then falls back to the file name.
-pub fn load(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, name: []const u8) !?Loaded {
-    var sessions_dir = base.openDir(io, DIR_NAME, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => return err,
-    };
-    defer sessions_dir.close(io);
-    const file = sessions_dir.openFile(io, name, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => return err,
-    };
-    defer file.close(io);
-
-    const header = readHeader(alloc, io, file);
-    var limit = try endOffset(file, io);
-    while (limit > 0) {
-        const bounds = try prevLineBounds(alloc, io, file, limit);
-        if (bounds.end > bounds.start) {
-            const line = try readRange(alloc, io, file, bounds);
-            if (parseCheckpoint(alloc, line)) |save| {
-                if (header) |parsed| return .{ .header = parsed, .save = save };
-                return .{ .header = .{
-                    .id = try alloc.dupe(u8, name[0 .. name.len - NAME_EXTENSION.len]),
-                    .cwd = "",
-                }, .save = save };
-            }
-        }
-        if (bounds.start == 0) break;
-        limit = bounds.start - 1;
-    }
-    return null;
-}
-
-fn parseHeader(alloc: std.mem.Allocator, line: []const u8) ?Header {
-    return std.json.parseFromSliceLeaky(Header, alloc, line, .{ .ignore_unknown_fields = true }) catch null;
-}
-
-fn readHeader(alloc: std.mem.Allocator, io: std.Io, file: std.Io.File) ?Header {
-    const window = alloc.alloc(u8, 64 * 1024) catch return null;
-    const got = file.readPositionalAll(io, window, 0) catch return null;
-    const nl = std.mem.indexOfScalar(u8, window[0..got], '\n') orelse got;
-    const parsed = parseHeader(alloc, window[0..nl]) orelse return null;
-    return .{
-        .id = alloc.dupe(u8, parsed.id) catch return null,
-        .created_ms = parsed.created_ms,
-        .cwd = alloc.dupe(u8, parsed.cwd) catch return null,
-    };
-}
-
-const LineBounds = struct { start: u64, end: u64 };
-
-fn prevLineBounds(alloc: std.mem.Allocator, io: std.Io, file: std.Io.File, limit: u64) !LineBounds {
-    var block_len: usize = 8192;
-    while (true) {
-        const read_len: usize = @intCast(@min(limit, block_len));
-        const block_start = limit - read_len;
-        const buf = try alloc.alloc(u8, read_len);
-        const got = try file.readPositionalAll(io, buf, block_start);
-        if (got != read_len) return error.UnexpectedEof;
-        var i: usize = got;
-        while (i > 0) {
-            i -= 1;
-            if (buf[i] == '\n') return .{ .start = block_start + i + 1, .end = limit };
-        }
-        if (block_start == 0) return .{ .start = 0, .end = limit };
-        block_len *= 8;
-    }
-}
-
-fn readRange(alloc: std.mem.Allocator, io: std.Io, file: std.Io.File, bounds: LineBounds) ![]u8 {
-    const len: usize = @intCast(bounds.end - bounds.start);
-    const buf = try alloc.alloc(u8, len);
-    const got = try file.readPositionalAll(io, buf, bounds.start);
-    if (got != len) return error.UnexpectedEof;
-    return buf;
-}
-
-fn checkpointLine(alloc: std.mem.Allocator, io: std.Io, save: session.SaveState) ![]u8 {
-    var line: std.Io.Writer.Allocating = .init(alloc);
-    const writer = &line.writer;
-    try writer.print("{{\"kind\":\"checkpoint\",\"ms\":{d},\"save\":", .{wallMillis(io)});
-    try std.json.Stringify.value(save, .{}, writer);
-    try writer.writeAll(",\"prompt\":");
-    try std.json.Stringify.value(checkpointPrompt(alloc, save), .{}, writer);
-    try writer.writeAll("}\n");
-    return line.toOwnedSlice();
-}
-
-fn checkpointPrompt(alloc: std.mem.Allocator, save: session.SaveState) []const u8 {
-    const text = firstUserText(save.chat) orelse return "";
-    return clipPrompt(alloc, text);
-}
-
-/// Extracts the trailing `"prompt"` value straight from the last bytes of a
-/// checkpoint line. Null when the field is absent (legacy journal) or the
-/// value does not fit the window; callers then fall back to a full load.
-fn tailPrompt(alloc: std.mem.Allocator, io: std.Io, file: std.Io.File) ?[]const u8 {
-    const size = endOffset(file, io) catch return null;
-    if (size == 0) return null;
-    var window: [2048]u8 = undefined;
-    const read_len: usize = @intCast(@min(window.len, size));
-    const got = file.readPositionalAll(io, window[0..read_len], size - read_len) catch return null;
-    if (got != read_len) return null;
-    const marker = ",\"prompt\":\"";
-    const at = std.mem.lastIndexOf(u8, window[0..got], marker) orelse return null;
-    const value = window[at + marker.len .. got];
-    var closed: ?usize = null;
-    var i: usize = 0;
-    while (i < value.len) : (i += 1) {
-        if (value[i] == '\\') {
-            i += 1;
-            continue;
-        }
-        if (value[i] == '"') {
-            closed = i;
-            break;
-        }
-    }
-    const end = closed orelse return null;
-    if (end > PROMPT_FIELD_MAX) return null;
-    var wrap: std.Io.Writer.Allocating = .init(alloc);
-    wrap.writer.print("{{\"p\":\"{s}}}", .{value[0 .. end + 1]}) catch return null;
-    const decoded = std.json.parseFromSliceLeaky(struct { p: []const u8 = "" }, alloc, wrap.written(), .{}) catch return null;
-    return decoded.p;
 }
 
 fn firstUserText(chat: []const session.WireMessage) ?[]const u8 {
@@ -430,19 +424,6 @@ fn firstUserText(chat: []const session.WireMessage) ?[]const u8 {
     return null;
 }
 
-/// Prompt of the newest checkpoint, whitespace collapsed and cut to
-/// PROMPT_CLIP bytes with a trailing "...". Reads the checkpoint line tail
-/// directly. Journals without the prompt field report `LEGACY_PROMPT` and
-/// stay fully loadable through `load`.
-pub fn firstPrompt(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) []const u8 {
-    const name = fileName(alloc, id) catch return LEGACY_PROMPT;
-    var sessions_dir = base.openDir(io, DIR_NAME, .{}) catch return LEGACY_PROMPT;
-    defer sessions_dir.close(io);
-    const file = sessions_dir.openFile(io, name, .{}) catch return LEGACY_PROMPT;
-    defer file.close(io);
-    return tailPrompt(alloc, io, file) orelse LEGACY_PROMPT;
-}
-
 fn clipPrompt(alloc: std.mem.Allocator, text: []const u8) []const u8 {
     var words: std.ArrayList([]const u8) = .empty;
     var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
@@ -454,9 +435,6 @@ fn clipPrompt(alloc: std.mem.Allocator, text: []const u8) []const u8 {
     return std.fmt.allocPrint(alloc, "{s}...", .{one[0..cut]}) catch one[0..cut];
 }
 
-/// All sessions as (id, modified_ms, firstPrompt) rows, all allocated in the
-/// caller's arena; freed by dropping that arena. Each journal is parsed in a
-/// short-lived sub-arena so hundreds of entries do not accumulate prompt text.
 pub fn summaries(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir) ![]SummaryRow {
     const entries = try list(alloc, io, base);
     const rows = try alloc.alloc(SummaryRow, entries.len);
@@ -480,7 +458,6 @@ pub const SummaryRow = struct {
     prompt: []const u8,
 };
 
-/// Deletes session files untouched for longer than `max_age_ms`.
 pub fn collectGarbage(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, max_age_ms: i64) void {
     const entries = list(alloc, io, base) catch return;
     defer freeList(alloc, entries);
@@ -495,202 +472,678 @@ pub fn collectGarbage(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, ma
     }
 }
 
-/// Parses one checkpoint line; parsed values stay live in `alloc` (the load
-/// arena — superseded snapshots are released when the caller drops it).
-fn parseCheckpoint(alloc: std.mem.Allocator, line: []const u8) ?session.SaveState {
-    const Envelope = struct { kind: []const u8 = "", save: session.SaveState };
-    const parsed = std.json.parseFromSliceLeaky(Envelope, alloc, line, .{ .ignore_unknown_fields = true }) catch return null;
-    if (!std.mem.eql(u8, parsed.kind, "checkpoint")) return null;
-    return parsed.save;
-}
-
 fn openSessionsDir(base: std.Io.Dir, io: std.Io) !std.Io.Dir {
     try base.createDirPath(io, DIR_NAME);
     return base.openDir(io, DIR_NAME, .{ .iterate = true });
 }
 
-test "create, checkpoint, load, resolve, gc roundtrip" {
-    const testing = std.testing;
-    var io_state = std.Io.Threaded.init(testing.allocator, .{});
-    defer io_state.deinit();
-    const io = io_state.io();
+pub const Loaded = struct {
+    header: Header,
+    save: session.SaveState,
+    accepted_bytes: u64,
+    problem: ?[]const u8 = null,
+    holds_chat: bool = false,
+    repairs: []const Record = &.{},
+};
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var tmp_path_buf: [std.posix.PATH_MAX + 1:0]u8 = undefined;
-    const tmp_len = try tmp.dir.realPath(io, &tmp_path_buf);
-    tmp_path_buf[tmp_len] = 0;
-    const base = std.Io.Dir{ .handle = tmp.dir.handle };
+const Exchange = struct {
+    calls: std.StringHashMapUnmanaged(struct { name: []const u8, done: bool = false }) = .empty,
+    remaining: usize = 0,
+    start: ?usize = null,
 
-    var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
-    defer store.deinit();
-    try store.create("/tmp/project");
-    try testing.expect(store.file_name == null);
+    fn append(self: *Exchange, alloc: std.mem.Allocator, message: session.WireMessage, index: usize) !void {
+        var calls: usize = 0;
+        var results: usize = 0;
+        var ids: std.StringHashMapUnmanaged(void) = .empty;
+        defer ids.deinit(alloc);
+        for (message.parts) |part| switch (part) {
+            .tool_call => |call| {
+                if (message.role != .agent or call.id.len == 0) return error.InvalidToolCall;
+                const entry = try ids.getOrPut(alloc, call.id);
+                if (entry.found_existing) return error.DuplicateToolCall;
+                calls += 1;
+            },
+            .tool_result => |result| {
+                if (message.role != .user) return error.InvalidToolResult;
+                const call = self.calls.get(result.call_id) orelse return error.ResultWithoutCall;
+                if (call.done or !std.mem.eql(u8, call.name, result.name)) return error.InvalidToolResult;
+                const entry = try ids.getOrPut(alloc, result.call_id);
+                if (entry.found_existing) return error.DuplicateToolResult;
+                results += 1;
+            },
+            else => {},
+        };
+        if (calls > 0 and results > 0) return error.InvalidToolExchange;
+        if (results == 0 and self.remaining > 0) return error.UnfinishedToolExchange;
+        if (results == 0) {
+            self.calls.clearRetainingCapacity();
+            self.start = null;
+        }
+        if (calls > 0) {
+            for (message.parts) |part| if (part == .tool_call) {
+                try self.calls.put(alloc, part.tool_call.id, .{ .name = part.tool_call.name });
+            };
+            self.remaining = calls;
+            self.start = index;
+        }
+        if (results > 0) {
+            for (message.parts) |part| if (part == .tool_result) {
+                self.calls.getPtr(part.tool_result.call_id).?.done = true;
+            };
+            self.remaining -= results;
+            if (self.remaining == 0) self.start = null;
+        }
+    }
+};
 
-    const entries_before = try list(testing.allocator, io, base);
-    defer freeList(testing.allocator, entries_before);
-    try testing.expectEqual(@as(usize, 0), entries_before.len);
+const ReplayAgent = struct {
+    metadata: session.WireAgent,
+    history: std.ArrayList(session.WireMessage) = .empty,
+    exchange: Exchange = .{},
+    removed: bool = false,
+};
 
-    const save = session.SaveState{ .chat = &.{}, .timeline = &.{} };
-    try store.appendCheckpoint(save);
-    try testing.expect(store.file_name != null);
-    try store.appendCheckpoint(save);
+const Replay = struct {
+    alloc: std.mem.Allocator,
+    agents: std.AutoArrayHashMapUnmanaged(u32, ReplayAgent) = .empty,
+    main: ?u32 = null,
+    timeline: std.ArrayList(app.TimelineEntry) = .empty,
+    statuses: std.ArrayList(session.WireToolStatus) = .empty,
+    status_indices: std.StringHashMapUnmanaged(usize) = .empty,
+    holds_chat: bool = false,
 
-    var id_buf: [64]u8 = undefined;
-    const id = store.currentId(&id_buf).?;
-    try testing.expectEqual(ID_LEN, id.len);
+    fn agent(self: *Replay, id: ?u32, retained: bool) !*ReplayAgent {
+        const value = self.agents.getPtr(id orelse return error.MissingAgentId) orelse return error.UndeclaredAgent;
+        if (retained and value.removed) return error.RemovedAgent;
+        return value;
+    }
 
-    var load_arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer load_arena.deinit();
-    const loaded = (try load(load_arena.allocator(), io, base, store.file_name.?)) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("/tmp/project", loaded.header.cwd);
-    try testing.expectEqualStrings(id, loaded.header.id);
-    try testing.expectEqual(@as(usize, 0), loaded.save.chat.len);
+    fn interruptCalls(self: *Replay, id: u32, exchange: *const Exchange, history: []const session.WireMessage) !void {
+        for (history) |message| for (message.parts) |part| {
+            if (part != .tool_call) continue;
+            if (exchange.calls.get(part.tool_call.id)) |call| {
+                if (call.done) continue;
+            }
+            var status = Record{ .kind = .tool_status, .agentID = id, .call_id = part.tool_call.id, .state = .interrupted };
+            const key = try std.fmt.allocPrint(self.alloc, "{d}:{s}", .{ id, part.tool_call.id });
+            if (self.status_indices.get(key)) |index| {
+                status.ansi = self.statuses.items[index].ansi;
+                status.child = self.statuses.items[index].child;
+            }
+            try self.apply(status, "{}");
+        };
+    }
 
-    const entries = try list(testing.allocator, io, base);
-    defer freeList(testing.allocator, entries);
-    try testing.expectEqual(@as(usize, 1), entries.len);
-    try testing.expectEqualStrings(id, entries[0].id);
+    fn apply(self: *Replay, record: Record, raw: []const u8) anyerror!void {
+        const alloc = self.alloc;
+        switch (record.kind) {
+            .agent => {
+                const id = record.agentID orelse return error.MissingAgentId;
+                if (self.agents.contains(id)) return error.DuplicateAgent;
+                if (record.parent) |parent| _ = try self.agent(parent, false);
+                try self.agents.put(alloc, id, .{ .metadata = .{
+                    .id = id,
+                    .name = record.name orelse return error.MissingAgentMetadata,
+                    .type_idx = record.type_idx orelse return error.MissingAgentMetadata,
+                    .parent = record.parent,
+                    .depth = record.depth orelse return error.MissingAgentMetadata,
+                    .cwd = record.cwd orelse return error.MissingAgentMetadata,
+                    .background = record.background orelse return error.MissingAgentMetadata,
+                    .clean = record.clean orelse return error.MissingAgentMetadata,
+                    .task_description = record.task_description orelse return error.MissingAgentMetadata,
+                } });
+            },
+            .agent_update => {
+                const value = try self.agent(record.agentID, true);
+                if (record.parent) |parent| _ = try self.agent(parent, false);
+                const fields = try std.json.parseFromSliceLeaky(std.json.Value, alloc, raw, .{});
+                if (record.name) |v| value.metadata.name = v;
+                if (record.type_idx) |v| value.metadata.type_idx = v;
+                if (fields.object.contains("parent")) value.metadata.parent = record.parent;
+                if (record.depth) |v| value.metadata.depth = v;
+                if (record.cwd) |v| value.metadata.cwd = v;
+                if (record.background) |v| value.metadata.background = v;
+                if (record.clean) |v| value.metadata.clean = v;
+                if (record.task_description) |v| value.metadata.task_description = v;
+            },
+            .main_agent => {
+                if (record.agentID) |id| _ = try self.agent(id, true);
+                self.main = record.agentID;
+            },
+            .agent_remove => {
+                const value = try self.agent(record.agentID, true);
+                value.removed = true;
+                if (self.main == record.agentID) self.main = null;
+            },
+            .message => {
+                const value = try self.agent(record.agentID, true);
+                const message = record.message orelse return error.MissingMessage;
+                try value.exchange.append(alloc, message, value.history.items.len);
+                try value.history.append(alloc, message);
+                self.holds_chat = true;
+            },
+            .compaction, .reset => {
+                const value = try self.agent(record.agentID, true);
+                const history = record.history orelse return error.MissingHistory;
+                if (record.kind == .reset and record.reason == null) return error.MissingResetReason;
+                var exchange: Exchange = .{};
+                for (history, 0..) |message, index| try exchange.append(alloc, message, index);
+                if (record.kind == .reset and std.mem.eql(u8, record.reason.?, "interrupted_exchange")) {
+                    if (value.exchange.start) |start| try self.interruptCalls(record.agentID.?, &value.exchange, value.history.items[start..]);
+                }
+                value.exchange = exchange;
+                value.history = .empty;
+                try value.history.appendSlice(alloc, history);
+                self.holds_chat = self.holds_chat or history.len > 0;
+            },
+            .timeline_append => {
+                const entry = record.entry orelse return error.MissingTimelineEntry;
+                for (entry.parts) |part| if (part == .tool_call) {
+                    _ = try self.agent(part.tool_call.agent_id.pack(), false);
+                };
+                try self.timeline.append(alloc, entry);
+            },
+            .timeline_truncate => {
+                const length = record.length orelse return error.MissingTimelineLength;
+                if (length > self.timeline.items.len) return error.InvalidTimelineLength;
+                self.timeline.shrinkRetainingCapacity(length);
+            },
+            .tool_status => {
+                _ = try self.agent(record.agentID, false);
+                if (record.child) |id| _ = try self.agent(id, false);
+                const call = record.call_id orelse return error.MissingCallId;
+                const key = try std.fmt.allocPrint(alloc, "{d}:{s}", .{ record.agentID.?, call });
+                const entry = try self.status_indices.getOrPut(alloc, key);
+                if (!entry.found_existing) {
+                    entry.value_ptr.* = self.statuses.items.len;
+                    try self.statuses.append(alloc, undefined);
+                }
+                self.statuses.items[entry.value_ptr.*] = .{ .agent = record.agentID, .call_id = call, .ansi = record.ansi, .state = record.state, .is_error = switch (record.state) {
+                    .failed, .interrupted => true,
+                    .succeeded => false,
+                    .pending => null,
+                }, .child = record.child };
+            },
+        }
+    }
+};
 
-    const resolved = try resolve(testing.allocator, io, base, id[0..8]);
-    try testing.expect(resolved != null);
-    defer testing.allocator.free(resolved.?);
-    try testing.expectEqualStrings(id, resolved.?);
+const Lines = struct {
+    file: std.Io.File,
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    buffer: [8192]u8 = undefined,
+    start: usize = 0,
+    end: usize = 0,
+    read_offset: u64 = 0,
+    accepted: u64 = 0,
+    line: std.ArrayList(u8) = .empty,
+    torn: bool = false,
 
-    const missing = try resolve(testing.allocator, io, base, "zzzz");
-    try testing.expect(missing == null);
+    fn next(self: *Lines) !?[]const u8 {
+        self.line.clearRetainingCapacity();
+        while (true) {
+            if (self.start == self.end) {
+                self.end = try self.file.readPositionalAll(self.io, &self.buffer, self.read_offset);
+                self.read_offset += self.end;
+                self.start = 0;
+                if (self.end == 0) {
+                    self.torn = self.line.items.len > 0;
+                    return null;
+                }
+            }
+            if (std.mem.indexOfScalarPos(u8, self.buffer[0..self.end], self.start, '\n')) |nl| {
+                try self.line.appendSlice(self.alloc, self.buffer[self.start..nl]);
+                self.start = nl + 1;
+                self.accepted += self.line.items.len + 1;
+                return self.line.items;
+            }
+            try self.line.appendSlice(self.alloc, self.buffer[self.start..self.end]);
+            self.start = self.end;
+        }
+    }
+};
 
-    collectGarbage(testing.allocator, io, base, GC_AGE_MS);
-    const fresh_after_gc = try list(testing.allocator, io, base);
-    defer freeList(testing.allocator, fresh_after_gc);
-    try testing.expectEqual(@as(usize, 1), fresh_after_gc.len);
-
-    collectGarbage(testing.allocator, io, base, -1);
-    const after_gc = try list(testing.allocator, io, base);
-    defer freeList(testing.allocator, after_gc);
-    try testing.expectEqual(@as(usize, 0), after_gc.len);
+fn parseHeader(alloc: std.mem.Allocator, line: []const u8) !Header {
+    const header = std.json.parseFromSliceLeaky(Header, alloc, line, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.UnsupportedSessionFormat;
+    if (header.v != 2 or !std.mem.eql(u8, header.kind, "header")) return error.UnsupportedSessionFormat;
+    return header;
 }
 
-test "torn tail and corrupt header fall back to last checkpoint" {
-    const testing = std.testing;
-    var io_state = std.Io.Threaded.init(testing.allocator, .{});
-    defer io_state.deinit();
-    const io = io_state.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const base = std.Io.Dir{ .handle = tmp.dir.handle };
-    try base.createDirPath(io, DIR_NAME);
-
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    // Torn tail: header + checkpoint + partial garbage line without '\n'.
-    const good_checkpoint = "{\"kind\":\"checkpoint\",\"ms\":1,\"save\":{\"chat\":[],\"timeline\":[]}}";
-    {
-        const body = try std.fmt.allocPrint(alloc, "{{\"kind\":\"header\",\"v\":1,\"id\":\"aaa\",\"created_ms\":0,\"cwd\":\"/x\"}}\n{s}\n{{\"kind\":\"chec", .{good_checkpoint});
-        var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
-        defer sessions_dir.close(io);
-        const file = try sessions_dir.createFile(io, "20250101-000000-aaaa.jsonl", .{});
-        defer file.close(io);
-        var wb: [256]u8 = undefined;
-        var w = file.writer(io, &wb);
-        try w.interface.writeAll(body);
-        try w.interface.flush();
-    }
-
-    const loaded = (try load(alloc, io, base, "20250101-000000-aaaa.jsonl")) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("aaa", loaded.header.id);
-    try testing.expectEqual(@as(usize, 0), loaded.save.chat.len);
-
-    // Corrupt header: checkpoints must still be found; id from file name.
-    {
-        var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
-        defer sessions_dir.close(io);
-        const file = try sessions_dir.createFile(io, "20250101-000000-bbbb.jsonl", .{ .truncate = true });
-        defer file.close(io);
-        var wb: [256]u8 = undefined;
-        var w = file.writer(io, &wb);
-        try w.interface.writeAll("this is not json\n");
-        try w.interface.writeAll(good_checkpoint);
-        try w.interface.writeAll("\n");
-        try w.interface.flush();
-    }
-
-    var arena2 = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena2.deinit();
-    const loaded2 = (try load(arena2.allocator(), io, base, "20250101-000000-bbbb.jsonl")) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("20250101-000000-bbbb", loaded2.header.id);
-    try testing.expectEqual(@as(usize, 0), loaded2.save.chat.len);
-
-    // Compaction: past the cap the journal is header + one checkpoint.
-    var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
-    defer store.deinit();
-    try store.create("/tmp/project");
-    const empty = session.SaveState{ .chat = &.{}, .timeline = &.{} };
-    for (0..MAX_CHECKPOINTS + 1) |_| try store.appendCheckpoint(empty);
-    try testing.expectEqual(@as(u32, 1), store.checkpoint_count);
-    const stat = blk: {
-        var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
-        defer sessions_dir.close(io);
-        break :blk try sessions_dir.statFile(io, store.file_name.?, .{});
+pub fn load(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, name: []const u8) !?Loaded {
+    var dir = base.openDir(io, DIR_NAME, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
     };
-    try testing.expect(stat.size < 512);
-
-    // Torn-tail healing: the next append must not fuse onto a missing '\n'.
-    {
-        var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
-        defer sessions_dir.close(io);
-        const f = try sessions_dir.openFile(io, store.file_name.?, .{ .mode = .read_write });
-        defer f.close(io);
-        const end = try endOffset(f, io);
-        try f.setLength(io, end - 1);
-    }
-    store.checkpoint_count = MAX_CHECKPOINTS;
-    try store.appendCheckpoint(empty);
-    var arena3 = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena3.deinit();
-    const healed = (try load(arena3.allocator(), io, base, store.file_name.?)) orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(u32, 1), store.checkpoint_count);
-    try testing.expectEqual(@as(usize, 0), healed.save.chat.len);
-}
-
-test "legacy journal is flagged, still loadable, converts on next checkpoint" {
-    const testing = std.testing;
-    var io_state = std.Io.Threaded.init(testing.allocator, .{});
-    defer io_state.deinit();
-    const io = io_state.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const base = std.Io.Dir{ .handle = tmp.dir.handle };
-    try base.createDirPath(io, DIR_NAME);
-
-    var sessions_dir = try base.openDir(io, DIR_NAME, .{ .iterate = true });
-    defer sessions_dir.close(io);
-    const file = try sessions_dir.createFile(io, "20250101-000000-cccc.jsonl", .{});
+    defer dir.close(io);
+    const file = dir.openFile(io, name, .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
     defer file.close(io);
-    var wb: [256]u8 = undefined;
-    var w = file.writer(io, &wb);
-    try w.interface.writeAll("{\"kind\":\"header\",\"v\":1,\"id\":\"ccc\",\"created_ms\":0,\"cwd\":\"/x\"}\n");
-    try w.interface.writeAll("{\"kind\":\"checkpoint\",\"ms\":9,\"save\":{\"chat\":[{\"role\":\"user\",\"parts\":[{\"text\":\"legacy   prompt\"}]}],\"timeline\":[]}}\n");
-    try w.interface.flush();
+    var lines = Lines{ .file = file, .io = io, .alloc = alloc };
+    defer lines.line.deinit(alloc);
+    const header = try parseHeader(alloc, (try lines.next()) orelse return error.UnsupportedSessionFormat);
+    var accepted = lines.accepted;
+    var replay = Replay{ .alloc = alloc };
+    var problem: ?[]const u8 = null;
+    while (try lines.next()) |line| {
+        const record = std.json.parseFromSliceLeaky(Record, alloc, line, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            problem = @errorName(err);
+            break;
+        };
+        replay.apply(record, line) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            problem = @errorName(err);
+            break;
+        };
+        accepted = lines.accepted;
+    }
+    if (lines.torn) problem = "UnterminatedRecord";
+    if (problem) |reason| std.log.scoped(.session).warn("replay stopped at byte {d}: {s}", .{ accepted, reason });
+    var retained: std.ArrayList(session.WireAgent) = .empty;
+    var archived: std.ArrayList(u32) = .empty;
+    var archived_agents: std.ArrayList(session.WireAgent) = .empty;
+    var repairs: std.ArrayList(Record) = .empty;
+    var main_metadata: ?session.WireAgent = null;
+    for (replay.agents.values()) |*agent| {
+        try archived.append(alloc, agent.metadata.id);
+        if (agent.removed) {
+            agent.metadata.chat = agent.history.items;
+            try archived_agents.append(alloc, agent.metadata);
+            continue;
+        }
+        if (agent.exchange.start) |start| {
+            for (agent.history.items[start..]) |message| for (message.parts) |part| {
+                if (part != .tool_call) continue;
+                if (agent.exchange.calls.get(part.tool_call.id)) |call| {
+                    if (call.done) continue;
+                }
+                var status = Record{ .kind = .tool_status, .agentID = agent.metadata.id, .call_id = part.tool_call.id, .state = .interrupted };
+                const status_key = try std.fmt.allocPrint(alloc, "{d}:{s}", .{ agent.metadata.id, status.call_id.? });
+                if (replay.status_indices.get(status_key)) |status_index| {
+                    status.ansi = replay.statuses.items[status_index].ansi;
+                    status.child = replay.statuses.items[status_index].child;
+                }
+                try replay.apply(status, "{}");
+                try repairs.append(alloc, status);
+            };
+            agent.history.shrinkRetainingCapacity(start);
+            try repairs.append(alloc, .{ .kind = .reset, .agentID = agent.metadata.id, .history = agent.history.items, .reason = "interrupted_exchange" });
+        }
+        agent.metadata.chat = agent.history.items;
+        if (replay.main == agent.metadata.id) main_metadata = agent.metadata else try retained.append(alloc, agent.metadata);
+    }
+    return .{ .header = header, .accepted_bytes = accepted, .problem = problem, .holds_chat = replay.holds_chat, .repairs = repairs.items, .save = .{
+        .chat = if (main_metadata) |main| main.chat else &.{},
+        .timeline = replay.timeline.items,
+        .main_agent = replay.main,
+        .main_metadata = main_metadata,
+        .archived_ids = archived.items,
+        .archived_agents = archived_agents.items,
+        .clean = if (main_metadata) |main| main.clean else false,
+        .agents = retained.items,
+        .tool_status = replay.statuses.items,
+    } };
+}
 
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+fn supported(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8) bool {
+    const file = dir.openFile(io, name, .{}) catch return false;
+    defer file.close(io);
+    var lines = Lines{ .file = file, .io = io, .alloc = alloc };
+    defer lines.line.deinit(alloc);
+    const line = (lines.next() catch return false) orelse return false;
+    const parsed = std.json.parseFromSlice(Header, alloc, line, .{ .ignore_unknown_fields = true }) catch return false;
+    defer parsed.deinit();
+    return parsed.value.v == 2 and std.mem.eql(u8, parsed.value.kind, "header");
+}
+
+pub fn firstPrompt(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, id: []const u8) []const u8 {
+    const name = fileName(alloc, id) catch return "";
+    var dir = base.openDir(io, DIR_NAME, .{}) catch return "";
+    defer dir.close(io);
+    const file = dir.openFile(io, name, .{}) catch return "";
+    defer file.close(io);
+    var lines = Lines{ .file = file, .io = io, .alloc = alloc };
+    defer lines.line.deinit(alloc);
+    _ = parseHeader(alloc, (lines.next() catch return "") orelse return "") catch return "";
+    var main: ?u32 = null;
+    while (lines.next() catch return "") |line| {
+        const parsed = std.json.parseFromSlice(Record, alloc, line, .{ .ignore_unknown_fields = true }) catch return "";
+        defer parsed.deinit();
+        const record = parsed.value;
+        switch (record.kind) {
+            .main_agent => main = record.agentID,
+            .agent_remove => if (main == record.agentID) {
+                main = null;
+            },
+            .message => if (main != null and record.agentID == main) {
+                if (record.message) |message| if (firstUserText(&.{message})) |text| return clipPrompt(alloc, text);
+            },
+            else => {},
+        }
+    }
+    return "";
+}
+
+const TestLog = struct {
+    tmp: std.testing.TmpDir,
+    io_state: std.Io.Threaded,
+    store: Store,
+    arena: std.heap.ArenaAllocator,
+
+    fn init(self: *TestLog) !void {
+        self.tmp = std.testing.tmpDir(.{});
+        self.io_state = std.Io.Threaded.init(std.testing.allocator, .{});
+        self.arena = .init(std.testing.allocator);
+        self.store = .{ .io = self.io_state.io(), .gpa = std.testing.allocator, .base = .{ .handle = self.tmp.dir.handle } };
+        try self.store.create("/project");
+    }
+
+    fn deinit(self: *TestLog) void {
+        self.store.deinit();
+        self.arena.deinit();
+        self.io_state.deinit();
+        self.tmp.cleanup();
+    }
+
+    fn declare(self: *TestLog, id: u32) !void {
+        try self.store.enqueue(.{ .kind = .agent, .agentID = id, .name = "agent", .type_idx = 0, .depth = 0, .cwd = "/project", .background = false, .clean = false, .task_description = "" });
+    }
+
+    fn message(self: *TestLog, id: u32, text: []const u8) !void {
+        try self.store.enqueue(.{ .kind = .message, .agentID = id, .message = .{ .role = .user, .parts = &.{.{ .text = text }} } });
+    }
+
+    fn read(self: *TestLog) !Loaded {
+        return (try load(self.arena.allocator(), self.store.io, self.store.base, self.store.file_name.?)).?;
+    }
+
+    fn raw(self: *TestLog, bytes: []const u8) !void {
+        const file = self.store.file.?;
+        try file.writePositionalAll(self.store.io, bytes, (try file.stat(self.store.io)).size);
+    }
+};
+
+test "append log interleaves agents and compaction preserves display and preview" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const store = &fixture.store;
+    try std.testing.expect(store.file_name == null);
+    try fixture.declare(1);
+    try fixture.declare(2);
+    try store.enqueue(.{ .kind = .main_agent, .agentID = 1 });
+    try fixture.message(1, "original prompt");
+    try fixture.message(2, "child prompt");
+    var timeline_parts = [_]app.TimelinePart{.{ .message = "original prompt" }};
+    try store.enqueue(.{ .kind = .timeline_append, .entry = .{ .role = .user, .parts = &timeline_parts } });
+    try store.enqueue(.{ .kind = .compaction, .agentID = 1, .history = &.{.{ .role = .user, .parts = &.{.{ .text = "summary" }} }} });
+    try fixture.message(2, "child followup");
+    try fixture.message(1, "continue");
+    try store.flush();
+    const loaded = try fixture.read();
+    try std.testing.expect(loaded.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), loaded.save.chat.len);
+    try std.testing.expectEqualStrings("summary", loaded.save.chat[0].parts[0].text);
+    try std.testing.expectEqualStrings("continue", loaded.save.chat[1].parts[0].text);
+    try std.testing.expectEqual(@as(usize, 2), loaded.save.agents[0].chat.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.save.timeline.len);
+    var id: [ID_LEN]u8 = undefined;
+    try std.testing.expectEqualStrings("original prompt", firstPrompt(fixture.arena.allocator(), store.io, store.base, store.currentId(&id).?));
+    const size = store.offset;
+    try store.flush();
+    try std.testing.expectEqual(size, store.offset);
+}
+
+test "partial exchange and torn record repair retain archive and make resumed work reachable" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const store = &fixture.store;
+    try fixture.declare(1);
+    try store.enqueue(.{ .kind = .main_agent, .agentID = 1 });
+    try fixture.message(1, "hello");
+    try store.enqueue(.{ .kind = .message, .agentID = 1, .message = .{ .role = .agent, .parts = &.{
+        .{ .tool_call = .{ .id = "a", .name = "tool", .arguments = "{}" } },
+        .{ .tool_call = .{ .id = "b", .name = "tool", .arguments = "{}" } },
+    } } });
+    try store.enqueue(.{ .kind = .message, .agentID = 1, .message = .{ .role = .user, .parts = &.{.{ .tool_result = .{ .call_id = "a", .name = "tool", .content = "done" } }} } });
+    try store.flush();
+    const prefix_size = store.offset;
+    try fixture.raw("{\"kind\":\"message\",\"agentID\":1,\"message\":{\"role\":\"user\",\"parts\":[]}}");
+    const loaded = try fixture.read();
+    try std.testing.expectEqualStrings("UnterminatedRecord", loaded.problem.?);
+    try std.testing.expectEqual(prefix_size, loaded.accepted_bytes);
+    try std.testing.expectEqual(@as(usize, 1), loaded.save.chat.len);
+    try std.testing.expectEqual(@as(usize, 2), loaded.repairs.len);
+    try std.testing.expect(loaded.repairs[0].kind == .tool_status);
+    try std.testing.expectEqualStrings("b", loaded.repairs[0].call_id.?);
+    try std.testing.expect(loaded.repairs[0].state == .interrupted);
+    try std.testing.expect(loaded.repairs[1].kind == .reset);
+    const name = try fixture.arena.allocator().dupe(u8, store.file_name.?);
+    try store.open("/project", name);
+    try fixture.message(1, "resumed");
+    try store.flush();
+    const resumed = try fixture.read();
+    try std.testing.expect(resumed.problem == null);
+    try std.testing.expectEqual(@as(usize, 0), resumed.repairs.len);
+    try std.testing.expectEqual(@as(usize, 2), resumed.save.chat.len);
+    try std.testing.expectEqualStrings("resumed", resumed.save.chat[1].parts[0].text);
+    var dir = try store.base.openDir(store.io, DIR_NAME, .{ .iterate = true });
+    defer dir.close(store.io);
+    var it = dir.iterateAssumeFirstIteration();
+    var backups: usize = 0;
+    while (try it.next(store.io)) |entry| if (std.mem.endsWith(u8, entry.name, ".bak")) {
+        backups += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), backups);
+}
+
+test "invalid complete records stop before their effects" {
+    const invalid = [_][]const u8{
+        "{\"kind\":\"unknown\"}\n",
+        "{\"kind\":\"message\",\"agentID\":99,\"message\":{\"role\":\"user\",\"parts\":[]}}\n",
+        "{\"kind\":\"message\",\"agentID\":1,\"message\":{\"role\":\"user\",\"parts\":[{\"tool_result\":{\"call_id\":\"ghost\",\"name\":\"tool\",\"content\":\"bad\"}}]}}\n",
+        "{\"kind\":\"reset\",\"agentID\":1,\"reason\":\"history_replace\",\"history\":[{\"role\":\"user\",\"parts\":[{\"tool_result\":{\"call_id\":\"ghost\",\"name\":\"tool\",\"content\":\"bad\"}}]}]}\n",
+        "{\"kind\":\"timeline_truncate\",\"length\":1}\n",
+        "{\"kind\":\"agent\",\"agentID\":1}\n",
+    };
+    for (invalid) |line| {
+        var fixture: TestLog = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        try fixture.declare(1);
+        try fixture.store.enqueue(.{ .kind = .main_agent, .agentID = 1 });
+        try fixture.message(1, "accepted");
+        try fixture.store.flush();
+        const accepted = fixture.store.offset;
+        try fixture.raw(line);
+        try fixture.raw("{\"kind\":\"message\",\"agentID\":1,\"message\":{\"role\":\"user\",\"parts\":[{\"text\":\"unreachable\"}]}}\n");
+        const loaded = try fixture.read();
+        try std.testing.expect(loaded.problem != null);
+        try std.testing.expectEqual(accepted, loaded.accepted_bytes);
+        try std.testing.expectEqual(@as(usize, 1), loaded.save.chat.len);
+        try std.testing.expectEqualStrings("accepted", loaded.save.chat[0].parts[0].text);
+        const name = try fixture.arena.allocator().dupe(u8, fixture.store.file_name.?);
+        try fixture.store.open("/project", name);
+        try fixture.message(1, "reachable");
+        try fixture.store.flush();
+        const resumed = try fixture.read();
+        try std.testing.expect(resumed.problem == null);
+        try std.testing.expectEqual(@as(usize, 2), resumed.save.chat.len);
+    }
+}
+
+test "partial writes acknowledge complete lines and retain exactly the suffix" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const store = &fixture.store;
+    try fixture.declare(1);
+    try store.enqueue(.{ .kind = .main_agent, .agentID = 1 });
+    try store.flush();
+    try fixture.message(1, "first");
+    try fixture.message(1, "second");
+    std.mem.swap(std.ArrayList(Pending), &store.pending, &store.batch);
+    try fixture.raw(store.batch.items[0].bytes);
+    try fixture.raw(store.batch.items[1].bytes[0..17]);
+    try store.reconcile();
+    try std.testing.expectEqual(@as(usize, 1), store.batch.items.len);
+    try store.flush();
+    const loaded = try fixture.read();
+    try std.testing.expect(loaded.problem == null);
+    try std.testing.expectEqual(@as(usize, 2), loaded.save.chat.len);
+    try std.testing.expectEqualStrings("first", loaded.save.chat[0].parts[0].text);
+    try std.testing.expectEqualStrings("second", loaded.save.chat[1].parts[0].text);
+    try fixture.message(1, "third");
+    const Failure = struct {
+        fn write(file: std.Io.File, io: std.Io, bytes: []const u8, offset: u64) !void {
+            try file.writePositionalAll(io, bytes[0..13], offset);
+            return error.SimulatedFailure;
+        }
+    };
+    store.write_batch = Failure.write;
+    try std.testing.expectError(error.SimulatedFailure, store.flush());
+    try std.testing.expectEqual(@as(usize, 1), store.batch.items.len);
+    store.write_batch = null;
+    try store.flush();
+    const retried = try fixture.read();
+    try std.testing.expectEqual(@as(usize, 3), retried.save.chat.len);
+}
+
+test "metadata switching removal and cleared status fields survive replay" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const store = &fixture.store;
+    try fixture.declare(1);
+    try fixture.declare(2);
+    try store.enqueue(.{ .kind = .main_agent, .agentID = 1 });
+    try fixture.message(1, "first main");
+    try store.enqueue(.{ .kind = .tool_status, .agentID = 1, .call_id = "link", .ansi = "styled", .state = .failed, .child = 2 });
+    try store.enqueue(.{ .kind = .tool_status, .agentID = 1, .call_id = "link", .state = .pending });
+    try store.enqueue(.{ .kind = .agent_remove, .agentID = 1 });
+    try store.enqueue(.{ .kind = .main_agent, .agentID = 2 });
+    try fixture.message(2, "second main");
+    try store.flush();
+    try fixture.raw("{\"kind\":\"agent_update\",\"agentID\":2,\"cwd\":\"/changed\"}\n");
+    const loaded = try fixture.read();
+    try std.testing.expect(loaded.problem == null);
+    try std.testing.expectEqual(@as(?u32, 2), loaded.save.main_agent);
+    try std.testing.expectEqualStrings("agent", loaded.save.main_metadata.?.name);
+    try std.testing.expectEqualStrings("/changed", loaded.save.main_metadata.?.cwd);
+    try std.testing.expectEqual(@as(usize, 0), loaded.save.agents.len);
+    try std.testing.expectEqual(@as(usize, 2), loaded.save.archived_ids.len);
+    try std.testing.expectEqualStrings("", loaded.save.tool_status[0].ansi);
+    try std.testing.expect(loaded.save.tool_status[0].child == null);
+    try std.testing.expectEqual(session.ToolState.pending, loaded.save.tool_status[0].state);
+    try fixture.raw("{\"kind\":\"message\",\"agentID\":1,\"message\":{\"role\":\"user\",\"parts\":[]}}\n");
+    const invalid = try fixture.read();
+    try std.testing.expectEqualStrings("RemovedAgent", invalid.problem.?);
+}
+
+test "version one and legacy journals are rejected and omitted without modification" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const store = &fixture.store;
+    var dir = try openSessionsDir(store.base, store.io);
+    defer dir.close(store.io);
+    const contents = [_][]const u8{ "{\"kind\":\"header\",\"v\":1,\"id\":\"old\"}\n", "{\"chat\":[],\"timeline\":[]}\n" };
+    for (contents, 0..) |bytes, index| {
+        const name = try std.fmt.allocPrint(fixture.arena.allocator(), "old{d}.jsonl", .{index});
+        const file = try dir.createFile(store.io, name, .{ .read = true });
+        defer file.close(store.io);
+        try file.writePositionalAll(store.io, bytes, 0);
+        try std.testing.expectError(error.UnsupportedSessionFormat, store.open("/project", name));
+        try std.testing.expectEqual(@as(u64, bytes.len), (try file.stat(store.io)).size);
+    }
+    const entries = try list(std.testing.allocator, store.io, store.base);
+    defer freeList(std.testing.allocator, entries);
+    try std.testing.expectEqual(@as(usize, 0), entries.len);
+    try std.testing.expectError(error.UnsupportedSessionFormat, resolve(std.testing.allocator, store.io, store.base, "old"));
+    try std.testing.expect(store.file == null);
+}
+
+test "fixed append payload does not grow with prior history and never reads journal" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const store = &fixture.store;
+    try fixture.declare(1);
+    try store.publish(1, .append, &.{sdk.UserMessage("fixed")});
+    const bytes = store.pending.items[store.pending.items.len - 1].bytes.len;
+    try store.flush();
+    for (0..2000) |_| try store.publish(1, .append, &.{sdk.UserMessage("history")});
+    try store.flush();
+    try store.publish(1, .append, &.{sdk.UserMessage("fixed")});
+    try std.testing.expectEqual(bytes, store.pending.items[0].bytes.len);
+    try store.flush();
+    const loaded = try fixture.read();
+    try std.testing.expectEqual(@as(usize, 2002), loaded.save.agents[0].chat.len);
+    try std.testing.expect(loaded.problem == null);
+}
+
+test "tool exchange validation rejects duplicates and crossing conversation records" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
-    try testing.expectEqualStrings(LEGACY_PROMPT, firstPrompt(alloc, io, base, "20250101-000000-cccc"));
-    const loaded = try load(alloc, io, base, "20250101-000000-cccc.jsonl");
-    try testing.expect(loaded != null);
-    try testing.expectEqual(@as(usize, 1), loaded.?.save.chat.len);
+    const call = session.WireMessage{ .role = .agent, .parts = &.{
+        .{ .tool_call = .{ .id = "a", .name = "tool", .arguments = "{}" } },
+        .{ .tool_call = .{ .id = "b", .name = "tool", .arguments = "{}" } },
+    } };
+    const result = session.WireMessage{ .role = .user, .parts = &.{.{ .tool_result = .{ .call_id = "a", .name = "tool", .content = "ok" } }} };
+    var exchange = Exchange{};
+    try exchange.append(alloc, call, 0);
+    try exchange.append(alloc, result, 1);
+    try std.testing.expectError(error.InvalidToolResult, exchange.append(alloc, result, 2));
+    try std.testing.expectError(error.UnfinishedToolExchange, exchange.append(alloc, .{ .role = .user, .parts = &.{.{ .text = "crossing" }} }, 2));
+    try std.testing.expectEqual(@as(usize, 1), exchange.remaining);
+    try exchange.append(alloc, .{ .role = .user, .parts = &.{.{ .tool_result = .{ .call_id = "b", .name = "tool", .content = "ok" } }} }, 2);
+    try std.testing.expect(exchange.start == null);
+    try exchange.append(alloc, .{ .role = .agent, .parts = &.{.{ .text = "finished" }} }, 3);
+}
 
-    var store = Store{ .io = io, .gpa = testing.allocator, .base = base };
-    defer store.deinit();
-    try store.open("/x", "20250101-000000-cccc.jsonl");
-    const resumed = [_]session.WireMessage{
-        .{ .role = .user, .parts = &.{.{ .text = "fresh prompt" }} },
+test "header only sessions are valid and main selection can be cleared" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.store.createJournal();
+    const empty = try fixture.read();
+    try std.testing.expect(empty.problem == null);
+    try std.testing.expect(empty.save.main_agent == null);
+    try std.testing.expect(!empty.holds_chat);
+    var id: [ID_LEN]u8 = undefined;
+    try std.testing.expectEqualStrings("", firstPrompt(fixture.arena.allocator(), fixture.store.io, fixture.store.base, fixture.store.currentId(&id).?));
+    try fixture.declare(1);
+    try fixture.store.enqueue(.{ .kind = .main_agent, .agentID = 1 });
+    try fixture.store.enqueue(.{ .kind = .main_agent });
+    try fixture.store.flush();
+    const cleared = try fixture.read();
+    try std.testing.expect(cleared.save.main_agent == null);
+    try std.testing.expectEqual(@as(usize, 1), cleared.save.agents.len);
+}
+
+test "failed reconciliation blocks subsequent writes" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try fixture.declare(1);
+    try fixture.store.flush();
+    try fixture.message(1, "pending");
+    const Failure = struct {
+        fn write(file: std.Io.File, io: std.Io, _: []const u8, offset: u64) !void {
+            try file.setLength(io, offset - 1);
+            return error.SimulatedFailure;
+        }
     };
-    try store.appendCheckpoint(.{ .chat = &resumed, .timeline = &.{} });
-    try testing.expectEqualStrings("fresh prompt", firstPrompt(alloc, io, base, "20250101-000000-cccc"));
+    fixture.store.write_batch = Failure.write;
+    try std.testing.expectError(error.JournalNeedsRecovery, fixture.store.flush());
+    fixture.store.write_batch = null;
+    const size = (try fixture.store.file.?.stat(fixture.store.io)).size;
+    try std.testing.expectError(error.JournalNeedsRecovery, fixture.store.flush());
+    try std.testing.expectEqual(size, (try fixture.store.file.?.stat(fixture.store.io)).size);
+    try std.testing.expectEqual(@as(usize, 1), fixture.store.batch.items.len);
 }

@@ -290,7 +290,8 @@ a render callback.
 prompt that started the current turn. The checkpoint moves when a run starts
 with a new prompt or a queued user message. It resets whenever the history is
 replaced or the agent resets: session load, prompt rewind, compaction. A cancel
-keeps the checkpoint, so a correction still sees the canceled output. Use it
+keeps the turn checkpoint. Completed exchanges remain available; an unfinished
+tool exchange is removed from model history while its display remains visible. Use it
 in a `blitz.hooks.agent_complete` listener to hand one turn to a memory
 compressor agent:
 

@@ -616,7 +616,15 @@ pub fn run(
     if (app.input_mode != .wizard) app.warnUnboundAgentModels();
 
     var store = session_store.Store{ .io = io, .gpa = gpa, .base = cwd_dir };
-    defer store.deinit();
+    defer {
+        app.registry.cancelAll();
+        app.checkpoint();
+        for (&app.registry.slots) |*slot| if (slot.agent) |*agent| {
+            agent.journal = null;
+        };
+        app.session_store = null;
+        store.deinit();
+    }
     app.session_store = &store;
     var session_id_buf: [session_store.ID_LEN]u8 = undefined;
     if (resume_session) |prefix| {
@@ -635,19 +643,18 @@ pub fn run(
             return error.SessionNotFound;
         };
         const loaded = loaded_opt orelse {
-            std.debug.print("Error: session '{s}' has no usable checkpoint\n", .{resolved});
+            std.debug.print("Error: session '{s}' has no usable header\n", .{resolved});
             return error.SessionNotFound;
         };
         var resumed = false;
         if (session.applySaveState(&app, &loaded.save)) |_| {
             resumed = true;
         } else |err| {
-            // Fall back to a fresh journal: binding the resumed one would let
-            // a later compaction destroy the session's original checkpoints.
             std.log.scoped(.session).warn("resume of {s} failed: {s}", .{ resolved, @errorName(err) });
         }
         if (resumed) {
             try store.open(cwd, file_name);
+            session.bindJournal(&app);
         } else {
             store.create(cwd) catch |create_err| {
                 std.log.scoped(.session).warn("session journal unavailable: {s}", .{@errorName(create_err)});
@@ -1314,10 +1321,8 @@ pub fn run(
 }
 
 /// Prints the resume hint once the terminal is back on the normal screen.
-/// Suppressed when the journal has no checkpoints, so a `blitz continue <id>`
-/// built from the hint can never hit "no usable checkpoint".
 fn printSessionHint(store: *session_store.Store, id_buf: *[session_store.ID_LEN]u8) void {
-    if (store.checkpoint_count == 0) return;
+    if (!store.holdsChat()) return;
     const id = store.currentId(id_buf) orelse return;
     std.debug.print("session saved: {s} - blitz continue {s}\n", .{ id, id });
 }
@@ -1391,13 +1396,6 @@ fn resolvePermissionsHeadless(app: *App, io: std.Io) void {
             else => .approved,
         };
         next.event.set(io);
-    }
-}
-
-fn recommendedOption(options: []const []const u8) u8 {
-    switch (r.permissions.recommendedChoice(options)) {
-        .choice => |i| return i,
-        else => unreachable,
     }
 }
 

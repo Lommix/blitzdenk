@@ -245,20 +245,39 @@ const PathCompletion = struct {
 const ToolStatusEntry = struct {
     lines: std.ArrayList(r.tui.Line) = .empty,
     child_id: ?r.AgentId = null,
+    interrupted: bool = false,
     is_error: ?bool = null,
 };
 
 const ToolStatusAgent = struct {
+    name: []const u8 = "",
+    task_description: []const u8 = "",
     generation: u16 = 0,
     entries: std.array_hash_map.String(ToolStatusEntry) = .empty,
 };
 
 const ToolStatusStore = struct {
     agents: [r.agent_registry.max_agents]ToolStatusAgent = [_]ToolStatusAgent{.{}} ** r.agent_registry.max_agents,
+    archived: std.AutoHashMapUnmanaged(u32, ToolStatusAgent) = .empty,
+    pending_children: std.AutoHashMapUnmanaged(u32, std.ArrayList(struct { owner: r.AgentId, call_id: []const u8 })) = .empty,
+
+    fn forWrite(self: *ToolStatusStore, alloc: std.mem.Allocator, id: r.AgentId) !*ToolStatusAgent {
+        const current = &self.agents[id.index];
+        if (current.generation == id.generation) return current;
+        if (self.archived.getPtr(id.pack())) |archived| return archived;
+        if (current.entries.count() > 0 or current.name.len > 0) try self.archived.put(alloc, (r.AgentId{ .index = id.index, .generation = current.generation }).pack(), current.*);
+        current.* = .{ .generation = id.generation };
+        return current;
+    }
+
+    pub fn getAgent(self: *ToolStatusStore, id: r.AgentId) ?*ToolStatusAgent {
+        if (id.index >= r.agent_registry.max_agents) return null;
+        if (self.agents[id.index].generation == id.generation) return &self.agents[id.index];
+        return self.archived.getPtr(id.pack());
+    }
 
     fn setResult(self: *ToolStatusStore, alloc: std.mem.Allocator, agent_id: r.AgentId, call_id: []const u8, is_error: bool) !void {
-        const agent = &self.agents[agent_id.index];
-        if (agent.generation != agent_id.generation) agent.* = .{ .generation = agent_id.generation };
+        const agent = try self.forWrite(alloc, agent_id);
 
         const entry = try agent.entries.getOrPut(alloc, call_id);
         if (!entry.found_existing) {
@@ -387,6 +406,7 @@ pub const App = struct {
     event_bus: r.events.EventBus = .{},
     injection_hooks: r.inject.InjectionsHooks = .{},
     path_completion: PathCompletion = .{},
+    journal_restoring: bool = false,
 
     // TODO: cleanup io
     pub fn init(
@@ -621,12 +641,10 @@ pub const App = struct {
         if (agent_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
         const g = self.tool_status_entries.lock(self.io);
         defer g.unlock();
+        defer self.publishToolStatus(agent_id, call_id, g.ptr);
 
         const alloc = self.sessionAlloc();
-        const agent = &g.ptr.agents[agent_id.index];
-        if (agent.generation != agent_id.generation) {
-            agent.* = .{ .generation = agent_id.generation };
-        }
+        const agent = try g.ptr.forWrite(alloc, agent_id);
 
         const res = try agent.entries.getOrPut(alloc, call_id);
         if (!res.found_existing) {
@@ -649,12 +667,10 @@ pub const App = struct {
         if (agent_id.index >= r.agent_registry.max_agents or child_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
         const g = self.tool_status_entries.lock(self.io);
         defer g.unlock();
+        defer self.publishToolStatus(agent_id, call_id, g.ptr);
 
         const alloc = self.sessionAlloc();
-        const agent = &g.ptr.agents[agent_id.index];
-        if (agent.generation != agent_id.generation) {
-            agent.* = .{ .generation = agent_id.generation };
-        }
+        const agent = try g.ptr.forWrite(alloc, agent_id);
 
         const res = try agent.entries.getOrPut(alloc, call_id);
         if (!res.found_existing) {
@@ -662,13 +678,66 @@ pub const App = struct {
             res.value_ptr.* = .{};
         }
         res.value_ptr.child_id = child_id;
+        const declared = self.session_store == null or self.session_store.?.declares(child_id.pack());
+        if (!self.journal_restoring and !declared) {
+            const pending = try g.ptr.pending_children.getOrPut(alloc, child_id.pack());
+            if (!pending.found_existing) pending.value_ptr.* = .empty;
+            try pending.value_ptr.append(alloc, .{ .owner = agent_id, .call_id = res.key_ptr.* });
+        }
     }
 
     pub fn setToolResult(self: *App, agent_id: r.AgentId, call_id: []const u8, is_error: bool) !void {
         if (agent_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
         const g = self.tool_status_entries.lock(self.io);
         defer g.unlock();
+        defer self.publishToolStatus(agent_id, call_id, g.ptr);
         try g.ptr.setResult(self.sessionAlloc(), agent_id, call_id, is_error);
+    }
+
+    fn publishToolStatus(self: *App, id: r.AgentId, call_id: []const u8, statuses: *ToolStatusStore) void {
+        if (self.journal_restoring) return;
+        const store = self.session_store orelse return;
+        const status_agent = statuses.getAgent(id) orelse return;
+        const entry = status_agent.entries.get(call_id) orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const ansi = r.session.linesToAnsi(entry.lines.items, arena.allocator()) catch return;
+        store.enqueue(.{
+            .kind = .tool_status,
+            .agentID = id.pack(),
+            .call_id = call_id,
+            .ansi = ansi,
+            .state = if (entry.interrupted) .interrupted else if (entry.is_error) |failed| (if (failed) .failed else .succeeded) else .pending,
+            .child = if (entry.child_id) |child| (if (statuses.pending_children.contains(child.pack())) null else child.pack()) else null,
+        }) catch |err| std.log.scoped(.session).err("tool status: {s}", .{@errorName(err)});
+    }
+
+    pub fn rememberAgentMetadata(self: *App, id: r.AgentId, name: []const u8, task: []const u8) !void {
+        const guard = self.tool_status_entries.lock(self.io);
+        defer guard.unlock();
+        const entry = try guard.ptr.forWrite(self.sessionAlloc(), id);
+        entry.name = try self.sessionAlloc().dupe(u8, name);
+        entry.task_description = try self.sessionAlloc().dupe(u8, task);
+    }
+
+    pub fn interruptToolStatuses(self: *App, id: r.AgentId) void {
+        const guard = self.tool_status_entries.lock(self.io);
+        defer guard.unlock();
+        const agent = guard.ptr.getAgent(id) orelse return;
+        var it = agent.entries.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.is_error != null) continue;
+            entry.value_ptr.interrupted = true;
+            entry.value_ptr.is_error = true;
+            self.publishToolStatus(id, entry.key_ptr.*, guard.ptr);
+        }
+    }
+
+    fn publishPendingToolLinks(self: *App, id: r.AgentId) void {
+        const guard = self.tool_status_entries.lock(self.io);
+        defer guard.unlock();
+        const pending = guard.ptr.pending_children.fetchRemove(id.pack()) orelse return;
+        for (pending.value.items) |link| self.publishToolStatus(link.owner, link.call_id, guard.ptr);
     }
 
     pub fn handleScrollbarMouse(self: *App, m: r.tui.Terminal.Mouse) bool {
@@ -742,25 +811,36 @@ pub const App = struct {
     }
 
     pub fn checkpoint(self: *App) void {
-        const store = self.session_store orelse return;
         _ = self.drainPendingDiffs();
-        const agent = self.mainAgent() orelse return;
+        self.journalFlush();
+    }
 
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const save = r.session.buildSaveState(self, agent, arena.allocator()) catch |err| {
-            std.log.scoped(.session).warn("checkpoint encode failed: {s}", .{@errorName(err)});
-            return;
-        };
-        if (save.chat.len == 0) return;
+    pub fn journalFlush(self: *App) void {
+        if (self.session_store) |store| {
+            store.drainDisplay(self) catch |err| std.log.scoped(.session).warn("journal display failed: {s}", .{@errorName(err)});
+            store.flush() catch |err| std.log.scoped(.session).warn("journal flush failed: {s}", .{@errorName(err)});
+        }
+    }
 
-        store.appendCheckpoint(save) catch |err| {
-            std.log.scoped(.session).warn("checkpoint write failed: {s}", .{@errorName(err)});
+    pub fn selectMainAgent(self: *App, id: ?r.AgentId) !void {
+        if (!self.journal_restoring) if (self.session_store) |store| try store.enqueue(.{ .kind = .main_agent, .agentID = if (id) |value| value.pack() else null });
+        self.main_agent_id = id;
+    }
+
+    fn journalClear(self: *App) void {
+        for (&self.registry.slots) |*slot| if (slot.agent) |*agent| {
+            agent.journal = null;
         };
     }
 
     pub fn reset(self: *App) void {
+        self.registry.cancelAll();
         self.checkpoint();
+        if (self.session_store) |store| store.flush() catch |err| {
+            std.log.scoped(.session).err("session reset postponed: {s}", .{@errorName(err)});
+            return;
+        };
+        self.journalClear();
         if (self.session_store) |store| store.bump();
         if (self.mcp_load) |*task| task.deinit();
         self.mcp_load = null;
@@ -850,6 +930,8 @@ pub const App = struct {
             self.update_result_seen = true;
             self.dirty = true;
         }
+
+        self.journalFlush();
     }
 
     pub fn animationActive(self: *const App) bool {
@@ -1050,7 +1132,7 @@ pub const App = struct {
         return @intCast(@divTrunc(self.session_run_ns + live, std.time.ns_per_s));
     }
 
-    fn handleReapedAgent(self: *App, agent_id: r.AgentId) !void {
+    pub fn handleReapedAgent(self: *App, agent_id: r.AgentId) !void {
         const agent = self.registry.get(agent_id) orelse return;
         const state = self.registry.state(agent_id) orelse return;
         if (state == .active) return;
@@ -1088,6 +1170,7 @@ pub const App = struct {
         if (self.registry.get(id)) |agent| agent.cancelAndWait();
         self.lua_vm.invokeSpawnCallback(self.io, id.pack(), r.lua.AWAIT_CANCELED);
         self.registry.release(id);
+        if (self.main_agent_id == id) self.main_agent_id = null;
     }
 
     fn finishBackgroundAgent(self: *App, agent_id: r.AgentId, agent: *r.agent.Agent) !void {
@@ -1607,6 +1690,14 @@ pub const App = struct {
     }
 
     pub fn configureAgent(self: *const App, id: r.AgentId, agent: *r.agent.Agent) !void {
+        try @constCast(self).rememberAgentMetadata(id, agent.name, agent.task_description);
+        if (!self.journal_restoring and agent.journal == null) {
+            agent.journal = self.session_store;
+            agent.journal_id = id.pack();
+            try agent.publishMetadata(.agent);
+            @constCast(self).publishPendingToolLinks(id);
+            if (agent.history().len > 0) if (agent.journal) |store| try store.publish(id.pack(), .append, agent.history());
+        }
         try self.context_factory.configureAgent(agent, self.toolBase(id));
         agent.context_limit = self.default_context_limit;
         agent.lua_reload_generation_seen = self.lua_reload_generation.load(.monotonic);
@@ -2299,7 +2390,9 @@ pub const App = struct {
             cut = index;
         }
         const turn_start = cut orelse return;
-        agent.setMessages(history[0..turn_start]) catch return;
+        if (self.session_store) |store| store.drainDisplay(self) catch return;
+        agent.replaceMessages(history[0..turn_start], .rewind) catch return;
+        if (self.session_store) |store| store.enqueue(.{ .kind = .timeline_truncate, .length = start }) catch return;
 
         self.timeline.shrinkRetainingCapacity(start);
         if (self.timeline_render_cache.items.len > start) {
@@ -2426,7 +2519,7 @@ pub const App = struct {
                 try self.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
             },
             .complete => |result| {
-                if (!is_main) return;
+                if (!is_main or self.session_store != null) return;
                 const skip_final = self.sdk_preview_flushed;
                 if (!skip_final and self.streaming_entry != null) {
                     try self.flushSdkPreview();
@@ -2497,6 +2590,10 @@ pub const App = struct {
     }
 
     pub fn appendTimelineEntry(self: *App, alloc: std.mem.Allocator, entry: TimelineEntry) !void {
+        if (!self.journal_restoring) if (self.session_store) |store| {
+            try store.drainDisplay(self);
+            try store.enqueue(.{ .kind = .timeline_append, .entry = entry });
+        };
         try self.timeline.append(alloc, entry);
     }
 
@@ -2506,6 +2603,7 @@ pub const App = struct {
     }
 
     fn appendSdkHistory(self: *App, agent_id: r.AgentId, messages: []const r.sdk.Message, start: usize, skip: usize) !void {
+        if (self.session_store != null) return;
         const alloc = self.sessionAlloc();
         var remaining = skip;
         for (messages[@min(start, messages.len)..]) |message| {
@@ -2555,6 +2653,10 @@ pub const App = struct {
     }
 
     pub fn flushSdkPreview(self: *App) !void {
+        if (self.session_store != null) {
+            self.dropStreamingPreview();
+            return;
+        }
         const entry = self.streaming_entry orelse {
             self.dropStreamingPreview();
             return;
@@ -2805,7 +2907,7 @@ const SdkPreviewPart = struct {
     call: SdkPreviewCall = .{ .call_id = "", .tool_name = "" },
 };
 
-fn renderSdkParts(
+pub fn renderSdkParts(
     alloc: std.mem.Allocator,
     agent_id: r.AgentId,
     parts: []const r.sdk.Part,
@@ -3964,15 +4066,11 @@ fn buildToolGroupParagraph(
     defer statuses.unlock();
 
     for (calls) |call| {
-        const agent = app.registry.get(call.agent_id) orelse continue;
+        const agent = app.registry.get(call.agent_id);
         var line = r.tui.Line{};
 
-        const status_agent = &statuses.ptr.agents[call.agent_id.index];
-        const status = if (status_agent.generation == call.agent_id.generation)
-            status_agent.entries.getPtr(call.call_id)
-        else
-            null;
-        const live_result: ?r.sdk.ToolResult = findToolResult(agent, call.call_id);
+        const status = if (statuses.ptr.getAgent(call.agent_id)) |status_agent| status_agent.entries.getPtr(call.call_id) else null;
+        const live_result: ?r.sdk.ToolResult = if (agent) |value| findToolResult(value, call.call_id) else null;
         const is_error = if (live_result) |result| result.is_error else if (status) |entry| entry.is_error else null;
         if (is_error) |failed| {
             if (failed) {
@@ -3986,6 +4084,7 @@ fn buildToolGroupParagraph(
 
         try line.pushSpan(arena, .{ .content = " " });
         if (status) |entry| {
+            if (entry.interrupted) try line.pushSpan(arena, .{ .content = "interrupted ", .style = .{ .fg = app.theme.err } });
             if (entry.lines.items.len > 0) {
                 line.style = entry.lines.items[0].style;
                 for (entry.lines.items[0].spans.items) |span| try line.pushSpan(arena, span);
@@ -4055,7 +4154,12 @@ const RailNode = struct {
 };
 
 fn pushChildActivity(app: *App, arena: std.mem.Allocator, line: *r.tui.Line, child_id: r.AgentId) !void {
-    const child = app.registry.get(child_id) orelse return;
+    const child = app.registry.get(child_id) orelse {
+        if (app.tool_status_entries.value.getAgent(child_id)) |archived| {
+            if (archived.name.len > 0) try line.pushSpanPrint(arena, "  {s}", .{archived.name}, .{ .fg = app.theme.muted });
+        }
+        return;
+    };
     const activity = child.activity;
     if (activity != .idle) {
         try line.pushSpan(arena, .{ .content = switch (activity) {
@@ -4087,8 +4191,7 @@ fn walkAgentRail(
 ) !void {
     if (depth >= rail_depth_cap) return;
     if (agent_id.index >= r.agent_registry.max_agents) return;
-    const agent_status = &store.agents[agent_id.index];
-    if (agent_status.generation != agent_id.generation) return;
+    const agent_status = store.getAgent(agent_id) orelse return;
 
     const Candidate = struct { entry: *ToolStatusEntry, anchored: bool };
     var candidates: std.ArrayList(Candidate) = .empty;
@@ -4269,8 +4372,7 @@ const TimelineRenderSlot = struct {
 fn toolCallChildId(app: *App, call: TimelinePart.ToolCallEntry) ?r.AgentId {
     const statuses = app.tool_status_entries.lock(app.io);
     defer statuses.unlock();
-    const status_agent = &statuses.ptr.agents[call.agent_id.index];
-    if (status_agent.generation != call.agent_id.generation) return null;
+    const status_agent = statuses.ptr.getAgent(call.agent_id) orelse return null;
     const entry = status_agent.entries.getPtr(call.call_id) orelse return null;
     return entry.child_id;
 }

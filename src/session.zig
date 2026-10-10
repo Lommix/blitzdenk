@@ -162,6 +162,9 @@ pub const SaveState = struct {
     /// entries belong to it; on apply both those entries and the timeline
     /// tool_call stamps carrying this id are re-keyed to the fresh id.
     main_agent: ?u32 = null,
+    main_metadata: ?WireAgent = null,
+    archived_ids: []const u32 = &.{},
+    archived_agents: []const WireAgent = &.{},
     clean: bool = false,
     /// Rich per-call status lines (styled label + result flag + child link)
     /// so restored call blocks don't degrade to the plain tool name.
@@ -184,7 +187,10 @@ pub const WireAgent = struct {
     chat: []const WireMessage = &.{},
 };
 
+pub const ToolState = enum { pending, succeeded, failed, interrupted };
+
 pub const WireToolStatus = struct {
+    state: ToolState = .pending,
     agent: ?u32 = null,
     call_id: []const u8,
     ansi: []const u8 = "",
@@ -192,20 +198,7 @@ pub const WireToolStatus = struct {
     child: ?u32 = null,
 };
 
-/// Encodes the current session into a `SaveState`; `alloc` must outlive the
-/// returned value (callers typically use an arena). Reminders are skipped.
-pub fn buildSaveState(a: *app.App, agent: *const r.agent.Agent, alloc: std.mem.Allocator) !SaveState {
-    return .{
-        .chat = try encodeChat(agent.history(), alloc),
-        .timeline = a.timeline.items,
-        .main_agent = if (a.main_agent_id) |main| main.pack() else null,
-        .clean = agent.clean,
-        .tool_status = try encodeToolStatus(a, alloc),
-        .agents = try encodeAgents(a, alloc),
-    };
-}
-
-fn encodeChat(history: []const sdk.Message, alloc: std.mem.Allocator) ![]const WireMessage {
+pub fn encodeChat(history: []const sdk.Message, alloc: std.mem.Allocator) ![]const WireMessage {
     var out: std.ArrayList(WireMessage) = .empty;
     for (history) |message| {
         if (isReminder(message)) continue;
@@ -214,68 +207,9 @@ fn encodeChat(history: []const sdk.Message, alloc: std.mem.Allocator) ![]const W
     return out.toOwnedSlice(alloc);
 }
 
-fn encodeAgents(a: *app.App, alloc: std.mem.Allocator) ![]const WireAgent {
-    var out: std.ArrayList(WireAgent) = .empty;
-    for (&a.registry.slots, 0..) |*slot, index| {
-        switch (slot.state.load(.acquire)) {
-            .free, .reserved => continue,
-            .active, .complete, .failed => {},
-        }
-        const agent = if (slot.agent) |*value| value else continue;
-        const id = r.AgentId{ .index = @intCast(index), .generation = slot.generation };
-        if (a.main_agent_id) |main| {
-            if (id.pack() == main.pack()) continue;
-        }
-        const chat = try encodeChat(agent.history(), alloc);
-        if (chat.len == 0) continue;
-        try out.append(alloc, .{
-            .id = id.pack(),
-            .type_idx = agent.type_idx,
-            .name = agent.name,
-            .task_description = agent.task_description,
-            .parent = agent.parent,
-            .depth = agent.depth,
-            .cwd = agent.cwd,
-            .background = agent.background,
-            .clean = agent.clean,
-            .chat = chat,
-        });
-    }
-    return out.toOwnedSlice(alloc);
-}
-
-/// Serializes the tool status table. The main agent's entries are stored with
-/// `agent == null` (its id changes across apply); child agents keep their
-/// packed id. Entries whose ANSI text is empty and that carry no flags are
-/// skipped — the plain tool_name fallback is equivalent for those.
-fn encodeToolStatus(a: *app.App, alloc: std.mem.Allocator) ![]const WireToolStatus {
-    const main_pack = a.main_agent_id orelse return &.{};
-    var out: std.ArrayList(WireToolStatus) = .empty;
-    const g = a.tool_status_entries.lock(a.io);
-    defer g.unlock();
-    for (&g.ptr.agents, 0..) |*status_agent, index| {
-        if (status_agent.entries.count() == 0) continue;
-        const id = r.AgentId{ .index = @intCast(index), .generation = status_agent.generation };
-        const agent_key: ?u32 = if (id.pack() == main_pack.pack()) null else id.pack();
-        var it = status_agent.entries.iterator();
-        while (it.next()) |slot| {
-            const entry = slot.value_ptr.*;
-            if (entry.lines.items.len == 0 and entry.is_error == null and entry.child_id == null) continue;
-            try out.append(alloc, .{
-                .agent = agent_key,
-                .call_id = slot.key_ptr.*,
-                .ansi = try linesToAnsi(entry.lines.items, alloc),
-                .is_error = entry.is_error,
-                .child = if (entry.child_id) |child| child.pack() else null,
-            });
-        }
-    }
-    return out.toOwnedSlice(alloc);
-}
-
 /// Renders styled lines back to an ANSI string — the same representation
 /// `App.setToolStatus` consumes via `Text.fromAnsi`.
-fn linesToAnsi(lines: []const r.tui.Line, alloc: std.mem.Allocator) ![]const u8 {
+pub fn linesToAnsi(lines: []const r.tui.Line, alloc: std.mem.Allocator) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     var prev_style: ?r.tui.Style = null;
@@ -300,91 +234,61 @@ fn isReminder(message: sdk.Message) bool {
     return message.role == .user and isReminderText(message.text());
 }
 
-/// Applies an already-parsed snapshot onto the app: rebuilds the main agent
-/// from `save.chat` and replays the rendered timeline entries.
 pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
-    const session_alloc = a.sessionAlloc();
-
-    const main_id = try restoreMain(a, save, session_alloc);
-    var restored: std.ArrayList(u32) = .empty;
-    errdefer {
-        a.registry.release(main_id);
-        for (restored.items) |packed_id| {
-            if (packed_id == main_id.pack()) continue;
-            a.registry.release(r.AgentId.unpack(packed_id));
-        }
+    a.journal_restoring = true;
+    defer a.journal_restoring = false;
+    const alloc = a.sessionAlloc();
+    for (save.archived_ids) |packed_id| {
+        const id = r.AgentId.unpack(packed_id);
+        if (id.index >= r.agent_registry.max_agents) continue;
+        a.registry.slots[id.index].generation = @max(a.registry.slots[id.index].generation, id.generation);
     }
-
+    for (save.archived_agents) |*entry| {
+        const id: r.AgentId = .unpack(entry.id);
+        if (id.index >= r.agent_registry.max_agents) continue;
+        try a.rememberAgentMetadata(id, entry.name, entry.task_description);
+    }
+    var restored: std.ArrayList(r.AgentId) = .empty;
+    errdefer for (restored.items) |id| a.registry.release(id);
+    if (save.main_metadata) |entry| {
+        try restoreSubAgent(a, &entry, alloc);
+        try restored.append(alloc, .unpack(entry.id));
+    } else if (save.main_agent) |id| {
+        const entry = WireAgent{ .id = id, .name = a.context_factory.agentName(.general), .cwd = a.cwd, .clean = save.clean, .chat = save.chat };
+        try restoreSubAgent(a, &entry, alloc);
+        try restored.append(alloc, .unpack(id));
+    }
     for (save.agents) |*entry| {
-        restoreSubAgent(a, entry, session_alloc) catch |err| {
-            log.warn("session agent {d} not restored: {s}", .{ entry.id, @errorName(err) });
-            continue;
-        };
-        try restored.append(session_alloc, entry.id);
+        try restoreSubAgent(a, entry, alloc);
+        try restored.append(alloc, .unpack(entry.id));
     }
-    nullMissingParents(a, main_id, save);
-
-    // Re-key restored tool_call stamps: the main agent's id changed across
-    // the save/load boundary, and the renderer looks statuses up by the id
-    // embedded in the timeline entry. Child ids are kept as-is — the per-slot
-    // generation reset in setToolStatus/setToolChild makes their old-gen
-    // lookups match again.
-    for (save.timeline) |*entry| {
-        for (entry.parts) |*part| switch (part.*) {
-            .tool_call => |*call| {
-                if (save.main_agent) |main| {
-                    if (call.agent_id.pack() == main) call.agent_id = main_id;
-                }
-            },
-            else => {},
-        };
-        try a.appendTimelineEntry(session_alloc, entry.*);
-    }
-
-    // Restore rich call-block status, keyed to the fresh agent ids.
+    for (save.timeline) |entry| try a.appendTimelineEntry(alloc, entry);
     for (save.tool_status) |status| {
-        const agent_id: r.AgentId = if (status.agent) |packed_id| .unpack(packed_id) else main_id;
-        if (agent_id.index >= r.agent_registry.max_agents) continue;
-        if (status.ansi.len > 0) a.setToolStatus(agent_id, status.call_id, status.ansi) catch {};
-        if (status.is_error) |is_error| a.setToolResult(agent_id, status.call_id, is_error) catch {};
-        if (status.child) |child| a.setToolChild(agent_id, status.call_id, .unpack(child)) catch {};
+        const packed_id = status.agent orelse save.main_agent orelse continue;
+        const id: r.AgentId = .unpack(packed_id);
+        if (id.index >= r.agent_registry.max_agents) continue;
+        try a.setToolStatus(id, status.call_id, status.ansi);
+        if (status.is_error) |failed| try a.setToolResult(id, status.call_id, failed);
+        if (status.child) |child| try a.setToolChild(id, status.call_id, .unpack(child));
+        const guard = a.tool_status_entries.lock(a.io);
+        if (guard.ptr.getAgent(id)) |agent_status| if (agent_status.entries.getPtr(status.call_id)) |entry| {
+            entry.interrupted = status.state == .interrupted;
+        };
+        guard.unlock();
     }
-
-    a.main_agent_id = main_id;
-    a.registry.pin(main_id);
-    a.registry.slots[main_id.index].state.store(.complete, .release);
+    a.main_agent_id = if (save.main_agent) |id| .unpack(id) else null;
+    if (a.main_agent_id) |id| a.registry.pin(id);
     a.dirty = true;
     a.running = false;
 }
 
-fn restoreMain(a: *app.App, save: *const SaveState, alloc: std.mem.Allocator) !r.AgentId {
-    const options: r.agent.InitOptions = .{ .identity = .{
-        .type_idx = @intFromEnum(r.ContextFactory.AgentType.general),
-        .name = a.context_factory.agentName(.general),
-        .cwd = a.cwd,
-        .clean = save.clean,
-    }, .context_limit = a.default_context_limit };
-    const model_config = try mainModelConfig(a);
-    const Claimed = struct { id: r.AgentId, agent: *r.agent.Agent };
-    const claimed: Claimed = if (save.main_agent) |packed_main| claimed: {
-        const id = r.AgentId.unpack(packed_main);
-        break :claimed .{ .id = id, .agent = try a.registry.restoreAt(id, model_config, options) };
-    } else claimed: {
-        const id = a.registry.reserve(null) orelse return error.RegistryFull;
-        errdefer a.registry.releaseReservation(id);
-        break :claimed .{ .id = id, .agent = try a.registry.activate(id, model_config, options) };
-    };
-    errdefer a.registry.release(claimed.id);
-    try a.configureAgent(claimed.id, claimed.agent);
-    try setRestoredChat(claimed.agent, save.chat, alloc);
-    return claimed.id;
-}
-
-fn mainModelConfig(a: *app.App) !models.Config {
-    return switch (a.context_factory.buildAgentApiConfig(.general, &a.config, a.exec_pool.env)) {
-        .config => |config| config,
-        .diagnostic => error.InvalidProviderConfiguration,
-    };
+pub fn bindJournal(a: *app.App) void {
+    for (&a.registry.slots, 0..) |*slot, index| {
+        if (slot.agent) |*agent| {
+            agent.journal = a.session_store;
+            agent.journal_id = (r.AgentId{ .index = @intCast(index), .generation = slot.generation }).pack();
+        }
+    }
 }
 
 fn restoreSubAgent(a: *app.App, entry: *const WireAgent, alloc: std.mem.Allocator) !void {
@@ -407,6 +311,7 @@ fn restoreSubAgent(a: *app.App, entry: *const WireAgent, alloc: std.mem.Allocato
     agent.background = entry.background;
     try setRestoredChat(agent, entry.chat, alloc);
     try a.configureAgent(id, agent);
+    agent.reported_task_done = true;
     a.registry.slots[id.index].state.store(.complete, .release);
 }
 
@@ -414,22 +319,6 @@ fn setRestoredChat(agent: *r.agent.Agent, chat: []const WireMessage, alloc: std.
     const messages = try alloc.alloc(sdk.Message, chat.len);
     for (chat, messages) |wire, *message| message.* = try decodeMessage(alloc, wire);
     try agent.setMessages(messages);
-}
-
-fn nullMissingParents(a: *app.App, main_id: r.AgentId, save: *const SaveState) void {
-    const main_pack = main_id.pack();
-    for (save.agents) |*entry| {
-        const id = r.AgentId.unpack(entry.id);
-        const agent = a.registry.get(id) orelse continue;
-        defer a.registry.slots[id.index].parent = agent.parent;
-        const parent = agent.parent orelse continue;
-        if (parent == main_pack) continue;
-        const parent_agent = a.registry.get(r.AgentId.unpack(parent)) orelse {
-            agent.parent = null;
-            continue;
-        };
-        if (parent_agent.depth >= agent.depth) agent.parent = null;
-    }
 }
 
 const SessionTestRig = struct {
@@ -482,6 +371,7 @@ const SessionTestRig = struct {
         self.a.main_agent_id = null;
         self.a.event_bus = .{};
         self.a.session_store = null;
+        self.a.journal_restoring = false;
         self.a.dirty = false;
         self.a.running = false;
     }
@@ -513,13 +403,13 @@ const SessionTestRig = struct {
             .cwd = self.a.cwd,
         }, .context_limit = self.a.default_context_limit });
         agent.background = background;
-        try self.a.configureAgent(id, agent);
         if (messages.len > 0) try agent.setMessages(messages);
+        try self.a.configureAgent(id, agent);
         return id;
     }
 };
 
-test "sub-agents survive a checkpoint, journal round-trip, and resume with frozen ids" {
+test "retained agents and display survive journal replay with stable ids" {
     const testing = std.testing;
 
     var tmp = std.testing.tmpDir(.{});
@@ -530,11 +420,16 @@ test "sub-agents survive a checkpoint, journal round-trip, and resume with froze
     try rig.init();
     defer rig.deinit();
 
+    var store = r.session_store.Store{ .io = rig.a.io, .gpa = testing.allocator, .base = base };
+    defer store.deinit();
+    try store.create("/tmp/project");
+    rig.a.session_store = &store;
+
     const main_id = try rig.spawn("main", "", null, false, &.{
         sdk.UserMessage("plan the work"),
         sdk.AssistantMessage("spawning helpers"),
     });
-    rig.a.main_agent_id = main_id;
+    try rig.a.selectMainAgent(main_id);
     rig.registry.pin(main_id);
     rig.registry.slots[main_id.index].state.store(.complete, .release);
 
@@ -558,17 +453,13 @@ test "sub-agents survive a checkpoint, journal round-trip, and resume with froze
     try rig.a.appendTimelineEntry(alloc, .{ .role = .agent, .parts = parts });
     try rig.a.setToolStatus(child_id, "call_spawn_child", "agent tool line");
 
-    var store = r.session_store.Store{ .io = rig.a.io, .gpa = testing.allocator, .base = base };
-    defer store.deinit();
-    try store.create("/tmp/project");
-    rig.a.session_store = &store;
     rig.a.checkpoint();
     try testing.expect(store.file_name != null);
 
     var load_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer load_arena.deinit();
     const loaded = (try r.session_store.load(load_arena.allocator(), rig.a.io, base, store.file_name.?)) orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(usize, 2), loaded.save.agents.len);
+    try testing.expectEqual(@as(usize, 3), loaded.save.agents.len);
 
     var resumed: SessionTestRig = undefined;
     try resumed.init();
@@ -618,4 +509,240 @@ test "sub-agents survive a checkpoint, journal round-trip, and resume with froze
         _ = resumed.registry.reap(child_id);
         if (resumed.registry.state(child_id) == .active) try std.Io.sleep(resumed.a.io, .fromMilliseconds(1), .awake);
     }
+}
+
+test "resumed agents stay idle and reap without background completion notices" {
+    const testing = std.testing;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = std.Io.Dir{ .handle = tmp.dir.handle };
+
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+
+    var store = r.session_store.Store{ .io = rig.a.io, .gpa = testing.allocator, .base = base };
+    defer store.deinit();
+    try store.create("/tmp/project");
+    rig.a.session_store = &store;
+
+    const main_id = try rig.spawn("main", "", null, false, &.{
+        sdk.UserMessage("plan the work"),
+        sdk.AssistantMessage("spawning helpers"),
+    });
+    try rig.a.selectMainAgent(main_id);
+    rig.registry.pin(main_id);
+    rig.registry.slots[main_id.index].state.store(.complete, .release);
+
+    const bg_id = try rig.spawn("scout", "watch the logs", main_id, true, &.{
+        sdk.UserMessage("watch the logs"),
+        sdk.AssistantMessage("log stable"),
+    });
+
+    rig.a.checkpoint();
+    try testing.expect(store.file_name != null);
+
+    var load_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer load_arena.deinit();
+    const loaded = (try r.session_store.load(load_arena.allocator(), rig.a.io, base, store.file_name.?)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), loaded.save.agents.len);
+
+    var resumed: SessionTestRig = undefined;
+    try resumed.init();
+    defer resumed.deinit();
+    try applySaveState(&resumed.a, &loaded.save);
+
+    const main = resumed.registry.get(main_id).?;
+    const bg = resumed.registry.get(bg_id).?;
+    try testing.expect(main.reported_task_done);
+    try testing.expect(bg.reported_task_done);
+    try testing.expectEqual(r.agent_registry.SlotState.complete, resumed.registry.state(main_id).?);
+    try testing.expectEqual(r.agent_registry.SlotState.complete, resumed.registry.state(bg_id).?);
+    try testing.expect(!resumed.a.running);
+    try testing.expectEqual(@as(usize, 0), main.queued_messages.items.len);
+    try testing.expect(main.task == null);
+
+    const timeline_len = resumed.a.timeline.items.len;
+    try resumed.a.handleReapedAgent(bg_id);
+    try resumed.a.handleReapedAgent(main_id);
+    try testing.expectEqual(@as(u32, 0), resumed.registry.countActive());
+    try testing.expectEqual(r.agent_registry.SlotState.complete, resumed.registry.state(main_id).?);
+    try testing.expectEqual(@as(usize, 0), main.queued_messages.items.len);
+    try testing.expect(!resumed.a.running);
+    try testing.expectEqual(timeline_len, resumed.a.timeline.items.len);
+
+    const Fixture = struct {
+        fn discard(_: ?*anyopaque, _: agent_run.Event) void {}
+    };
+    try resumed.registry.run(main_id, .{ .max_steps = 0 });
+    try testing.expect(!main.reported_task_done);
+    try testing.expectEqual(r.agent_registry.SlotState.active, resumed.registry.state(main_id).?);
+    while (resumed.registry.state(main_id) == .active) {
+        _ = resumed.registry.drain(main_id, 64, null, Fixture.discard);
+        _ = resumed.registry.reap(main_id);
+        if (resumed.registry.state(main_id) == .active) try std.Io.sleep(resumed.a.io, .fromMilliseconds(1), .awake);
+    }
+}
+
+const JournalModel = struct {
+    fragment_ready: std.Io.Event = .unset,
+    accept_response: std.Io.Event = .unset,
+    tool_started: std.Io.Event = .unset,
+    finish_tool: std.Io.Event = .unset,
+    calls: usize = 0,
+
+    fn modelId(_: *anyopaque) []const u8 {
+        return "journal-test";
+    }
+
+    fn generate(ctx: *anyopaque, alloc: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) !*sdk.model.GenerateResult {
+        const self: *JournalModel = @ptrCast(@alignCast(ctx));
+        const result = try alloc.create(sdk.model.GenerateResult);
+        self.calls += 1;
+        if (self.calls == 1) {
+            const calls = try alloc.alloc(sdk.ToolCall, 1);
+            calls[0] = .{ .id = try alloc.dupe(u8, "call"), .name = try alloc.dupe(u8, "wait"), .input = try alloc.dupe(u8, "{}") };
+            result.* = .{ .text = try alloc.dupe(u8, "accepted assistant"), .tool_calls = calls, .finish_reason = .tool_calls };
+        } else {
+            result.* = .{ .text = try alloc.dupe(u8, "final answer"), .finish_reason = .stop };
+        }
+        return result;
+    }
+
+    fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, streaming: *sdk.model.StreamContext) !*sdk.model.GenerateResult {
+        const self: *JournalModel = @ptrCast(@alignCast(ctx));
+        if (self.calls == 0) {
+            streaming.send(.{ .type = .text, .text = "uncommitted fragment" });
+            self.fragment_ready.set(io);
+            try self.accept_response.wait(io);
+        }
+        return generate(ctx, alloc, io, params, client, retries);
+    }
+
+    fn execute(ctx: ?*anyopaque, _: std.mem.Allocator, io: std.Io, _: sdk.ToolCall) !sdk.ToolOutput {
+        const self: *JournalModel = @ptrCast(@alignCast(ctx.?));
+        self.tool_started.set(io);
+        try self.finish_tool.wait(io);
+        return .{ .content = "tool finished" };
+    }
+
+    fn discard(_: ?*anyopaque, _: agent_run.Event) void {}
+
+    const vtable = sdk.model.ModelVTable{ .model_id = modelId, .generate = generate, .stream = stream };
+};
+
+test "assistant archive and display publish during a running tool and final answer publishes once" {
+    try exerciseJournalRun(false);
+}
+
+test "live cancellation archives completed assistant and resets unfinished model exchange" {
+    try exerciseJournalRun(true);
+}
+
+fn exerciseJournalRun(cancel: bool) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+    var store = r.session_store.Store{ .io = rig.a.io, .gpa = std.testing.allocator, .base = .{ .handle = tmp.dir.handle } };
+    defer store.deinit();
+    try store.create("/project");
+    rig.a.session_store = &store;
+    const id = try rig.spawn("main", "", null, false, &.{});
+    try rig.a.selectMainAgent(id);
+    var fixture = JournalModel{};
+    const agent = rig.registry.get(id).?;
+    agent.lifetime.reminder = null;
+    const tools = [_]sdk.Tool{.{ .name = "wait", .execute = JournalModel.execute, .execute_ctx = &fixture }};
+    agent.tools = &tools;
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &JournalModel.vtable }, .{ .prompt = "work", .max_steps = 2 });
+    defer agent.cancelAndWait();
+    try fixture.fragment_ready.wait(rig.a.io);
+    try store.flush();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const streaming = (try r.session_store.load(arena.allocator(), rig.a.io, store.base, store.file_name.?)).?;
+    try std.testing.expectEqual(@as(usize, 1), streaming.save.chat.len);
+    try std.testing.expectEqual(@as(usize, 0), streaming.save.timeline.len);
+    try std.testing.expect(store.holdsChat());
+    fixture.accept_response.set(rig.a.io);
+    try fixture.tool_started.wait(rig.a.io);
+    rig.a.journalFlush();
+    const in_tool = (try r.session_store.load(arena.allocator(), rig.a.io, store.base, store.file_name.?)).?;
+    try std.testing.expectEqual(@as(usize, 1), in_tool.save.timeline.len);
+    try std.testing.expectEqualStrings("accepted assistant", in_tool.save.timeline[0].parts[0].message);
+    try std.testing.expectEqual(@as(usize, 1), in_tool.save.chat.len);
+    try std.testing.expectEqual(@as(usize, 2), in_tool.repairs.len);
+    try std.testing.expect(!agent.task.?.isFinished());
+    if (cancel) {
+        agent.cancelAndWait();
+        try std.testing.expectEqual(@as(usize, 1), agent.history().len);
+    } else {
+        fixture.finish_tool.set(rig.a.io);
+        agent.task.?.wait();
+        while (agent.drain(64, null, JournalModel.discard) != 0) {}
+        try std.testing.expect(agent.reap());
+    }
+    rig.a.checkpoint();
+    const completed = (try r.session_store.load(arena.allocator(), rig.a.io, store.base, store.file_name.?)).?;
+    try std.testing.expect(completed.problem == null);
+    try std.testing.expectEqual(@as(usize, 0), completed.repairs.len);
+    try std.testing.expectEqual(@as(usize, if (cancel) 1 else 4), completed.save.chat.len);
+    try std.testing.expectEqual(@as(usize, if (cancel) 1 else 2), completed.save.timeline.len);
+    if (cancel) {
+        try std.testing.expectEqual(ToolState.interrupted, completed.save.tool_status[0].state);
+    } else {
+        try std.testing.expectEqualStrings("final answer", completed.save.chat[3].parts[0].text);
+    }
+    const size = store.offset;
+    rig.a.checkpoint();
+    try std.testing.expectEqual(size, store.offset);
+}
+
+test "removed agents retain historical links without occupying restored slots" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+    var store = r.session_store.Store{ .io = rig.a.io, .gpa = std.testing.allocator, .base = .{ .handle = tmp.dir.handle } };
+    defer store.deinit();
+    try store.create("/project");
+    rig.a.session_store = &store;
+    var first: ?r.AgentId = null;
+    for (0..r.agent_registry.max_agents + 3) |_| {
+        const id = try rig.spawn("archived", "task", null, false, &.{sdk.UserMessage("old")});
+        if (first == null) first = id;
+        try rig.a.setToolStatus(id, "call", "old label");
+        rig.registry.release(id);
+    }
+    const current = try rig.spawn("current", "", null, false, &.{sdk.UserMessage("new")});
+    try rig.a.selectMainAgent(current);
+    try rig.a.setToolStatus(current, "call", "new label");
+    try rig.a.setToolChild(current, "call", first.?);
+    rig.a.checkpoint();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const loaded = (try r.session_store.load(arena.allocator(), rig.a.io, store.base, store.file_name.?)).?;
+    try std.testing.expect(loaded.problem == null);
+    try std.testing.expectEqual(@as(usize, r.agent_registry.max_agents + 3), loaded.save.archived_agents.len);
+    var resumed: SessionTestRig = undefined;
+    try resumed.init();
+    defer resumed.deinit();
+    try applySaveState(&resumed.a, &loaded.save);
+    try std.testing.expect(resumed.registry.get(first.?) == null);
+    try std.testing.expectEqual(current, resumed.a.main_agent_id.?);
+    const statuses = resumed.a.tool_status_entries.lock(resumed.a.io);
+    defer statuses.unlock();
+    const archived = statuses.ptr.getAgent(first.?).?;
+    try std.testing.expectEqualStrings("archived", archived.name);
+    try std.testing.expect(archived.entries.contains("call"));
+    const retained = statuses.ptr.getAgent(current).?;
+    try std.testing.expectEqualStrings("current", retained.name);
+    try std.testing.expectEqual(first.?, retained.entries.get("call").?.child_id.?);
+    const next = resumed.registry.reserve(null).?;
+    defer resumed.registry.releaseReservation(next);
+    try std.testing.expect(next.pack() != first.?.pack());
 }

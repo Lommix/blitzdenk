@@ -95,6 +95,7 @@ pub const Registry = struct {
 
     pub fn reserve(self: *Registry, parent: ?AgentId) ?AgentId {
         for (&self.slots, 0..) |*slot, index| {
+            if (slot.generation == std.math.maxInt(u16)) continue;
             if (slot.state.cmpxchgStrong(.free, .reserved, .acq_rel, .monotonic) == null) {
                 slot.parent = if (parent) |id| id.pack() else null;
                 slot.generation +%= 1;
@@ -111,7 +112,7 @@ pub const Registry = struct {
         for (&self.slots, 0..) |*slot, index| {
             const value = slot.state.load(.acquire);
             if (value != .complete and value != .failed) continue;
-            if (slot.pinned) continue;
+            if (slot.pinned or slot.generation == std.math.maxInt(u16)) continue;
             if (victim == null or slot.finish_seq < self.slots[victim.?].finish_seq) victim = index;
         }
         const index = victim orelse return null;
@@ -130,6 +131,7 @@ pub const Registry = struct {
 
     fn retire(self: *Registry, slot: *Slot) void {
         var agent = slot.agent orelse return;
+        agent.removeFromJournal();
         slot.agent = null;
         self.pending_mutex.lockUncancelable(self.io);
         defer self.pending_mutex.unlock(self.io);
@@ -188,6 +190,8 @@ pub const Registry = struct {
         slot.event.set(self.io);
         self.accountUsage(slot);
         if (slot.agent) |*agent| {
+            agent.cancelAndWait();
+            agent.removeFromJournal();
             agent.deinit();
         }
         const generation = slot.generation;

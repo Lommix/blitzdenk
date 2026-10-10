@@ -66,7 +66,10 @@ fn run(
 ) !types.TextResult {
     var opts = opts_in;
     var history: std.ArrayList(Message) = .empty;
+    var pending_exchange: ?usize = null;
     errdefer {
+        repairHistory(alloc, opts, &history, pending_exchange) catch {};
+        if (opts.hooks.on_checkpoint) |hook| hook(opts.hooks.on_checkpoint_ctx, history.items);
         for (history.items) |msg| types.freeMessage(alloc, msg);
         history.deinit(alloc);
     }
@@ -78,6 +81,8 @@ fn run(
             .single = types.Part.textPart(try alloc.dupe(u8, opts.prompt)),
         });
     }
+
+    if (opts.prompt.len > 0) try notifyHistory(opts, .append, history.items[history.items.len - 1 ..]);
 
     var steps: std.ArrayList(types.StepResult) = .empty;
     errdefer {
@@ -107,11 +112,14 @@ fn run(
                     replacement.deinit(alloc);
                 }
                 try appendOwnedMessages(alloc, &replacement, prepared.messages);
+                try notifyHistory(opts, prepared.replacement_kind, replacement.items);
                 for (history.items) |msg| types.freeMessage(alloc, msg);
                 history.deinit(alloc);
                 history = replacement;
             } else {
+                const start = history.items.len;
                 try appendOwnedMessages(alloc, &history, prepared.messages);
+                try notifyHistory(opts, .append, history.items[start..]);
             }
             if (prepared.tools) |fresh| opts.tools = fresh;
         }
@@ -199,6 +207,12 @@ fn run(
         total_usage.add(result.usage);
         finish = result.finish_reason;
 
+        const has_tools = result.tool_calls.len > 0;
+        if (!has_tools and result.finish_reason == .tool_calls) {
+            log.err("provider finished with tool_calls but returned no valid tool calls at step {d}; retrying turn", .{step_no});
+            return error.NetworkError;
+        }
+
         {
             const assistant_message = Message{
                 .role = .assistant,
@@ -207,26 +221,21 @@ fn run(
             errdefer types.freeMessage(alloc, assistant_message);
             try history.append(alloc, assistant_message);
         }
+        if (has_tools) pending_exchange = history.items.len - 1;
+        try notifyHistory(opts, .append, history.items[history.items.len - 1 ..]);
         const assistant_msg = history.items[history.items.len - 1];
 
-        const has_tools = result.tool_calls.len > 0;
-        if (!has_tools and result.finish_reason == .tool_calls) {
-            log.err("provider finished with tool_calls but returned no valid tool calls at step {d}; retrying turn", .{step_no});
-            return error.NetworkError;
-        }
         const execute_tools = has_tools and step_no < opts.max_steps;
         if (has_tools and !execute_tools) exhausted = true;
         const tool_results: []types.ToolResult = if (execute_tools)
-            try executeTools(alloc, io, opts, result.tool_calls, step_no)
+            try executeTools(alloc, io, opts, result.tool_calls, step_no, &history)
         else
             &.{};
+        if (execute_tools) pending_exchange = null;
         defer if (execute_tools) {
             freeToolResults(alloc, tool_results);
             alloc.free(tool_results);
         };
-        if (execute_tools) {
-            try appendToolMessages(alloc, &history, tool_results);
-        }
 
         var should_stop = false;
         for (tool_results) |tool_result| {
@@ -274,6 +283,9 @@ fn run(
         alloc.destroy(result);
         if (!execute_tools or should_stop) break;
     }
+
+    try repairHistory(alloc, opts, &history, pending_exchange);
+    pending_exchange = null;
 
     var text: std.ArrayList(u8) = .empty;
     errdefer text.deinit(alloc);
@@ -569,6 +581,7 @@ fn executeTools(
     opts: GenerateOptions,
     calls: []const types.ToolCall,
     step: usize,
+    history: *std.ArrayList(Message),
 ) ![]types.ToolResult {
     const results = try alloc.alloc(types.ToolResult, calls.len);
     var completed: usize = 0;
@@ -581,6 +594,7 @@ fn executeTools(
         for (calls, 0..) |tc, i| {
             results[i] = try executeOne(alloc, io, opts, tc, step);
             completed = i + 1;
+            try appendToolResult(alloc, opts, history, results[i]);
         }
     } else {
         const Job = struct {
@@ -615,6 +629,7 @@ fn executeTools(
             results[awaited] = job.result;
             awaited += 1;
             completed = awaited;
+            try appendToolResult(alloc, opts, history, job.result);
         }
     }
 
@@ -803,4 +818,23 @@ pub fn streamObject(
         },
         .arena = object_arena,
     };
+}
+
+fn notifyHistory(opts: GenerateOptions, change: options.HistoryChange, messages: []const Message) !void {
+    if (change == .append and messages.len == 0) return;
+    if (opts.hooks.on_history) |hook| try hook(opts.hooks.on_history_ctx, change, messages);
+}
+
+fn appendToolResult(alloc: std.mem.Allocator, opts: GenerateOptions, history: *std.ArrayList(Message), result: types.ToolResult) !void {
+    const start = history.items.len;
+    try appendToolMessages(alloc, history, &.{result});
+    try notifyHistory(opts, .append, history.items[start..]);
+}
+
+fn repairHistory(alloc: std.mem.Allocator, opts: GenerateOptions, history: *std.ArrayList(Message), pending_exchange: ?usize) !void {
+    if (pending_exchange) |cut| {
+        try notifyHistory(opts, .interrupted_exchange, history.items[0..cut]);
+        for (history.items[cut..]) |message| types.freeMessage(alloc, message);
+        history.shrinkRetainingCapacity(cut);
+    }
 }
