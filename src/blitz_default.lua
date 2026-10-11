@@ -79,7 +79,8 @@ for i, out in ipairs(r) do print(i, out:match("^%S+") or "0") end]],
 ---------------------------------------------------------------------------------------------------
 Tools.idle_tool = blitz.register_tool({
 	name = "idle",
-	description = "End your turn. The next event or sub agent will wake you up.",
+	description = "Use when waiting for your sub agents to finish work",
+	snippet = "Wait for your sub agents",
 	func = function(ctx, _)
 		ctx:set_status("Waiting for something to happen")
 		return { exit_loop = true }
@@ -134,8 +135,7 @@ Tools.agent_tool = blitz.register_tool({
 			description = "Bare agent: no system-reminder injections and no AGENTS.md context. Defaults to false",
 		},
 	},
-	snippet = "Launch a subagent",
-	guidelines = "Wait for agents by ending your turn",
+	snippet = "launch a new agent with a task",
 	func = function(ctx, call)
 		local a = call.arguments
 		local description = a.description
@@ -201,12 +201,15 @@ Tools.agent_tool = blitz.register_tool({
 })
 
 ---------------------------------------------------------------------------------------------------
---- inject an agent catalogue into new sessions ( digest = reinject on change)
+--- inject an agent catalogue into new sessions ( digest = reinject on change/compact)
 ---------------------------------------------------------------------------------------------------
 blitz.hooks.inject({
-	main_only = true,
 	digest = true,
-	func = function()
+	func = function(_, agent_type_id)
+		if blitz.has_tool(agent_type_id, Tools.agent_tool) == false then
+			return ""
+		end
+
 		local rows = {}
 		for _, t in ipairs(blitz.list_agent_types()) do
 			if t.in_agent_tool then
@@ -236,7 +239,6 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	Tools.message_tool,
 	Tools.idle_tool,
 	Tools.agent_tool,
-	-- blitz.tools.PATCH, -- EDIT/WRITE alternative
 })
 
 ---------------------------------------------------------------------------------------------------
