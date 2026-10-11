@@ -1630,6 +1630,7 @@ pub const BlitzHooks = LuaType{
                             vm.permission_hook = c.LUA_NOREF;
                             for (vm.inject_hooks.items) |*entry| c.luaL_unref(state, c.LUA_REGISTRYINDEX, entry.func_ref);
                             vm.inject_hooks.clearRetainingCapacity();
+                            vm.inject_hooks_generation += 1;
                             vm.prompt_hook = c.LUA_NOREF;
                         }
                     }).t, "clear"),
@@ -3565,6 +3566,7 @@ pub const LuaVm = struct {
     /// blitz.hooks.approve() slot. One handler, last registration wins.
     permission_hook: c_int = c.LUA_NOREF,
     inject_hooks: std.ArrayList(LuaInjectEntry) = .empty,
+    inject_hooks_generation: u64 = 0,
     prompt_hook: c_int = c.LUA_NOREF,
     /// Packed agent id to registry ref of agent.spawn on_complete callbacks.
     /// Main vm only, touched under vm_mu.
@@ -3703,6 +3705,7 @@ pub const LuaVm = struct {
         self.command_entries = .empty;
         self.mcp_entries = .empty;
         self.inject_hooks = .empty;
+        self.inject_hooks_generation += 1;
         self.spawn_callbacks.clearRetainingCapacity();
         self.stdout_buf = .empty;
         self.prepareArenaLists() catch return error.LuaInitFailed;
@@ -4204,19 +4207,17 @@ pub const LuaVm = struct {
         return alloc.dupe(u8, ptr[0..len]) catch null;
     }
 
-    pub fn resetInjectDigest(self: *LuaVm) void {
-        const a = self.app orelse return;
-        self.vm_mu.lockUncancelable(a.io);
-        defer self.vm_mu.unlock(a.io);
-        for (self.inject_hooks.items) |*entry| entry.hook.last_digest = null;
-    }
-
-    pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, agent_type: u8, cancel_token: ?*r.sdk.CancellationToken) void {
+    pub fn emitInjectHooks(self: *LuaVm, w: *std.Io.Writer, agent_id: r.AgentId, agent_type: u8, cancel_token: ?*r.sdk.CancellationToken, digests: *r.inject.LuaHookDigests, alloc: std.mem.Allocator) void {
         const a = self.app orelse return;
         if (!a.lua_inject_hooks_enabled.load(.acquire)) return;
         self.vm_mu.lockUncancelable(a.io);
         defer self.vm_mu.unlock(a.io);
         if (self.inject_hooks.items.len == 0) return;
+
+        if (digests.hooks_generation != self.inject_hooks_generation) {
+            digests.map.clearRetainingCapacity();
+            digests.hooks_generation = self.inject_hooks_generation;
+        }
 
         if (cancel_token) |token| {
             self.cancel_token = token;
@@ -4231,7 +4232,7 @@ pub const LuaVm = struct {
         const top = c.lua_gettop(L);
         defer c.lua_settop(L, top);
 
-        for (self.inject_hooks.items) |*entry| {
+        for (self.inject_hooks.items, 0..) |*entry, i| {
             if (!entry.hook.allows(a.main_agent_id, agent_id)) continue;
 
             _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, entry.func_ref);
@@ -4250,10 +4251,13 @@ pub const LuaVm = struct {
             var len: usize = 0;
             const ptr = c.lua_tolstring(L, -1, &len) orelse continue;
 
-            if (!entry.hook.accepts(ptr[0..len])) continue;
+            const digest = if (entry.hook.digest) std.hash.Wyhash.hash(0, ptr[0..len]) else null;
+            if (digest) |value| {
+                if (digests.map.get(i) == value) continue;
+            }
 
             w.writeAll(ptr[0..len]) catch return;
-            entry.hook.remember(ptr[0..len]);
+            if (digest) |value| digests.map.put(alloc, i, value) catch {};
         }
     }
 };
@@ -5867,7 +5871,9 @@ test "inject hooks survive a lua reload without stale arena storage" {
     const id = r.AgentId{ .index = 0, .generation = 0 };
     var w = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer w.deinit();
-    vm.emitInjectHooks(&w.writer, id, 0, null);
+    var digests: r.inject.LuaHookDigests = .{};
+    defer digests.map.deinit(std.testing.allocator);
+    vm.emitInjectHooks(&w.writer, id, 0, null, &digests, std.testing.allocator);
     try std.testing.expectEqualStrings("fresh", w.writer.buffered());
 }
 

@@ -3,6 +3,7 @@ const sdk = @import("blitz-sdk");
 const models = @import("models");
 const agent_run = @import("agent_run.zig");
 const compact = @import("compact.zig");
+const inject = @import("inject.zig");
 pub const state = @import("agent-state");
 
 const stream_timeout_ms: u64 = 15 * 60 * 1000;
@@ -103,6 +104,7 @@ pub const Agent = struct {
     skill_catalog_digest: ?u64 = null,
     capability_catalog_digest: ?u64 = null,
     mcp_catalog_digest: ?u64 = null,
+    lua_hook_digests: inject.LuaHookDigests = .{},
     lua_reload_generation_seen: u64 = 0,
     usage: sdk.Usage = .{},
     context_tokens: u64 = 0,
@@ -185,6 +187,7 @@ pub const Agent = struct {
         self.injection_arena.deinit();
         self.tool_arena.deinit();
         self.metadata.deinit();
+        self.lua_hook_digests.map.deinit(self.alloc);
         self.* = undefined;
     }
 
@@ -677,6 +680,7 @@ pub const Agent = struct {
             return null;
         };
         self.compaction.noteSuccess();
+        self.resetInjectDigests();
         self.usage.add(outcome.usage);
         self.context_tokens = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, cloned);
         self.context_from_provider = false;
@@ -788,8 +792,16 @@ pub const Agent = struct {
         if (self.run_hooks.history) |hook| try hook(self.run_hooks.history_ctx, change, messages);
     }
 
+    fn resetInjectDigests(self: *Agent) void {
+        self.skill_catalog_digest = null;
+        self.capability_catalog_digest = null;
+        self.mcp_catalog_digest = null;
+        self.lua_hook_digests.map.clearRetainingCapacity();
+    }
+
     fn publishHistory(self: *Agent, change: sdk.options.HistoryChange, messages: []const sdk.Message) !void {
         if (self.journal) |store| try store.publish(self.journal_id, change, messages);
+        if (change == .compaction) self.resetInjectDigests();
     }
 
     pub fn removeFromJournal(self: *Agent) void {

@@ -877,7 +877,6 @@ pub const App = struct {
         self.invalidateTimelineRenderCache();
         self.context_factory.resetLoadedTools() catch {};
         self.lua_vm.disableAllMcp();
-        self.lua_vm.resetInjectDigest();
         self.lua_state.reset(self.io, self.gpa);
         _ = self.event_bus.emit(self, .session_reset);
         self.reloadMcpTools() catch {};

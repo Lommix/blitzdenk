@@ -6,27 +6,17 @@ pub const Callback = *const fn (w: *std.Io.Writer, app: *r.app.App, agent: *r.ag
 pub const LuaInjectHook = struct {
     main_only: bool = false,
     digest: bool = false,
-    last_digest: ?u64 = null,
 
     pub fn allows(self: *const LuaInjectHook, main_id: ?r.AgentId, agent_id: r.AgentId) bool {
         if (!self.main_only) return true;
         const main = main_id orelse return false;
         return main.pack() == agent_id.pack();
     }
+};
 
-    pub fn accepts(self: *const LuaInjectHook, text: []const u8) bool {
-        if (!self.digest) return true;
-        const digest = std.hash.Wyhash.hash(0, text);
-        if (self.last_digest) |last| {
-            if (last == digest) return false;
-        }
-        return true;
-    }
-
-    pub fn remember(self: *LuaInjectHook, text: []const u8) void {
-        if (!self.digest) return;
-        self.last_digest = std.hash.Wyhash.hash(0, text);
-    }
+pub const LuaHookDigests = struct {
+    hooks_generation: u64 = 0,
+    map: std.AutoHashMapUnmanaged(usize, u64) = .empty,
 };
 
 ///!Inject system reminder on tool turn finish
@@ -85,7 +75,7 @@ pub const InjectionsHooks = struct {
         if (app.lua_inject_hooks_enabled.load(.acquire)) {
             if (app.registry.idForAgent(agent)) |agent_id| {
                 var hook_w = std.Io.Writer.Allocating.init(alloc);
-                app.lua_vm.emitInjectHooks(&hook_w.writer, agent_id, agent.type_idx, if (agent.task) |*t| &t.cancellation else null);
+                app.lua_vm.emitInjectHooks(&hook_w.writer, agent_id, agent.type_idx, if (agent.task) |*t| &t.cancellation else null, &agent.lua_hook_digests, agent.alloc);
                 const hook_res = try hook_w.toOwnedSlice();
                 defer alloc.free(hook_res);
                 if (hook_res.len > 0) {
