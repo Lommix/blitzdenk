@@ -6,7 +6,7 @@ const compact = @import("compact.zig");
 const inject = @import("inject.zig");
 pub const state = @import("agent-state");
 
-const stream_timeout_ms: u64 = 15 * 60 * 1000;
+const stream_timeout_ms: u64 = 5 * 60 * 1000;
 const stream_idle_timeout_ms: u64 = 120 * 1000;
 
 const PrepareHook = *const fn (?*anyopaque, sdk.options.PrepareStepInfo) anyerror!sdk.options.PrepareStepResult;
@@ -118,6 +118,7 @@ pub const Agent = struct {
     max_retries: u32 = 10,
     retry_delay_ms: u64 = 10_000,
     retry_at_ns: i128 = 0,
+    provider_retry_after_ms: ?u64 = null,
     stream_started_ns: i128 = 0,
     stream_output_bytes: u64 = 0,
     tokens_per_second: f32 = 0,
@@ -358,6 +359,7 @@ pub const Agent = struct {
         self.stop_requested.store(false, .release);
         self.flags.cancel = false;
         self.retry_at_ns = 0;
+        self.provider_retry_after_ms = null;
         self.endStream();
         self.tokens_per_second = 0;
         self.activity = .processing;
@@ -443,10 +445,12 @@ pub const Agent = struct {
                 }
                 self.endStream();
                 self.activity = .processing;
+                self.provider_retry_after_ms = null;
             },
             .provider_error => |provider_error| {
                 self.endStream();
                 self.last_provider_retryable = provider_error.is_retryable;
+                self.provider_retry_after_ms = provider_error.retry_after_ms;
                 if (provider_error.will_retry) {
                     self.status = .retrying;
                     self.activity = .retrying;
@@ -499,6 +503,7 @@ pub const Agent = struct {
             self.last_provider_retryable = false;
             self.retry_count = 0;
             self.retry_at_ns = 0;
+            self.provider_retry_after_ms = null;
             self.flags.overflow_recovery = false;
             if (self.resume_options) |*options| options.deinit();
             self.resume_options = null;
@@ -564,8 +569,10 @@ pub const Agent = struct {
 
     fn scheduleRetry(self: *Agent) void {
         self.retry_count += 1;
+        const delay_ms = if (self.provider_retry_after_ms) |retry_after| @min(@max(retry_after, 1000), 60_000) else self.retry_delay_ms;
         const now: i128 = @intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds);
-        self.retry_at_ns = now + @as(i128, self.retry_delay_ms) * std.time.ns_per_ms;
+        self.retry_at_ns = now + @as(i128, delay_ms) * std.time.ns_per_ms;
+        self.provider_retry_after_ms = null;
         self.status = .retrying;
         self.activity = .retrying;
     }

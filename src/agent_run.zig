@@ -8,6 +8,7 @@ pub const ProviderError = struct {
     response_body: []const u8,
     is_retryable: bool,
     will_retry: bool = false,
+    retry_after_ms: ?u64 = null,
 };
 
 pub const ToolResultEvent = struct {
@@ -286,6 +287,7 @@ pub const RunTask = struct {
             .response_body = info.response_body,
             .is_retryable = info.is_retryable,
             .will_retry = info.will_retry,
+            .retry_after_ms = info.retry_after_ms,
         } }) catch |err| {
             log.err("dropped provider error event status={d}: {s}", .{ info.status_code, @errorName(err) });
         };

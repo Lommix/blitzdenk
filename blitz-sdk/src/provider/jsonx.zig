@@ -411,7 +411,15 @@ pub fn postSseWithRetry(
     var attempt: u32 = 0;
     while (true) {
         if (options.cancellation) |token| try token.check();
-        const response = try postSseTimed(a, io, client, url, body, headers, options.timeout_ms, options.idle_timeout_ms, options.cancellation, event_ctx, on_event);
+        var events_emitted = std.atomic.Value(bool).init(false);
+        const response = postSseTimed(a, io, client, url, body, headers, options.timeout_ms, options.idle_timeout_ms, options.cancellation, event_ctx, on_event, &events_emitted) catch |err| {
+            if (err == error.RateLimited and attempt < max_retries and !events_emitted.load(.acquire)) {
+                try sleepBackoff(io, attempt, null, options.cancellation);
+                attempt += 1;
+                continue;
+            }
+            return err;
+        };
         if (@intFromEnum(response.status) < 400) return response.body;
         if (!isRetryableStatus(response.status) or attempt >= max_retries) {
             defer a.free(response.body);
@@ -547,7 +555,7 @@ fn postTimed(
     timeout_ms: ?u64,
     cancellation: ?*opts_mod.CancellationToken,
 ) !Response {
-    if (timeout_ms == null and cancellation == null) return post(a, io, client, url, body, headers);
+    const timeout = timeout_ms orelse 600_000;
     const Selection = union(enum) {
         response: anyerror!Response,
         timeout: void,
@@ -556,7 +564,7 @@ fn postTimed(
     var buffer: [3]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
     select.async(.response, postTask, .{ a, io, client, url, body, headers });
-    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout });
+    select.async(.timeout, timeoutTask, .{ io, timeout });
     if (cancellation) |token| select.async(.canceled, opts_mod.CancellationToken.waitUntilCanceled, .{ token, io });
     switch (try select.await()) {
         .response => |response| {
@@ -648,6 +656,7 @@ fn postSse(
     event_ctx: ?*anyopaque,
     on_event: *const fn (?*anyopaque, []const u8) anyerror!void,
     last_chunk: ?*std.atomic.Value(i64),
+    events_emitted: ?*std.atomic.Value(bool),
 ) !Response {
     const h = try a.alloc(std.http.Header, headers.len + 1);
     defer a.free(h);
@@ -703,8 +712,8 @@ fn postSse(
         if (writer.end == 0) continue;
         const chunk = scratch[0..writer.end];
         try output.appendSlice(a, chunk);
+        if (last_chunk) |stamp| stamp.store(nowNs(io), .release);
         if (@intFromEnum(status) >= 400) {
-            if (last_chunk) |stamp| stamp.store(nowNs(io), .release);
             continue;
         }
         try pending.appendSlice(a, chunk);
@@ -714,8 +723,8 @@ fn postSse(
                 const data = std.mem.trim(u8, line["data:".len..], " ");
                 if (std.mem.eql(u8, data, "[DONE]")) return .{ .status = status, .body = try output.toOwnedSlice(a), .retry_after_ms = retry_after_ms };
                 if (data.len > 0) {
-                    if (last_chunk) |stamp| stamp.store(nowNs(io), .release);
                     try on_event(event_ctx, data);
+                    if (events_emitted) |flag| flag.store(true, .release);
                 }
             }
             try pending.replaceRange(a, 0, end + 1, "");
@@ -725,14 +734,14 @@ fn postSse(
     return .{ .status = status, .body = try output.toOwnedSlice(a), .retry_after_ms = retry_after_ms };
 }
 
-pub fn sseCompleted(sse_text: []const u8, terminators: []const []const u8) bool {
+pub fn sseHasData(sse_text: []const u8) bool {
     var it = std.mem.splitScalar(u8, sse_text, '\n');
     while (it.next()) |line| {
         if (!std.mem.startsWith(u8, line, "data:")) continue;
         const data = std.mem.trim(u8, line["data:".len..], " \t\r");
-        for (terminators) |terminator| {
-            if (std.mem.indexOf(u8, data, terminator) != null) return true;
-        }
+        if (data.len == 0) continue;
+        if (std.mem.eql(u8, data, "[DONE]")) continue;
+        return true;
     }
     return false;
 }
@@ -759,9 +768,11 @@ fn postSseTimed(
     cancellation: ?*opts_mod.CancellationToken,
     event_ctx: ?*anyopaque,
     on_event: *const fn (?*anyopaque, []const u8) anyerror!void,
+    events_emitted: ?*std.atomic.Value(bool),
 ) !Response {
     var last_chunk = std.atomic.Value(i64).init(nowNs(io));
-    if (timeout_ms == null and idle_timeout_ms == null and cancellation == null) return postSse(a, io, client, url, body, headers, event_ctx, on_event, null);
+    const timeout = timeout_ms orelse 600_000;
+    const idle = idle_timeout_ms orelse 120_000;
     const Selection = union(enum) {
         response: anyerror!Response,
         timeout: void,
@@ -770,10 +781,9 @@ fn postSseTimed(
     };
     var buffer: [4]Selection = undefined;
     var select = std.Io.Select(Selection).init(io, &buffer);
-    const chunk_stamp: ?*std.atomic.Value(i64) = if (idle_timeout_ms == null) null else &last_chunk;
-    select.async(.response, postSseTask, .{ a, io, client, url, body, headers, event_ctx, on_event, chunk_stamp });
-    if (timeout_ms) |timeout| select.async(.timeout, timeoutTask, .{ io, timeout });
-    if (idle_timeout_ms) |idle| select.async(.idle, idleWatchdog, .{ io, idle, &last_chunk });
+    select.async(.response, postSseTask, .{ a, io, client, url, body, headers, event_ctx, on_event, &last_chunk, events_emitted });
+    select.async(.timeout, timeoutTask, .{ io, timeout });
+    select.async(.idle, idleWatchdog, .{ io, idle, &last_chunk });
     if (cancellation) |token| select.async(.canceled, opts_mod.CancellationToken.waitUntilCanceled, .{ token, io });
     switch (try select.await()) {
         .response => |response| {
@@ -795,6 +805,6 @@ fn postSseTimed(
     }
 }
 
-fn postSseTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, event_ctx: ?*anyopaque, on_event: *const fn (?*anyopaque, []const u8) anyerror!void, last_chunk: ?*std.atomic.Value(i64)) !Response {
-    return postSse(a, io, client, url, body, headers, event_ctx, on_event, last_chunk);
+fn postSseTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, event_ctx: ?*anyopaque, on_event: *const fn (?*anyopaque, []const u8) anyerror!void, last_chunk: ?*std.atomic.Value(i64), events_emitted: ?*std.atomic.Value(bool)) !Response {
+    return postSse(a, io, client, url, body, headers, event_ctx, on_event, last_chunk, events_emitted);
 }

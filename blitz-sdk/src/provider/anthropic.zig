@@ -163,7 +163,7 @@ pub const Chat = struct {
         var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
         const sse_text = try jsonx.postSseWithRetry(alloc, io, client orelse try self.ensureClient(alloc, io), url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         defer alloc.free(sse_text);
-        if (!jsonx.sseCompleted(sse_text, &.{"\"type\":\"message_delta\""})) return error.NetworkError;
+        if (!jsonx.sseHasData(sse_text)) return error.NetworkError;
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
         return parseStream(alloc, sse_text, &final_ctx);
     }
