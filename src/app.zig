@@ -4150,8 +4150,8 @@ fn appendToolImage(
     try images.append(arena, .{ .entry = entry, .row = p.lines.items.len, .col = col, .cols = m.cols, .rows = m.rows });
     for (0..m.rows) |row| {
         var line = r.tui.Line{};
-        try line.pushText(arena, rail, .{ .fg = app.theme.muted });
-        try line.pushText(arena, if (row == 0) "  └ " else "    ", .{ .fg = app.theme.muted });
+        try line.pushText(arena, rail, .{});
+        try line.pushText(arena, if (row == 0) "  └ " else "    ", .{});
         try p.lines.append(arena, line);
     }
 }

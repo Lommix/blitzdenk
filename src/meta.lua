@@ -492,6 +492,8 @@
 ---@field tps number
 ---messages waiting in the agent queue
 ---@field queued integer
+---unix epoch milliseconds of the last provider request, 0 if none
+---@field last_active integer
 
 ---@class BlitzAgentTypeRow
 ---type handle for blitz.agent.spawn

@@ -119,6 +119,7 @@ pub const Agent = struct {
     retry_delay_ms: u64 = 10_000,
     retry_at_ns: i128 = 0,
     provider_retry_after_ms: ?u64 = null,
+    last_active_ns: std.atomic.Value(i128) = .init(0),
     stream_started_ns: i128 = 0,
     stream_output_bytes: u64 = 0,
     tokens_per_second: f32 = 0,
@@ -341,6 +342,7 @@ pub const Agent = struct {
         self.compaction.estimated_input_tokens = estimate;
         self.compact_task = compact.Task.init(self.alloc, self.io, &self.model, self.tools, self.history(), force);
         self.compact_task.?.cache_key = self.cache_key orelse fallback_cache_key;
+        _ = self.last_active_ns.swap(@intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds), .monotonic);
         self.status = .compacting;
         self.compact_task.?.start();
         return true;
@@ -395,6 +397,8 @@ pub const Agent = struct {
         run_options.hooks.on_tool_call_ctx = self;
         run_options.hooks.stop_when = stopWhen;
         run_options.hooks.stop_when_ctx = self;
+        run_options.hooks.on_request = requestStart;
+        run_options.hooks.on_request_ctx = self;
         run_options.hooks.on_history = historyChanged;
         run_options.hooks.on_history_ctx = self;
         self.task = agent_run.RunTask.init(self.alloc, self.io, model, run_options) catch |err| {
@@ -601,6 +605,11 @@ pub const Agent = struct {
     pub fn contextPercent(self: *const Agent) u8 {
         if (self.context_limit == 0) return 0;
         return @intCast(@min(100, self.context_tokens * 100 / self.context_limit));
+    }
+
+    fn requestStart(ctx: ?*anyopaque, _: sdk.options.RequestInfo) void {
+        const self: *Agent = @ptrCast(@alignCast(ctx.?));
+        _ = self.last_active_ns.swap(@intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds), .monotonic);
     }
 
     fn prepareStep(ctx: ?*anyopaque, info: sdk.options.PrepareStepInfo) anyerror!sdk.options.PrepareStepResult {

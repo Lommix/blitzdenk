@@ -305,6 +305,7 @@ const AgentRowDef = LuaType{ .table_def = .{ .name = "BlitzAgentRow", .fields = 
     .{ .name = "depth", .ty = LuaType.integer, .desc = "agent depth (0 = main)" },
     .{ .name = "tps", .ty = LuaType.number, .desc = "output tokens per second, live while a run streams" },
     .{ .name = "queued", .ty = LuaType.integer, .desc = "messages waiting in the agent queue" },
+    .{ .name = "last_active", .ty = LuaType.integer, .desc = "unix epoch milliseconds of the last provider request, 0 if none" },
 } } };
 const AgentRowListDef = LuaType{ .raw_refs = .{ .text = "BlitzAgentRow[]", .refs = &.{AgentRowDef} } };
 
@@ -660,6 +661,7 @@ pub const Blitz = LuaType{
                         depth: u16,
                         tps: f32,
                         queued: u32,
+                        last_active: i64,
                     };
 
                     fn stateLabel(slot_state: r.agent_registry.SlotState, agent: *const r.agent.Agent) []const u8 {
@@ -712,6 +714,7 @@ pub const Blitz = LuaType{
                                 .depth = agent.depth,
                                 .tps = agent.tokens_per_second,
                                 .queued = @intCast(agent.queued_messages.items.len),
+                                .last_active = @intCast(@divTrunc(agent.last_active_ns.fetchAdd(0, .monotonic), std.time.ns_per_ms)),
                             };
                             count += 1;
                         }
