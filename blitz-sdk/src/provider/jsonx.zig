@@ -60,7 +60,11 @@ pub fn buildChatRequest(
                 try s.objectField("tool_call_id");
                 try s.write(result.id);
                 try s.objectField("content");
-                try s.write(result.output);
+                if (result.output.len == 0) {
+                    try s.write(" ");
+                } else {
+                    try s.write(result.output);
+                }
                 try s.endObject();
             }
             const run_ends = i + 1 == params.messages.len or params.messages[i + 1].role != .tool;
@@ -84,15 +88,28 @@ pub fn buildChatRequest(
         try s.beginObject();
         try s.objectField("role");
         try s.write(msg.role.string());
+        var has_content_parts = false;
+        for (msg.parts()) |part| switch (part) {
+            .text, .image => has_content_parts = true,
+            else => {},
+        };
         try s.objectField("content");
-        try s.beginArray();
-        for (msg.parts()) |part| {
-            switch (part) {
-                .tool_call, .tool_result => {},
-                else => try writePart(&s, part),
+        if (!has_content_parts) {
+            if (msg.role == .assistant) {
+                try s.write(@as(?u8, null));
+            } else {
+                try s.write("");
             }
+        } else {
+            try s.beginArray();
+            for (msg.parts()) |part| {
+                switch (part) {
+                    .tool_call, .tool_result => {},
+                    else => try writePart(&s, part),
+                }
+            }
+            try s.endArray();
         }
-        try s.endArray();
         if (msg.role == .assistant) {
             var has_calls = false;
             for (msg.parts()) |part| {
