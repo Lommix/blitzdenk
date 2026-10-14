@@ -486,7 +486,15 @@ fn wrapRows(
         si = run.end.span;
         pos = run.end.pos;
 
-        const row_width = st.width();
+        const row_width = @max(st.width(), 1);
+        if (st.col >= row_width) {
+            try st.flush();
+            if (space) {
+                st.src += run.bytes;
+                st.row_start = st.src;
+                continue;
+            }
+        }
         const fits = run.cols <= row_width -| st.col;
         const placeable = (st.col > 0 or run.cols <= row_width) and (space or run.cols <= row_width);
         if (placeable and st.col > 0 and !fits) {
@@ -506,7 +514,7 @@ fn wrapRows(
 
         var m = from;
         while (markBefore(m, run.end)) {
-            const take = markScan(spans, m, run.end, st.width() -| st.col, null);
+            const take = markScan(spans, m, run.end, @max(st.width(), 1) -| st.col, null);
             try st.push(spans, m, take.end);
             st.col += take.cols;
             st.src += take.bytes;
@@ -1237,4 +1245,44 @@ fn renderRowClipped(row: *const Line, x: i32, y: i32, max_width: u16, buf: *Buff
             col +|= 1;
         }
     }
+}
+
+test "wrapLine advances after a full row" {
+    var line = Line{};
+    defer line.deinit(std.testing.allocator);
+    try line.pushText(std.testing.allocator, "abcd efgh", .{});
+    var rows: std.ArrayList(Line) = .empty;
+    defer {
+        for (rows.items) |*row| row.deinit(std.testing.allocator);
+        rows.deinit(std.testing.allocator);
+    }
+    try wrapLine(std.testing.allocator, &line, 4, &rows);
+    try std.testing.expectEqual(@as(usize, 2), rows.items.len);
+}
+
+test "wrapLine advances across invalid utf8" {
+    var line = Line{};
+    defer line.deinit(std.testing.allocator);
+    const text = [_]u8{ 0xFF, 0xFE, 0xFD };
+    try line.pushText(std.testing.allocator, &text, .{});
+    var rows: std.ArrayList(Line) = .empty;
+    defer {
+        for (rows.items) |*row| row.deinit(std.testing.allocator);
+        rows.deinit(std.testing.allocator);
+    }
+    try wrapLine(std.testing.allocator, &line, 1, &rows);
+    try std.testing.expectEqual(@as(usize, 3), rows.items.len);
+}
+
+test "wrapLine makes progress with zero continuation width" {
+    var line = Line{};
+    defer line.deinit(std.testing.allocator);
+    try line.pushText(std.testing.allocator, "abcdef", .{});
+    var rows: std.ArrayList(Line) = .empty;
+    defer {
+        for (rows.items) |*row| row.deinit(std.testing.allocator);
+        rows.deinit(std.testing.allocator);
+    }
+    try wrapLineEx(std.testing.allocator, &line, 2, 0, &rows);
+    try std.testing.expectEqual(@as(usize, 5), rows.items.len);
 }

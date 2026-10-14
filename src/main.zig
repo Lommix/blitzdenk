@@ -412,6 +412,7 @@ fn sessionsTui(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
     const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
     var app = try App.init(io, gpa, context_factory, cwd);
+    app.kitty_graphics = tui.kitty.graphicsSupported(env);
     var registry = r.agent_registry.Registry.init(gpa, io);
     var exec_pool = r.exec.CmdPool.init(gpa, io, env);
     app.registry = &registry;
@@ -426,6 +427,8 @@ fn sessionsTui(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env
     app.enterSessionPicker(rows);
 
     var term = try tui.Terminal.init(arena, io);
+    if (!app.kitty_graphics) app.kitty_graphics = term.probeKittyGraphics(100);
+    term.kitty_graphics = app.kitty_graphics;
     defer term.deinit();
 
     var picked: ?r.session_picker.Row = null;
@@ -533,6 +536,7 @@ pub fn run(
     session_store.collectGarbage(arena, io, cwd_dir, session_store.GC_AGE_MS);
 
     var app = try App.init(io, gpa, context_factory, cwd);
+    app.kitty_graphics = tui.kitty.graphicsSupported(env);
     var registry = r.agent_registry.Registry.init(gpa, io);
     var exec_pool = r.exec.CmdPool.init(gpa, io, env);
     app.registry = &registry;
@@ -673,6 +677,8 @@ pub fn run(
     var exit_hint: bool = false;
     {
         var term = try tui.Terminal.init(arena, io);
+        if (!app.kitty_graphics) app.kitty_graphics = term.probeKittyGraphics(100);
+        term.kitty_graphics = app.kitty_graphics;
         defer term.deinit();
         app.frame_snapshot = &term.previous;
         app.frame_snapshot_resize_gen = &term.resize_generation;
@@ -680,6 +686,7 @@ pub fn run(
         var was_running = app.running;
         var error_fade_pending = false;
         var last_frame_ns: i128 = 0;
+        var mouse_press: ?struct { x: u16, y: u16 } = null;
         main_loop: while (true) {
             const now_ns: i128 = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
             const notifications_before = app.notifications.hasVisible();
@@ -691,12 +698,15 @@ pub fn run(
             if (fading_before and !fading_now) app.dirty = true;
 
             if (app.lua_redraw.swap(false, .acq_rel)) app.dirty = true;
+            if (app.inline_images_ready.load(.acquire)) app.dirty = true;
 
             const animated = app.animationActive() or fading_now;
             app.frame_snapshot_blocked = term.selectionActive();
             if (app.dirty or (animated and now_ns -| last_frame_ns >= 16 * std.time.ns_per_ms)) {
                 last_frame_ns = now_ns;
+                app.cell_px = term.cellPixels();
                 try term.drawWith(&app, App.render);
+                syncGraphics(io, &term, &app);
                 app.frame_count +%= 1;
                 app.dirty = false;
             }
@@ -884,6 +894,15 @@ pub fn run(
                 if (next_event != .none) app.dirty = true;
                 switch (next_event) {
                     .key => |k| {
+                        if (app.image_viewer != null) {
+                            if (k.mods.ctrl and k.code == .char and k.textSlice().len == 1 and k.textSlice()[0] == 'c') {
+                                app.closeImageViewer();
+                                continue;
+                            }
+                            const res = r.image_view.handleKey(&app.image_viewer.?, k);
+                            if (res == .close) app.closeImageViewer();
+                            continue;
+                        }
                         if (app.keymap.parse(k)) |action| {
                             switch (action) {
                                 .exit => {
@@ -1278,15 +1297,34 @@ pub fn run(
                         }
                     },
                     .mouse => |m| {
-                        if (!app.handleScrollbarMouse(m)) {
-                            const res = term.handleMouse(m);
-                            if (res.copied) {
-                                app.notifications.append(gpa, app.nowMillis(), "Copied to clipboard!", .{}) catch {};
+                        if (app.image_viewer) |*viewer| {
+                            switch (r.image_view.handleMouse(viewer, m)) {
+                                .consumed => {},
+                                .close => app.closeImageViewer(),
+                                .pass => {},
                             }
-                            if (res.wheel < 0) {
-                                try app.cmd_queue.append(io, .{ .scroll_up = @intCast(-res.wheel) });
-                            } else if (res.wheel > 0) {
-                                try app.cmd_queue.append(io, .{ .scroll_down = @intCast(res.wheel) });
+                        } else {
+                            if (!app.handleScrollbarMouse(m)) {
+                                const res = term.handleMouse(m);
+                                if (res.copied) {
+                                    app.notifications.append(gpa, app.nowMillis(), "Copied to clipboard!", .{}) catch {};
+                                }
+                                if (res.wheel < 0) {
+                                    try app.cmd_queue.append(io, .{ .scroll_up = @intCast(-res.wheel) });
+                                } else if (res.wheel > 0) {
+                                    try app.cmd_queue.append(io, .{ .scroll_down = @intCast(res.wheel) });
+                                }
+                            }
+                            if (m.button == .left and m.action == .press) {
+                                mouse_press = .{ .x = m.x, .y = m.y };
+                            }
+                            if (m.button == .left and m.action == .release) {
+                                if (mouse_press) |press| {
+                                    if (press.x == m.x and press.y == m.y) {
+                                        openImageAt(&app, &term, m.x, m.y);
+                                    }
+                                }
+                                mouse_press = null;
                             }
                         }
                     },
@@ -1305,6 +1343,232 @@ pub fn run(
 
     app.checkpoint();
     if (exit_hint) printSessionHint(&store, &session_id_buf);
+}
+
+const image_token_punct = "\"'`([{<,;:";
+
+fn trimToken(token: []const u8) []const u8 {
+    var start: usize = 0;
+    var end: usize = token.len;
+    while (start < end and (std.mem.indexOfScalar(u8, image_token_punct, token[start]) != null or token[start] == '(')) start += 1;
+    while (end > start and (std.mem.indexOfScalar(u8, ")]}>.,;:'\"`", token[end - 1]) != null)) end -= 1;
+    return token[start..end];
+}
+
+fn openImageAt(app: *App, term: *tui.Terminal, x: u16, y: u16) void {
+    const w = term.previous.rect.width;
+    const h = term.previous.rect.height;
+    if (x >= w or y >= h) return;
+    var left: i32 = @as(i32, x);
+    while (left >= 0 and term.previous.get(@intCast(left), y).char != ' ') left -= 1;
+    var right: u16 = x;
+    while (right < w and term.previous.get(right, y).char != ' ') right += 1;
+    if (right -| @as(u16, @intCast(left + 1)) == 0) return;
+
+    var token_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var len: usize = 0;
+    var cx: u16 = @intCast(left + 1);
+    while (cx < right) : (cx += 1) {
+        const cell = term.previous.get(cx, y);
+        if (cell.char == ' ') continue;
+        if (len + 4 > token_buf.len) return;
+        const n = std.unicode.utf8Encode(cell.char, token_buf[len..]) catch return;
+        len += n;
+    }
+    const token = trimToken(token_buf[0..len]);
+    if (token.len > 4 and r.image_view.hasImageExtension(token)) {
+        app.openImageToken(token);
+    }
+}
+
+fn syncGraphics(io: std.Io, term: *tui.Terminal, app: *App) void {
+    if (!app.kitty_graphics) return;
+    if (app.graphics_resize_gen != term.resize_generation) {
+        app.graphics_resize_gen = term.resize_generation;
+        for (app.inline_images.entries.items) |entry| {
+            entry.transmitted = false;
+            entry.placed_gen = 0;
+        }
+        if (app.image_viewer) |*viewer| viewer.transmitted = false;
+    }
+    syncImageViewerGraphics(io, term, app);
+    syncInlineGraphics(io, term, app);
+}
+
+fn syncImageViewerGraphics(io: std.Io, term: *tui.Terminal, app: *App) void {
+    if (app.image_view_pending_delete != 0) {
+        var buf: [64]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        tui.kitty.deleteImage(&w, app.image_view_pending_delete) catch {};
+        term.writeRaw(buf[0..w.end]);
+        app.image_view_pending_delete = 0;
+    }
+    const viewer = if (app.image_viewer) |*viewer| viewer else return;
+    if (viewer.img == null) return;
+    viewer.cell_px = term.cellPixels();
+    if (!viewer.transmitted) {
+        var wbuf: [8192]u8 = undefined;
+        var w = term.stdout.writerStreaming(io, &wbuf);
+        const img = viewer.img.?;
+        tui.kitty.transmitRgba(&w.interface, viewer.id, img.pixels, img.width, img.height) catch {
+            w.interface.flush() catch {};
+            return;
+        };
+        w.interface.flush() catch return;
+        viewer.transmitted = true;
+    }
+    const placement = r.image_view.computePlacement(viewer, viewer.cell_px);
+    var buf: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    tui.kitty.placeWithId(&w, viewer.id, 1, placement) catch return;
+    term.writeRaw(buf[0..w.end]);
+}
+
+fn syncInlineGraphics(io: std.Io, term: *tui.Terminal, app: *App) void {
+    if (!app.kitty_graphics) return;
+
+    while (app.inline_pending_deletes.items.len > 0) {
+        const id = app.inline_pending_deletes.pop().?;
+        var buf: [64]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        tui.kitty.deleteImage(&w, id) catch continue;
+        term.writeRaw(buf[0..w.end]);
+    }
+
+    app.inline_frame_gen += 1;
+    const frame_gen = app.inline_frame_gen;
+
+    const hidden = app.image_viewer != null;
+    if (!hidden) {
+        for (app.inline_placements.items) |pl| {
+            const entry = pl.entry;
+            if (entry.state.load(.acquire) != .ready) continue;
+            const img = entry.img orelse continue;
+            if (!entry.transmitted) {
+                var wbuf: [8192]u8 = undefined;
+                var w = term.stdout.writerStreaming(io, &wbuf);
+                tui.kitty.transmitRgba(&w.interface, entry.kitty_id, img.pixels, img.width, img.height) catch {
+                    w.interface.flush() catch {};
+                    continue;
+                };
+                w.interface.flush() catch continue;
+                entry.transmitted = true;
+            }
+            var buf: [160]u8 = undefined;
+            var pw = std.Io.Writer.fixed(&buf);
+            tui.kitty.placeWithId(&pw, entry.kitty_id, r.inline_images.placement_id, .{
+                .col = pl.rect.x,
+                .row = pl.rect.y,
+                .cols = pl.rect.width,
+                .rows = pl.rect.height,
+                .src = pl.src,
+            }) catch continue;
+            term.writeRaw(buf[0..pw.end]);
+            entry.placed_gen = frame_gen;
+        }
+    }
+
+    for (app.inline_images.entries.items) |entry| {
+        if (entry.placed_gen == 0 or entry.placed_gen == frame_gen) continue;
+        var buf: [64]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        tui.kitty.deletePlacement(&w, entry.kitty_id, r.inline_images.placement_id) catch continue;
+        term.writeRaw(buf[0..w.end]);
+        entry.placed_gen = 0;
+    }
+}
+
+fn captureGraphics(app: *App, resize_generation: u64) ![]u8 {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "graphics", .{});
+    defer file.close(std.testing.io);
+    var term: tui.Terminal = undefined;
+    term.stdout = file;
+    term.io = std.testing.io;
+    term.resize_generation = resize_generation;
+    syncGraphics(std.testing.io, &term, app);
+    return tmp.dir.readFileAlloc(std.testing.io, "graphics", std.testing.allocator, .limited(4096));
+}
+
+test "resized graphics retransmit pixels before placing visible and previously hidden images" {
+    const gpa = std.testing.allocator;
+    var pixels = [_]u8{ 255, 0, 0, 255 };
+    var entry: r.inline_images.Entry = .{
+        .agent_id = .{ .index = 1, .generation = 0 },
+        .call_id = "image",
+        .kitty_id = 1_000_000,
+        .img = .{ .width = 1, .height = 1, .pixels = &pixels },
+        .state = .init(.ready),
+    };
+    var hidden = entry;
+    hidden.kitty_id += 1;
+    hidden.transmitted = true;
+    var app: App = undefined;
+    app.gpa = gpa;
+    app.kitty_graphics = true;
+    app.graphics_resize_gen = 0;
+    app.inline_frame_gen = 0;
+    app.inline_images = .{};
+    defer app.inline_images.entries.deinit(gpa);
+    try app.inline_images.entries.appendSlice(gpa, &.{ &entry, &hidden });
+    app.inline_pending_deletes = .empty;
+    defer app.inline_pending_deletes.deinit(gpa);
+    app.inline_placements = .empty;
+    defer app.inline_placements.deinit(gpa);
+    try app.inline_placements.append(gpa, .{
+        .entry = &entry,
+        .rect = .{ .x = 2, .y = 3, .width = 1, .height = 1 },
+        .src = .{ .w = 1, .h = 1 },
+    });
+    app.image_viewer = null;
+    app.image_view_pending_delete = 0;
+
+    const transmit = "a=t,f=32,s=1,v=1,i=1000000";
+    const place = "a=p,i=1000000,p=1";
+    for ([_]u64{ 0, 0, 1, 1, 2 }) |generation| {
+        const was_transmitted = entry.transmitted;
+        const resized = app.graphics_resize_gen != generation;
+        const bytes = try captureGraphics(&app, generation);
+        defer gpa.free(bytes);
+        const placement = std.mem.indexOf(u8, bytes, place) orelse return error.TestUnexpectedResult;
+        const transmission = std.mem.indexOf(u8, bytes, transmit);
+        if (resized or !was_transmitted) {
+            try std.testing.expect(transmission != null);
+            try std.testing.expect(transmission.? < placement);
+        } else {
+            try std.testing.expect(transmission == null);
+        }
+        try std.testing.expect(entry.transmitted);
+        try std.testing.expect(entry.placed_gen != 0);
+    }
+    try std.testing.expect(!hidden.transmitted);
+    app.inline_placements.items[0].entry = &hidden;
+    const restored = try captureGraphics(&app, 2);
+    defer gpa.free(restored);
+    try std.testing.expect(std.mem.indexOf(u8, restored, "a=t,f=32,s=1,v=1,i=1000001") != null);
+    try std.testing.expect(std.mem.indexOf(u8, restored, "a=p,i=1000001,p=1") != null);
+
+    app.image_viewer = .{
+        .id = 1001,
+        .img = entry.img,
+        .image_rect = .{ .width = 2, .height = 2 },
+        .transmitted = true,
+    };
+    const viewer_bytes = try captureGraphics(&app, 3);
+    defer gpa.free(viewer_bytes);
+    const viewer_transmit = std.mem.indexOf(u8, viewer_bytes, "a=t,f=32,s=1,v=1,i=1001") orelse return error.TestUnexpectedResult;
+    const viewer_place = std.mem.indexOf(u8, viewer_bytes, "a=p,i=1001,p=1") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(viewer_transmit < viewer_place);
+    try std.testing.expect(app.image_viewer.?.transmitted);
+    try std.testing.expect(!hidden.transmitted);
+    const next_frame = try captureGraphics(&app, 3);
+    defer gpa.free(next_frame);
+    try std.testing.expect(std.mem.indexOf(u8, next_frame, "a=t") == null);
+    app.image_viewer = null;
+    const reopened = try captureGraphics(&app, 3);
+    defer gpa.free(reopened);
+    try std.testing.expect(std.mem.indexOf(u8, reopened, "a=t,f=32,s=1,v=1,i=1000001") != null);
 }
 
 /// Prints the resume hint once the terminal is back on the normal screen.

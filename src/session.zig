@@ -247,18 +247,22 @@ pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
         const id: r.AgentId = .unpack(entry.id);
         if (id.index >= r.agent_registry.max_agents) continue;
         try a.rememberAgentMetadata(id, entry.name, entry.task_description);
+        try rememberWireImages(a, id, entry.chat, alloc);
     }
     var restored: std.ArrayList(r.AgentId) = .empty;
     errdefer for (restored.items) |id| a.registry.release(id);
     if (save.main_metadata) |entry| {
+        try rememberWireImages(a, .unpack(entry.id), entry.chat, alloc);
         try restoreSubAgent(a, &entry, alloc);
         try restored.append(alloc, .unpack(entry.id));
     } else if (save.main_agent) |id| {
         const entry = WireAgent{ .id = id, .name = a.context_factory.agentName(.general), .cwd = a.cwd, .clean = save.clean, .chat = save.chat };
+        try rememberWireImages(a, .unpack(id), entry.chat, alloc);
         try restoreSubAgent(a, &entry, alloc);
         try restored.append(alloc, .unpack(id));
     }
     for (save.agents) |*entry| {
+        try rememberWireImages(a, .unpack(entry.id), entry.chat, alloc);
         try restoreSubAgent(a, entry, alloc);
         try restored.append(alloc, .unpack(entry.id));
     }
@@ -319,6 +323,17 @@ fn setRestoredChat(agent: *r.agent.Agent, chat: []const WireMessage, alloc: std.
     const messages = try alloc.alloc(sdk.Message, chat.len);
     for (chat, messages) |wire, *message| message.* = try decodeMessage(alloc, wire);
     try agent.setMessages(messages);
+}
+
+fn rememberWireImages(a: *app.App, agent_id: r.AgentId, chat: []const WireMessage, alloc: std.mem.Allocator) !void {
+    for (chat) |message| for (message.parts) |part| switch (part) {
+        .tool_result => |result| if (result.image) |image| {
+            const data_url = try std.fmt.allocPrint(alloc, "data:{s};base64,{s}", .{ image.media_type, image.data });
+            try a.markToolImageUrl(agent_id, result.call_id, data_url);
+            _ = a.inline_images.rememberBorrowed(a.gpa, agent_id, result.call_id, data_url);
+        },
+        else => {},
+    };
 }
 
 const SessionTestRig = struct {

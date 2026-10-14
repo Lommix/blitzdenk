@@ -3,6 +3,11 @@ const posix = std.posix;
 const buffer_mod = @import("buffer.zig");
 const cell_mod = @import("cell.zig");
 const rect_mod = @import("rect.zig");
+const kitty_mod = @import("kitty.zig");
+
+const kitty_probe_query = "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+const kitty_probe_response = "\x1b_Gi=31;OK\x1b\\";
+const kitty_probe_buffer_size = 64 * 1024;
 
 pub const Buffer = buffer_mod.Buffer;
 pub const Cell = cell_mod.Cell;
@@ -46,6 +51,10 @@ pub const Terminal = struct {
     input_queue: RingQueue(Event, 64) = .{},
     last_size: Rect,
     selection: ?Selection = null,
+    apc_pending: bool = false,
+    apc_esc_pending: bool = false,
+    apc_start_pending: bool = false,
+    kitty_graphics: bool = false,
 
     pub const Selection = struct {
         anchor_x: u16,
@@ -110,6 +119,12 @@ pub const Terminal = struct {
     }
 
     pub fn deinit(self: *Terminal) void {
+        if (self.kitty_graphics) {
+            var clr_buf: [32]u8 = undefined;
+            var cw = std.Io.Writer.fixed(&clr_buf);
+            kitty_mod.deleteAll(&cw) catch {};
+            self.writeRaw(clr_buf[0..cw.end]);
+        }
         // Disable mouse + bracketed paste, show cursor, leave alternate screen
         var buf: [80]u8 = undefined;
         var w = self.stdout.writerStreaming(self.io, &buf);
@@ -134,6 +149,81 @@ pub const Terminal = struct {
 
     pub fn size(self: *Terminal) Rect {
         return getSize(self.stdout.handle);
+    }
+
+    pub fn cellPixels(self: *Terminal) kitty_mod.CellPixels {
+        return kitty_mod.cellPixels(self.stdout.handle);
+    }
+
+    pub fn writeRaw(self: *Terminal, bytes: []const u8) void {
+        var buf: [8192]u8 = undefined;
+        var w = self.stdout.writerStreaming(self.io, &buf);
+        w.interface.writeAll(bytes) catch {};
+        w.interface.flush() catch {};
+    }
+
+    pub fn probeKittyGraphics(self: *Terminal, timeout_ms: i32) bool {
+        var write_buf: [128]u8 = undefined;
+        var w = self.stdout.writerStreaming(self.io, &write_buf);
+        w.interface.writeAll(kitty_probe_query) catch return false;
+        w.interface.flush() catch return false;
+
+        var probe_bytes: [kitty_probe_buffer_size]u8 = undefined;
+        var probe_len: usize = 0;
+        const start: i128 = @intCast(std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds);
+        const timeout: i128 = if (timeout_ms > 0) @intCast(timeout_ms) else 0;
+        const deadline = start + timeout * std.time.ns_per_ms;
+        const stdin_fd = std.Io.File.stdin().handle;
+
+        while (true) {
+            const now: i128 = @intCast(std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds);
+            if (now >= deadline) break;
+            const remaining_ns = deadline - now;
+            const remaining_ms_i128 = @divTrunc(remaining_ns + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+            const poll_timeout: i32 = @intCast(@min(remaining_ms_i128, @as(i128, std.math.maxInt(i32))));
+            var fds = [_]posix.pollfd{.{
+                .fd = stdin_fd,
+                .events = posix.POLL.IN,
+                .revents = 0,
+            }};
+            const ready = posix.poll(&fds, poll_timeout) catch break;
+            if (ready == 0) break;
+            if (probe_len == probe_bytes.len) break;
+            const n = posix.read(stdin_fd, probe_bytes[probe_len..]) catch break;
+            if (n == 0) break;
+            probe_len += n;
+            if (std.mem.indexOf(u8, probe_bytes[0..probe_len], kitty_probe_response) != null) break;
+        }
+
+        return self.consumeKittyProbeBuffer(probe_bytes[0..probe_len]);
+    }
+
+    fn consumeKittyProbeBuffer(self: *Terminal, data: []const u8) bool {
+        var found = false;
+        var cursor: usize = 0;
+        var i: usize = 0;
+        while (i < data.len) {
+            if (std.mem.startsWith(u8, data[i..], kitty_probe_response)) {
+                self.parseAndEnqueue(data[cursor..i]);
+                i += kitty_probe_response.len;
+                cursor = i;
+                found = true;
+                continue;
+            }
+            if (i + 3 <= data.len and std.mem.eql(u8, data[i..][0..3], "\x1b[?")) {
+                var end = i + 3;
+                while (end < data.len and data[end] >= 0x20 and data[end] <= 0x3F) : (end += 1) {}
+                if (end < data.len and data[end] == 'c') {
+                    self.parseAndEnqueue(data[cursor..i]);
+                    i = end + 1;
+                    cursor = i;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        self.parseAndEnqueue(data[cursor..]);
+        return found;
     }
 
     pub fn selectionActive(self: *const Terminal) bool {
@@ -522,6 +612,45 @@ pub const Terminal = struct {
     /// Parse all events from a byte slice and push them onto the input queue.
     fn parseAndEnqueue(self: *Terminal, data: []const u8) void {
         var i: usize = 0;
+        if (self.apc_start_pending) {
+            if (data.len == 0) return;
+            self.apc_start_pending = false;
+            if (data[0] == '_') {
+                self.apc_pending = true;
+                i = 1;
+            } else if (data[0] == '[' or data[0] == 'O') {
+                var combined: [1024]u8 = undefined;
+                if (data.len < combined.len) {
+                    combined[0] = 0x1B;
+                    @memcpy(combined[1 .. data.len + 1], data);
+                    self.parseAndEnqueue(combined[0 .. data.len + 1]);
+                    return;
+                }
+                self.pushKey(.esc, .{});
+            } else {
+                self.pushKey(.esc, .{});
+            }
+        }
+        if (self.apc_pending) {
+            if (self.apc_esc_pending) {
+                if (i >= data.len) return;
+                if (data[i] == '\\') {
+                    self.apc_pending = false;
+                    self.apc_esc_pending = false;
+                    i += 1;
+                } else {
+                    self.apc_esc_pending = false;
+                }
+            }
+            if (self.apc_pending) {
+                const end = std.mem.indexOfPos(u8, data, i, "\x1b\\") orelse {
+                    if (data.len > i and data[data.len - 1] == 0x1B) self.apc_esc_pending = true;
+                    return;
+                };
+                self.apc_pending = false;
+                i = end + 2;
+            }
+        }
         while (i < data.len) {
             // Bracket paste start: ESC [ 2 0 0 ~
             if (i + 6 <= data.len and data[i] == 0x1B and data[i + 1] == '[' and
@@ -530,6 +659,18 @@ pub const Terminal = struct {
                 const event = self.readPaste(data[i + 6 ..]);
                 self.input_queue.push(event);
                 return; // paste consumes the rest
+            }
+
+            if (i + 1 < data.len and data[i] == 0x1B and data[i + 1] == '_') {
+                var j = i + 2;
+                while (j + 1 < data.len and !(data[j] == 0x1B and data[j + 1] == '\\')) : (j += 1) {}
+                if (j + 1 >= data.len) {
+                    self.apc_pending = true;
+                    self.apc_esc_pending = data.len > i + 2 and data[data.len - 1] == 0x1B;
+                    return;
+                }
+                i = j + 2;
+                continue;
             }
 
             // CSI sequences: ESC [ ...
@@ -641,11 +782,9 @@ pub const Terminal = struct {
                 continue;
             }
 
-            // Lone ESC at end of buffer
             if (data[i] == 0x1B) {
-                self.pushKey(.esc, .{});
-                i += 1;
-                continue;
+                self.apc_start_pending = true;
+                return;
             }
 
             // Multi-byte UTF-8 (0xC0+ is start of 2/3/4-byte sequence)
@@ -757,3 +896,89 @@ pub const Terminal = struct {
         try writer.flush();
     }
 };
+
+test "fragmented apc responses stay out of input events" {
+    var term: Terminal = undefined;
+    term.input_queue = .{};
+    term.apc_pending = false;
+    term.apc_esc_pending = false;
+    term.apc_start_pending = false;
+
+    term.parseAndEnqueue("\x1b");
+    try std.testing.expect(term.apc_start_pending);
+    term.parseAndEnqueue("_payload");
+    try std.testing.expect(term.apc_pending);
+    term.parseAndEnqueue("\x1b");
+    try std.testing.expect(term.apc_esc_pending);
+    term.parseAndEnqueue("\\x");
+    try std.testing.expect(!term.apc_pending);
+    try std.testing.expectEqual(@as(usize, 1), term.input_queue.len);
+    switch (term.nextEvent()) {
+        .key => |key| try std.testing.expectEqual(@as(u8, 'x'), key.textSlice()[0]),
+        else => return error.UnexpectedEvent,
+    }
+}
+
+test "fragmented escape sequences remain input sequences" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var term: Terminal = undefined;
+    term.allocator = arena.allocator();
+    term.input_queue = .{};
+    term.apc_pending = false;
+    term.apc_esc_pending = false;
+    term.apc_start_pending = false;
+
+    term.parseAndEnqueue("\x1b");
+    term.parseAndEnqueue("[A");
+    term.parseAndEnqueue("\x1b");
+    term.parseAndEnqueue("[200~paste\x1b[201~");
+    try std.testing.expectEqual(@as(usize, 2), term.input_queue.len);
+    switch (term.nextEvent()) {
+        .key => |key| try std.testing.expect(key.code == .arrow_up),
+        else => return error.UnexpectedEvent,
+    }
+    switch (term.nextEvent()) {
+        .paste => |paste| {
+            try std.testing.expectEqualStrings("paste", paste);
+        },
+        else => return error.UnexpectedEvent,
+    }
+}
+
+test "fragmented kitty probe response enables graphics and preserves input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var term: Terminal = undefined;
+    term.allocator = arena.allocator();
+    term.input_queue = .{};
+    term.apc_pending = false;
+    term.apc_esc_pending = false;
+    term.apc_start_pending = false;
+
+    const first = "\x1b_Gi=31;O";
+    const second = "K\x1b\\\x1b[?1;2c\xC3\xA9\x1b[A\x1b[200~paste\x1b[201~";
+    var probe_bytes: [first.len + second.len]u8 = undefined;
+    @memcpy(probe_bytes[0..first.len], first);
+    @memcpy(probe_bytes[first.len..], second);
+    const supported = term.consumeKittyProbeBuffer(&probe_bytes);
+    try std.testing.expect(supported);
+    try std.testing.expectEqual(@as(usize, 3), term.input_queue.len);
+    switch (term.nextEvent()) {
+        .key => |key| {
+            try std.testing.expectEqual(@as(usize, 2), key.textSlice().len);
+            try std.testing.expectEqualStrings("é", key.textSlice());
+        },
+        else => return error.UnexpectedEvent,
+    }
+    switch (term.nextEvent()) {
+        .key => |key| try std.testing.expect(key.code == .arrow_up),
+        else => return error.UnexpectedEvent,
+    }
+    switch (term.nextEvent()) {
+        .paste => |paste| {
+            try std.testing.expectEqualStrings("paste", paste);
+        },
+        else => return error.UnexpectedEvent,
+    }
+}

@@ -6,6 +6,7 @@ const markdown = @import("markdown.zig");
 pub const widgets = @import("widgets.zig");
 pub const text_utils = @import("text_utils.zig");
 pub const icon = @import("icon.zig");
+pub const kitty = @import("kitty.zig");
 pub const input_layout = @import("input_layout.zig");
 pub const AnsiWriter = @import("ansi.zig").AnsiWriter;
 pub const MarkdownStreamRenderer = markdown.MarkdownStreamRenderer;

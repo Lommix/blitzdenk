@@ -14,6 +14,7 @@ pub const ProviderError = struct {
 pub const ToolResultEvent = struct {
     tool_call_id: []const u8,
     is_error: bool,
+    image_url: []const u8 = "",
 };
 
 pub const StepEvent = struct {
@@ -58,9 +59,15 @@ pub const EventQueue = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const alloc = self.arena.allocator();
+        const tool_results = try alloc.alloc(ToolResultEvent, step.tool_results.len);
+        for (step.tool_results, 0..) |result, i| tool_results[i] = .{
+            .tool_call_id = try alloc.dupe(u8, result.tool_call_id),
+            .is_error = result.is_error,
+            .image_url = if (result.image) |image| try alloc.dupe(u8, image.url) else "",
+        };
         try self.events.append(alloc, .{ .step = .{
             .number = step.number,
-            .tool_results = try cloneToolResultEvents(alloc, step.tool_results),
+            .tool_results = tool_results,
             .usage = step.usage,
         } });
     }
@@ -362,11 +369,12 @@ fn cloneEvent(alloc: std.mem.Allocator, event: Event) !Event {
     };
 }
 
-fn cloneToolResultEvents(alloc: std.mem.Allocator, values: anytype) ![]const ToolResultEvent {
+fn cloneToolResultEvents(alloc: std.mem.Allocator, values: []const ToolResultEvent) ![]const ToolResultEvent {
     const cloned = try alloc.alloc(ToolResultEvent, values.len);
     for (values, 0..) |value, i| cloned[i] = .{
         .tool_call_id = try alloc.dupe(u8, value.tool_call_id),
         .is_error = value.is_error,
+        .image_url = if (value.image_url.len > 0) try alloc.dupe(u8, value.image_url) else "",
     };
     return cloned;
 }

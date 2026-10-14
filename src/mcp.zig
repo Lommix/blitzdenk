@@ -189,7 +189,7 @@ fn toolTrampoline(ctx: r.tools.ToolContext, call: r.sdk.ToolCall) r.sdk.ToolOutp
         return errResult(call, msg);
     };
 
-    return .{ .content = content.text, .is_error = content.is_error };
+    return .{ .content = content.text, .is_error = content.is_error, .image = content.image };
 }
 
 fn errResult(_: r.sdk.ToolCall, msg: []const u8) r.sdk.ToolOutput {
@@ -354,6 +354,19 @@ test "MCP http client speaks streamable http with session reuse and sse response
     manager.deinit();
 }
 
+test "MCP image content is preserved in tool results" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), "[{\"type\":\"text\",\"text\":\"read\"},{\"type\":\"image\",\"data\":\"AQID\",\"mimeType\":\"image/png\"}]", .{});
+    defer parsed.deinit();
+    var image: ?r.sdk.ToolImage = null;
+    const text = try flattenContent(arena.allocator(), &parsed.value, &image);
+    try std.testing.expectEqualStrings("read\n[MCP content: image]", text);
+    try std.testing.expect(image != null);
+    try std.testing.expectEqualStrings("data:image/png;base64,AQID", image.?.url);
+    try std.testing.expectEqualStrings("image/png", image.?.media_type);
+}
+
 const RemoteTool = struct {
     name: []const u8,
     description: []const u8,
@@ -363,6 +376,7 @@ const RemoteTool = struct {
 const ToolCallResult = struct {
     text: []const u8,
     is_error: bool,
+    image: ?r.sdk.ToolImage = null,
 };
 
 const Client = struct {
@@ -555,8 +569,9 @@ const Client = struct {
             .text = try alloc.dupe(u8, ""),
             .is_error = is_error,
         };
-        const text = try flattenContent(alloc, &content_val);
-        return .{ .text = text, .is_error = is_error };
+        var image: ?r.sdk.ToolImage = null;
+        const text = try flattenContent(alloc, &content_val, &image);
+        return .{ .text = text, .is_error = is_error, .image = image };
     }
 
     fn request(self: *Client, id: i64, line: []const u8) !std.json.Parsed(std.json.Value) {
@@ -884,7 +899,7 @@ fn stringifyValue(alloc: std.mem.Allocator, value: std.json.Value) ![]const u8 {
     return out.toOwnedSlice();
 }
 
-fn flattenContent(alloc: std.mem.Allocator, value: *const std.json.Value) ![]const u8 {
+fn flattenContent(alloc: std.mem.Allocator, value: *const std.json.Value, image: *?r.sdk.ToolImage) ![]const u8 {
     var out = std.Io.Writer.Allocating.init(alloc);
     errdefer out.deinit();
     const w = &out.writer;
@@ -903,6 +918,14 @@ fn flattenContent(alloc: std.mem.Allocator, value: *const std.json.Value) ![]con
 
         if (std.mem.eql(u8, ty, "text")) {
             try w.writeAll(stringField(item, "text") orelse "");
+        } else if (std.mem.eql(u8, ty, "image") and image.* == null) {
+            const data = stringField(item, "data") orelse "";
+            const media_type = stringField(item, "mimeType") orelse "image/png";
+            if (data.len > 0 and data.len <= r.inline_images.max_source_bytes) image.* = .{
+                .url = try std.fmt.allocPrint(alloc, "data:{s};base64,{s}", .{ media_type, data }),
+                .media_type = try alloc.dupe(u8, media_type),
+            };
+            try w.print("[MCP content: {s}]", .{ty});
         } else {
             try w.print("[MCP content: {s}]", .{ty});
         }

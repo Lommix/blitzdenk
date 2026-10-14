@@ -73,6 +73,7 @@ const builtin_command_completions: []const CommandCompletion = &.{
 pub const AppFlags = packed struct {
     show_thinking: bool = false,
     show_diffs: bool = true,
+    inline_images: bool = true,
     notify_on_reload: bool = true,
     debug_log: bool = true,
     approval_mode: r.permissions.ApprovalMode = .default,
@@ -248,6 +249,8 @@ const ToolStatusEntry = struct {
     child_id: ?r.AgentId = null,
     interrupted: bool = false,
     is_error: ?bool = null,
+    has_image: bool = false,
+    image_url: []const u8 = "",
 };
 
 const ToolStatusAgent = struct {
@@ -255,6 +258,8 @@ const ToolStatusAgent = struct {
     task_description: []const u8 = "",
     generation: u16 = 0,
     entries: std.array_hash_map.String(ToolStatusEntry) = .empty,
+    image_calls: std.array_hash_map.String(void) = .empty,
+    image_urls: std.array_hash_map.String([]const u8) = .empty,
 };
 
 const ToolStatusStore = struct {
@@ -266,7 +271,9 @@ const ToolStatusStore = struct {
         const current = &self.agents[id.index];
         if (current.generation == id.generation) return current;
         if (self.archived.getPtr(id.pack())) |archived| return archived;
-        if (current.entries.count() > 0 or current.name.len > 0) try self.archived.put(alloc, (r.AgentId{ .index = id.index, .generation = current.generation }).pack(), current.*);
+        if (current.entries.count() > 0 or current.image_calls.count() > 0 or current.image_urls.count() > 0 or current.name.len > 0) {
+            try self.archived.put(alloc, (r.AgentId{ .index = id.index, .generation = current.generation }).pack(), current.*);
+        }
         current.* = .{ .generation = id.generation };
         return current;
     }
@@ -277,7 +284,26 @@ const ToolStatusStore = struct {
         return self.archived.getPtr(id.pack());
     }
 
-    fn setResult(self: *ToolStatusStore, alloc: std.mem.Allocator, agent_id: r.AgentId, call_id: []const u8, is_error: bool) !void {
+    fn markImage(self: *ToolStatusStore, alloc: std.mem.Allocator, agent_id: r.AgentId, call_id: []const u8, image_url: []const u8) !void {
+        const agent = try self.forWrite(alloc, agent_id);
+        const image_call = try agent.image_calls.getOrPut(alloc, call_id);
+        if (!image_call.found_existing) image_call.key_ptr.* = try alloc.dupe(u8, call_id);
+        if (agent.entries.getPtr(call_id)) |entry| {
+            entry.has_image = true;
+        }
+        if (image_url.len > 0 and image_url.len <= r.inline_images.max_source_bytes) {
+            const image = try agent.image_urls.getOrPut(alloc, call_id);
+            if (!image.found_existing) {
+                image.key_ptr.* = try alloc.dupe(u8, call_id);
+                image.value_ptr.* = try alloc.dupe(u8, image_url);
+            }
+            if (agent.entries.getPtr(call_id)) |entry| entry.image_url = image.value_ptr.*;
+        } else if (agent.entries.getPtr(call_id)) |entry| {
+            if (agent.image_urls.get(call_id)) |image| entry.image_url = image;
+        }
+    }
+
+    fn setResult(self: *ToolStatusStore, alloc: std.mem.Allocator, agent_id: r.AgentId, call_id: []const u8, is_error: bool, image_url: []const u8) !void {
         const agent = try self.forWrite(alloc, agent_id);
 
         const entry = try agent.entries.getOrPut(alloc, call_id);
@@ -286,6 +312,9 @@ const ToolStatusStore = struct {
             entry.value_ptr.* = .{};
         }
         entry.value_ptr.is_error = is_error;
+        entry.value_ptr.has_image = entry.value_ptr.has_image or image_url.len > 0 or agent.image_calls.contains(call_id);
+        if (agent.image_urls.get(call_id)) |url| entry.value_ptr.image_url = url;
+        if (image_url.len > 0) try self.markImage(alloc, agent_id, call_id, image_url);
     }
 };
 
@@ -341,13 +370,19 @@ pub const App = struct {
     timeline_heights_width: u16 = 0,
     timeline_heights_thinking: bool = false,
     timeline_heights_diffs: bool = false,
+    timeline_heights_inline: bool = false,
     timeline_heights_agent: bool = false,
+    timeline_heights_cell_px: r.tui.kitty.CellPixels = .{},
+    timeline_heights_image_gen: u64 = 0,
     timeline_render_cache: std.ArrayList(?TimelineRenderSlot) = .empty,
     timeline_render_width: u16 = 0,
     timeline_render_thinking: bool = false,
     timeline_render_diffs: bool = false,
+    timeline_render_inline: bool = false,
     timeline_render_agent_key: ?u32 = null,
     timeline_render_history_gen: u64 = 0,
+    timeline_render_cell_px: r.tui.kitty.CellPixels = .{},
+    timeline_render_image_gen: u64 = 0,
     timeline_render_valid: bool = false,
     frame_snapshot: ?*const r.tui.Buffer = null,
     frame_snapshot_valid: bool = false,
@@ -408,6 +443,17 @@ pub const App = struct {
     injection_hooks: r.inject.InjectionsHooks = .{},
     path_completion: PathCompletion = .{},
     journal_restoring: bool = false,
+    image_viewer: ?r.image_view.Viewer = null,
+    image_view_next_id: u32 = 1000,
+    image_view_pending_delete: u32 = 0,
+    kitty_graphics: bool = false,
+    inline_images: r.inline_images.Store = .{},
+    inline_placements: std.ArrayListUnmanaged(r.inline_images.Placement) = .empty,
+    inline_pending_deletes: std.ArrayListUnmanaged(u32) = .empty,
+    inline_images_ready: std.atomic.Value(bool) = .init(false),
+    inline_frame_gen: u64 = 0,
+    graphics_resize_gen: u64 = 0,
+    cell_px: r.tui.kitty.CellPixels = .{},
 
     // TODO: cleanup io
     pub fn init(
@@ -443,12 +489,41 @@ pub const App = struct {
         };
     }
 
+    pub fn openImageToken(self: *App, token: []const u8) void {
+        if (!self.kitty_graphics) {
+            self.notifications.append(self.gpa, self.nowMillis(), "Image view needs a kitty graphics terminal", .{}) catch {};
+            return;
+        }
+        if (self.image_viewer != null) self.closeImageViewer();
+        self.image_view_next_id += 1;
+        var viewer = r.image_view.open(self.gpa, self.image_view_next_id, self.io, self.cwd, token);
+        if (viewer.img) |img| {
+            viewer.img = r.image.downsampleMaxSide(self.gpa, img, r.image_view.max_side) catch img;
+        }
+        self.image_viewer = viewer;
+        self.dirty = true;
+    }
+
+    pub fn closeImageViewer(self: *App) void {
+        if (self.image_viewer) |*viewer| {
+            if (viewer.transmitted) self.image_view_pending_delete = viewer.id;
+            viewer.close(self.gpa);
+        }
+        self.image_viewer = null;
+        self.dirty = true;
+    }
+
     pub fn localLuaIsGlobal(self: *const App) bool {
         const dir = self.lua_config_dir orelse return false;
         return pathInsideDir(self.cwd, dir);
     }
 
     pub fn deinit(self: *App) void {
+        if (self.image_viewer) |*viewer| viewer.close(self.gpa);
+        self.image_viewer = null;
+        self.inline_images.deinit(self.gpa);
+        self.inline_placements.deinit(self.gpa);
+        self.inline_pending_deletes.deinit(self.gpa);
         self.clearSelections(false);
         self.selection_queue.value.deinit(self.gpa);
         self.event_bus.shutdown(self);
@@ -655,6 +730,8 @@ pub const App = struct {
             for (res.value_ptr.lines.items) |*line| line.deinit(alloc);
             res.value_ptr.lines.clearRetainingCapacity();
         }
+        res.value_ptr.has_image = agent.image_calls.contains(call_id);
+        if (agent.image_urls.get(call_id)) |image_url| res.value_ptr.image_url = image_url;
 
         var parsed = try r.tui.Text.fromAnsi(alloc, text);
         defer parsed.deinit(alloc);
@@ -692,7 +769,18 @@ pub const App = struct {
         const g = self.tool_status_entries.lock(self.io);
         defer g.unlock();
         defer self.publishToolStatus(agent_id, call_id, g.ptr);
-        try g.ptr.setResult(self.sessionAlloc(), agent_id, call_id, is_error);
+        try g.ptr.setResult(self.sessionAlloc(), agent_id, call_id, is_error, "");
+    }
+
+    pub fn markToolImage(self: *App, agent_id: r.AgentId, call_id: []const u8) !void {
+        return self.markToolImageUrl(agent_id, call_id, "");
+    }
+
+    pub fn markToolImageUrl(self: *App, agent_id: r.AgentId, call_id: []const u8, image_url: []const u8) !void {
+        if (agent_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
+        const g = self.tool_status_entries.lock(self.io);
+        defer g.unlock();
+        try g.ptr.markImage(self.sessionAlloc(), agent_id, call_id, image_url);
     }
 
     fn publishToolStatus(self: *App, id: r.AgentId, call_id: []const u8, statuses: *ToolStatusStore) void {
@@ -835,6 +923,13 @@ pub const App = struct {
     }
 
     pub fn reset(self: *App) void {
+        self.closeImageViewer();
+        for (self.inline_images.entries.items) |entry| {
+            if (entry.transmitted or entry.placed_gen != 0) self.inline_pending_deletes.append(self.gpa, entry.kitty_id) catch break;
+        }
+        self.inline_images.deinit(self.gpa);
+        self.inline_images = .{};
+        self.inline_placements.clearRetainingCapacity();
         self.registry.cancelAll();
         self.checkpoint();
         if (self.session_store) |store| store.flush() catch |err| {
@@ -1792,11 +1887,18 @@ pub const App = struct {
 
     pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
         refreshLuaStatusBar(app);
-        if (renderFrameSnapshot(app, area, buf)) return;
+        if (renderFrameSnapshot(app, area, buf)) {
+            underlineImageTokens(buf);
+            if (app.image_viewer) |*viewer| r.image_view.render(viewer, app.theme, area, buf);
+            if (app.frame_snapshot_resize_gen) |gen| app.frame_snapshot_resize_seen = gen.*;
+            return;
+        }
         refreshLuaWidgets(app, area, buf);
         renderCore(app, area, buf);
         drawLuaPanels(app, buf);
         renderCompletionPopup(app, app.arena_frame.allocator(), app.widget_frame_input_area, app.widget_frame_progress_h, buf);
+        underlineImageTokens(buf);
+        if (app.image_viewer) |*viewer| r.image_view.render(viewer, app.theme, area, buf);
         if (app.frame_snapshot_resize_gen) |gen| app.frame_snapshot_resize_seen = gen.*;
     }
 
@@ -1830,6 +1932,7 @@ pub const App = struct {
             if (gen.* != app.frame_snapshot_resize_seen) return false;
         }
         if (app.notifications.hasVisible()) return false;
+        if (app.inline_placements.items.len > 0 and app.frame_snapshot_tools.items.len > 0) return false;
         const now_ns: i128 = @intCast(std.Io.Clock.Timestamp.now(app.io, .awake).raw.nanoseconds);
         return !app.lua_vm.errorAlive(now_ns);
     }
@@ -1870,10 +1973,17 @@ pub const App = struct {
     fn renderCore(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
         app.mu.lockUncancelable(app.io);
         defer app.mu.unlock(app.io);
+        if (app.inline_images_ready.swap(false, .acq_rel)) {
+            app.invalidateTimelineRenderCache();
+            app.timeline_heights.clearRetainingCapacity();
+        }
         _ = app.arena_frame.reset(.free_all);
         const frame_alloc = app.arena_frame.allocator();
         app.frame_snapshot_tools.clearRetainingCapacity();
         app.frame_snapshot_calls.clearRetainingCapacity();
+        app.inline_placements.clearRetainingCapacity();
+        for (app.inline_images.entries.items) |entry| entry.frame_pinned = false;
+        app.inline_images.prune(app.gpa);
         app.frame_snapshot_valid = true;
 
         var widget_layout_fallback = WidgetLayout{ .area = area, .main = area };
@@ -2047,6 +2157,17 @@ pub const App = struct {
                 renderTimelineScrollbar(app, cs, content_area, buf);
             }
         }
+        for (app.inline_images.entries.items) |entry| {
+            if (!entry.frame_pinned) continue;
+            var placed = false;
+            for (app.inline_placements.items) |placement| {
+                if (placement.entry == entry) {
+                    placed = true;
+                    break;
+                }
+            }
+            if (!placed) entry.frame_pinned = false;
+        }
 
         // Input/Permission: a single overlay_dark block hosting the main-agent
         // progress, the input content, and the statusbar.
@@ -2106,6 +2227,46 @@ pub const App = struct {
                         .height = height,
                     };
                     p.renderSimple(frame_alloc, completion_area, buf);
+                }
+            }
+        }
+    }
+
+    fn underlineImageTokens(buf: *r.tui.Buffer) void {
+        const w = buf.rect.width;
+        const h = buf.rect.height;
+        if (w == 0 or h == 0) return;
+        var token: [512]u8 = undefined;
+        var y: u16 = 0;
+        while (y < h) : (y += 1) {
+            var x: u16 = 0;
+            while (x < w) {
+                const start_cell = buf.get(buf.rect.x + x, buf.rect.y + y);
+                if (start_cell.char == ' ') {
+                    x += 1;
+                    continue;
+                }
+                const token_start = x;
+                var len: usize = 0;
+                while (x < w) : (x += 1) {
+                    const cell = buf.get(buf.rect.x + x, buf.rect.y + y);
+                    if (cell.char == ' ') break;
+                    if (len + 4 > token.len) {
+                        while (x < w and buf.get(buf.rect.x + x, buf.rect.y + y).char != ' ') x += 1;
+                        break;
+                    }
+                    const n = std.unicode.utf8Encode(cell.char, token[len..]) catch {
+                        continue;
+                    };
+                    len += n;
+                }
+                if (len > 4 and r.image_view.hasImageExtension(token[0..len])) {
+                    var ux = token_start;
+                    while (ux < x) : (ux += 1) {
+                        var cell = buf.get(buf.rect.x + ux, buf.rect.y + y);
+                        cell.style.modifier.underline = true;
+                        buf.set(buf.rect.x + ux, buf.rect.y + y, cell);
+                    }
                 }
             }
         }
@@ -2493,7 +2654,15 @@ pub const App = struct {
                 }
                 const status = self.tool_status_entries.lock(self.io);
                 defer status.unlock();
-                for (step.tool_results) |result| try status.ptr.setResult(alloc, agent_id, result.tool_call_id, result.is_error);
+                for (step.tool_results) |result| {
+                    try status.ptr.setResult(alloc, agent_id, result.tool_call_id, result.is_error, result.image_url);
+                    if (result.image_url.len > 0) {
+                        _ = self.inline_images.remember(self.gpa, agent_id, result.tool_call_id, result.image_url);
+                        if (self.kitty_graphics and self.flags.inline_images) {
+                            _ = self.inline_images.request(self.gpa, agent_id, result.tool_call_id, result.image_url, &self.inline_images_ready);
+                        }
+                    }
+                }
                 if (is_main) try self.flushSdkPreview();
             },
             .provider_error => |provider_error| {
@@ -3905,6 +4074,15 @@ const RenderParagraphItem = struct {
     h: usize,
     is_tool_block: bool = false,
     live_calls: ?[]const TimelinePart.ToolCallEntry = null,
+    inline_images: []const ToolInlineImage = &.{},
+};
+
+const ToolInlineImage = struct {
+    entry: *r.inline_images.Entry,
+    row: usize,
+    col: u16,
+    cols: u16,
+    rows: u16,
 };
 
 const FrameSnapshotTool = struct {
@@ -3940,6 +4118,44 @@ fn collapseToolPadding(
     total.* -= old_next_h - next.h;
 }
 
+fn appendToolImage(
+    app: *App,
+    arena: std.mem.Allocator,
+    p: *r.tui.Paragraph,
+    images: *std.ArrayList(ToolInlineImage),
+    agent_id: r.AgentId,
+    call_id: []const u8,
+    source_url: ?[]const u8,
+    rail: []const u8,
+    inner_w: u16,
+) !void {
+    if (!app.kitty_graphics or !app.flags.inline_images) return;
+    const entry = app.inline_images.find(agent_id, call_id) orelse blk: {
+        const data_url = source_url orelse return;
+        break :blk app.inline_images.request(app.gpa, agent_id, call_id, data_url, &app.inline_images_ready) orelse return;
+    };
+    if (entry.state.load(.acquire) != .ready) {
+        const data_url = if (entry.data_url.len > 0) entry.data_url else source_url orelse "";
+        if (data_url.len > 0) {
+            _ = app.inline_images.request(app.gpa, agent_id, call_id, data_url, &app.inline_images_ready);
+        }
+    }
+    if (entry.state.load(.acquire) != .ready or entry.img == null) return;
+    const col: u16 = @intCast(textWidthCols(rail) + 4);
+    const available = inner_w -| p.padding.left -| p.padding.right -| col;
+    if (available == 0) return;
+    const m = r.inline_images.Store.metrics(entry, app.cell_px, available);
+    if (m.rows == 0 or m.cols == 0) return;
+    entry.frame_pinned = true;
+    try images.append(arena, .{ .entry = entry, .row = p.lines.items.len, .col = col, .cols = m.cols, .rows = m.rows });
+    for (0..m.rows) |row| {
+        var line = r.tui.Line{};
+        try line.pushText(arena, rail, .{ .fg = app.theme.muted });
+        try line.pushText(arena, if (row == 0) "  └ " else "    ", .{ .fg = app.theme.muted });
+        try p.lines.append(arena, line);
+    }
+}
+
 fn appendToolGroup(
     arena: std.mem.Allocator,
     out: *std.ArrayList(RenderParagraphItem),
@@ -3957,6 +4173,16 @@ fn appendToolGroup(
     total.* += para.h;
     collapseToolPadding(out, total, inner_w);
     calls.clearRetainingCapacity();
+}
+
+fn appendRail(arena: std.mem.Allocator, out: *std.ArrayList(u8), prefix: []const bool, connector: []const u8) !void {
+    try out.append(arena, ' ');
+    for (prefix) |continues| {
+        try out.appendSlice(arena, if (continues) r.tui.icon.box_v else " ");
+        try out.append(arena, ' ');
+    }
+    try out.appendSlice(arena, connector);
+    try out.append(arena, ' ');
 }
 
 /// Build one r.tui.Paragraph per TimelineEntry. Allocations live in `arena`; do not
@@ -4057,6 +4283,7 @@ fn buildToolGroupParagraph(
     inner_w: u16,
 ) !RenderParagraphItem {
     var p = r.tui.Paragraph{ .wrap = false };
+    var images: std.ArrayList(ToolInlineImage) = .empty;
 
     p.style.bg = app.theme.bg;
     p.padding = .all(1);
@@ -4069,7 +4296,10 @@ fn buildToolGroupParagraph(
         var line = r.tui.Line{};
 
         const status = if (statuses.ptr.getAgent(call.agent_id)) |status_agent| status_agent.entries.getPtr(call.call_id) else null;
-        const live_result: ?r.sdk.ToolResult = if (agent) |value| findToolResult(value, call.call_id) else null;
+        const history_result = if (agent) |value| findToolHistory(value, call.call_id) else null;
+        const status_image_url = if (status) |entry| if (entry.image_url.len > 0) entry.image_url else null else null;
+        const image_url = if (history_result) |value| value.image_url else status_image_url;
+        const live_result: ?r.sdk.ToolResult = if (history_result) |value| value.result else null;
         const is_error = if (live_result) |result| result.is_error else if (status) |entry| entry.is_error else null;
         if (is_error) |failed| {
             if (failed) {
@@ -4109,6 +4339,8 @@ fn buildToolGroupParagraph(
                 }
             }
 
+            try appendToolImage(app, arena, &p, &images, call.agent_id, call.call_id, image_url, "", inner_w);
+
             const child_id = entry.child_id orelse continue;
             var rail_nodes: std.ArrayList(RailNode) = .empty;
             try walkAgentRail(arena, statuses.ptr, app.registry, child_id, &.{}, 0, &rail_nodes);
@@ -4117,20 +4349,24 @@ fn buildToolGroupParagraph(
                 var nested = r.tui.Line{ .style = node.line.style };
                 const connector: []const u8 = if (node.rail_end) r.tui.icon.box_bl else if (node.entry_start) r.tui.icon.box_t_right else r.tui.icon.box_v;
                 var rail: std.ArrayList(u8) = .empty;
-                try rail.append(arena, ' ');
-                for (node.prefix) |continues| {
-                    try rail.appendSlice(arena, if (continues) r.tui.icon.box_v else " ");
-                    try rail.append(arena, ' ');
-                }
-                try rail.appendSlice(arena, connector);
-                try rail.append(arena, ' ');
+                try appendRail(arena, &rail, node.prefix, connector);
                 try nested.pushSpan(arena, .{ .content = rail.items });
                 for (node.line.spans.items) |span| try nested.pushSpan(arena, span);
                 if (node.entry_start) {
                     if (node.child_id) |node_child_id| try pushChildActivity(app, arena, &nested, node_child_id);
                 }
                 try p.lines.append(arena, nested);
+                if (node.image_call_id) |call_id| {
+                    var image_rail: std.ArrayList(u8) = .empty;
+                    try appendRail(arena, &image_rail, node.prefix, if (node.continues) r.tui.icon.box_v else " ");
+                    const node_history = if (app.registry.get(node.agent_id)) |node_agent| findToolHistory(node_agent, call_id) else null;
+                    const node_status_image_url = if (statuses.ptr.getAgent(node.agent_id)) |node_status_agent| if (node_status_agent.entries.getPtr(call_id)) |node_entry| if (node_entry.image_url.len > 0) node_entry.image_url else null else null else null;
+                    const node_image_url = if (node_history) |value| value.image_url else node_status_image_url;
+                    try appendToolImage(app, arena, &p, &images, node.agent_id, call_id, node_image_url, image_rail.items, inner_w);
+                }
             }
+        } else {
+            try appendToolImage(app, arena, &p, &images, call.agent_id, call.call_id, image_url, "", inner_w);
         }
     }
 
@@ -4138,6 +4374,7 @@ fn buildToolGroupParagraph(
         .h = p.totalHeightLong(inner_w),
         .p = p,
         .is_tool_block = true,
+        .inline_images = images.items,
     };
 }
 
@@ -4150,6 +4387,9 @@ const RailNode = struct {
     rail_end: bool = false,
     child_id: ?r.AgentId,
     prefix: []const bool,
+    agent_id: r.AgentId,
+    image_call_id: ?[]const u8 = null,
+    continues: bool = false,
 };
 
 fn pushChildActivity(app: *App, arena: std.mem.Allocator, line: *r.tui.Line, child_id: r.AgentId) !void {
@@ -4192,29 +4432,31 @@ fn walkAgentRail(
     if (agent_id.index >= r.agent_registry.max_agents) return;
     const agent_status = store.getAgent(agent_id) orelse return;
 
-    const Candidate = struct { entry: *ToolStatusEntry, anchored: bool };
+    const Candidate = struct { entry: *ToolStatusEntry, call_id: []const u8, anchored: bool };
     var candidates: std.ArrayList(Candidate) = .empty;
     var recent_count: usize = 0;
     var it = agent_status.entries.iterator();
     while (it.next()) |kv| {
         const entry = kv.value_ptr;
         const anchored = if (entry.child_id) |child| !registry.subtreeDone(child) else false;
-        if (!anchored and entry.lines.items.len == 0) continue;
+        const image_entry = entry.has_image or agent_status.image_calls.contains(kv.key_ptr.*);
+        if (!anchored and entry.lines.items.len == 0 and !image_entry) continue;
         if (!anchored) recent_count += 1;
-        try candidates.append(arena, .{ .entry = entry, .anchored = anchored });
+        try candidates.append(arena, .{ .entry = entry, .call_id = kv.key_ptr.*, .anchored = anchored });
     }
     var skip = recent_count -| rail_recent_entries;
-    var visible: std.ArrayList(*ToolStatusEntry) = .empty;
+    var visible: std.ArrayList(Candidate) = .empty;
     for (candidates.items) |candidate| {
         if (!candidate.anchored and skip > 0) {
             skip -= 1;
             continue;
         }
-        try visible.append(arena, candidate.entry);
+        try visible.append(arena, candidate);
     }
 
     var last_row: ?usize = null;
-    for (visible.items, 0..) |tool_entry, vi| {
+    for (visible.items, 0..) |candidate, vi| {
+        const tool_entry = candidate.entry;
         const continues = vi + 1 < visible.items.len;
         const child_prefix = try arena.alloc(bool, prefix.len + 1);
         @memcpy(child_prefix[0..prefix.len], prefix);
@@ -4227,24 +4469,31 @@ fn walkAgentRail(
                 .entry_start = li == 0,
                 .child_id = tool_entry.child_id,
                 .prefix = prefix,
+                .agent_id = agent_id,
+                .image_call_id = if (li + 1 == tool_entry.lines.items.len) candidate.call_id else null,
+                .continues = continues,
             });
         }
-        // An empty visible entry is anchored; give its child an identifiable
-        // first row for activity indicators, connectors, and recursion.
         if (tool_entry.lines.items.len == 0) {
-            const child_id = tool_entry.child_id.?;
             var anchor = r.tui.Line{};
-            const child = registry.get(child_id);
-            const name = if (child) |agent| agent.name else "";
-            const task = if (child) |agent| agent.task_description else "";
-            const label = if (name.len > 0) name else try std.fmt.allocPrint(arena, "agent {d}", .{child_id.pack()});
-            try anchor.pushSpan(arena, .{ .content = if (task.len > 0) try std.fmt.allocPrint(arena, "{s} -> {s}", .{ label, task }) else label });
+            if (tool_entry.child_id) |child_id| {
+                const child = registry.get(child_id);
+                const name = if (child) |agent| agent.name else "";
+                const task = if (child) |agent| agent.task_description else "";
+                const label = if (name.len > 0) name else try std.fmt.allocPrint(arena, "agent {d}", .{child_id.pack()});
+                try anchor.pushSpan(arena, .{ .content = if (task.len > 0) try std.fmt.allocPrint(arena, "{s} -> {s}", .{ label, task }) else label });
+            } else {
+                try anchor.pushSpan(arena, .{ .content = candidate.call_id });
+            }
             last_row = out.items.len;
             try out.append(arena, .{
                 .line = anchor,
                 .entry_start = true,
-                .child_id = child_id,
+                .child_id = tool_entry.child_id,
                 .prefix = prefix,
+                .agent_id = agent_id,
+                .image_call_id = candidate.call_id,
+                .continues = continues,
             });
         }
         if (tool_entry.child_id) |entry_child_id| {
@@ -4255,26 +4504,44 @@ fn walkAgentRail(
     if (last_row) |row| out.items[row].rail_end = true;
 }
 
-/// Scan the conversation for a tool_result with the given call_id. Source of
-/// truth for "did this tool finish": `tool_call_done` is cleared right
-/// after commit, but the result lives on in the conversation as a tool_result part.
-fn findToolResult(agent: *r.agent.Agent, call_id: []const u8) ?r.sdk.ToolResult {
+const ToolHistoryResult = struct {
+    result: r.sdk.ToolResult,
+    image_url: ?[]const u8 = null,
+};
+
+fn findToolHistory(agent: *r.agent.Agent, call_id: []const u8) ?ToolHistoryResult {
     var i = agent.history().len;
     while (i > 0) {
         i -= 1;
         const msg = agent.history()[i];
-        for (msg.parts()) |part| switch (part) {
-            .tool_result => |res| if (std.mem.eql(u8, res.id, call_id)) return .{
-                .tool_call_id = res.id,
-                .tool_name = res.name,
-                .output = res.output,
-                .is_error = res.is_error,
-                .exit_loop = res.exit_loop,
+        const parts = msg.parts();
+        for (parts, 0..) |part, part_index| switch (part) {
+            .tool_result => |res| {
+                if (!std.mem.eql(u8, res.id, call_id)) continue;
+                const image = if (part_index + 1 < parts.len) switch (parts[part_index + 1]) {
+                    .image => |img| if (std.mem.startsWith(u8, img.url, "data:")) r.sdk.ToolImage{ .url = img.url, .media_type = img.media_type } else null,
+                    else => null,
+                } else null;
+                return .{
+                    .result = .{
+                        .tool_call_id = res.id,
+                        .tool_name = res.name,
+                        .output = res.output,
+                        .is_error = res.is_error,
+                        .exit_loop = res.exit_loop,
+                        .image = image,
+                    },
+                    .image_url = if (image) |value| value.url else null,
+                };
             },
             else => {},
         };
     }
     return null;
+}
+
+fn findToolResult(agent: *r.agent.Agent, call_id: []const u8) ?r.sdk.ToolResult {
+    return if (findToolHistory(agent, call_id)) |history| history.result else null;
 }
 
 fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: TimelinePart.DiffEntry) r.tui.Paragraph {
@@ -4411,16 +4678,23 @@ fn timelineRenderCacheSync(app: *App, inner_w: u16, agent_key: ?u32, history_gen
         app.timeline_render_width == inner_w and
         app.timeline_render_thinking == app.flags.show_thinking and
         app.timeline_render_diffs == app.flags.show_diffs and
+        app.timeline_render_inline == app.flags.inline_images and
         app.timeline_render_agent_key == agent_key and
-        app.timeline_render_history_gen == history_gen;
+        app.timeline_render_history_gen == history_gen and
+        app.timeline_render_image_gen == app.inline_images.eviction_gen and
+        app.timeline_render_cell_px.w == app.cell_px.w and
+        app.timeline_render_cell_px.h == app.cell_px.h;
     if (key_match) return;
     app.invalidateTimelineRenderCache();
     app.timeline_render_valid = true;
     app.timeline_render_width = inner_w;
     app.timeline_render_thinking = app.flags.show_thinking;
     app.timeline_render_diffs = app.flags.show_diffs;
+    app.timeline_render_inline = app.flags.inline_images;
     app.timeline_render_agent_key = agent_key;
     app.timeline_render_history_gen = history_gen;
+    app.timeline_render_image_gen = app.inline_images.eviction_gen;
+    app.timeline_render_cell_px = app.cell_px;
 }
 
 fn timelineRenderCacheGet(app: *App, idx: usize) ?TimelineRenderSlot {
@@ -4461,7 +4735,11 @@ fn timelineEntryHeights(app: *App, alloc: std.mem.Allocator, inner_w: u16) []con
     const maybe_agent: ?*r.agent.Agent = if (app.main_agent_id) |id| app.registry.get(id) else null;
     const key_match = app.timeline_heights_thinking == app.flags.show_thinking and
         app.timeline_heights_diffs == app.flags.show_diffs and
-        app.timeline_heights_agent == (maybe_agent != null);
+        app.timeline_heights_inline == app.flags.inline_images and
+        app.timeline_heights_agent == (maybe_agent != null) and
+        app.timeline_heights_image_gen == app.inline_images.eviction_gen and
+        app.timeline_heights_cell_px.w == app.cell_px.w and
+        app.timeline_heights_cell_px.h == app.cell_px.h;
     if (app.timeline_heights_width != inner_w or !key_match or
         app.timeline_heights.items.len > app.timeline.items.len)
     {
@@ -4469,7 +4747,10 @@ fn timelineEntryHeights(app: *App, alloc: std.mem.Allocator, inner_w: u16) []con
         app.timeline_heights_width = inner_w;
         app.timeline_heights_thinking = app.flags.show_thinking;
         app.timeline_heights_diffs = app.flags.show_diffs;
+        app.timeline_heights_inline = app.flags.inline_images;
         app.timeline_heights_agent = maybe_agent != null;
+        app.timeline_heights_image_gen = app.inline_images.eviction_gen;
+        app.timeline_heights_cell_px = app.cell_px;
     }
 
     while (app.timeline_heights.items.len < app.timeline.items.len) {
@@ -4657,6 +4938,12 @@ fn renderTimelineStack(app: *App, s: TimelineStack, area: r.tui.Rect, buf: *r.tu
         var p = e.p;
         if (p.reverse) {
             p.scroll_offset = @intCast(item_bottom - visible_bottom);
+        } else if (e.is_tool_block) {
+            const skip: usize = @intCast(visible_top - item_top);
+            p.scroll_offset +|= skip -| p.padding.top;
+            p.padding.top -|= @intCast(@min(skip, p.padding.top));
+            const cut_bottom: usize = @intCast(item_bottom - visible_bottom);
+            p.padding.bottom -|= @intCast(@min(cut_bottom, p.padding.bottom));
         } else {
             p.scroll_offset +|= @intCast(visible_top - item_top);
         }
@@ -4669,11 +4956,56 @@ fn renderTimelineStack(app: *App, s: TimelineStack, area: r.tui.Rect, buf: *r.tu
         };
         if (e.live_calls != null) {
             var recorded = e;
-            recorded.p.scroll_offset = p.scroll_offset;
+            recorded.p = p;
             app.recordFrameSnapshotTool(recorded, sub, inner_w);
         }
+        recordToolInlinePlacements(app, e.inline_images, p, sub);
         p.render(alloc, sub, area, buf);
     }
+}
+
+fn recordToolInlinePlacements(app: *App, images: []const ToolInlineImage, p: r.tui.Paragraph, area: r.tui.Rect) void {
+    const content_top: i128 = @as(i128, area.y) + p.padding.top;
+    const content_bottom: i128 = @as(i128, area.y) + area.height - p.padding.bottom;
+    for (images) |img| {
+        const top = content_top + @as(i128, @intCast(img.row)) - @as(i128, @intCast(p.scroll_offset));
+        const bottom = top + img.rows;
+        const visible_top = @max(top, content_top);
+        const visible_bottom = @min(bottom, content_bottom);
+        if (visible_top >= visible_bottom) continue;
+        recordInlinePlacement(app, img.entry, img.cols, area.x +| p.padding.left +| img.col, img.rows, top, visible_top, visible_bottom);
+    }
+}
+
+fn recordInlinePlacement(
+    app: *App,
+    entry: *r.inline_images.Entry,
+    cols: u16,
+    x: u16,
+    full_rows: usize,
+    item_top: i128,
+    visible_top: i128,
+    visible_bottom: i128,
+) void {
+    if (entry.state.load(.acquire) != .ready) return;
+    const img = entry.img orelse return;
+    if (cols == 0 or full_rows == 0 or img.width == 0 or img.height == 0) return;
+    const skip: u64 = @intCast(@max(0, visible_top - item_top));
+    const vis: u64 = @intCast(@max(0, visible_bottom - visible_top));
+    if (vis == 0 or skip >= full_rows) return;
+    const src_y: u32 = @intCast(@as(u64, img.height) * skip / full_rows);
+    var src_h: u32 = @intCast(@as(u64, img.height) * vis / full_rows);
+    src_h = @max(1, @min(src_h, img.height - src_y));
+    app.inline_placements.append(app.gpa, .{
+        .entry = entry,
+        .rect = .{
+            .x = x,
+            .y = @intCast(@max(0, visible_top)),
+            .width = cols,
+            .height = @intCast(@min(vis, std.math.maxInt(u16))),
+        },
+        .src = .{ .x = 0, .y = src_y, .w = img.width, .h = src_h },
+    }) catch {};
 }
 
 const scrollbar_strip_width: u16 = 3;
@@ -4957,6 +5289,211 @@ fn formatTokenCount(dest: []u8, count: u64) []const u8 {
         const m = @as(f64, @floatFromInt(count)) / 1_000_000.0;
         return std.fmt.bufPrint(dest, "{d:.1}M", .{m}) catch "0M";
     }
+}
+
+test "tool images follow their calls, crop to the viewport, and follow recursive rail visibility" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var registry = r.agent_registry.Registry.init(gpa, std.testing.io);
+    defer registry.deinit();
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.gpa = gpa;
+    app.registry = &registry;
+    app.session_store = null;
+    app.theme = .default;
+    app.flags = .{};
+    app.frame_count = 0;
+    app.kitty_graphics = true;
+    app.cell_px = .{ .w = 10, .h = 20 };
+    app.tool_status_entries = .{};
+    app.inline_images = .{};
+    app.inline_placements = .empty;
+    defer app.inline_placements.deinit(gpa);
+    app.arena_frame = .init(gpa);
+    defer app.arena_frame.deinit();
+    const parent_id = r.AgentId{ .index = 0, .generation = 0 };
+    const child_id = r.AgentId{ .index = 1, .generation = 0 };
+    const grandchild_id = r.AgentId{ .index = 2, .generation = 0 };
+    var pixels: [0]u8 = .{};
+    var image = r.inline_images.Entry{
+        .agent_id = parent_id,
+        .call_id = "screenshot",
+        .kitty_id = 1,
+        .img = .{ .width = 80, .height = 80, .pixels = &pixels },
+        .state = .init(.ready),
+    };
+    try app.inline_images.entries.append(alloc, &image);
+    const calls = [_]TimelinePart.ToolCallEntry{
+        .{ .agent_id = parent_id, .call_id = "screenshot", .tool_name = "browser_screenshot" },
+        .{ .agent_id = parent_id, .call_id = "next", .tool_name = "bash" },
+    };
+    const item = try buildToolGroupParagraph(&app, alloc, &calls, 40);
+    try std.testing.expectEqual(@as(usize, 1), item.inline_images.len);
+    try std.testing.expectEqual(@as(usize, 1), item.inline_images[0].row);
+    try std.testing.expectEqual(@as(usize, 8), item.h);
+    var stack = TimelineStack{ .total = item.h };
+    try stack.items.append(alloc, item);
+    var buf = try r.tui.Buffer.init(gpa, .{ .width = 80, .height = 30 });
+    defer buf.deinit();
+    const area = r.tui.Rect{ .x = 10, .y = 3, .width = 40, .height = 20 };
+    renderTimelineStack(&app, stack, area, &buf);
+    try std.testing.expectEqual(@as(u21, '└'), buf.get(13, 5).char);
+    try std.testing.expectEqual(@as(u21, 'b'), buf.get(13, 9).char);
+    try std.testing.expectEqual(@as(usize, 1), app.inline_placements.items.len);
+    try std.testing.expectEqual(r.tui.Rect{ .x = 15, .y = 5, .width = 8, .height = 4 }, app.inline_placements.items[0].rect);
+
+    app.inline_placements.clearRetainingCapacity();
+    renderTimelineStack(&app, stack, .{ .x = 10, .y = 3, .width = 40, .height = 3 }, &buf);
+    try std.testing.expectEqual(@as(usize, 1), app.inline_placements.items.len);
+    try std.testing.expectEqual(r.tui.Rect{ .x = 15, .y = 3, .width = 8, .height = 1 }, app.inline_placements.items[0].rect);
+    try std.testing.expectEqual(@as(u32, 60), app.inline_placements.items[0].src.y);
+    try std.testing.expectEqual(@as(u32, 20), app.inline_placements.items[0].src.h);
+
+    app.inline_placements.clearRetainingCapacity();
+    stack.scroll_offset = 5;
+    renderTimelineStack(&app, stack, .{ .x = 10, .y = 3, .width = 40, .height = 3 }, &buf);
+    try std.testing.expectEqual(r.tui.Rect{ .x = 15, .y = 5, .width = 8, .height = 1 }, app.inline_placements.items[0].rect);
+    try std.testing.expectEqual(@as(u32, 0), app.inline_placements.items[0].src.y);
+    try std.testing.expectEqual(@as(u32, 20), app.inline_placements.items[0].src.h);
+
+    var nested_pixels: [0]u8 = .{};
+    var nested_image = r.inline_images.Entry{
+        .agent_id = grandchild_id,
+        .call_id = "screenshot",
+        .kitty_id = 2,
+        .img = .{ .width = 80, .height = 80, .pixels = &nested_pixels },
+        .state = .init(.ready),
+    };
+    try app.inline_images.entries.append(alloc, &nested_image);
+    const statuses = &app.tool_status_entries.value;
+    const parent = try statuses.forWrite(alloc, parent_id);
+    try parent.entries.put(alloc, "launch", .{ .child_id = child_id });
+    const child = try statuses.forWrite(alloc, child_id);
+    var child_entry = ToolStatusEntry{ .child_id = grandchild_id };
+    try child_entry.lines.append(alloc, try r.tui.Line.new(alloc, "spawn", .{}, .{}));
+    try child.entries.put(alloc, "spawn", child_entry);
+    const grandchild = try statuses.forWrite(alloc, grandchild_id);
+    for ([_][]const u8{ "screenshot", "after1", "after2" }) |call_id| {
+        var entry = ToolStatusEntry{};
+        try entry.lines.append(alloc, try r.tui.Line.new(alloc, "{s}", .{call_id}, .{}));
+        try grandchild.entries.put(alloc, call_id, entry);
+    }
+    const launch = [_]TimelinePart.ToolCallEntry{.{ .agent_id = parent_id, .call_id = "launch", .tool_name = "start" }};
+    const nested = try buildToolGroupParagraph(&app, alloc, &launch, 40);
+    try std.testing.expectEqual(@as(usize, 1), nested.inline_images.len);
+    try std.testing.expectEqual(@as(u16, 9), nested.inline_images[0].col);
+    stack = .{ .total = nested.h };
+    try stack.items.append(alloc, nested);
+    app.inline_placements.clearRetainingCapacity();
+    buf.clear();
+    renderTimelineStack(&app, stack, area, &buf);
+    const nested_placement = app.inline_placements.items[0];
+    try std.testing.expectEqual(@as(u16, 20), nested_placement.rect.x);
+    try std.testing.expectEqual(@as(u21, '└'), buf.get(18, nested_placement.rect.y).char);
+    try std.testing.expectEqual(@as(u21, '│'), buf.get(14, nested_placement.rect.y).char);
+
+    var after = ToolStatusEntry{};
+    try after.lines.append(alloc, try r.tui.Line.new(alloc, "after3", .{}, .{}));
+    try grandchild.entries.put(alloc, "after3", after);
+    const expired = try buildToolGroupParagraph(&app, alloc, &launch, 40);
+    try std.testing.expectEqual(@as(usize, 0), expired.inline_images.len);
+    stack = .{ .total = expired.h };
+    try stack.items.append(alloc, expired);
+    app.inline_placements.clearRetainingCapacity();
+    renderTimelineStack(&app, stack, area, &buf);
+    try std.testing.expectEqual(@as(usize, 0), app.inline_placements.items.len);
+
+    const narrow = try buildToolGroupParagraph(&app, alloc, &calls, 6);
+    try std.testing.expectEqual(@as(usize, 0), narrow.inline_images.len);
+    app.flags.inline_images = false;
+    const disabled = try buildToolGroupParagraph(&app, alloc, &calls, 40);
+    try std.testing.expectEqual(@as(usize, 0), disabled.inline_images.len);
+}
+
+test "long image token scan advances" {
+    var buf = try r.tui.Buffer.init(std.testing.allocator, .{ .width = 600, .height = 1 });
+    defer buf.deinit();
+    var text: [600]u8 = undefined;
+    @memset(&text, 'a');
+    @memcpy(text[596..], ".png");
+    buf.setString(0, 0, &text, .{});
+    App.underlineImageTokens(&buf);
+    try std.testing.expect(!buf.get(0, 0).style.modifier.underline);
+}
+
+test "empty anchored tool entries carry their image call id" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var registry = r.agent_registry.Registry.init(alloc, std.testing.io);
+    defer registry.deinit();
+    var statuses = ToolStatusStore{};
+    const parent_id = r.AgentId{ .index = 0, .generation = 0 };
+    const child_id = r.AgentId{ .index = 1, .generation = 0 };
+    registry.slots[child_id.index].state.store(.reserved, .release);
+    const parent = try statuses.forWrite(arena.allocator(), parent_id);
+    try parent.entries.put(arena.allocator(), "empty-image", .{ .child_id = child_id });
+
+    var nodes: std.ArrayList(RailNode) = .empty;
+    try walkAgentRail(arena.allocator(), &statuses, &registry, parent_id, &.{}, 0, &nodes);
+    try std.testing.expectEqual(@as(usize, 1), nodes.items.len);
+    try std.testing.expectEqualStrings("empty-image", nodes.items[0].image_call_id.?);
+}
+
+test "finished image-only tool entries stay in the recursive rail" {
+    const alloc = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var registry = r.agent_registry.Registry.init(alloc, std.testing.io);
+    defer registry.deinit();
+    var statuses = ToolStatusStore{};
+    const agent_id = r.AgentId{ .index = 1, .generation = 0 };
+    registry.slots[agent_id.index].state.store(.complete, .release);
+    const agent = try statuses.forWrite(arena.allocator(), agent_id);
+    const entry = ToolStatusEntry{ .has_image = true };
+    try agent.entries.put(arena.allocator(), "image-only", entry);
+
+    var nodes: std.ArrayList(RailNode) = .empty;
+    try walkAgentRail(arena.allocator(), &statuses, &registry, agent_id, &.{}, 0, &nodes);
+    try std.testing.expectEqual(@as(usize, 1), nodes.items.len);
+    try std.testing.expectEqualStrings("image-only", nodes.items[0].image_call_id.?);
+}
+
+test "archived tool status rehydrates an evicted image source" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var registry = r.agent_registry.Registry.init(gpa, std.testing.io);
+    defer registry.deinit();
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.gpa = gpa;
+    app.registry = &registry;
+    app.session_store = null;
+    app.theme = .default;
+    app.flags = .{};
+    app.frame_count = 0;
+    app.kitty_graphics = true;
+    app.cell_px = .{ .w = 10, .h = 20 };
+    app.tool_status_entries = .{};
+    app.inline_images = .{};
+    app.arena_session = .init(gpa);
+    defer app.arena_session.deinit();
+    defer app.inline_images.deinit(gpa);
+
+    const agent_id = r.AgentId{ .index = 1, .generation = 0 };
+    const call_id = "archived-image";
+    const source = "data:image/png;base64,source";
+    try app.markToolImageUrl(agent_id, call_id, source);
+    try app.setToolStatus(agent_id, call_id, "");
+    const calls = [_]TimelinePart.ToolCallEntry{.{ .agent_id = agent_id, .call_id = call_id, .tool_name = "screenshot" }};
+    _ = try buildToolGroupParagraph(&app, arena.allocator(), &calls, 40);
+
+    const entry = app.inline_images.find(agent_id, call_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(source, entry.data_url);
 }
 
 test "widget layout reserves sidebars and hides them on narrow terminals" {
