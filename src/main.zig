@@ -179,7 +179,11 @@ pub fn main(init: std.process.Init) !void {
     const split = CliArgs.split(init.minimal.args, &pos_buf);
     const cli_flags = split.flags;
     const command_result = CliCommand.parse(split.positional);
-    if (cli_flags.debug_log or builtin.mode == .Debug) openDebugLog(io, init.environ_map);
+    const cleanup_cmd = split.prompt == null and (switch (command_result) {
+        .cmd => |parsed| parsed == .cleanup,
+        .err, .none => false,
+    });
+    if ((cli_flags.debug_log or builtin.mode == .Debug) and !cleanup_cmd) openDebugLog(io, init.environ_map);
 
     const cmd: CliCommand = if (split.prompt) |p|
         CliCommand{ .prompt = p }
@@ -282,6 +286,9 @@ pub fn main(init: std.process.Init) !void {
         .update => {
             try updateCli(io, init.gpa, init.environ_map);
         },
+        .cleanup => {
+            try cleanupCli(io, init.arena.allocator(), init.environ_map, cli_flags.cleanup_sessions);
+        },
         .sessions => {
             sessionsTui(io, init.gpa, init.arena.allocator(), init.environ_map) catch |err| {
                 std.debug.print("Error: session picker failed: {s}\n", .{@errorName(err)});
@@ -299,6 +306,7 @@ pub fn main(init: std.process.Init) !void {
                 \\continue [ID]        resume a session in cwd (default: most recent)
                 \\sessions             pick a recorded session in cwd to continue
                 \\update               download and replace the running binary
+                \\cleanup              delete tmp artifacts and the debug log
                 \\
                 \\Flags:
                 \\  --log              write debug.log in path
@@ -308,6 +316,7 @@ pub fn main(init: std.process.Init) !void {
                 \\  --clean            skip local user context
                 \\  --prompt "STRING"  prefill input in current cwd
                 \\  --headless         with --prompt: run headless, print final message
+                \\  --sessions         with cleanup: also delete recorded sessions
                 \\
             , .{r.VERSION});
         },
@@ -334,6 +343,75 @@ fn updateCli(io: std.Io, gpa: std.mem.Allocator, env: *const std.process.Environ
         std.process.exit(1);
     };
     std.debug.print("blitz updated to {s} - restart to apply\n", .{update.latest});
+}
+
+fn cleanupLine(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    const out = std.Io.File.stdout();
+    var buf: [512]u8 = undefined;
+    var w = out.writerStreaming(io, &buf);
+    try w.interface.print(fmt ++ "\n", args);
+    try w.interface.flush();
+}
+
+fn cleanupRemoved(io: std.Io, path: []const u8) !bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    try std.Io.Dir.cwd().deleteTree(io, path);
+    return true;
+}
+
+fn cleanupTarget(io: std.Io, path: []const u8) !void {
+    if (try cleanupRemoved(io, path)) {
+        try cleanupLine(io, "removed {s}", .{path});
+    } else {
+        try cleanupLine(io, "nothing to remove: {s}", .{path});
+    }
+}
+
+fn cleanupSessions(io: std.Io, alloc: std.mem.Allocator, cache_dir: []const u8) !void {
+    var cache = std.Io.Dir.openDirAbsolute(io, cache_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => {
+            try cleanupLine(io, "nothing to remove: {s}/*/sessions", .{cache_dir});
+            return;
+        },
+        else => return err,
+    };
+    defer cache.close(io);
+    var removed = false;
+    var it = cache.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) {
+            const info = cache.statFile(io, entry.name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => continue,
+                else => return err,
+            };
+            if (info.kind != .directory) continue;
+        }
+        const path = try std.fmt.allocPrint(alloc, "{s}/{s}/sessions", .{ cache_dir, entry.name });
+        if (try cleanupRemoved(io, path)) {
+            removed = true;
+            try cleanupLine(io, "removed {s}", .{path});
+        }
+    }
+    if (!removed) try cleanupLine(io, "nothing to remove: {s}/*/sessions", .{cache_dir});
+}
+
+fn cleanupCli(io: std.Io, alloc: std.mem.Allocator, env: *const std.process.Environ.Map, with_sessions: bool) !void {
+    const cache_dir = try std.fs.path.resolve(alloc, &.{try util.cacheDir(alloc, env)});
+    if (!std.fs.path.isAbsolute(cache_dir)) {
+        try cleanupLine(io, "refusing: {s} is not an absolute cache dir", .{cache_dir});
+        return error.CacheDirNotAbsolute;
+    }
+    if (std.mem.eql(u8, util.TMP_DIR, cache_dir)) {
+        try cleanupLine(io, "refusing: {s} is both the tmp dir and the cache dir", .{cache_dir});
+        return error.TmpDirIsCacheDir;
+    }
+    const log_path = try std.fmt.allocPrint(alloc, "{s}/debug.log", .{cache_dir});
+    try cleanupTarget(io, log_path);
+    if (with_sessions) try cleanupSessions(io, alloc, cache_dir);
+    try cleanupTarget(io, util.TMP_DIR);
 }
 
 fn sessionProjectDir(alloc: std.mem.Allocator, cache_dir: []const u8, project_cwd: []const u8) ![]u8 {
@@ -1699,6 +1777,7 @@ pub const CliFlags = packed struct {
     no_context: bool = false,
     /// run --prompt headless, print final message instead of tui
     headless: bool = false,
+    cleanup_sessions: bool = false,
 
     fn applyToken(self: *CliFlags, tok: []const u8, value: ?[]const u8) bool {
         if (std.mem.eql(u8, tok, "--log")) {
@@ -1743,6 +1822,11 @@ pub const CliFlags = packed struct {
 
         if (std.mem.eql(u8, tok, "--headless")) {
             self.headless = true;
+            return true;
+        }
+
+        if (std.mem.eql(u8, tok, "--sessions")) {
+            self.cleanup_sessions = true;
             return true;
         }
 
@@ -1814,6 +1898,7 @@ pub const CliCommand = union(enum) {
     sessions,
     help,
     update,
+    cleanup,
 
     pub const ParseResult = union(enum) {
         cmd: CliCommand,
@@ -1841,6 +1926,8 @@ pub const CliCommand = union(enum) {
         }
 
         if (std.mem.eql(u8, head, "update")) return .{ .cmd = .update };
+
+        if (std.mem.eql(u8, head, "cleanup")) return .{ .cmd = .cleanup };
 
         if (std.mem.eql(u8, head, "help")) return .{ .cmd = .help };
 
