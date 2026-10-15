@@ -23,6 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 - Version management: run `blitz update` on new releases. (pulls release bin from github)
 - Sessions management per project: `blitz continue <?session_id>` resumes, `blitz sessions` list all
 - Render custom widgets from Lua
+- Inline Image rendering (if your terminal supports it)
 
 ## Defaults
 
