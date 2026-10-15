@@ -246,7 +246,7 @@ const PathCompletion = struct {
 
 const ToolStatusEntry = struct {
     lines: std.ArrayList(r.tui.Line) = .empty,
-    child_id: ?r.AgentId = null,
+    child_ids: std.ArrayList(r.AgentId) = .empty,
     interrupted: bool = false,
     is_error: ?bool = null,
     has_image: bool = false,
@@ -741,7 +741,7 @@ pub const App = struct {
         }
     }
 
-    pub fn setToolChild(self: *App, agent_id: r.AgentId, call_id: []const u8, child_id: r.AgentId) !void {
+    pub fn addToolChild(self: *App, agent_id: r.AgentId, call_id: []const u8, child_id: r.AgentId) !void {
         if (agent_id.index >= r.agent_registry.max_agents or child_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
         const g = self.tool_status_entries.lock(self.io);
         defer g.unlock();
@@ -755,7 +755,10 @@ pub const App = struct {
             res.key_ptr.* = try alloc.dupe(u8, call_id);
             res.value_ptr.* = .{};
         }
-        res.value_ptr.child_id = child_id;
+        for (res.value_ptr.child_ids.items) |existing| {
+            if (existing.pack() == child_id.pack()) return;
+        }
+        try res.value_ptr.child_ids.append(alloc, child_id);
         const declared = self.session_store == null or self.session_store.?.declares(child_id.pack());
         if (!self.journal_restoring and !declared) {
             const pending = try g.ptr.pending_children.getOrPut(alloc, child_id.pack());
@@ -791,13 +794,20 @@ pub const App = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const ansi = r.session.linesToAnsi(entry.lines.items, arena.allocator()) catch return;
+        const child_buf = arena.allocator().alloc(u32, entry.child_ids.items.len) catch return;
+        var child_n: usize = 0;
+        for (entry.child_ids.items) |child| {
+            if (statuses.pending_children.contains(child.pack())) continue;
+            child_buf[child_n] = child.pack();
+            child_n += 1;
+        }
         store.enqueue(.{
             .kind = .tool_status,
             .agentID = id.pack(),
             .call_id = call_id,
             .ansi = ansi,
             .state = if (entry.interrupted) .interrupted else if (entry.is_error) |failed| (if (failed) .failed else .succeeded) else .pending,
-            .child = if (entry.child_id) |child| (if (statuses.pending_children.contains(child.pack())) null else child.pack()) else null,
+            .children = child_buf[0..child_n],
         }) catch |err| std.log.scoped(.session).err("tool status: {s}", .{@errorName(err)});
     }
 
@@ -4321,8 +4331,8 @@ fn buildToolGroupParagraph(
                 try line.pushSpan(arena, .{ .content = call.tool_name });
             }
 
-            if (entry.child_id) |child_id| {
-                try pushChildActivity(app, arena, &line, child_id);
+            if (childCount(entry.*) == 1) {
+                if (onlyChildId(entry.*)) |only| try pushChildActivity(app, arena, &line, only);
             }
         } else {
             try line.pushSpan(arena, .{ .content = call.tool_name });
@@ -4341,13 +4351,12 @@ fn buildToolGroupParagraph(
 
             try appendToolImage(app, arena, &p, &images, call.agent_id, call.call_id, image_url, "", inner_w);
 
-            const child_id = entry.child_id orelse continue;
             var rail_nodes: std.ArrayList(RailNode) = .empty;
-            try walkAgentRail(arena, statuses.ptr, app.registry, child_id, &.{}, 0, &rail_nodes);
+            try appendChildRailBlocks(arena, statuses.ptr, app.registry, entry, &.{}, 0, &rail_nodes);
 
             for (rail_nodes.items) |node| {
                 var nested = r.tui.Line{ .style = node.line.style };
-                const connector: []const u8 = if (node.rail_end) r.tui.icon.box_bl else if (node.entry_start) r.tui.icon.box_t_right else r.tui.icon.box_v;
+                const connector = node.connector();
                 var rail: std.ArrayList(u8) = .empty;
                 try appendRail(arena, &rail, node.prefix, connector);
                 try nested.pushSpan(arena, .{ .content = rail.items });
@@ -4384,21 +4393,83 @@ const rail_recent_entries = 3;
 const RailNode = struct {
     line: r.tui.Line,
     entry_start: bool,
-    rail_end: bool = false,
     child_id: ?r.AgentId,
     prefix: []const bool,
     agent_id: r.AgentId,
     image_call_id: ?[]const u8 = null,
     continues: bool = false,
+
+    fn connector(self: RailNode) []const u8 {
+        if (self.entry_start) return if (self.continues) r.tui.icon.box_t_right else r.tui.icon.box_bl;
+        return if (self.continues) r.tui.icon.box_v else " ";
+    }
 };
 
-fn pushChildActivity(app: *App, arena: std.mem.Allocator, line: *r.tui.Line, child_id: r.AgentId) !void {
-    const child = app.registry.get(child_id) orelse {
-        if (app.tool_status_entries.value.getAgent(child_id)) |archived| {
-            if (archived.name.len > 0) try line.pushSpanPrint(arena, "  {s}", .{archived.name}, .{ .fg = app.theme.muted });
-        }
+fn appendChildRailBlocks(
+    arena: std.mem.Allocator,
+    store: *ToolStatusStore,
+    registry: *r.agent_registry.Registry,
+    entry: *ToolStatusEntry,
+    prefix: []const bool,
+    depth: u32,
+    out: *std.ArrayList(RailNode),
+) anyerror!void {
+    if (depth >= rail_depth_cap) return;
+    const children = entry.child_ids.items;
+    if (children.len == 1) {
+        try walkAgentRail(arena, store, registry, children[0], prefix, depth, out);
         return;
-    };
+    }
+    for (children, 0..) |child, index| {
+        const continues = index + 1 < children.len;
+        var anchor = r.tui.Line{};
+        try anchor.pushSpan(arena, .{ .content = try railChildLabel(arena, store, registry, child) });
+        try out.append(arena, .{
+            .line = anchor,
+            .entry_start = true,
+            .child_id = child,
+            .prefix = prefix,
+            .agent_id = child,
+            .continues = continues,
+        });
+        const child_prefix = try extendRailPrefix(arena, prefix, continues);
+        try walkAgentRail(arena, store, registry, child, child_prefix, depth + 1, out);
+    }
+}
+
+fn extendRailPrefix(arena: std.mem.Allocator, prefix: []const bool, continues: bool) ![]const bool {
+    const child_prefix = try arena.alloc(bool, prefix.len + 1);
+    @memcpy(child_prefix[0..prefix.len], prefix);
+    child_prefix[prefix.len] = continues;
+    return child_prefix;
+}
+
+fn childCount(entry: ToolStatusEntry) usize {
+    return entry.child_ids.items.len;
+}
+
+fn onlyChildId(entry: ToolStatusEntry) ?r.AgentId {
+    return if (entry.child_ids.items.len == 1) entry.child_ids.items[0] else null;
+}
+
+fn anyChildLive(registry: *r.agent_registry.Registry, entry: ToolStatusEntry) bool {
+    for (entry.child_ids.items) |child| {
+        if (!registry.subtreeDone(child)) return true;
+    }
+    return false;
+}
+
+fn railChildLabel(arena: std.mem.Allocator, store: *ToolStatusStore, registry: *r.agent_registry.Registry, child_id: r.AgentId) ![]const u8 {
+    const child = registry.get(child_id);
+    const archived = store.getAgent(child_id);
+    const name = if (child) |agent| agent.name else if (archived) |agent| agent.name else "";
+    const task = if (child) |agent| agent.task_description else if (archived) |agent| agent.task_description else "";
+    const label = if (name.len > 0) name else try std.fmt.allocPrint(arena, "agent {d}", .{child_id.pack()});
+    return if (task.len > 0) try std.fmt.allocPrint(arena, "{s} -> {s}", .{ label, task }) else label;
+}
+
+fn pushChildActivity(app: *App, arena: std.mem.Allocator, line: *r.tui.Line, child_id: r.AgentId) !void {
+    const child = app.registry.get(child_id) orelse return;
     const activity = child.activity;
     if (activity != .idle) {
         try line.pushSpan(arena, .{ .content = switch (activity) {
@@ -4438,9 +4509,9 @@ fn walkAgentRail(
     var it = agent_status.entries.iterator();
     while (it.next()) |kv| {
         const entry = kv.value_ptr;
-        const anchored = if (entry.child_id) |child| !registry.subtreeDone(child) else false;
+        const anchored = anyChildLive(registry, entry.*);
         const image_entry = entry.has_image or agent_status.image_calls.contains(kv.key_ptr.*);
-        if (!anchored and entry.lines.items.len == 0 and !image_entry) continue;
+        if (!anchored and entry.lines.items.len == 0 and !image_entry and childCount(entry.*) == 0) continue;
         if (!anchored) recent_count += 1;
         try candidates.append(arena, .{ .entry = entry, .call_id = kv.key_ptr.*, .anchored = anchored });
     }
@@ -4454,20 +4525,16 @@ fn walkAgentRail(
         try visible.append(arena, candidate);
     }
 
-    var last_row: ?usize = null;
     for (visible.items, 0..) |candidate, vi| {
         const tool_entry = candidate.entry;
         const continues = vi + 1 < visible.items.len;
-        const child_prefix = try arena.alloc(bool, prefix.len + 1);
-        @memcpy(child_prefix[0..prefix.len], prefix);
-        child_prefix[prefix.len] = continues;
+        const child_prefix = try extendRailPrefix(arena, prefix, continues);
 
         for (tool_entry.lines.items, 0..) |entry_line, li| {
-            last_row = out.items.len;
             try out.append(arena, .{
                 .line = entry_line,
                 .entry_start = li == 0,
-                .child_id = tool_entry.child_id,
+                .child_id = onlyChildId(tool_entry.*),
                 .prefix = prefix,
                 .agent_id = agent_id,
                 .image_call_id = if (li + 1 == tool_entry.lines.items.len) candidate.call_id else null,
@@ -4476,32 +4543,23 @@ fn walkAgentRail(
         }
         if (tool_entry.lines.items.len == 0) {
             var anchor = r.tui.Line{};
-            if (tool_entry.child_id) |child_id| {
-                const child = registry.get(child_id);
-                const name = if (child) |agent| agent.name else "";
-                const task = if (child) |agent| agent.task_description else "";
-                const label = if (name.len > 0) name else try std.fmt.allocPrint(arena, "agent {d}", .{child_id.pack()});
-                try anchor.pushSpan(arena, .{ .content = if (task.len > 0) try std.fmt.allocPrint(arena, "{s} -> {s}", .{ label, task }) else label });
+            if (onlyChildId(tool_entry.*)) |child_id| {
+                try anchor.pushSpan(arena, .{ .content = try railChildLabel(arena, store, registry, child_id) });
             } else {
                 try anchor.pushSpan(arena, .{ .content = candidate.call_id });
             }
-            last_row = out.items.len;
             try out.append(arena, .{
                 .line = anchor,
                 .entry_start = true,
-                .child_id = tool_entry.child_id,
+                .child_id = onlyChildId(tool_entry.*),
                 .prefix = prefix,
                 .agent_id = agent_id,
                 .image_call_id = candidate.call_id,
                 .continues = continues,
             });
         }
-        if (tool_entry.child_id) |entry_child_id| {
-            try walkAgentRail(arena, store, registry, entry_child_id, child_prefix, depth + 1, out);
-        }
+        try appendChildRailBlocks(arena, store, registry, tool_entry, child_prefix, depth + 1, out);
     }
-    // Each agent closes its own rail, even when descendants follow its last row.
-    if (last_row) |row| out.items[row].rail_end = true;
 }
 
 const ToolHistoryResult = struct {
@@ -4635,12 +4693,17 @@ const TimelineRenderSlot = struct {
     total: usize,
 };
 
-fn toolCallChildId(app: *App, call: TimelinePart.ToolCallEntry) ?r.AgentId {
+fn callChildrenReady(app: *App, call: TimelinePart.ToolCallEntry, cacheable: bool) bool {
     const statuses = app.tool_status_entries.lock(app.io);
     defer statuses.unlock();
-    const status_agent = statuses.ptr.getAgent(call.agent_id) orelse return null;
-    const entry = status_agent.entries.getPtr(call.call_id) orelse return null;
-    return entry.child_id;
+    const status_agent = statuses.ptr.getAgent(call.agent_id) orelse return true;
+    const entry = status_agent.entries.getPtr(call.call_id) orelse return true;
+    for (entry.child_ids.items) |child| {
+        if (cacheable) {
+            if (app.registry.state(child) != null) return false;
+        } else if (!app.registry.subtreeDone(child)) return false;
+    }
+    return true;
 }
 
 fn timelineEntrySettled(app: *App, entry: TimelineEntry) bool {
@@ -4648,10 +4711,7 @@ fn timelineEntrySettled(app: *App, entry: TimelineEntry) bool {
         .tool_call => |call| {
             const agent = app.registry.get(call.agent_id) orelse return false;
             if (findToolResult(agent, call.call_id) == null) return false;
-            if (toolCallChildId(app, call)) |cid| {
-                const child = app.registry.get(cid) orelse continue;
-                if (child.activity != .idle) return false;
-            }
+            if (!callChildrenReady(app, call, false)) return false;
         },
         else => {},
     };
@@ -4664,9 +4724,7 @@ fn entryRenderCacheable(app: *App, entry: TimelineEntry, inner_w: u16) bool {
         .tool_call => |call| {
             const agent = app.registry.get(call.agent_id) orelse return false;
             if (findToolResult(agent, call.call_id) == null) return false;
-            if (toolCallChildId(app, call)) |cid| {
-                if (app.registry.get(cid) != null) return false;
-            }
+            if (!callChildrenReady(app, call, true)) return false;
         },
         else => {},
     };
@@ -5370,9 +5428,12 @@ test "tool images follow their calls, crop to the viewport, and follow recursive
     try app.inline_images.entries.append(alloc, &nested_image);
     const statuses = &app.tool_status_entries.value;
     const parent = try statuses.forWrite(alloc, parent_id);
-    try parent.entries.put(alloc, "launch", .{ .child_id = child_id });
+    var launch_entry = ToolStatusEntry{};
+    try launch_entry.child_ids.append(alloc, child_id);
+    try parent.entries.put(alloc, "launch", launch_entry);
     const child = try statuses.forWrite(alloc, child_id);
-    var child_entry = ToolStatusEntry{ .child_id = grandchild_id };
+    var child_entry = ToolStatusEntry{};
+    try child_entry.child_ids.append(alloc, grandchild_id);
     try child_entry.lines.append(alloc, try r.tui.Line.new(alloc, "spawn", .{}, .{}));
     try child.entries.put(alloc, "spawn", child_entry);
     const grandchild = try statuses.forWrite(alloc, grandchild_id);
@@ -5435,7 +5496,9 @@ test "empty anchored tool entries carry their image call id" {
     const child_id = r.AgentId{ .index = 1, .generation = 0 };
     registry.slots[child_id.index].state.store(.reserved, .release);
     const parent = try statuses.forWrite(arena.allocator(), parent_id);
-    try parent.entries.put(arena.allocator(), "empty-image", .{ .child_id = child_id });
+    var entry = ToolStatusEntry{};
+    try entry.child_ids.append(arena.allocator(), child_id);
+    try parent.entries.put(arena.allocator(), "empty-image", entry);
 
     var nodes: std.ArrayList(RailNode) = .empty;
     try walkAgentRail(arena.allocator(), &statuses, &registry, parent_id, &.{}, 0, &nodes);
@@ -5895,4 +5958,89 @@ test "waiting main agent shows waiting progress and cancel stops the tree" {
     try std.testing.expectEqual(r.agent.Status.canceled, registry.get(parent_id).?.status);
     try std.testing.expectEqual(r.agent.Status.canceled, child.status);
     try std.testing.expectEqual(@as(u32, 0), registry.countActive());
+}
+
+test "sibling agent rails preserve ancestry through multiline tools images and empty agents" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var registry = r.agent_registry.Registry.init(gpa, std.testing.io);
+    defer registry.deinit();
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.gpa = gpa;
+    app.registry = &registry;
+    app.session_store = null;
+    app.journal_restoring = false;
+    app.arena_session = .init(gpa);
+    defer app.arena_session.deinit();
+    app.tool_status_entries = .{};
+    app.theme = .default;
+    app.frame_count = 0;
+    app.flags = .{};
+    app.kitty_graphics = true;
+    app.cell_px = .{ .w = 10, .h = 20 };
+    app.inline_images = .{};
+    const parent = registry.reserve(null).?;
+    var children: [4]r.AgentId = undefined;
+    for (&children, [_][]const u8{ "alpha", "beta", "gamma", "delta" }) |*child, name| {
+        child.* = registry.reserve(parent).?;
+        try app.rememberAgentMetadata(child.*, name, "");
+        try app.addToolChild(parent, "launch", child.*);
+    }
+    const grandchild = registry.reserve(children[0]).?;
+    try app.setToolStatus(parent, "launch", "codemode");
+    try app.setToolResult(parent, "launch", false);
+    try app.setToolStatus(children[0], "first", "first\nmore");
+    try app.setToolStatus(children[0], "spawn", "spawn");
+    try app.addToolChild(children[0], "spawn", grandchild);
+    try app.setToolStatus(grandchild, "work", "grandchild work");
+    try app.setToolStatus(children[2], "image", "screenshot");
+    try app.setToolStatus(children[3], "tail", "tail\ncontinued");
+    var pixels: [0]u8 = .{};
+    var image = r.inline_images.Entry{
+        .agent_id = children[2],
+        .call_id = "image",
+        .kitty_id = 1,
+        .img = .{ .width = 80, .height = 80, .pixels = &pixels },
+        .state = .init(.ready),
+    };
+    try app.inline_images.entries.append(alloc, &image);
+    const calls = [_]TimelinePart.ToolCallEntry{.{ .agent_id = parent, .call_id = "launch", .tool_name = "codemode" }};
+    const item = try buildToolGroupParagraph(&app, alloc, &calls, 80);
+    const expected = [_][]const u8{
+        " ├ alpha",
+        " │ ├ first",
+        " │ │ more",
+        " │ └ spawn",
+        " │   └ grandchild work",
+        " ├ beta",
+        " ├ gamma",
+        " │ └ screenshot",
+        " │     └ ",
+        " │       ",
+        " │       ",
+        " │       ",
+        " └ delta",
+        "   └ tail",
+        "     continued",
+    };
+    try std.testing.expectEqual(expected.len + 1, item.p.lines.items.len);
+    for (item.p.lines.items[1..], expected) |line, wanted| {
+        var actual: std.ArrayList(u8) = .empty;
+        for (line.spans.items) |span| try actual.appendSlice(alloc, span.content);
+        try std.testing.expectEqualStrings(wanted, actual.items);
+    }
+    try std.testing.expectEqual(@as(usize, 1), item.inline_images.len);
+    try std.testing.expectEqual(@as(usize, 9), item.inline_images[0].row);
+    try std.testing.expectEqual(@as(u16, 9), item.inline_images[0].col);
+    try std.testing.expect(!callChildrenReady(&app, calls[0], false));
+    try std.testing.expect(!callChildrenReady(&app, calls[0], true));
+    for (children) |child| registry.releaseReservation(child);
+    registry.releaseReservation(grandchild);
+    try std.testing.expect(callChildrenReady(&app, calls[0], false));
+    try std.testing.expect(callChildrenReady(&app, calls[0], true));
+    const restored = try buildToolGroupParagraph(&app, alloc, &calls, 80);
+    try std.testing.expectEqual(item.p.lines.items.len, restored.p.lines.items.len);
 }

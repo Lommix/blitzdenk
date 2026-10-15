@@ -32,6 +32,7 @@ pub const Record = struct {
     ansi: []const u8 = "",
     state: session.ToolState = .pending,
     child: ?u32 = null,
+    children: []const u32 = &.{},
 
     pub fn jsonStringify(self: Record, j: anytype) !void {
         switch (self.kind) {
@@ -42,7 +43,7 @@ pub const Record = struct {
             .reset => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .history = self.history, .reason = self.reason }),
             .timeline_append => try j.write(.{ .kind = self.kind, .entry = self.entry }),
             .timeline_truncate => try j.write(.{ .kind = self.kind, .length = self.length }),
-            .tool_status => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .call_id = self.call_id, .ansi = self.ansi, .state = self.state, .child = self.child }),
+            .tool_status => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .call_id = self.call_id, .ansi = self.ansi, .state = self.state, .children = self.children }),
         }
     }
 };
@@ -568,7 +569,7 @@ const Replay = struct {
             const key = try std.fmt.allocPrint(self.alloc, "{d}:{s}", .{ id, part.tool_call.id });
             if (self.status_indices.get(key)) |index| {
                 status.ansi = self.statuses.items[index].ansi;
-                status.child = self.statuses.items[index].child;
+                status.children = self.statuses.items[index].children;
             }
             try self.apply(status, "{}");
         };
@@ -650,7 +651,13 @@ const Replay = struct {
             },
             .tool_status => {
                 _ = try self.agent(record.agentID, false);
-                if (record.child) |id| _ = try self.agent(id, false);
+                var merged: std.ArrayList(u32) = .empty;
+                if (record.children.len > 0) {
+                    try merged.appendSlice(alloc, record.children);
+                } else if (record.child) |id| {
+                    try merged.append(alloc, id);
+                }
+                for (merged.items) |id| _ = try self.agent(id, false);
                 const call = record.call_id orelse return error.MissingCallId;
                 const key = try std.fmt.allocPrint(alloc, "{d}:{s}", .{ record.agentID.?, call });
                 const entry = try self.status_indices.getOrPut(alloc, key);
@@ -662,7 +669,7 @@ const Replay = struct {
                     .failed, .interrupted => true,
                     .succeeded => false,
                     .pending => null,
-                }, .child = record.child };
+                }, .children = merged.items };
             },
         }
     }
@@ -764,7 +771,7 @@ pub fn load(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, name: []cons
                 const status_key = try std.fmt.allocPrint(alloc, "{d}:{s}", .{ agent.metadata.id, status.call_id.? });
                 if (replay.status_indices.get(status_key)) |status_index| {
                     status.ansi = replay.statuses.items[status_index].ansi;
-                    status.child = replay.statuses.items[status_index].child;
+                    status.children = replay.statuses.items[status_index].children;
                 }
                 try replay.apply(status, "{}");
                 try repairs.append(alloc, status);
@@ -1022,7 +1029,7 @@ test "metadata switching removal and cleared status fields survive replay" {
     try fixture.declare(2);
     try store.enqueue(.{ .kind = .main_agent, .agentID = 1 });
     try fixture.message(1, "first main");
-    try store.enqueue(.{ .kind = .tool_status, .agentID = 1, .call_id = "link", .ansi = "styled", .state = .failed, .child = 2 });
+    try store.enqueue(.{ .kind = .tool_status, .agentID = 1, .call_id = "link", .ansi = "styled", .state = .failed, .children = &.{2} });
     try store.enqueue(.{ .kind = .tool_status, .agentID = 1, .call_id = "link", .state = .pending });
     try store.enqueue(.{ .kind = .agent_remove, .agentID = 1 });
     try store.enqueue(.{ .kind = .main_agent, .agentID = 2 });
@@ -1037,7 +1044,7 @@ test "metadata switching removal and cleared status fields survive replay" {
     try std.testing.expectEqual(@as(usize, 0), loaded.save.agents.len);
     try std.testing.expectEqual(@as(usize, 2), loaded.save.archived_ids.len);
     try std.testing.expectEqualStrings("", loaded.save.tool_status[0].ansi);
-    try std.testing.expect(loaded.save.tool_status[0].child == null);
+    try std.testing.expect(loaded.save.tool_status[0].children.len == 0);
     try std.testing.expectEqual(session.ToolState.pending, loaded.save.tool_status[0].state);
     try fixture.raw("{\"kind\":\"message\",\"agentID\":1,\"message\":{\"role\":\"user\",\"parts\":[]}}\n");
     const invalid = try fixture.read();
@@ -1146,4 +1153,20 @@ test "failed reconciliation blocks subsequent writes" {
     try std.testing.expectError(error.JournalNeedsRecovery, fixture.store.flush());
     try std.testing.expectEqual(size, (try fixture.store.file.?.stat(fixture.store.io)).size);
     try std.testing.expectEqual(@as(usize, 1), fixture.store.batch.items.len);
+}
+
+test "tool statuses replay multiple children and legacy child links" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    for (1..6) |id| try fixture.declare(@intCast(id));
+    try fixture.store.enqueue(.{ .kind = .tool_status, .agentID = 1, .call_id = "launch", .children = &.{ 2, 3, 4, 5 } });
+    try fixture.store.flush();
+    const multiple = try fixture.read();
+    try std.testing.expect(multiple.problem == null);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 3, 4, 5 }, multiple.save.tool_status[0].children);
+    try fixture.raw("{\"kind\":\"tool_status\",\"agentID\":1,\"call_id\":\"launch\",\"child\":2}\n");
+    const legacy = try fixture.read();
+    try std.testing.expect(legacy.problem == null);
+    try std.testing.expectEqualSlices(u32, &.{2}, legacy.save.tool_status[0].children);
 }

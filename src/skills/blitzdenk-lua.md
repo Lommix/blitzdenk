@@ -184,6 +184,11 @@ spawns `general`.
 An agent id is one integer; the agent tool result carries it as
 `agent_id: <int>`.
 
+Agents spawned inside a tool attach to its timeline row automatically.
+Inside codemode, both direct spawns and `ctx:call` or `ctx:batch` calls to
+`agent` attach to the outer codemode row. `ctx:set_child_id(id)` adds an
+existing agent to the same row; repeated ids appear once.
+
 `on_complete` in `blitz.agent.spawn` attaches a one-shot callback to the run.
 It fires once on the main thread when the run ends. Closing or replacing the
 agent before that fires `blitz.AWAIT_CANCELED` instead, and a Lua reload

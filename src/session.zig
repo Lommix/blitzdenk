@@ -195,7 +195,7 @@ pub const WireToolStatus = struct {
     call_id: []const u8,
     ansi: []const u8 = "",
     is_error: ?bool = null,
-    child: ?u32 = null,
+    children: []const u32 = &.{},
 };
 
 pub fn encodeChat(history: []const sdk.Message, alloc: std.mem.Allocator) ![]const WireMessage {
@@ -273,7 +273,7 @@ pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
         if (id.index >= r.agent_registry.max_agents) continue;
         try a.setToolStatus(id, status.call_id, status.ansi);
         if (status.is_error) |failed| try a.setToolResult(id, status.call_id, failed);
-        if (status.child) |child| try a.setToolChild(id, status.call_id, .unpack(child));
+        for (status.children) |child| try a.addToolChild(id, status.call_id, .unpack(child));
         const guard = a.tool_status_entries.lock(a.io);
         if (guard.ptr.getAgent(id)) |agent_status| if (agent_status.entries.getPtr(status.call_id)) |entry| {
             entry.interrupted = status.state == .interrupted;
@@ -736,7 +736,7 @@ test "removed agents retain historical links without occupying restored slots" {
     const current = try rig.spawn("current", "", null, false, &.{sdk.UserMessage("new")});
     try rig.a.selectMainAgent(current);
     try rig.a.setToolStatus(current, "call", "new label");
-    try rig.a.setToolChild(current, "call", first.?);
+    try rig.a.addToolChild(current, "call", first.?);
     rig.a.checkpoint();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -756,8 +756,153 @@ test "removed agents retain historical links without occupying restored slots" {
     try std.testing.expect(archived.entries.contains("call"));
     const retained = statuses.ptr.getAgent(current).?;
     try std.testing.expectEqualStrings("current", retained.name);
-    try std.testing.expectEqual(first.?, retained.entries.get("call").?.child_id.?);
+    try std.testing.expectEqual(first.?, retained.entries.get("call").?.child_ids.items[0]);
     const next = resumed.registry.reserve(null).?;
     defer resumed.registry.releaseReservation(next);
     try std.testing.expect(next.pack() != first.?.pack());
+}
+
+test "tool spawns and manual links retain the visible call through nested and batched tools" {
+    const Fixture = struct {
+        fn run(tool_name: []const u8, input: []const u8, count: usize) !void {
+            var rig: SessionTestRig = undefined;
+            try rig.init();
+            defer rig.deinit();
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const alloc = rig.a.sessionAlloc();
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const config_dir = path_buf[0..try tmp.dir.realPath(rig.a.io, &path_buf)];
+            const config_path = try std.fs.path.join(alloc, &.{ config_dir, "config.lua" });
+            try tmp.dir.writeFile(rig.a.io, .{ .sub_path = "config.lua", .data = @embedFile("blitz_default.lua") ++
+                \\blitz.register_tool({ name = "delegate", description = "Delegate through another tool", func = function(ctx, call)
+                \\    return { msg = ctx:call("agent", call.arguments) }
+                \\end })
+                \\blitz.register_tool({ name = "link", description = "Attach an existing agent", func = function(ctx, call)
+                \\    ctx:set_child_id(call.arguments.agent_id)
+                \\    return {}
+                \\end })
+            });
+            rig.a.cwd = config_dir;
+            rig.a.lua_config_abs = config_path;
+            rig.a.lua_config_dir = config_dir;
+            rig.a.cmd_queue = try r.cmd.CommandQueue.init(std.testing.allocator);
+            defer rig.a.cmd_queue.deinit();
+            const vm = try r.lua.LuaVm.initTool(std.testing.allocator);
+            defer vm.deinit();
+            rig.a.lua_vm = vm;
+            vm.setApp(&rig.a);
+            try vm.load(config_path);
+            const parent = try rig.spawn("parent", "", null, false, &.{});
+            const agent = rig.registry.get(parent).?;
+            try r.tools.context.install(agent, rig.a.toolBase(parent), try vm.getRegisteredTools(alloc));
+            var ran = false;
+            for (agent.tools) |tool| {
+                if (!std.mem.eql(u8, tool.name, tool_name)) continue;
+                const result = try tool.run(alloc, rig.a.io, .{ .id = "outer", .name = tool_name, .input = input });
+                try std.testing.expect(!result.is_error);
+                ran = true;
+            }
+            try std.testing.expect(ran);
+            try std.testing.expectEqual(count, rig.a.cmd_queue._data.items.len);
+            const statuses = rig.a.tool_status_entries.value.getAgent(parent).?;
+            const children = statuses.entries.get("outer").?.child_ids.items;
+            try std.testing.expectEqual(count, children.len);
+            for (rig.a.cmd_queue._data.items) |command| {
+                const spawned = command.spawn_agent.agent_id;
+                var found = false;
+                for (children) |child| if (child.pack() == spawned.pack()) {
+                    found = true;
+                    break;
+                };
+                try std.testing.expect(found);
+            }
+            var entries = statuses.entries.iterator();
+            while (entries.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "outer")) continue;
+                try std.testing.expectEqual(@as(usize, 0), entry.value_ptr.child_ids.items.len);
+            }
+        }
+    };
+    const scripts = [_][]const u8{
+        \\for i = 1, 4 do
+        \\    print(ctx:call("agent", { description = "child " .. i, prompt = "work", agent_type = "general" }))
+        \\end
+        ,
+        \\local requests = {}
+        \\for i = 1, 4 do requests[i] = { name = "agent", args = { description = "child " .. i, prompt = "work", agent_type = "general" } } end
+        \\for _, result in ipairs(ctx:batch(requests)) do print(result) end
+        ,
+        \\for i = 1, 4 do
+        \\    print(ctx:call("delegate", { description = "child " .. i, prompt = "work", agent_type = "general" }))
+        \\end
+        ,
+        \\for i = 1, 20 do
+        \\    local id = blitz.agent.spawn({ parent_id = ctx.agent_id, prompt = "work", background = true })
+        \\    ctx:call("link", { agent_id = id })
+        \\    ctx:set_child_id(id)
+        \\end
+        ,
+    };
+    for (scripts, 0..) |code, index| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const input = try std.json.Stringify.valueAlloc(arena.allocator(), .{ .code = code }, .{});
+        try Fixture.run("codemode", input, if (index == 3) 20 else 4);
+    }
+    try Fixture.run("agent", "{\"description\":\"child\",\"prompt\":\"work\",\"agent_type\":\"general\"}", 1);
+}
+
+test "multiple pending child links survive declaration and journal replay" {
+    const testing = std.testing;
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = r.session_store.Store{ .io = rig.a.io, .gpa = testing.allocator, .base = tmp.dir };
+    defer store.deinit();
+    try store.create("/tmp/project");
+    rig.a.session_store = &store;
+    const parent = try rig.spawn("parent", "", null, false, &.{});
+    try rig.a.selectMainAgent(parent);
+    var children: [4]r.AgentId = undefined;
+    for (&children) |*child| {
+        child.* = rig.registry.reserve(parent).?;
+        try rig.a.addToolChild(parent, "launch", child.*);
+        try rig.a.addToolChild(parent, "launch", child.*);
+    }
+    try store.flush();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const pending = (try r.session_store.load(arena.allocator(), rig.a.io, tmp.dir, store.file_name.?)).?;
+    try testing.expect(pending.problem == null);
+    try testing.expectEqual(@as(usize, 0), pending.save.tool_status[0].children.len);
+    const model_config = switch (rig.factory.buildAgentApiConfig(.general, &rig.cfg, rig.pool.env)) {
+        .config => |config| config,
+        .diagnostic => return error.InvalidProviderConfiguration,
+    };
+    for (children) |child| {
+        const agent = try rig.registry.activate(child, model_config, .{ .identity = .{
+            .name = "child",
+            .task_description = "work",
+            .parent = parent.pack(),
+            .depth = 1,
+            .cwd = rig.a.cwd,
+        } });
+        agent.background = true;
+        try rig.a.configureAgent(child, agent);
+    }
+    try store.flush();
+    const loaded = (try r.session_store.load(arena.allocator(), rig.a.io, tmp.dir, store.file_name.?)).?;
+    try testing.expect(loaded.problem == null);
+    var packed_ids: [4]u32 = undefined;
+    for (children, &packed_ids) |child, *id| id.* = child.pack();
+    try testing.expectEqualSlices(u32, &packed_ids, loaded.save.tool_status[0].children);
+    var resumed: SessionTestRig = undefined;
+    try resumed.init();
+    defer resumed.deinit();
+    try applySaveState(&resumed.a, &loaded.save);
+    const entry = resumed.a.tool_status_entries.value.getAgent(parent).?.entries.get("launch").?;
+    try testing.expectEqualSlices(r.AgentId, &children, entry.child_ids.items);
 }

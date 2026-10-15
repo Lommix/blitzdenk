@@ -12,6 +12,11 @@ pub const Display = struct {
     child: ?*const fn (?*anyopaque, AgentId, []const u8, AgentId) void = null,
 };
 
+pub const Owner = struct {
+    agent_id: AgentId,
+    call_id: []const u8,
+};
+
 pub const BaseContext = struct {
     registry: *registry_mod.Registry,
     exec_pool: *exec.CmdPool,
@@ -20,6 +25,7 @@ pub const BaseContext = struct {
     permissions: permissions.Handler = .{},
     display: Display = .{},
     app: ?*anyopaque = null,
+    owner: ?Owner = null,
 };
 
 pub const Context = struct {
@@ -62,7 +68,12 @@ pub const Context = struct {
     }
 
     pub fn setChild(self: Context, call_id: []const u8, child_id: AgentId) void {
-        if (self.base.display.child) |child| child(self.base.display.ctx, self.base.self_id, call_id, child_id);
+        const target = self.owner(call_id);
+        if (self.base.display.child) |child| child(self.base.display.ctx, target.agent_id, target.call_id, child_id);
+    }
+
+    pub fn owner(self: Context, call_id: []const u8) Owner {
+        return self.base.owner orelse .{ .agent_id = self.base.self_id, .call_id = call_id };
     }
 };
 
@@ -112,6 +123,14 @@ fn installInternal(agent: *agent_mod.Agent, base: BaseContext, definitions: []co
     if (live) try agent.setToolsLive(tools) else try agent.setTools(tools);
 }
 
+pub fn runWithOwner(tool: sdk.Tool, alloc: std.mem.Allocator, io: std.Io, call: sdk.ToolCall, owner: Owner) !sdk.ToolOutput {
+    if (tool.execute != trampoline) return tool.run(alloc, io, call);
+    const binding: *const Binding = @ptrCast(@alignCast(tool.execute_ctx.?));
+    var base = binding.base;
+    base.owner = owner;
+    return binding.execute(.{ .alloc = alloc, .io = io, .base = base }, call);
+}
+
 fn trampoline(ctx: ?*anyopaque, alloc: std.mem.Allocator, io: std.Io, call: sdk.ToolCall) anyerror!sdk.ToolOutput {
     const binding: *Binding = @ptrCast(@alignCast(ctx.?));
     return binding.execute(.{ .alloc = alloc, .io = io, .base = binding.base }, call);
@@ -123,7 +142,17 @@ test "SDK tool trampoline preserves call context and output" {
             std.testing.expectEqualStrings("call", call.id) catch unreachable;
             std.testing.expectEqualStrings("{}", call.input) catch unreachable;
             std.testing.expect(context.base.registry.get(context.base.self_id) != null) catch unreachable;
-            return .{ .content = "done", .exit_loop = true };
+            if (context.base.owner) |owner| {
+                std.testing.expectEqual(context.base.self_id, owner.agent_id) catch unreachable;
+                std.testing.expectEqualStrings("outer", owner.call_id) catch unreachable;
+            }
+            return .{ .content = if (context.base.owner) |target| target.call_id else "done", .exit_loop = true };
+        }
+
+        fn foreign(ctx: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: sdk.ToolCall) anyerror!sdk.ToolOutput {
+            const value: *const u8 = @ptrCast(ctx.?);
+            try std.testing.expectEqual(@as(u8, 98), value.*);
+            return .{ .content = "foreign" };
         }
     };
 
@@ -149,4 +178,12 @@ test "SDK tool trampoline preserves call context and output" {
     const output = try agent.tools[0].run(std.testing.allocator, std.testing.io, .{ .id = "call", .name = "test", .input = "{}" });
     try std.testing.expectEqualStrings("done", output.content);
     try std.testing.expect(output.exit_loop);
+    const owner = Owner{ .agent_id = id, .call_id = "outer" };
+    const owned = try runWithOwner(agent.tools[0], std.testing.allocator, std.testing.io, .{ .id = "call", .name = "test", .input = "{}" }, owner);
+    try std.testing.expectEqualStrings("outer", owned.content);
+    const binding: *const Binding = @ptrCast(@alignCast(agent.tools[0].execute_ctx.?));
+    try std.testing.expect(binding.base.owner == null);
+    var foreign_context: u8 = 98;
+    const foreign = try runWithOwner(.{ .name = "foreign", .execute = Fixture.foreign, .execute_ctx = &foreign_context }, std.testing.allocator, std.testing.io, .{ .id = "call", .name = "foreign", .input = "{}" }, owner);
+    try std.testing.expectEqualStrings("foreign", foreign.content);
 }

@@ -188,8 +188,6 @@ Tools.agent_tool = blitz.register_tool({
 			error("No agent slots left")
 		end
 
-		ctx:set_child_id(id)
-
 		local info = "\27[1;38;2;122;162;247m"
 		local text = "\27[38;2;192;202;245m"
 		local bold = "\27[1m"

@@ -2744,6 +2744,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                         c.lua_pushnil(state);
                         return 1;
                     };
+                    if (vm.owner) |owner| a.addToolChild(owner.agent_id, owner.call_id, id) catch {};
                     if (spawn.on_complete) |cb| {
                         vm.spawn_callbacks.put(vm.parent, id.pack(), cb.idx) catch {
                             c.luaL_unref(state, c.LUA_REGISTRYINDEX, cb.idx);
@@ -3552,6 +3553,7 @@ pub const LuaVm = struct {
     L: *c.lua_State,
     app: ?*app.App = null,
     is_tool_vm: bool = false,
+    owner: ?r.tools.context.Owner = null,
     main_thread_id: std.Thread.Id = 0,
     cancel_token: ?*r.sdk.CancellationToken = null,
     parent: Allocator,
@@ -4846,6 +4848,7 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
         .tool_ctx = ctx,
         .tool_call = call,
     };
+    vm.owner = ctx.owner(call.id);
     pushCtxTable(L, &bridge, entry.state_ref);
     pushCallTable(vm.luaArena(), L, call);
 
@@ -5013,15 +5016,15 @@ fn luaSetChildId(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
     const bridge = getBridge(state) orelse return 0;
     const id = readAgentIdArg(state, "ctx.set_child_id", 2);
-    r.tools.setToolChild(bridge.tool_ctx, bridge.tool_call, id);
+    r.tools.addToolChild(bridge.tool_ctx, bridge.tool_call, id);
     return 0;
 }
 
 const NESTED_TOOL_PARALLEL: usize = 8;
 
 const NestedToolRun = struct {
-    execute: r.sdk.types.ToolExecuteFn,
-    execute_ctx: ?*anyopaque,
+    tool: r.sdk.Tool,
+    owner: r.tools.context.Owner,
     call: ToolCall,
 };
 
@@ -5035,11 +5038,15 @@ fn prepareNestedRun(bridge: *CtxBridge, state: *c.lua_State, name: []const u8, a
 
     for (bridge.tool_ctx.agent().tools) |tool| {
         if (!std.mem.eql(u8, tool.name, name)) continue;
-        const execute = tool.execute orelse break;
+        if (tool.execute == null) break;
         bridge.nested_count += 1;
+        const owner: r.tools.context.Owner = vm.owner orelse .{
+            .agent_id = bridge.tool_ctx.base.self_id,
+            .call_id = bridge.tool_call.id,
+        };
         return .{
-            .execute = execute,
-            .execute_ctx = tool.execute_ctx,
+            .tool = tool,
+            .owner = owner,
             .call = .{
                 .id = try std.fmt.allocPrint(arena, "{s}/{d}", .{ bridge.tool_call.id, bridge.nested_count }),
                 .name = try arena.dupe(u8, name),
@@ -5055,7 +5062,7 @@ fn prepareNestedRun(bridge: *CtxBridge, state: *c.lua_State, name: []const u8, a
 }
 
 fn runNestedTool(run: NestedToolRun, alloc: std.mem.Allocator, io: std.Io) anyerror![]const u8 {
-    const output = run.execute(run.execute_ctx, alloc, io, run.call) catch |err| {
+    const output = r.tools.context.runWithOwner(run.tool, alloc, io, run.call, run.owner) catch |err| {
         if (err == error.Canceled) return err;
         return std.fmt.allocPrint(alloc, "error: nested tool failed: {s}", .{@errorName(err)}) catch err;
     };

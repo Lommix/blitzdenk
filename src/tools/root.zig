@@ -111,9 +111,10 @@ pub fn writeToolChangedStatus(
     app.queueDiffToHistory(.{ .path = path, .before = before, .after = after }) catch {};
 }
 
-pub fn setToolChild(ctx: ToolContext, call: ToolCall, child_id: r.AgentId) void {
+pub fn addToolChild(ctx: ToolContext, call: ToolCall, child_id: r.AgentId) void {
     const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
-    app.setToolChild(ctx.base.self_id, call.id, child_id) catch {};
+    const owner = ctx.owner(call.id);
+    app.addToolChild(owner.agent_id, owner.call_id, child_id) catch {};
 }
 
 pub fn markConfigTouched(ctx: ToolContext, resolved: []const u8) void {
