@@ -2,6 +2,7 @@ const std = @import("std");
 const lua = @import("lua.zig");
 
 pub fn main(init: std.process.Init) !void {
+    try @import("exec").shim.enter(init);
     var alloc_writer = std.Io.Writer.Allocating.init(init.arena.allocator());
     var w = &alloc_writer.writer;
     var emitted_table_defs = std.StringHashMap(void).init(init.arena.allocator());

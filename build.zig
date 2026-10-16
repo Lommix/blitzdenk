@@ -19,9 +19,22 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "blitz-sdk", .module = blitz_sdk_mod }},
     });
 
+    const exec_shim = b.addExecutable(.{
+        .name = "blitz-exec-test-shim",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/exec_shim.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const exec_options = b.addOptions();
+    exec_options.addOptionPath("test_shim_path", exec_shim.getEmittedBin());
     const exec_mod = b.addModule("exec", .{
         .root_source_file = b.path("src/exec.zig"),
         .target = target,
+        .link_libc = true,
+        .imports = &.{.{ .name = "exec_options", .module = exec_options.createModule() }},
     });
     const agent_id_mod = b.addModule("agent-id", .{
         .root_source_file = b.path("src/agent_id.zig"),
@@ -134,6 +147,9 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
+    const exec_tests = b.addTest(.{ .root_module = exec_mod });
+    const run_exec_tests = b.addRunArtifact(exec_tests);
+    test_step.dependOn(&run_exec_tests.step);
 }
 
 fn build_lua_c(

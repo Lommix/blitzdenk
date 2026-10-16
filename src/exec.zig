@@ -9,9 +9,13 @@
 //!   owner (the `runAndWait` caller or `Handle` holder) may release.
 const std = @import("std");
 const builtin = @import("builtin");
+pub const shim = @import("exec_shim.zig");
 
 const MAX_OUTPUT = 4 * 1024 * 1024;
 const SLOT_COUNT = 64;
+const TERMINATE_GRACE_MS = 500;
+const DRAIN_TIMEOUT_MS = 2000;
+const PROCESS_POLL_MS = 10;
 
 pub const CmdSlot = struct {
     in_use: std.atomic.Value(bool) = .init(false),
@@ -125,29 +129,28 @@ pub const CmdPool = struct {
         } else |_| {}
     }
 
-    /// Returns a usable SSH_AUTH_SOCK path. If `inherited_sock` already points
-    /// at a live socket, returns it untouched. Otherwise spawns `ssh-agent -s`
-    /// and records pid + socket on self. Subsequent runWithOpts() calls
-    /// transparently inject this socket into spawned-child env. Caller must
-    /// NOT free the slice.
     pub fn ensureAgent(self: *Self, inherited_sock: ?[]const u8) ![]const u8 {
         if (inherited_sock) |s| if (s.len > 0 and socketUsable(s)) return s;
 
         if (self.agent_sock) |s| if (socketUsable(s)) return s;
-        // Stale own-agent: drop it before spawning a replacement.
         self.killAgent();
 
-        const res = try self.runAndWait(.{
+        const res = try self.runAndWaitTimeout(.{
             .argv = &.{ "ssh-agent", "-s" },
             .force_local = true,
             .skip_agent_overlay = true,
-        });
+        }, 3000);
         defer self.alloc.free(res.stdout);
         defer self.alloc.free(res.stderr);
 
         if (res.ty != .success) return error.AgentSpawnFailed;
 
         const parsed = parseAgentOutput(res.stdout) orelse return error.AgentParseFailed;
+        errdefer {
+            std.posix.kill(parsed.pid, std.posix.SIG.TERM) catch {};
+            std.Io.Dir.deleteFileAbsolute(self.io, parsed.sock) catch {};
+        }
+        if (!socketUsable(parsed.sock)) return error.AgentSpawnFailed;
         const sock_owned = try self.alloc.dupe(u8, parsed.sock);
         self.agent_sock = sock_owned;
         self.agent_pid = parsed.pid;
@@ -155,21 +158,27 @@ pub const CmdPool = struct {
     }
 
     pub fn killAgent(self: *Self) void {
+        const protection = self.io.swapCancelProtection(.blocked);
+        defer _ = self.io.swapCancelProtection(protection);
         if (self.agent_pid) |pid| {
             std.posix.kill(pid, std.posix.SIG.TERM) catch {};
         }
-        if (self.agent_sock) |s| self.alloc.free(s);
+        if (self.agent_sock) |s| {
+            std.Io.Dir.deleteFileAbsolute(self.io, s) catch {};
+            self.alloc.free(s);
+        }
         self.agent_pid = null;
         self.agent_sock = null;
     }
 
     fn socketUsable(path: []const u8) bool {
-        if (path.len == 0 or path.len >= std.fs.max_path_bytes) return false;
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        @memcpy(buf[0..path.len], path);
-        buf[path.len] = 0;
-        const z: [*:0]const u8 = @ptrCast(&buf);
-        return std.c.access(z, std.c.F_OK) == 0;
+        var address: std.c.sockaddr.un = .{ .path = @splat(0) };
+        if (path.len == 0 or path.len >= address.path.len or std.mem.indexOfScalar(u8, path, 0) != null) return false;
+        @memcpy(address.path[0..path.len], path);
+        const fd = std.c.socket(std.c.AF.UNIX, std.c.SOCK.STREAM | std.c.SOCK.CLOEXEC | std.c.SOCK.NONBLOCK, 0);
+        if (fd < 0) return false;
+        defer _ = std.c.close(fd);
+        return std.c.connect(fd, @ptrCast(&address), @sizeOf(@TypeOf(address))) == 0;
     }
 
     /// Parses ssh-agent -s output. Format (stable across openssh versions):
@@ -193,7 +202,7 @@ pub const CmdPool = struct {
             }
         }
 
-        if (sock == null or pid == null) return null;
+        if (sock == null or pid == null or pid.? <= 1) return null;
         return .{ .sock = sock.?, .pid = pid.? };
     }
 
@@ -233,6 +242,7 @@ pub const CmdPool = struct {
         /// cleanup. Useful for tools such as Chromium that may leave helpers
         /// holding stdout/stderr pipes open after the main process is killed.
         kill_process_group: bool = false,
+        scrub_env: bool = false,
         /// When true, skip the implicit SSH_AUTH_SOCK overlay even if we own
         /// an ssh-agent. Used when spawning the ssh-agent itself to avoid
         /// pointing the new agent at its own (not-yet-existing) socket.
@@ -277,7 +287,7 @@ pub const CmdPool = struct {
         };
 
         const spawned_argv = if (builtin.os.tag == .linux) blk: {
-            const out = try self.wrapSetsid(final_argv.?);
+            const out = try self.wrapExecShim(final_argv.?);
             final_argv = null;
             break :blk out;
         } else final_argv.?;
@@ -292,20 +302,16 @@ pub const CmdPool = struct {
         return self.ssh_target != null and self.ssh_active;
     }
 
-    /// Decides which env to pass to the child:
-    /// 1. Explicit env_overlay (e.g. unlock path) → take ownership as-is.
-    /// 2. We own an ssh-agent and overlay not skipped → clone parent_env
-    ///    and override SSH_AUTH_SOCK with our agent's socket.
-    /// 3. Otherwise → null (child inherits parent env normally).
     fn buildEnvBox(self: *Self, opts: RunOpts) !?*std.process.Environ.Map {
         if (opts.env_overlay) |em| {
             const box = try self.alloc.create(std.process.Environ.Map);
             box.* = em;
+            if (opts.scrub_env) scrubEnv(box);
             return box;
         }
 
-        if (opts.skip_agent_overlay) return null;
-        const sock = self.agent_sock orelse return null;
+        const sock = if (opts.skip_agent_overlay) null else self.agent_sock;
+        if (!opts.scrub_env and sock == null) return null;
 
         const box = try self.alloc.create(std.process.Environ.Map);
         errdefer self.alloc.destroy(box);
@@ -314,9 +320,34 @@ pub const CmdPool = struct {
 
         const keys = self.env.keys();
         const vals = self.env.values();
-        for (keys, vals) |k, v| try box.put(k, v);
-        try box.put("SSH_AUTH_SOCK", sock);
+        for (keys, vals) |k, v| {
+            if (opts.scrub_env and stripEnvKey(k)) continue;
+            try box.put(k, v);
+        }
+        if (sock) |s| try box.put("SSH_AUTH_SOCK", s);
         return box;
+    }
+
+    fn stripEnvKey(key: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(key, "LD_PRELOAD") or
+            std.ascii.eqlIgnoreCase(key, "LD_LIBRARY_PATH") or
+            std.ascii.eqlIgnoreCase(key, "LD_AUDIT") or
+            std.ascii.startsWithIgnoreCase(key, "DYLD_") or
+            std.ascii.findIgnoreCase(key, "API") != null or
+            std.ascii.findIgnoreCase(key, "AI") != null or
+            std.ascii.findIgnoreCase(key, "KEY") != null or
+            std.ascii.findIgnoreCase(key, "TOKEN") != null;
+    }
+
+    fn scrubEnv(env: *std.process.Environ.Map) void {
+        var i = env.keys().len;
+        while (i > 0) {
+            i -= 1;
+            const key = env.keys()[i];
+            if (!stripEnvKey(key)) continue;
+            @memset(@constCast(env.values()[i]), 0);
+            _ = env.swapRemove(key);
+        }
     }
 
     /// If SSH mode is active, return a freshly-allocated argv that wraps the
@@ -423,18 +454,15 @@ pub const CmdPool = struct {
             .stdout = .pipe,
             .stderr = .pipe,
             .environ_map = if (env_box) |b| b else null,
-            .pgid = if (kill_process_group and builtin.os.tag != .windows) 0 else null,
+            .pgid = if (kill_process_group and builtin.os.tag != .linux and builtin.os.tag != .windows) 0 else null,
         }) catch {
             slot.result_ty = .failed;
             slot.exit_code = null;
             slot.signal = null;
             return;
         };
-        defer if (child.id != null) {
-            if (kill_process_group and builtin.os.tag != .windows) {
-                const pgid: std.posix.pid_t = child.id.?;
-                std.posix.kill(-pgid, std.posix.SIG.KILL) catch {};
-            }
+        defer if (child.id) |pid| {
+            self.terminateProcess(pid, kill_process_group);
             child.kill(self.io);
         };
 
@@ -446,7 +474,7 @@ pub const CmdPool = struct {
         }
         defer if (stdin_future) |*future| future.cancel(self.io) catch {};
 
-        const term = self.collectOutput(slot, &child) catch |err| switch (err) {
+        const term = self.collectOutput(slot, &child, kill_process_group) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.StreamTooLong => {
                 // Output hit the cap; keep the partial output and report
@@ -463,10 +491,6 @@ pub const CmdPool = struct {
                 return;
             },
         };
-        if (stdin_future) |*future| future.await(self.io) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-        };
-
         switch (term) {
             .exited => |code| {
                 slot.exit_code = code;
@@ -502,7 +526,13 @@ pub const CmdPool = struct {
         self: *Self,
         slot: *CmdSlot,
         child: *std.process.Child,
+        kill_process_group: bool,
     ) CollectError!std.process.Child.Term {
+        try self.drainOutput(slot, child, kill_process_group);
+        return child.wait(self.io);
+    }
+
+    fn drainOutput(self: *Self, slot: *CmdSlot, child: *std.process.Child, kill_process_group: bool) CollectError!void {
         var mr_buf: std.Io.File.MultiReader.Buffer(2) = undefined;
         var mr: std.Io.File.MultiReader = undefined;
         mr.init(self.alloc, self.io, mr_buf.toStreams(), &.{ child.stdout.?, child.stderr.? });
@@ -511,19 +541,46 @@ pub const CmdPool = struct {
         const stdout_reader = mr.reader(0);
         const stderr_reader = mr.reader(1);
 
-        // Stream each drained chunk into the slot.
-        while (mr.fill(64, .none)) |_| {
+        var drain_start: ?i64 = null;
+        while (true) {
+            if (drain_start == null and leaderExited(child.id.?)) drain_start = nowMs(self.io);
+            if (drain_start) |start| if (nowMs(self.io) - start >= DRAIN_TIMEOUT_MS) {
+                self.terminateProcess(child.id.?, kill_process_group);
+                try self.appendBuffered(slot, stdout_reader, stderr_reader);
+                return;
+            };
+            mr.fill(64, .{ .duration = .{ .raw = .fromMilliseconds(PROCESS_POLL_MS), .clock = .awake } }) catch |err| switch (err) {
+                error.Timeout => continue,
+                error.EndOfStream => break,
+                else => |e| return e,
+            };
             try self.appendBuffered(slot, stdout_reader, stderr_reader);
-        } else |err| switch (err) {
-            error.EndOfStream => {},
-            else => |e| return e,
         }
 
         try mr.checkAnyError();
+    }
 
-        const term = try child.wait(self.io);
+    fn leaderExited(pid: std.process.Child.Id) bool {
+        if (builtin.os.tag != .linux) return false;
+        const linux = std.os.linux;
+        var info: linux.siginfo_t = std.mem.zeroes(linux.siginfo_t);
+        const rc = linux.waitid(.PID, pid, &info, linux.W.EXITED | linux.W.NOHANG | linux.W.NOWAIT, null);
+        return linux.errno(rc) == .SUCCESS and info.fields.common.first.piduid.pid == pid;
+    }
 
-        return term;
+    fn terminateProcess(self: *Self, pid: std.process.Child.Id, kill_process_group: bool) void {
+        if (builtin.os.tag == .windows) return;
+        const protection = self.io.swapCancelProtection(.blocked);
+        defer _ = self.io.swapCancelProtection(protection);
+        if (kill_process_group) std.posix.kill(-pid, std.posix.SIG.TERM) catch {};
+        std.posix.kill(pid, std.posix.SIG.TERM) catch {};
+        const start = nowMs(self.io);
+        while (nowMs(self.io) - start < TERMINATE_GRACE_MS) {
+            if (!kill_process_group and leaderExited(pid)) break;
+            std.Io.sleep(self.io, .fromMilliseconds(PROCESS_POLL_MS), .awake) catch {};
+        }
+        if (kill_process_group) std.posix.kill(-pid, std.posix.SIG.KILL) catch {};
+        std.posix.kill(pid, std.posix.SIG.KILL) catch {};
     }
 
     /// Moves all currently-buffered bytes out of the multi-reader and into the
@@ -564,12 +621,19 @@ pub const CmdPool = struct {
         self.alloc.free(argv);
     }
 
-    /// Returns argv with "setsid" prepended; takes ownership of argv.
-    fn wrapSetsid(self: *Self, argv: []const []const u8) ![]const []const u8 {
-        const wrapped = try self.alloc.alloc([]const u8, argv.len + 1);
+    fn wrapExecShim(self: *Self, argv: []const []const u8) ![]const []const u8 {
+        const wrapped = try self.alloc.alloc([]const u8, argv.len + 3);
         errdefer self.alloc.free(wrapped);
-        wrapped[0] = try self.alloc.dupe(u8, "setsid");
-        for (argv, 1..) |a, i| wrapped[i] = a;
+        wrapped[0] = if (builtin.is_test) blk: {
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const len = try std.Io.Dir.cwd().realPathFile(self.io, @import("exec_options").test_shim_path, &path_buf);
+            break :blk try self.alloc.dupe(u8, path_buf[0..len]);
+        } else try self.alloc.dupe(u8, "/proc/self/exe");
+        errdefer self.alloc.free(wrapped[0]);
+        wrapped[1] = try self.alloc.dupe(u8, shim.flag);
+        errdefer self.alloc.free(wrapped[1]);
+        wrapped[2] = try std.fmt.allocPrint(self.alloc, "{d}", .{std.c.getpid()});
+        for (argv, 3..) |a, i| wrapped[i] = a;
         self.alloc.free(argv);
         return wrapped;
     }
@@ -643,4 +707,372 @@ pub const CmdPool = struct {
 
 fn nowMs(io: std.Io) i64 {
     return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
+}
+
+test "scrubbed environments exclude credentials and loader variables without changing the parent" {
+    const testing = std.testing;
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    const stripped = [_][]const u8{ "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "OPENAI_API_KEY", "GITHUB_TOKEN", "mixed_api_key_value", "access_token" };
+    for (stripped) |key| try env.put(key, "secret");
+    try env.put("PATH", "/usr/bin:/bin");
+    try env.put("HOME", "/tmp");
+    try env.put("SSH_AUTH_SOCK", "/tmp/inherited.sock");
+    var pool = CmdPool.init(testing.allocator, testing.io, &env);
+    defer pool.deinit();
+
+    const box = (try pool.buildEnvBox(.{ .argv = &.{"env"}, .scrub_env = true })).?;
+    defer testing.allocator.destroy(box);
+    defer box.deinit();
+    for (stripped) |key| {
+        try testing.expect(!box.contains(key));
+        try testing.expectEqualStrings("secret", env.get(key).?);
+    }
+    try testing.expectEqualStrings("/usr/bin:/bin", box.get("PATH").?);
+    try testing.expectEqualStrings("/tmp", box.get("HOME").?);
+    try testing.expectEqualStrings("/tmp/inherited.sock", box.get("SSH_AUTH_SOCK").?);
+    try testing.expectEqual(null, try pool.buildEnvBox(.{ .argv = &.{"ssh"} }));
+
+    pool.agent_sock = try testing.allocator.dupe(u8, "/tmp/owned.sock");
+    const overlaid = (try pool.buildEnvBox(.{ .argv = &.{"env"}, .scrub_env = true })).?;
+    defer testing.allocator.destroy(overlaid);
+    defer overlaid.deinit();
+    try testing.expectEqualStrings("/tmp/owned.sock", overlaid.get("SSH_AUTH_SOCK").?);
+    try testing.expect(!overlaid.contains("OPENAI_API_KEY"));
+
+    const internal = (try pool.buildEnvBox(.{ .argv = &.{"ssh"} })).?;
+    defer testing.allocator.destroy(internal);
+    defer internal.deinit();
+    try testing.expectEqualStrings("secret", internal.get("OPENAI_API_KEY").?);
+}
+
+test "scrubbing applies to explicit environments and reaches spawned children" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const testing = std.testing;
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    var pool = CmdPool.init(testing.allocator, testing.io, &env);
+    defer pool.deinit();
+    var overlay = std.process.Environ.Map.init(testing.allocator);
+    try overlay.put("PATH", "/usr/bin:/bin");
+    try overlay.put("BLITZ_TEST_API_KEY", "secret");
+    try overlay.put("BLITZ_TEST_TOKEN", "secret");
+    try overlay.put("DYLD_TEST", "secret");
+    const res = try pool.runAndWaitTimeout(.{
+        .argv = &.{"/usr/bin/env"},
+        .env_overlay = overlay,
+        .scrub_env = true,
+    }, 2000);
+    defer testing.allocator.free(res.stdout);
+    defer testing.allocator.free(res.stderr);
+    try testing.expectEqual(.success, res.ty);
+    try testing.expectEqualStrings("PATH=/usr/bin:/bin\n", res.stdout);
+}
+
+test "timeout and cancellation kill the command process group" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const testing = std.testing;
+    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
+    defer env.deinit();
+    var pool = CmdPool.init(testing.allocator, testing.io, &env);
+    defer pool.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(cwd);
+
+    for ([_]bool{ false, true }) |cancel| {
+        const handle = try pool.runWithOpts(.{
+            .cwd = cwd,
+            .argv = &.{ "/bin/sh", "-c", "sleep 300 & printf '%s' \"$!\" > child; printf 'ready\\n'; wait" },
+            .kill_process_group = true,
+        });
+        defer pool.release(handle);
+        var pid: ?std.posix.pid_t = null;
+        const start = nowMs(testing.io);
+        while (nowMs(testing.io) - start < 2000) {
+            if (tmp.dir.readFileAlloc(testing.io, "child", testing.allocator, .limited(32))) |data| {
+                defer testing.allocator.free(data);
+                pid = std.fmt.parseInt(std.posix.pid_t, data, 10) catch null;
+                if (pid != null) break;
+            } else |err| if (err != error.FileNotFound) return err;
+            try std.Io.sleep(testing.io, .fromMilliseconds(5), .awake);
+        }
+        const child_pid = pid orelse return error.ChildNotReady;
+        defer std.posix.kill(child_pid, std.posix.SIG.KILL) catch {};
+        if (cancel) {
+            pool.cancel(handle);
+        } else {
+            const res = try pool.killAndCollect(handle);
+            defer testing.allocator.free(res.stdout);
+            defer testing.allocator.free(res.stderr);
+            try testing.expectEqual(.timeout, res.ty);
+        }
+
+        var path_buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/status", .{child_pid});
+        const stopped = nowMs(testing.io);
+        while (true) {
+            const status = std.Io.Dir.cwd().readFileAlloc(testing.io, path, testing.allocator, .limited(4096)) catch |err| switch (err) {
+                error.FileNotFound => break,
+                else => return err,
+            };
+            defer testing.allocator.free(status);
+            if (std.mem.indexOf(u8, status, "State:\tZ") != null or std.mem.indexOf(u8, status, "State:\tX") != null) break;
+            if (nowMs(testing.io) - stopped > 1000) return error.ChildSurvived;
+            try std.Io.sleep(testing.io, .fromMilliseconds(5), .awake);
+        }
+        try tmp.dir.deleteFile(testing.io, "child");
+    }
+}
+
+const ProcessTestFixture = struct {
+    tmp: std.testing.TmpDir,
+    env: std.process.Environ.Map,
+    cwd: [:0]const u8,
+    pool: CmdPool,
+
+    fn init(self: *ProcessTestFixture) !void {
+        self.tmp = std.testing.tmpDir(.{});
+        errdefer self.tmp.cleanup();
+        self.cwd = try self.tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        errdefer std.testing.allocator.free(self.cwd);
+        self.env = try std.process.Environ.createMap(std.testing.environ, std.testing.allocator);
+        self.pool = CmdPool.init(std.testing.allocator, std.testing.io, &self.env);
+    }
+
+    fn deinit(self: *ProcessTestFixture) void {
+        self.pool.deinit();
+        self.env.deinit();
+        std.testing.allocator.free(self.cwd);
+        self.tmp.cleanup();
+    }
+
+    fn launch(self: *ProcessTestFixture, command: []const u8) !CmdPool.Handle {
+        return self.pool.runWithOpts(.{
+            .cwd = self.cwd,
+            .argv = &.{ "/bin/sh", "-c", command },
+            .kill_process_group = true,
+            .scrub_env = true,
+        });
+    }
+
+    fn run(self: *ProcessTestFixture, command: []const u8, timeout_ms: i64) !CmdResult {
+        return self.pool.runAndWaitTimeout(.{
+            .cwd = self.cwd,
+            .argv = &.{ "/bin/sh", "-c", command },
+            .kill_process_group = true,
+            .scrub_env = true,
+        }, timeout_ms);
+    }
+
+    fn waitFile(self: *ProcessTestFixture, name: []const u8) ![]u8 {
+        const start = nowMs(std.testing.io);
+        while (nowMs(std.testing.io) - start < 3000) {
+            const data = self.tmp.dir.readFileAlloc(std.testing.io, name, std.testing.allocator, .limited(1024)) catch |err| switch (err) {
+                error.FileNotFound => {
+                    try std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake);
+                    continue;
+                },
+                else => return err,
+            };
+            if (data.len > 0) return data;
+            std.testing.allocator.free(data);
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake);
+        }
+        return error.ChildNotReady;
+    }
+};
+
+fn expectProcessStopped(pid: std.posix.pid_t) !void {
+    var buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buf, "/proc/{d}/status", .{pid});
+    const start = nowMs(std.testing.io);
+    while (true) {
+        const status = std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, std.testing.allocator, .limited(4096)) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+        defer std.testing.allocator.free(status);
+        if (std.mem.indexOf(u8, status, "State:\tZ") != null or std.mem.indexOf(u8, status, "State:\tX") != null) return;
+        if (nowMs(std.testing.io) - start > 1500) return error.ChildSurvived;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake);
+    }
+}
+
+test "exec shim ignores PATH setsid and preserves command exit status" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var f: ProcessTestFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.env.put("PATH", f.cwd);
+    const poisoned = try f.tmp.dir.createFile(std.testing.io, "setsid", .{ .permissions = .executable_file });
+    poisoned.close(std.testing.io);
+    const result = try f.run("printf output; printf diagnostic >&2; exit 7", 3000);
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    try std.testing.expectEqualStrings("output", result.stdout);
+    try std.testing.expectEqualStrings("diagnostic", result.stderr);
+    try std.testing.expectEqual(.failed, result.ty);
+    try std.testing.expectEqual(@as(?u8, 7), result.exit_code);
+}
+
+test "exec shim kills its command when the spawning parent dies" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var f: ProcessTestFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const wrapped = try f.pool.wrapExecShim(try f.pool.dupeArgv(&.{"/bin/true"}));
+    defer f.pool.freeArgv(wrapped);
+    var parent = try std.process.spawn(std.testing.io, .{
+        .argv = &.{ "/bin/sh", "-c", "\"$1\" \"$2\" \"$$\" /bin/sh -c 'printf \"%s\" \"$$\" > child; exec /bin/sleep 300' & wait", "parent", wrapped[0], shim.flag },
+        .cwd = .{ .path = f.cwd },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer parent.kill(std.testing.io);
+    const data = try f.waitFile("child");
+    defer std.testing.allocator.free(data);
+    const pid = try std.fmt.parseInt(std.posix.pid_t, data, 10);
+    defer std.posix.kill(pid, std.posix.SIG.KILL) catch {};
+    try std.posix.kill(parent.id.?, std.posix.SIG.KILL);
+    _ = try parent.wait(std.testing.io);
+    try expectProcessStopped(pid);
+}
+
+test "exec shim rejects a changed parent before executing the command" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var f: ProcessTestFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const wrapped = try f.pool.wrapExecShim(try f.pool.dupeArgv(&.{"/bin/true"}));
+    defer f.pool.freeArgv(wrapped);
+    var child = try std.process.spawn(std.testing.io, .{
+        .argv = &.{ wrapped[0], shim.flag, "2147483647", "/bin/true" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer child.kill(std.testing.io);
+    const term = try child.wait(std.testing.io);
+    try std.testing.expectEqual(@as(u8, 126), term.exited);
+}
+
+test "cancellation allows TERM cleanup and escalates for TERM resistant children" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var f: ProcessTestFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    for ([_]bool{ false, true }) |ignore_term| {
+        const command = if (ignore_term)
+            "trap '' TERM; printf '%s' \"$$\" > marker; exec /bin/sleep 300"
+        else
+            "trap 'rm -f marker; exit 0' TERM; printf '%s' \"$$\" > marker; while :; do sleep 1; done";
+        const handle = try f.launch(command);
+        defer f.pool.release(handle);
+        const data = try f.waitFile("marker");
+        defer std.testing.allocator.free(data);
+        const pid = try std.fmt.parseInt(std.posix.pid_t, data, 10);
+        defer std.posix.kill(pid, std.posix.SIG.KILL) catch {};
+        const start = nowMs(std.testing.io);
+        f.pool.cancel(handle);
+        try std.testing.expect(nowMs(std.testing.io) - start < 2000);
+        try expectProcessStopped(pid);
+        if (ignore_term) {
+            try f.tmp.dir.deleteFile(std.testing.io, "marker");
+        } else {
+            try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(std.testing.io, "marker", .{}));
+        }
+    }
+}
+
+test "leader exit bounds pipe draining and preserves partial output and exit status" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var f: ProcessTestFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const start = nowMs(std.testing.io);
+    const result = try f.run("sleep 300 & printf '%s' \"$!\" > child; printf partial; printf diagnostic >&2; exit 7", 10000);
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    const data = try f.waitFile("child");
+    defer std.testing.allocator.free(data);
+    const pid = try std.fmt.parseInt(std.posix.pid_t, data, 10);
+    defer std.posix.kill(pid, std.posix.SIG.KILL) catch {};
+    try std.testing.expect(nowMs(std.testing.io) - start < 6000);
+    try std.testing.expectEqual(.failed, result.ty);
+    try std.testing.expectEqual(@as(?u8, 7), result.exit_code);
+    try std.testing.expectEqualStrings("partial", result.stdout);
+    try std.testing.expectEqualStrings("diagnostic", result.stderr);
+    try expectProcessStopped(pid);
+}
+
+test "leader exit cancels stdin writes held open by descendants" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var f: ProcessTestFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const data = try std.testing.allocator.alloc(u8, 128 * 1024);
+    defer std.testing.allocator.free(data);
+    @memset(data, 'x');
+    const start = nowMs(std.testing.io);
+    const result = try f.pool.runAndWaitTimeout(.{
+        .cwd = f.cwd,
+        .argv = &.{ "/bin/sh", "-c", "sleep 300 <&0 >/dev/null 2>&1 & printf '%s' \"$!\" > child; printf complete" },
+        .stdin_data = data,
+        .kill_process_group = true,
+    }, 5000);
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    const pid_text = try f.waitFile("child");
+    defer std.testing.allocator.free(pid_text);
+    const pid = try std.fmt.parseInt(std.posix.pid_t, pid_text, 10);
+    defer std.posix.kill(pid, std.posix.SIG.KILL) catch {};
+    try std.testing.expect(nowMs(std.testing.io) - start < 3000);
+    try std.testing.expectEqual(.success, result.ty);
+    try std.testing.expectEqualStrings("complete", result.stdout);
+}
+
+test "SSH socket probes reject files and stale sockets and preserve inherited agents" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var f: ProcessTestFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buf, "{s}/sock", .{f.cwd});
+    try std.testing.expect(!CmdPool.socketUsable(path));
+    const file = try f.tmp.dir.createFile(std.testing.io, "sock", .{});
+    file.close(std.testing.io);
+    try std.testing.expect(!CmdPool.socketUsable(path));
+    try f.tmp.dir.deleteFile(std.testing.io, "sock");
+    const address = try std.Io.net.UnixAddress.init(path);
+    var server = try address.listen(std.testing.io, .{});
+    try std.testing.expect(CmdPool.socketUsable(path));
+    try std.testing.expectEqualStrings(path, try f.pool.ensureAgent(path));
+    f.pool.killAgent();
+    try std.testing.expect(CmdPool.socketUsable(path));
+    server.deinit(std.testing.io);
+    try std.testing.expect(!CmdPool.socketUsable(path));
+    f.pool.agent_sock = try std.testing.allocator.dupe(u8, path);
+    f.pool.killAgent();
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(std.testing.io, "sock", .{}));
+}
+
+test "owned ssh-agent teardown removes its socket" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    std.Io.Dir.accessAbsolute(std.testing.io, "/usr/bin/ssh-agent", .{}) catch return error.SkipZigTest;
+    var f: ProcessTestFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.env.put("PATH", "/usr/bin:/bin");
+    const sock = try std.testing.allocator.dupe(u8, try f.pool.ensureAgent(null));
+    defer std.testing.allocator.free(sock);
+    try std.testing.expect(CmdPool.socketUsable(sock));
+    try std.testing.expectEqualStrings(sock, try f.pool.ensureAgent(null));
+    f.pool.killAgent();
+    try std.testing.expect(!CmdPool.socketUsable(sock));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, sock, .{}));
+    try std.testing.expectEqual(null, f.pool.agent_pid);
+    try std.testing.expectEqual(null, f.pool.agent_sock);
 }

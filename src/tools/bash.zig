@@ -94,6 +94,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const res = runWithDeadline(ctx, .{
         .cwd = ctx.base.cwd,
         .argv = &.{ "/bin/sh", "-c", args.command },
+        .kill_process_group = true,
+        .scrub_env = true,
     }, timeout_ms) catch |err| switch (err) {
         error.Canceled => return r.errResult(call, "canceled"),
         else => return r.errResult(call, "exec failed"),
@@ -174,7 +176,10 @@ fn runWithDeadline(
         if (now_ms - start_ms > deadline_ms) {
             return ctx.base.exec_pool.killAndCollect(handle);
         }
-        std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(25), .real) catch return error.Canceled;
+        std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(25), .real) catch {
+            ctx.base.exec_pool.cancel(handle);
+            return error.Canceled;
+        };
     }
 }
 

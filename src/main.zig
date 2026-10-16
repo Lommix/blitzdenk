@@ -164,6 +164,7 @@ fn setupMarkerExistsAbsolute(alloc: std.mem.Allocator, io: std.Io, env: *const s
 }
 
 pub fn main(init: std.process.Init) !void {
+    try r.exec.shim.enter(init);
     var io_state = std.Io.Threaded.init(init.gpa, .{
         .stack_size = IO_THREAD_STACK_SIZE,
         .async_limit = .unlimited,

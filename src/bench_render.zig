@@ -107,6 +107,7 @@ fn report(label: []const u8, total_ns: u64, io: std.Io) void {
 }
 
 pub fn main(init: std.process.Init) !void {
+    try r.exec.shim.enter(init);
     var io_state = std.Io.Threaded.init(init.gpa, .{
         .stack_size = 2 * 1024 * 1024,
         .async_limit = .unlimited,
