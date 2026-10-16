@@ -21,6 +21,7 @@ pub const StepEvent = struct {
     number: usize,
     tool_results: []const ToolResultEvent = &.{},
     usage: sdk.Usage = .{},
+    compaction_count: usize = 0,
 };
 
 pub const Event = union(enum) {
@@ -55,7 +56,7 @@ pub const EventQueue = struct {
         try self.events.append(self.arena.allocator(), try cloneEvent(self.arena.allocator(), event));
     }
 
-    fn appendStep(self: *EventQueue, step: sdk.options.StepInfo) !void {
+    fn appendStep(self: *EventQueue, step: sdk.options.StepInfo, compaction_count: usize) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const alloc = self.arena.allocator();
@@ -69,6 +70,7 @@ pub const EventQueue = struct {
             .number = step.number,
             .tool_results = tool_results,
             .usage = step.usage,
+            .compaction_count = compaction_count,
         } });
     }
 
@@ -110,6 +112,8 @@ pub const RunTask = struct {
     result: ?*sdk.TextResult = null,
     checkpoint_arena: std.heap.ArenaAllocator,
     checkpoint: ?[]const sdk.Message = null,
+    provider_context_tokens: ?u64 = null,
+    compaction_count: usize = 0,
     failure: ?anyerror = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, model: sdk.LanguageModel, options: sdk.GenerateOptions) !RunTask {
@@ -271,13 +275,15 @@ pub const RunTask = struct {
 
     fn onStep(ctx: ?*anyopaque, step: sdk.options.StepInfo) void {
         const self: *RunTask = @ptrCast(@alignCast(ctx.?));
+        const context_tokens = step.usage.input_tokens + step.usage.cache_read_tokens + step.usage.cache_write_tokens;
+        if (context_tokens > 0) self.provider_context_tokens = context_tokens;
         if (!builtin.is_test) log.info("step {d}: in={d} cached={d} out={d}", .{
             step.number,
             step.usage.input_tokens + step.usage.cache_read_tokens,
             step.usage.cache_read_tokens,
             step.usage.output_tokens,
         });
-        self.queue.appendStep(step) catch |err| {
+        self.queue.appendStep(step, self.compaction_count) catch |err| {
             log.err("dropped step event step={d} calls={d} results={d}: {s}", .{ step.number, step.tool_calls.len, step.tool_results.len, @errorName(err) });
         };
     }
@@ -357,6 +363,7 @@ fn cloneEvent(alloc: std.mem.Allocator, event: Event) !Event {
             .number = value.number,
             .tool_results = try cloneToolResultEvents(alloc, value.tool_results),
             .usage = value.usage,
+            .compaction_count = value.compaction_count,
         } },
         .provider_error => |value| .{ .provider_error = .{
             .status_code = value.status_code,

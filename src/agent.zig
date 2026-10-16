@@ -329,7 +329,7 @@ pub const Agent = struct {
 
     pub fn startCompaction(self: *Agent, fallback_cache_key: ?[]const u8) !bool {
         if (self.task != null or self.compact_task != null) return error.RunInProgress;
-        const estimate = self.currentContextEstimate();
+        const estimate = self.currentContextEstimate(self.history());
         if (!self.compaction.shouldStart(self.history().len, estimate, self.context_limit, self.failureNow())) {
             _ = self.compaction.requested.swap(.none, .acq_rel);
             return false;
@@ -405,6 +405,8 @@ pub const Agent = struct {
             self.clearRunHooks();
             return err;
         };
+        self.task.?.provider_context_tokens = if (self.context_from_provider) self.context_tokens else null;
+        self.task.?.compaction_count = self.compaction.completion_count.load(.acquire);
         self.status = .running;
         self.task.?.start();
     }
@@ -443,7 +445,7 @@ pub const Agent = struct {
             .step => |step| {
                 self.usage.add(step.usage);
                 const step_context_tokens = step.usage.input_tokens + step.usage.cache_read_tokens + step.usage.cache_write_tokens;
-                if (step_context_tokens > 0) {
+                if (step_context_tokens > 0 and step.compaction_count == self.compaction.completion_count.load(.acquire)) {
                     self.context_tokens = step_context_tokens;
                     self.context_from_provider = true;
                 }
@@ -614,8 +616,6 @@ pub const Agent = struct {
 
     fn prepareStep(ctx: ?*anyopaque, info: sdk.options.PrepareStepInfo) anyerror!sdk.options.PrepareStepResult {
         const self: *Agent = @ptrCast(@alignCast(ctx.?));
-        self.injection_mutex.lockUncancelable(self.io);
-        defer self.injection_mutex.unlock(self.io);
         _ = self.step_arena.reset(.free_all);
         const upstream = if (self.run_hooks.prepare) |hook|
             try hook(self.run_hooks.prepare_ctx, info)
@@ -647,6 +647,8 @@ pub const Agent = struct {
             if (self.lifetime.reminder) |hook| try hook(self.lifetime.reminder_ctx, self) else null
         else
             null;
+        self.injection_mutex.lockUncancelable(self.io);
+        defer self.injection_mutex.unlock(self.io);
         if (self.queued_messages.items.len == 0 and reminder == null) {
             return .{ .messages = base, .replace = replace, .replacement_kind = replacement_kind, .tools = refreshed_tools };
         }
@@ -654,18 +656,22 @@ pub const Agent = struct {
         const combined = try alloc.alloc(sdk.Message, base.len + @intFromBool(reminder != null) + self.queued_messages.items.len);
         @memcpy(combined[0..base.len], base);
         if (reminder) |text| combined[base.len] = sdk.UserMessage(text);
-        @memcpy(combined[combined.len - self.queued_messages.items.len ..], self.queued_messages.items);
+        const queued = try agent_run.cloneMessages(alloc, self.queued_messages.items);
+        @memcpy(combined[combined.len - queued.len ..], queued);
         self.queued_messages.clearRetainingCapacity();
         return .{ .messages = combined, .replace = replace, .replacement_kind = replacement_kind, .tools = refreshed_tools };
     }
 
-    fn currentContextEstimate(self: *Agent) u64 {
+    fn currentContextEstimate(self: *Agent, messages: []const sdk.Message) u64 {
+        if (self.task) |*task| {
+            return task.provider_context_tokens orelse compact.estimateNextRequestTokens(task.model.modelId(), self.tools, messages);
+        }
         if (self.context_from_provider) return self.context_tokens;
-        return @max(self.context_tokens, compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, self.history()));
+        return @max(self.context_tokens, compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, messages));
     }
 
     fn maybeCompactForStep(self: *Agent, messages: []const sdk.Message) ?[]const sdk.Message {
-        const estimate = self.currentContextEstimate();
+        const estimate = self.currentContextEstimate(messages);
         if (!self.compaction.shouldStart(messages.len, estimate, self.context_limit, self.failureNow())) return null;
         const request = self.compaction.requested.swap(.none, .acq_rel);
         const force = request == .external;
@@ -681,7 +687,7 @@ pub const Agent = struct {
         const cache_key = self.cache_key;
         var outcome = switch (self.model) {
             .response => |*model| compact.compactResponses(scratch.allocator(), self.io, model, self.tools, messages, cancellation, cache_key),
-            inline else => |*model| compact.compactOrdinary(scratch.allocator(), self.io, model.languageModel(), messages, cancellation, force, cache_key),
+            inline else => |*model| compact.compactOrdinary(scratch.allocator(), self.io, self.run_model orelse model.languageModel(), messages, cancellation, force, cache_key),
         } catch |err| {
             std.log.scoped(.agent).warn("in-step compaction failed ({s}); backing off before retry", .{@errorName(err)});
             self.compaction.noteFailure(self.failureNow(), err);
@@ -704,7 +710,11 @@ pub const Agent = struct {
         self.compaction.last_compacted_estimate = self.context_tokens;
         self.compaction.must_progress_past_message_count = cloned.len;
         self.compaction.resetInFlight();
-        _ = self.compaction.completion_count.fetchAdd(1, .release);
+        const compaction_count = self.compaction.completion_count.fetchAdd(1, .release) +% 1;
+        if (self.task) |*task| {
+            task.provider_context_tokens = null;
+            task.compaction_count = compaction_count;
+        }
         self.turn_checkpoint = 0;
         return cloned;
     }
@@ -1174,4 +1184,139 @@ test "run cannot start while an async compaction is in flight" {
     agent.cancelAndWait();
     try std.testing.expectEqual(Status.canceled, agent.status);
     try std.testing.expect(agent.compact_task == null);
+}
+
+fn testInStepCompaction(initial_context: u64, first_step_context: u64, later_step_context: u64) !void {
+    const Fixture = struct {
+        agent: *Agent,
+        calls: usize = 0,
+        compactions: usize = 0,
+        injection_available: bool = true,
+        first_step_context: u64,
+        later_step_context: u64,
+
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generate(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const result = try alloc.create(sdk.model.GenerateResult);
+            if (std.mem.eql(u8, params.system, compact.SUMMARY_SYSTEM_PROMPT)) {
+                self.compactions += 1;
+                if (self.agent.injection_mutex.tryLock()) {
+                    self.agent.injection_mutex.unlock(io);
+                    try self.agent.queueReminder("background result during compaction");
+                } else {
+                    self.injection_available = false;
+                }
+                result.* = .{ .text = try alloc.dupe(u8, "checkpoint"), .finish_reason = .stop };
+                return result;
+            }
+            self.calls += 1;
+            result.* = .{
+                .finish_reason = if (self.calls < 4) .tool_calls else .stop,
+                .usage = .{ .input_tokens = if (self.calls == 1) self.first_step_context else self.later_step_context },
+            };
+            if (self.calls < 4) {
+                const calls = try alloc.alloc(sdk.ToolCall, 1);
+                calls[0] = .{
+                    .id = try std.fmt.allocPrint(alloc, "call_{d}", .{self.calls}),
+                    .name = try alloc.dupe(u8, "test"),
+                    .input = try alloc.dupe(u8, "{}"),
+                };
+                result.tool_calls = calls;
+            } else {
+                result.text = try alloc.dupe(u8, "done");
+            }
+            return result;
+        }
+
+        fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            return generate(ctx, alloc, io, params, client, retries);
+        }
+
+        fn toolExecute(_: ?*anyopaque, _: std.mem.Allocator, _: std.Io, _: sdk.ToolCall) anyerror!sdk.ToolOutput {
+            return .{ .content = "step result" };
+        }
+
+        fn reminder(_: ?*anyopaque, agent: *Agent) anyerror!?[]const u8 {
+            if (!agent.injection_mutex.tryLock()) return error.InjectionLocked;
+            agent.injection_mutex.unlock(agent.io);
+            return null;
+        }
+
+        fn collect(ctx: ?*anyopaque, event: agent_run.Event) void {
+            const agent: *Agent = @ptrCast(@alignCast(ctx.?));
+            agent.observe(event) catch unreachable;
+        }
+    };
+
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer io_state.deinit();
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.invalid/v1",
+        .params = .{ .openai = .{} },
+    }, .{ .context_limit = 250_000 });
+    defer agent.deinit();
+    var history: [150]sdk.Message = @splat(sdk.UserMessage("x" ** 6000));
+    history[0] = sdk.SystemMessage("system");
+    try agent.setMessages(&history);
+    try agent.setTools(&.{.{ .name = "test", .execute = Fixture.toolExecute }});
+    try agent.observe(.{ .step = .{ .number = 1, .usage = .{ .input_tokens = initial_context } } });
+    agent.lifetime.reminder = Fixture.reminder;
+
+    var fixture = Fixture{ .agent = &agent, .first_step_context = first_step_context, .later_step_context = later_step_context };
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .max_steps = 4 });
+    agent.task.?.wait();
+    while (agent.drain(4, &agent, Fixture.collect) != 0) {}
+    try std.testing.expect(agent.reap());
+
+    try std.testing.expectEqual(@as(usize, 4), fixture.calls);
+    try std.testing.expectEqual(@as(usize, 1), fixture.compactions);
+    try std.testing.expect(fixture.injection_available);
+    try std.testing.expectEqual(Status.complete, agent.status);
+    try std.testing.expectEqual(@as(usize, 1), agent.compaction.completion_count.load(.acquire));
+    try std.testing.expect(agent.contextPercent() < 15);
+    var notices: usize = 0;
+    for (agent.history()) |message| {
+        if (std.mem.eql(u8, message.text(), "background result during compaction")) notices += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), notices);
+}
+
+test "in-step compaction uses live history when provider usage is absent" {
+    try testInStepCompaction(240_000, 0, 0);
+}
+
+test "in-step compaction uses current provider usage before UI events drain" {
+    try testInStepCompaction(22_500, 240_000, 22_500);
+}
+
+test "in-step compaction clears the previous provider context" {
+    try testInStepCompaction(240_000, 22_500, 22_500);
+}
+
+test "pre-compaction usage events cannot restore the old context" {
+    try testInStepCompaction(22_500, 240_000, 0);
+}
+
+test "prepared messages retain queued content after another injection" {
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer io_state.deinit();
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.invalid/v1",
+        .params = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    try agent.queueReminder("first notice");
+    const prepared = try Agent.prepareStep(&agent, .{ .number = 1, .messages = &.{} });
+    try agent.queueReminder("next notice");
+    try std.testing.expectEqual(@as(usize, 1), prepared.messages.len);
+    try std.testing.expectEqualStrings("first notice", prepared.messages[0].text());
 }
