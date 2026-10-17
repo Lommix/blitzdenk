@@ -108,11 +108,13 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
             start_str,
             max_str,
         },
+        .max_output = 4 * 1024 * 1024,
     }) catch return r.errResult(call, "failed to read file");
     defer ctx.base.exec_pool.alloc.free(read_res.stdout);
     defer ctx.base.exec_pool.alloc.free(read_res.stderr);
 
     if (read_res.ty != .success) return r.errResult(call, "failed to read file");
+    if (read_res.stdout_truncated or read_res.stderr_truncated) return r.errResult(call, "requested section exceeds the 4MB read limit; retry with offset and limit");
     const out = read_res.toOwned(ctx.alloc) catch return r.errResult(call, "oom");
     if (std.mem.startsWith(u8, out, "MISS:")) {
         ctx.alloc.free(out);
@@ -229,7 +231,7 @@ fn loadLocalImage(ctx: r.ToolContext, resolved: []const u8) ImageLoadError![]con
     if (size == 0) return error.EmptyImage;
     if (size > MAX_IMAGE_BYTES) return error.ImageTooLarge;
 
-    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", "--", resolved } }) catch
+    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", "--", resolved }, .max_output = MAX_IMAGE_BYTES }) catch
         return error.ReadFailed;
     defer ctx.base.exec_pool.alloc.free(read_res.stderr);
     if (read_res.ty != .success) {
@@ -240,7 +242,7 @@ fn loadLocalImage(ctx: r.ToolContext, resolved: []const u8) ImageLoadError![]con
         ctx.base.exec_pool.alloc.free(read_res.stdout);
         return error.EmptyImage;
     }
-    if (read_res.stdout.len > MAX_IMAGE_BYTES) {
+    if (read_res.stdout_truncated or read_res.stdout.len > MAX_IMAGE_BYTES) {
         ctx.base.exec_pool.alloc.free(read_res.stdout);
         return error.ImageTooLarge;
     }
@@ -255,7 +257,7 @@ fn loadRemoteImage(ctx: r.ToolContext, url: []const u8) ImageLoadError![]const u
         "4194304",
         "--",
         url,
-    } }, 30_000) catch return error.DownloadFailed;
+    }, .max_output = MAX_IMAGE_BYTES }, 30_000) catch return error.DownloadFailed;
     defer ctx.base.exec_pool.alloc.free(result.stderr);
     if (result.ty == .timeout) {
         ctx.base.exec_pool.alloc.free(result.stdout);
@@ -270,7 +272,7 @@ fn loadRemoteImage(ctx: r.ToolContext, url: []const u8) ImageLoadError![]const u
         ctx.base.exec_pool.alloc.free(result.stdout);
         return error.EmptyImage;
     }
-    if (result.stdout.len > MAX_IMAGE_BYTES) {
+    if (result.stdout_truncated or result.stdout.len > MAX_IMAGE_BYTES) {
         ctx.base.exec_pool.alloc.free(result.stdout);
         return error.ImageTooLarge;
     }

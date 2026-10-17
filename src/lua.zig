@@ -1335,6 +1335,23 @@ pub const Blitz = LuaType{
                     },
                     .ret = &LuaAny,
                     .fn_ptr = (struct {
+                        const CAP_TEXT = std.fmt.comptimePrint("{d}MB", .{r.exec.MAX_OUTPUT / (1024 * 1024)});
+                        const STDOUT_TRUNCATED_MARKER = std.fmt.comptimePrint("[stdout truncated: kept the last {s}]", .{CAP_TEXT});
+                        const STDERR_TRUNCATED_MARKER = std.fmt.comptimePrint("[stderr truncated: kept the last {s}]", .{CAP_TEXT});
+
+                        fn appendTruncationMarker(alloc: Allocator, buf: *std.ArrayList(u8), marker: []const u8) !void {
+                            if (buf.items.len > 0 and buf.items[buf.items.len - 1] != '\n') try buf.append(alloc, '\n');
+                            try buf.appendSlice(alloc, marker);
+                        }
+
+                        fn truncatedOutput(alloc: Allocator, raw: []const u8, marker: []const u8) ![]u8 {
+                            var buf: std.ArrayList(u8) = .empty;
+                            errdefer buf.deinit(alloc);
+                            try buf.appendSlice(alloc, raw);
+                            try appendTruncationMarker(alloc, &buf, marker);
+                            return buf.toOwnedSlice(alloc);
+                        }
+
                         fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                             const state = L.?;
                             const a = getAppFromRegistry(state) orelse {
@@ -1380,7 +1397,19 @@ pub const Blitz = LuaType{
                             defer a.exec_pool.alloc.free(result.stderr);
 
                             const success = result.ty == .success;
-                            const output = if (success) result.stdout else if (result.stderr.len > 0) result.stderr else result.stdout;
+                            const use_stderr = !success and result.stderr.len > 0;
+                            const raw = if (use_stderr) result.stderr else result.stdout;
+                            const truncation_marker: ?[]const u8 = if (use_stderr)
+                                (if (result.stderr_truncated) STDERR_TRUNCATED_MARKER else null)
+                            else
+                                (if (result.stdout_truncated) STDOUT_TRUNCATED_MARKER else null);
+                            var marked: ?[]u8 = null;
+                            defer if (marked) |buf| {
+                                a.exec_pool.alloc.free(buf);
+                            };
+                            if (truncation_marker) |marker|
+                                marked = truncatedOutput(a.exec_pool.alloc, raw, marker) catch null;
+                            const output = marked orelse raw;
                             _ = c.lua_pushlstring(state, output.ptr, output.len);
                             c.lua_pushboolean(state, @intFromBool(success));
                             return 2;

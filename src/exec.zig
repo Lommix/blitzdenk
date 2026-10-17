@@ -11,7 +11,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 pub const shim = @import("exec_shim.zig");
 
-const MAX_OUTPUT = 4 * 1024 * 1024;
+pub const MAX_OUTPUT = 1024 * 1024;
+const TRIM_SLACK = 262144;
+const MAX_DRAIN_BYTES = 64 * 1024 * 1024;
 const SLOT_COUNT = 64;
 const TERMINATE_GRACE_MS = 500;
 const DRAIN_TIMEOUT_MS = 2000;
@@ -31,6 +33,10 @@ pub const CmdSlot = struct {
     result_ty: CmdResult.ResType = .failed,
     exit_code: ?u8 = null,
     signal: ?u32 = null,
+    stdout_truncated: bool = false,
+    stderr_truncated: bool = false,
+    cap: usize = MAX_OUTPUT,
+    drained: usize = 0,
 };
 
 pub const CmdResult = struct {
@@ -43,6 +49,8 @@ pub const CmdResult = struct {
     /// instead of relying on the coarser `ty` field.
     exit_code: ?u8 = null,
     signal: ?u32 = null,
+    stdout_truncated: bool = false,
+    stderr_truncated: bool = false,
 
     pub fn toOwned(self: *const CmdResult, alloc: std.mem.Allocator) ![]const u8 {
         var response = try alloc.alloc(u8, self.stderr.len + self.stdout.len);
@@ -247,6 +255,7 @@ pub const CmdPool = struct {
         /// an ssh-agent. Used when spawning the ssh-agent itself to avoid
         /// pointing the new agent at its own (not-yet-existing) socket.
         skip_agent_overlay: bool = false,
+        max_output: ?usize = null,
     };
 
     pub fn runWithOpts(self: *Self, opts: RunOpts) !Handle {
@@ -262,6 +271,10 @@ pub const CmdPool = struct {
         slot.result_ty = .failed;
         slot.exit_code = null;
         slot.signal = null;
+        slot.stdout_truncated = false;
+        slot.stderr_truncated = false;
+        slot.cap = @max(opts.max_output orelse MAX_OUTPUT, 1);
+        slot.drained = 0;
         errdefer {
             slot.owned.store(false, .release);
             slot.in_use.store(false, .release);
@@ -415,14 +428,18 @@ pub const CmdPool = struct {
         errdefer self.release(handle);
         if (timed_out) slot.future.cancel(self.io) catch {};
         slot.future.await(self.io) catch {};
+        trimToTail(&slot.stdout, slot.cap, slot.cap, &slot.stdout_truncated);
+        trimToTail(&slot.stderr, slot.cap, slot.cap, &slot.stderr_truncated);
         const out = try self.alloc.dupe(u8, slot.stdout.items);
         errdefer self.alloc.free(out);
         const err = try self.alloc.dupe(u8, slot.stderr.items);
         const ty = if (timed_out) CmdResult.ResType.timeout else slot.result_ty;
         const exit_code = slot.exit_code;
         const signal = slot.signal;
+        const stdout_truncated = slot.stdout_truncated;
+        const stderr_truncated = slot.stderr_truncated;
         self.release(handle);
-        return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code, .signal = signal };
+        return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code, .signal = signal, .stdout_truncated = stdout_truncated, .stderr_truncated = stderr_truncated };
     }
 
     // -----------------
@@ -476,14 +493,6 @@ pub const CmdPool = struct {
 
         const term = self.collectOutput(slot, &child, kill_process_group) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
-            error.StreamTooLong => {
-                // Output hit the cap; keep the partial output and report
-                // success. Consumers truncate for display anyway, so a hard
-                // failure here turns "huge result" into a baffling process
-                // error with no exit code or stderr.
-                slot.result_ty = .success;
-                return;
-            },
             else => {
                 slot.result_ty = .failed;
                 slot.exit_code = null;
@@ -519,8 +528,7 @@ pub const CmdPool = struct {
     const CollectError = std.Io.File.MultiReader.UnendingError ||
         std.Io.Batch.AwaitConcurrentError ||
         std.process.Child.WaitError ||
-        std.mem.Allocator.Error ||
-        error{StreamTooLong};
+        std.mem.Allocator.Error;
 
     fn collectOutput(
         self: *Self,
@@ -542,10 +550,11 @@ pub const CmdPool = struct {
         const stderr_reader = mr.reader(1);
 
         var drain_start: ?i64 = null;
+        var ceiling_hit = false;
         while (true) {
             if (drain_start == null and leaderExited(child.id.?)) drain_start = nowMs(self.io);
             if (drain_start) |start| if (nowMs(self.io) - start >= DRAIN_TIMEOUT_MS) {
-                self.terminateProcess(child.id.?, kill_process_group);
+                if (!ceiling_hit) self.terminateProcess(child.id.?, kill_process_group);
                 try self.appendBuffered(slot, stdout_reader, stderr_reader);
                 return;
             };
@@ -555,6 +564,11 @@ pub const CmdPool = struct {
                 else => |e| return e,
             };
             try self.appendBuffered(slot, stdout_reader, stderr_reader);
+            const ceiling = @max(MAX_DRAIN_BYTES, slot.cap *| 2);
+            if (!ceiling_hit and slot.drained > ceiling) {
+                ceiling_hit = true;
+                self.terminateProcess(child.id.?, kill_process_group);
+            }
         }
 
         try mr.checkAnyError();
@@ -590,7 +604,7 @@ pub const CmdPool = struct {
         slot: *CmdSlot,
         stdout_reader: *std.Io.Reader,
         stderr_reader: *std.Io.Reader,
-    ) (error{ OutOfMemory, StreamTooLong })!void {
+    ) !void {
         const out = stdout_reader.buffered();
         const err = stderr_reader.buffered();
         stdout_reader.toss(out.len);
@@ -598,9 +612,21 @@ pub const CmdPool = struct {
 
         try slot.stdout.appendSlice(self.alloc, out);
         try slot.stderr.appendSlice(self.alloc, err);
+        slot.drained += out.len + err.len;
 
-        if (slot.stdout.items.len > MAX_OUTPUT) return error.StreamTooLong;
-        if (slot.stderr.items.len > MAX_OUTPUT) return error.StreamTooLong;
+        trimToTail(&slot.stdout, slot.cap, slot.cap + TRIM_SLACK, &slot.stdout_truncated);
+        trimToTail(&slot.stderr, slot.cap, slot.cap + TRIM_SLACK, &slot.stderr_truncated);
+    }
+
+    fn trimToTail(list: *std.ArrayList(u8), keep: usize, threshold: usize, truncated: *bool) void {
+        if (keep > threshold or list.items.len <= threshold) return;
+        var drop = list.items.len - keep;
+        while (drop < list.items.len and (list.items[drop] & 0xC0) == 0x80) drop += 1;
+        if (drop == list.items.len) drop = list.items.len - keep;
+        const n = list.items.len - drop;
+        std.mem.copyForwards(u8, list.items[0..n], list.items[drop..]);
+        list.items.len = n;
+        truncated.* = true;
     }
 
     fn dupeArgv(self: *Self, argv: []const []const u8) ![]const []const u8 {
@@ -858,11 +884,16 @@ const ProcessTestFixture = struct {
     }
 
     fn run(self: *ProcessTestFixture, command: []const u8, timeout_ms: i64) !CmdResult {
+        return self.runCapped(command, timeout_ms, null);
+    }
+
+    fn runCapped(self: *ProcessTestFixture, command: []const u8, timeout_ms: i64, max_output: ?usize) !CmdResult {
         return self.pool.runAndWaitTimeout(.{
             .cwd = self.cwd,
             .argv = &.{ "/bin/sh", "-c", command },
             .kill_process_group = true,
             .scrub_env = true,
+            .max_output = max_output,
         }, timeout_ms);
     }
 
@@ -1075,4 +1106,29 @@ test "owned ssh-agent teardown removes its socket" {
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, sock, .{}));
     try std.testing.expectEqual(null, f.pool.agent_pid);
     try std.testing.expectEqual(null, f.pool.agent_sock);
+}
+
+test "output beyond the cap keeps the tail and marks truncation" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var f: ProcessTestFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const big = try f.run("seq 1 500000", 10000);
+    defer std.testing.allocator.free(big.stdout);
+    defer std.testing.allocator.free(big.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, big.stdout, "500000") != null);
+    try std.testing.expect(big.stdout_truncated);
+    try std.testing.expect(!big.stderr_truncated);
+    const small = try f.run("printf ok", 3000);
+    defer std.testing.allocator.free(small.stdout);
+    defer std.testing.allocator.free(small.stderr);
+    try std.testing.expect(!small.stdout_truncated);
+    try std.testing.expect(!small.stderr_truncated);
+    const capped = try f.runCapped("seq 1 500000", 10000, 64 * 1024);
+    defer std.testing.allocator.free(capped.stdout);
+    defer std.testing.allocator.free(capped.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, capped.stdout, "500000") != null);
+    try std.testing.expect(capped.stdout.len <= 64 * 1024);
+    try std.testing.expect(capped.stdout_truncated);
+    try std.testing.expect(!capped.stderr_truncated);
 }

@@ -5,6 +5,8 @@ const builtin = @import("builtin");
 
 const REPO = "Lommix/blitzdenk";
 
+const MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024;
+
 pub const VersionInfo = struct {
     latest: []const u8,
     asset_url: []const u8,
@@ -164,11 +166,15 @@ fn download(pool: *exec.CmdPool, gpa: std.mem.Allocator, url: []const u8, timeou
         &.{ "wget", "-qO-", url },
     };
     for (commands) |argv| {
-        const res = pool.runAndWaitTimeout(.{ .argv = argv, .force_local = true, .skip_agent_overlay = true }, timeout_ms) catch |err| switch (err) {
+        const res = pool.runAndWaitTimeout(.{ .argv = argv, .force_local = true, .skip_agent_overlay = true, .max_output = MAX_DOWNLOAD_BYTES }, timeout_ms) catch |err| switch (err) {
             error.Canceled => return err,
             else => continue,
         };
         gpa.free(res.stderr);
+        if (res.stdout_truncated) {
+            gpa.free(res.stdout);
+            return error.DownloadFailed;
+        }
         if (res.ty == .success and res.stdout.len > 0) return res.stdout;
         gpa.free(res.stdout);
     }

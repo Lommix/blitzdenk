@@ -1179,7 +1179,7 @@ pub const App = struct {
         list.stamp_ms = self.nowMillis();
         list.valid = true;
         list.include_hidden = include_hidden;
-        if (res.ty != .success) {
+        if (res.ty != .success or res.stdout_truncated) {
             list.valid = false;
             return;
         }

@@ -187,11 +187,11 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         } });
         switch (decision) {
             .approved => {},
-            .denied => return r.errResult(call, "User declined patch"),
+            .denied => return r.errResult(call, "User declined patch. Change the approach or ask the user before retrying."),
             .message => |txt| {
                 const wrapped = std.fmt.allocPrint(
                     alloc,
-                    "User declined patch and left feedback: {s}",
+                    "User declined patch and left feedback: {s}\nChange the approach or ask the user before retrying.",
                     .{txt},
                 ) catch txt;
                 return r.errResult(call, wrapped);
@@ -435,7 +435,6 @@ fn ok(comptime T: type, value: T, rest: []const u8) Result(T) {
 }
 
 /// Match exact literal. Returns matched slice.
-
 fn trimMarkerLine(bytes: []const u8) []const u8 {
     return std.mem.trim(u8, bytes, " \t\r");
 }
@@ -1190,7 +1189,7 @@ fn readFileViaExec(
     missing_ok: bool,
     diag: ?*ApplyDiagnostics,
 ) ApplyError!?[]const u8 {
-    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", path } }) catch {
+    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", path }, .max_output = MAX_FILE_BYTES }) catch {
         if (diag) |d| d.message = "read command failed to start";
         return ApplyError.ExecFailed;
     };
@@ -1208,7 +1207,7 @@ fn readFileViaExec(
         return ApplyError.ExecFailed;
     }
 
-    if (res.stdout.len > MAX_FILE_BYTES) {
+    if (res.stdout_truncated or res.stdout.len > MAX_FILE_BYTES) {
         if (diag) |d| d.message = "file exceeds maximum size";
         return ApplyError.FileTooLarge;
     }

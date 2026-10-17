@@ -103,10 +103,10 @@ pub fn fromDisplayPos(buffer: []const u8, display_pos: usize) usize {
 }
 
 fn readMime(alloc: std.mem.Allocator, pool: *exec.CmdPool, argv: []const []const u8, ext: []const u8) !?ImageData {
-    const res = pool.runAndWaitTimeout(.{ .argv = argv, .force_local = true }, 1500) catch return null;
+    const res = pool.runAndWaitTimeout(.{ .argv = argv, .force_local = true, .max_output = MAX_CLIP_IMAGE_BYTES }, 1500) catch return null;
     defer pool.alloc.free(res.stdout);
     defer pool.alloc.free(res.stderr);
-    if (res.ty == .success and res.stdout.len > 0 and res.stdout.len <= MAX_CLIP_IMAGE_BYTES) {
+    if (res.ty == .success and !res.stdout_truncated and res.stdout.len > 0 and res.stdout.len <= MAX_CLIP_IMAGE_BYTES) {
         return .{ .data = try alloc.dupe(u8, res.stdout), .ext = ext };
     }
     return null;
@@ -135,16 +135,25 @@ pub fn readImage(alloc: std.mem.Allocator, pool: *exec.CmdPool) !?ImageData {
 }
 
 pub fn saveImage(io: std.Io, alloc: std.mem.Allocator, data: []const u8, ext: []const u8) ![]const u8 {
-    std.Io.Dir.createDirAbsolute(io, util.TMP_DIR, .default_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
+    var tmp_dir = std.Io.Dir.openDirAbsolute(io, util.TMP_DIR, .{ .follow_symlinks = false }) catch |open_err| blk: {
+        std.Io.Dir.createDirAbsolute(io, util.TMP_DIR, .fromMode(0o700)) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        break :blk std.Io.Dir.openDirAbsolute(io, util.TMP_DIR, .{ .follow_symlinks = false }) catch return open_err;
     };
-    var tmp_dir = try std.Io.Dir.openDirAbsolute(io, util.TMP_DIR, .{});
     defer tmp_dir.close(io);
     const ns = std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds;
-    const name = try std.fmt.allocPrint(alloc, "paste_{d}{s}", .{ ns, ext });
+    var random: [8]u8 = undefined;
+    io.random(&random);
+    const hex = std.fmt.bytesToHex(random, .lower);
+    const name = try std.fmt.allocPrint(alloc, "paste_{d}-{s}{s}", .{ ns, hex, ext });
     defer alloc.free(name);
-    try tmp_dir.writeFile(io, .{ .sub_path = name, .data = data });
+    try tmp_dir.writeFile(io, .{
+        .sub_path = name,
+        .data = data,
+        .flags = .{ .exclusive = true, .permissions = .fromMode(0o600) },
+    });
     return std.fmt.allocPrint(alloc, "file://{s}/{s}", .{ util.TMP_DIR, name });
 }
 

@@ -3,6 +3,7 @@ const r = @import("root.zig");
 
 const SEARCH_TIMEOUT_MS = 10_000;
 const MAX_CONTEXT_LINES = 100;
+const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 
 pub const GlobTool = r.Tool{
     .def = .{
@@ -246,6 +247,7 @@ fn runSearch(
     const raw = ctx.base.exec_pool.runAndWaitTimeout(.{
         .cwd = ctx.base.cwd,
         .argv = search_argv,
+        .max_output = MAX_CAPTURE_BYTES,
     }, SEARCH_TIMEOUT_MS) catch {
         const message = std.fmt.allocPrint(ctx.alloc, "{s} failed for pattern `{s}` in `{s}`: could not spawn search process", .{
             failure.kind, failure.pattern, failure.file_path,
@@ -254,6 +256,10 @@ fn runSearch(
     };
     defer ctx.base.exec_pool.alloc.free(raw.stdout);
     defer ctx.base.exec_pool.alloc.free(raw.stderr);
+
+    if (raw.stdout_truncated or raw.stderr_truncated) {
+        return r.errResult(call, "search output exceeded the 4MB capture cap; narrow the query or add filters");
+    }
 
     if (raw.ty == .timeout) return r.errResult(call, "search timed out after 10 seconds; narrow path or globs and retry");
     // Ripgrep exit code 1 means the search completed successfully but found

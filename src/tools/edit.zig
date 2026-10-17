@@ -73,13 +73,17 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     };
     defer r.file_mutex.unlock(ctx.io);
 
-    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } }) catch
+    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved }, .max_output = MAX_EDIT_SIZE }) catch
         return r.errResult(call, "failed to read file");
     defer ctx.base.exec_pool.alloc.free(read_res.stdout);
     defer ctx.base.exec_pool.alloc.free(read_res.stderr);
 
     if (read_res.ty != .success) {
         return r.errResult(call, "invalid file");
+    }
+
+    if (read_res.stdout_truncated) {
+        return r.errResult(call, "file exceeds the 4MB edit limit");
     }
 
     if (read_res.stdout.len > MAX_EDIT_SIZE) {
@@ -117,11 +121,11 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     } });
     switch (decision) {
         .approved => {},
-        .denied => return r.errResult(call, "User declined edit"),
+        .denied => return r.errResult(call, "User declined edit. Change the approach or ask the user before retrying."),
         .message => |txt| {
             const wrapped = std.fmt.allocPrint(
                 alloc,
-                "User declined the edit and left feedback: {s}",
+                "User declined the edit and left feedback: {s}\nChange the approach or ask the user before retrying.",
                 .{txt},
             ) catch txt;
             return r.errResult(call, wrapped);
@@ -131,10 +135,14 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-    const verify_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } }) catch
+    const verify_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved }, .max_output = MAX_EDIT_SIZE }) catch
         return r.errResult(call, "failed to re-read file");
     defer ctx.base.exec_pool.alloc.free(verify_res.stdout);
     defer ctx.base.exec_pool.alloc.free(verify_res.stderr);
+
+    if (verify_res.stdout_truncated) {
+        return r.errResult(call, "file exceeds the 4MB edit limit");
+    }
 
     if (verify_res.ty != .success or !std.mem.eql(u8, verify_res.stdout, file_content)) {
         return r.errResult(call, "file changed on disk while the edit was pending; re-read the file and retry");

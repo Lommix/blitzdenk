@@ -254,14 +254,10 @@ pub fn isOversized(output: []const u8, max_bytes: usize, max_lines: usize) bool 
     return output.len > max_bytes or countLines(output) > max_lines;
 }
 
-const MAX_SPILL_BYTES: usize = 64 * 1024 * 1024;
-
 pub fn writeSpillFile(pool: *@import("exec").CmdPool, alloc: std.mem.Allocator, call_id: []const u8, content: []const u8) ?[]const u8 {
     const basename = std.fmt.allocPrint(alloc, "blitz-spill-{s}.txt", .{call_id}) catch return null;
     defer alloc.free(basename);
-    var cut = content.len -| MAX_SPILL_BYTES;
-    while (cut < content.len and (content[cut] & 0xC0) == 0x80) cut += 1;
-    return r.artifact.write(pool, alloc, basename, content[cut..]) catch null;
+    return r.artifact.write(pool, alloc, basename, content) catch null;
 }
 
 /// Collect trailing lines from the end of `output`: the last `max_lines`

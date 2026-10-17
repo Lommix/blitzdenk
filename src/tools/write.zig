@@ -51,7 +51,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     var before: ?[]const u8 = null;
     var has_before = false;
     if (ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } })) |probe| {
-        if (probe.ty == .success and probe.stdout.len > 0) {
+        if (probe.ty == .success and probe.stdout.len > 0 and !probe.stdout_truncated) {
             before = ctx.alloc.dupe(u8, probe.stdout) catch null;
             has_before = before != null;
         }
@@ -66,11 +66,11 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     } });
     switch (decision) {
         .approved => {},
-        .denied => return r.errResult(call, "User declined write"),
+        .denied => return r.errResult(call, "User declined write. Change the approach or ask the user before retrying."),
         .message => |txt| {
             const wrapped = std.fmt.allocPrint(
                 ctx.alloc,
-                "User declined write and left feedback: {s}",
+                "User declined write and left feedback: {s}\nChange the approach or ask the user before retrying.",
                 .{txt},
             ) catch txt;
             return r.errResult(call, wrapped);
