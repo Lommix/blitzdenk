@@ -159,9 +159,9 @@ pub const Model = union(Kind) {
         };
     }
 
-    pub fn deinit(self: *Model, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *Model) void {
         switch (self.*) {
-            inline else => |*chat| chat.deinit(alloc),
+            inline else => |*chat| chat.deinit(),
         }
     }
 

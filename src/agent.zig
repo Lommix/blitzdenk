@@ -187,8 +187,8 @@ pub const Agent = struct {
         if (self.compact_task) |*task| task.deinit();
         if (self.task) |*task| task.deinit();
         if (self.messages) |*messages| messages.deinit();
-        if (self.pending_model) |*model| model.deinit(self.alloc);
-        self.model.deinit(self.alloc);
+        if (self.pending_model) |*model| model.deinit();
+        self.model.deinit();
         if (self.cache_key) |key| self.alloc.free(key);
         self.state_arena.deinit();
         self.step_arena.deinit();
@@ -259,7 +259,7 @@ pub const Agent = struct {
         const replacement = try models.Model.init(self.alloc, config);
         const effort = config.reasoning_effort orelse self.reasoning_effort;
         if (self.task != null or self.compact_task != null) {
-            if (self.pending_model) |*stale| stale.deinit(self.alloc);
+            if (self.pending_model) |*stale| stale.deinit();
             self.pending_model = replacement;
             self.pending_effort = effort;
             self.pending_vision = config.vision;
@@ -277,7 +277,7 @@ pub const Agent = struct {
 
     fn installModel(self: *Agent, replacement: models.Model) void {
         self.run_model = null;
-        self.model.deinit(self.alloc);
+        self.model.deinit();
         self.model = replacement;
         self.setContextState(.{});
     }
@@ -1405,7 +1405,7 @@ test "prepared messages retain queued content after another injection" {
     try std.testing.expectEqualStrings("first notice", prepared.messages[0].text());
 }
 
-test "provider context retains its basis and includes new messages after resume" {
+test "provider context retains its basis and includes new messages after rewind" {
     var agent = try Agent.init(std.testing.allocator, std.testing.io, .{
         .api_key = "",
         .model = "model",
@@ -1415,13 +1415,15 @@ test "provider context retains its basis and includes new messages after resume"
     defer agent.deinit();
     const history = [_]sdk.Message{sdk.UserMessage("before")};
     try agent.setMessages(&history);
-    agent.setContextState(.{ .tokens = 1000, .from_provider = true, .estimate = compact.estimateNextRequestTokens("model", &.{}, &history) });
+    const basis = compact.estimateNextRequestTokens("model", &.{}, &history);
+    agent.setContextState(.{ .tokens = 1000, .from_provider = true, .estimate = basis });
     try std.testing.expectEqual(@as(u64, 1000), agent.currentContextEstimate(&history));
     const grown = [_]sdk.Message{ history[0], sdk.UserMessage("x" ** 3000) };
-    try std.testing.expect(agent.currentContextEstimate(&grown) >= 2000);
+    const grown_estimate = compact.estimateNextRequestTokens("model", &.{}, &grown);
+    try std.testing.expectEqual(@as(u64, 1000) + grown_estimate - basis, agent.currentContextEstimate(&grown));
     try agent.replaceMessages(&history, .rewind);
     try std.testing.expect(!agent.contextSnapshot().from_provider);
-    try std.testing.expect(agent.currentContextEstimate(&history) < 1000);
+    try std.testing.expectEqual(basis, agent.currentContextEstimate(&history));
 }
 
 test "worker journals provider usage before UI events are drained" {

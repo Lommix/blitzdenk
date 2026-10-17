@@ -948,7 +948,6 @@ pub const App = struct {
         };
         self.context_factory.startSession(&self.config) catch |err| {
             std.log.scoped(.session).err("session model snapshot failed: {s}", .{@errorName(err)});
-            return;
         };
         self.journalClear();
         if (self.session_store) |store| store.bump();

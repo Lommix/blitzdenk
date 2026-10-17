@@ -926,7 +926,9 @@ pub fn run(
                     }
                     if (!lua_reload_failed) app.lua_vm.clearLastError();
                     context_factory.config_reload_in_progress = false;
-                    try context_factory.applySessionBindings(&app.config);
+                    context_factory.applySessionBindings(&app.config, !lua_reload_failed) catch |err| {
+                        std.log.scoped(.lua).err("hot-reload: failed to apply session bindings: {s}", .{@errorName(err)});
+                    };
                     app.lua_vm.readConfigFields();
                     app.invalidateTimelineRenderCache();
                     if (app.input_mode != .wizard) app.warnUnboundAgentModels();

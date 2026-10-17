@@ -217,13 +217,7 @@ pub fn estimateRequestTokens(model_id: []const u8, tools: []const sdk.Tool, mess
         bytes += tool.description.len;
         bytes += tool.input_schema.len;
     }
-    for (messages) |message| {
-        bytes += message.role.string().len + 8;
-        for (message.parts()) |part| {
-            if (part == .reasoning and !replay_reasoning) continue;
-            bytes += partBytes(part);
-        }
-    }
+    for (messages) |message| bytes += messageBytes(message, replay_reasoning);
     return approxTokens(bytes);
 }
 
@@ -234,7 +228,7 @@ pub fn computeCutIndex(messages: []const sdk.Message) usize {
         i -= 1;
         const message = messages[i];
         if (message.role == .system or isSummaryMessage(message)) continue;
-        accumulated += approxTokens(messageBytes(message));
+        accumulated += approxTokens(messageBytes(message, true));
         if (accumulated < KEEP_RECENT_TOKENS) continue;
         var cut = i;
         while (cut < messages.len) : (cut += 1) {
@@ -352,9 +346,12 @@ fn logProviderError(_: ?*anyopaque, info: sdk.options.ProviderErrorInfo) void {
     if (!@import("builtin").is_test) std.log.scoped(.compact).warn("provider error status={d} retry={any}: {s}", .{ info.status_code, info.will_retry, info.response_body });
 }
 
-fn messageBytes(message: sdk.Message) u64 {
+fn messageBytes(message: sdk.Message, replay_reasoning: bool) u64 {
     var bytes: u64 = message.role.string().len + 8;
-    for (message.parts()) |part| bytes += partBytes(part);
+    for (message.parts()) |part| {
+        if (part == .reasoning and !replay_reasoning) continue;
+        bytes += partBytes(part);
+    }
     return bytes;
 }
 
@@ -563,10 +560,21 @@ test "ordinary SDK compaction generates and installs a summary" {
 }
 
 test "reasoning replay signatures do not inflate context or cut points" {
-    const plain = [_]sdk.Message{.{ .role = .assistant, .content = &.{sdk.Part.reasoningPart("thinking", "")} }};
-    const signed = [_]sdk.Message{.{ .role = .assistant, .content = &.{sdk.Part.reasoningPart("thinking", "signature" ** 100_000)} }};
+    const tail = "x" ** 60_000;
+    const plain = [_]sdk.Message{
+        sdk.SystemMessage("system"),
+        sdk.UserMessage(tail),
+        .{ .role = .assistant, .content = &.{sdk.Part.reasoningPart("thinking", "")} },
+    };
+    const signed = [_]sdk.Message{
+        sdk.SystemMessage("system"),
+        sdk.UserMessage(tail),
+        .{ .role = .assistant, .content = &.{sdk.Part.reasoningPart("thinking", "signature" ** 100_000)} },
+    };
     try std.testing.expectEqual(estimateNextRequestTokens("model", &.{}, &plain), estimateNextRequestTokens("model", &.{}, &signed));
-    try std.testing.expectEqual(computeCutIndex(&plain), computeCutIndex(&signed));
+    const cut = computeCutIndex(&plain);
+    try std.testing.expect(cut > 0);
+    try std.testing.expectEqual(cut, computeCutIndex(&signed));
 }
 test "context estimates follow reasoning replay settings" {
     const plain = [_]sdk.Message{sdk.AssistantMessage("answer")};

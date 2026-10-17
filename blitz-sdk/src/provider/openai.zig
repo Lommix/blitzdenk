@@ -53,12 +53,12 @@ pub const Chat = struct {
         };
     }
 
-    pub fn deinit(self: *Chat, alloc: std.mem.Allocator) void {
-        alloc.free(self.model_id);
-        alloc.free(self.api_key);
-        alloc.free(self.base_url);
-        auth.freeHeaders(alloc, self.extra_headers);
-        alloc.free(self.session_key_header);
+    pub fn deinit(self: *Chat) void {
+        self.allocator.free(self.model_id);
+        self.allocator.free(self.api_key);
+        self.allocator.free(self.base_url);
+        auth.freeHeaders(self.allocator, self.extra_headers);
+        self.allocator.free(self.session_key_header);
         if (self.client) |c| {
             c.deinit();
             self.allocator.destroy(c);

@@ -70,7 +70,8 @@ local opencode_ds_flash = blitz.add_model({
 	cost = { input = 0.15, output = 0.6, cache = 0.006 },
 })
 
-blitz.set_agent_model(blitz.AGENT_GENERAL, opencode_ds_flash, "high")
+blitz.set_agent_model(blitz.AGENT_GENERAL, opencode_ds_flash)
+blitz.set_agent_effort(blitz.AGENT_GENERAL, "high")
 ```
 
 ## Documentation

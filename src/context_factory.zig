@@ -351,7 +351,7 @@ pub fn startSession(self: *Self, cfg: *const r.config.BlitzdenkCfg) !void {
     self.session_active = true;
 }
 
-pub fn applySessionBindings(self: *Self, cfg: *const r.config.BlitzdenkCfg) !void {
+pub fn applySessionBindings(self: *Self, cfg: *const r.config.BlitzdenkCfg, prune_stale: bool) !void {
     if (!self.session_active) return;
     for (0..self.agent_counter) |i| {
         const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));
@@ -359,6 +359,15 @@ pub fn applySessionBindings(self: *Self, cfg: *const r.config.BlitzdenkCfg) !voi
         if (def.model == null) continue;
         if (self.sessionBindingFor(def.name) != null) continue;
         try self.captureSessionBinding(cfg, agent_type);
+    }
+    if (!prune_stale) return;
+    var i: usize = 0;
+    while (i < self.session_bindings.items.len) {
+        if (self.findAgentType(self.session_bindings.items[i].name) != null) {
+            i += 1;
+            continue;
+        }
+        _ = self.session_bindings.orderedRemove(i);
     }
 }
 
@@ -1187,11 +1196,12 @@ test "session model contract owns configuration through reload and refreshes on 
     try factory.setAgentEffort(.general, .low, false);
     const newcomer = try factory.addAgent(&fixture.cfg, .{ .name = "newcomer", .description = "", .prompt = "", .model = .{ .model = second } });
     const reordered = try factory.addAgent(&fixture.cfg, .{ .name = "worker", .description = "", .prompt = "", .model = .{ .model = second, .effort = .low } });
-    try factory.applySessionBindings(&fixture.cfg);
+    try factory.applySessionBindings(&fixture.cfg, true);
     factory.config_reload_in_progress = false;
 
     try std.testing.expectEqual(worker, reordered);
-    try std.testing.expect(worker != newcomer);
+    try std.testing.expectEqualStrings("worker", factory.agentName(reordered));
+    try std.testing.expectEqualStrings("newcomer", factory.agentName(newcomer));
     const pinned = try fixture.config(reordered);
     try std.testing.expectEqualStrings("first", pinned.model);
     try std.testing.expectEqualStrings("https://first.invalid", pinned.base_url);
@@ -1237,6 +1247,56 @@ test "runtime model changes and forced reloads update the session contract" {
     try std.testing.expectEqualStrings("first", (try fixture.config(.general)).model);
     try std.testing.expectEqual(r.config.ReasoningEffort.low, factory.agentEffort(.general).?);
     const late = try factory.addAgent(&fixture.cfg, .{ .name = "late", .description = "", .prompt = "", .model = .{ .model = second } });
-    try std.testing.expect(factory.sessionBindingFor("late") != null);
-    try std.testing.expectEqualStrings("second", (try fixture.config(late)).model);
+    const late_binding = factory.sessionBindingFor("late") orelse return error.TestExpectedBinding;
+    try std.testing.expectEqual(late, late_binding.agent_type);
+    try std.testing.expectEqual(r.config.ReasoningEffort.medium, late_binding.effort);
+    const late_config = try fixture.config(late);
+    try std.testing.expectEqualStrings("second", late_config.model);
+    try std.testing.expectEqualStrings("https://second.invalid", late_config.base_url);
+}
+
+test "reload reclaims binding slots released by renamed agents" {
+    var fixture: ModelContractTest = undefined;
+    fixture.init();
+    defer fixture.deinit();
+    const factory = &fixture.factory;
+    const first = try fixture.model("first", "https://first.invalid");
+    const alpha = try factory.addAgent(&fixture.cfg, .{ .name = "alpha", .description = "", .prompt = "", .model = .{ .model = first } });
+    try factory.startSession(&fixture.cfg);
+    try std.testing.expectEqual(@as(u6, 3), @intFromEnum(alpha));
+    const initial = try fixture.config(alpha);
+    try std.testing.expectEqualStrings("first", initial.model);
+
+    fixture.cfg.reset();
+    _ = fixture.config_arena.reset(.free_all);
+    _ = factory.prompt_arena.reset(.free_all);
+    factory.agents = .initFill(null);
+    factory.agents.set(.general, .{ .name = "general", .description = "", .prompt = "" });
+    factory.agent_counter = 3;
+    factory.config_reload_in_progress = true;
+    const second = try fixture.model("second", "https://second.invalid");
+    const beta = try factory.addAgent(&fixture.cfg, .{ .name = "beta", .description = "", .prompt = "", .model = .{ .model = second } });
+    try factory.applySessionBindings(&fixture.cfg, true);
+    factory.config_reload_in_progress = false;
+    try std.testing.expectEqual(@as(u6, 4), @intFromEnum(beta));
+    try std.testing.expect(factory.sessionBindingFor("alpha") == null);
+    try std.testing.expect(factory.sessionBindingFor("beta") != null);
+
+    fixture.cfg.reset();
+    _ = fixture.config_arena.reset(.free_all);
+    _ = factory.prompt_arena.reset(.free_all);
+    factory.agents = .initFill(null);
+    factory.agents.set(.general, .{ .name = "general", .description = "", .prompt = "" });
+    factory.agent_counter = 3;
+    factory.config_reload_in_progress = true;
+    const third = try fixture.model("third", "https://third.invalid");
+    const gamma = try factory.addAgent(&fixture.cfg, .{ .name = "gamma", .description = "", .prompt = "", .model = .{ .model = third } });
+    const beta_again = try factory.addAgent(&fixture.cfg, .{ .name = "beta", .description = "", .prompt = "", .model = .{ .model = third } });
+    try factory.applySessionBindings(&fixture.cfg, true);
+    factory.config_reload_in_progress = false;
+    try std.testing.expectEqual(@as(u6, 4), @intFromEnum(beta_again));
+    try std.testing.expectEqual(@as(u6, 3), @intFromEnum(gamma));
+    try std.testing.expect(factory.sessionBindingFor("beta") != null);
+    try std.testing.expectEqualStrings("second", (try fixture.config(beta_again)).model);
+    try std.testing.expectEqualStrings("third", (try fixture.config(gamma)).model);
 }

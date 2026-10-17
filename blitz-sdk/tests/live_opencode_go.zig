@@ -102,7 +102,7 @@ test "OpenCode Go multi-turn user input with reminder hook" {
         .base_url = base_url,
     });
 
-    defer chat.deinit(std.testing.allocator);
+    defer chat.deinit();
     const language_model = chat.languageModel();
 
     const hooks = sdk.Hooks{ .on_reminder = ReminderHook.onReminder };

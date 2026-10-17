@@ -112,7 +112,7 @@ fn encodeMessage(alloc: std.mem.Allocator, message: sdk.Message) !WireMessage {
         .text => |text| try parts.append(alloc, .{ .text = try util.sanitizeUtf8(alloc, text) }),
         .reasoning => |reasoning| try parts.append(alloc, .{ .thinking = .{
             .text = try util.sanitizeUtf8(alloc, reasoning.text),
-            .signature = if (reasoning.signature.len > 0) try sdk.reasoning.normalizeDetails(alloc, reasoning.signature) else null,
+            .signature = if (reasoning.signature.len > 0) reasoning.signature else null,
         } }),
         .image => |image| try parts.append(alloc, .{ .image = try encodeImage(image) }),
         .tool_call => |call| try parts.append(alloc, .{ .tool_call = .{

@@ -19,7 +19,7 @@ test "compat retains arbitrary OpenAI endpoints" {
         .base_url = "http://127.0.0.1:8080/v1",
         .api_key = "key",
     });
-    defer chat.deinit(std.testing.allocator);
+    defer chat.deinit();
     try std.testing.expectEqualStrings("local-model", chat.languageModel().modelId());
     try std.testing.expectEqualStrings("http://127.0.0.1:8080/v1", chat.base_url);
 }
@@ -591,7 +591,7 @@ test "cached provider clients outlive request arenas" {
     const alloc = std.testing.allocator;
     inline for (.{ sdk.openai.Chat, sdk.anthropic.Chat, sdk.responses.Chat, sdk.compat.Chat }) |Chat| {
         var chat = try Chat.init(alloc, "offline", .{ .api_key = "", .base_url = "unsupported://example" });
-        defer chat.deinit(alloc);
+        defer chat.deinit();
         var scratch = std.heap.ArenaAllocator.init(alloc);
         {
             defer scratch.deinit();
@@ -638,9 +638,14 @@ test "streamed reasoning details form complete replay blocks and visible traces"
 test "reasoning content and reasoning details are displayed only once" {
     const alloc = std.testing.allocator;
     const Fixture = struct {
-        fn emit(_: ?*anyopaque, _: sdk.StreamChunk) void {}
+        bytes: usize = 0,
+        fn emit(ctx: ?*anyopaque, chunk: sdk.StreamChunk) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            if (chunk.type == .reasoning) self.bytes += chunk.text.len;
+        }
     };
-    var ctx = sdk.model.StreamContext{ .emit = Fixture.emit };
+    var fixture: Fixture = .{};
+    var ctx = sdk.model.StreamContext{ .emit = Fixture.emit, .emit_ctx = &fixture };
     const result = try sdk.openai.parseChatStream(alloc,
         \\data: {"choices":[{"delta":{"reasoning_content":"one","reasoning_details":[{"type":"reasoning.text","index":0,"text":"one"}]}}]}
         \\data: {"choices":[{"delta":{"reasoning_content":"two","reasoning_details":[{"type":"reasoning.text","index":0,"text":"two"}]}}]}
@@ -648,4 +653,5 @@ test "reasoning content and reasoning details are displayed only once" {
     defer alloc.destroy(result);
     defer result.deinit(alloc);
     try std.testing.expectEqualStrings("onetwo", result.reasoning);
+    try std.testing.expectEqual(result.reasoning.len, fixture.bytes);
 }
