@@ -11,7 +11,7 @@ pub const ID_LEN = "20250827-184000-".len + ID_RANDOM_LEN;
 pub const PROMPT_CLIP: usize = 80;
 pub const Header = struct { kind: []const u8, v: u32, id: []const u8, created_ms: i64 = 0, cwd: []const u8 = "" };
 pub const Entry = struct { id: []const u8, modified_ms: i64 };
-pub const Kind = enum { agent, main_agent, message, compaction, reset, timeline_append, timeline_truncate, tool_status, agent_update, agent_remove };
+pub const Kind = enum { agent, main_agent, message, compaction, reset, timeline_append, timeline_truncate, tool_status, agent_update, agent_remove, usage };
 pub const Record = struct {
     kind: Kind,
     agentID: ?u32 = null,
@@ -23,6 +23,7 @@ pub const Record = struct {
     background: ?bool = null,
     clean: ?bool = null,
     task_description: ?[]const u8 = null,
+    tokens: ?session.TokenState = null,
     message: ?session.WireMessage = null,
     history: ?[]const session.WireMessage = null,
     reason: ?[]const u8 = null,
@@ -38,9 +39,10 @@ pub const Record = struct {
         switch (self.kind) {
             .agent, .agent_update => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .name = self.name, .type_idx = self.type_idx, .parent = self.parent, .depth = self.depth, .cwd = self.cwd, .background = self.background, .clean = self.clean, .task_description = self.task_description }),
             .main_agent, .agent_remove => try j.write(.{ .kind = self.kind, .agentID = self.agentID }),
+            .usage => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .tokens = self.tokens }),
             .message => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .message = self.message }),
-            .compaction => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .history = self.history }),
-            .reset => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .history = self.history, .reason = self.reason }),
+            .compaction => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .history = self.history, .tokens = self.tokens }),
+            .reset => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .history = self.history, .reason = self.reason, .tokens = self.tokens }),
             .timeline_append => try j.write(.{ .kind = self.kind, .entry = self.entry }),
             .timeline_truncate => try j.write(.{ .kind = self.kind, .length = self.length }),
             .tool_status => try j.write(.{ .kind = self.kind, .agentID = self.agentID, .call_id = self.call_id, .ansi = self.ansi, .state = self.state, .children = self.children }),
@@ -133,6 +135,10 @@ pub const Store = struct {
     }
 
     pub fn publish(self: *Store, id: u32, change: sdk.options.HistoryChange, messages: []const sdk.Message) !void {
+        return self.publishState(id, change, messages, null);
+    }
+
+    pub fn publishState(self: *Store, id: u32, change: sdk.options.HistoryChange, messages: []const sdk.Message, tokens: ?session.TokenState) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const wire = try session.encodeChat(messages, arena.allocator());
@@ -161,6 +167,7 @@ pub const Store = struct {
                 .agentID = id,
                 .history = wire,
                 .reason = @tagName(change),
+                .tokens = tokens,
             }),
         }
     }
@@ -607,6 +614,10 @@ const Replay = struct {
                 if (record.clean) |v| value.metadata.clean = v;
                 if (record.task_description) |v| value.metadata.task_description = v;
             },
+            .usage => {
+                const value = try self.agent(record.agentID, true);
+                value.metadata.tokens = record.tokens orelse return error.MissingUsage;
+            },
             .main_agent => {
                 if (record.agentID) |id| _ = try self.agent(id, true);
                 self.main = record.agentID;
@@ -633,6 +644,13 @@ const Replay = struct {
                     if (value.exchange.start) |start| try self.interruptCalls(record.agentID.?, &value.exchange, value.history.items[start..]);
                 }
                 value.exchange = exchange;
+                if (record.tokens) |tokens| {
+                    value.metadata.tokens = tokens;
+                } else {
+                    value.metadata.tokens.context_tokens = 0;
+                    value.metadata.tokens.context_from_provider = false;
+                    value.metadata.tokens.context_estimate = 0;
+                }
                 value.history = .empty;
                 try value.history.appendSlice(alloc, history);
                 self.holds_chat = self.holds_chat or history.len > 0;
@@ -777,6 +795,9 @@ pub fn load(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, name: []cons
                 try repairs.append(alloc, status);
             };
             agent.history.shrinkRetainingCapacity(start);
+            agent.metadata.tokens.context_from_provider = false;
+            agent.metadata.tokens.context_tokens = 0;
+            agent.metadata.tokens.context_estimate = 0;
             try repairs.append(alloc, .{ .kind = .reset, .agentID = agent.metadata.id, .history = agent.history.items, .reason = "interrupted_exchange" });
         }
         agent.metadata.chat = agent.history.items;
@@ -1169,4 +1190,46 @@ test "tool statuses replay multiple children and legacy child links" {
     const legacy = try fixture.read();
     try std.testing.expect(legacy.problem == null);
     try std.testing.expectEqualSlices(u32, &.{2}, legacy.save.tool_status[0].children);
+}
+
+test "journal restores absolute per-agent usage and compaction token state" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const store = &fixture.store;
+    try fixture.declare(1);
+    try fixture.declare(2);
+    try store.enqueue(.{ .kind = .main_agent, .agentID = 1 });
+    try fixture.message(1, "first");
+    const tokens = session.TokenState{
+        .usage = .{ .input_tokens = 1000, .output_tokens = 100, .total_tokens = 1100, .cache_read_tokens = 500, .cache_write_tokens = 20, .reasoning_tokens = 70 },
+        .context_tokens = 1520,
+        .context_from_provider = true,
+        .context_estimate = 1200,
+        .model = "local-model",
+    };
+    try store.enqueue(.{ .kind = .usage, .agentID = 1, .tokens = tokens });
+    try store.enqueue(.{ .kind = .usage, .agentID = 1, .tokens = tokens });
+    try store.enqueue(.{ .kind = .usage, .agentID = 2, .tokens = .{ .usage = .{ .input_tokens = 200 } } });
+    try store.flush();
+    const first = try fixture.read();
+    try std.testing.expect(first.problem == null);
+    try std.testing.expectEqualDeep(tokens, first.save.main_metadata.?.tokens);
+    try std.testing.expectEqual(@as(u64, 200), first.save.agents[0].tokens.usage.input_tokens);
+    var compacted = tokens;
+    compacted.context_tokens = 50;
+    compacted.context_from_provider = false;
+    compacted.context_estimate = 0;
+    try store.publishState(1, .compaction, &.{sdk.UserMessage("summary")}, compacted);
+    try store.flush();
+    const second = try fixture.read();
+    try std.testing.expect(second.problem == null);
+    try std.testing.expectEqualDeep(compacted, second.save.main_metadata.?.tokens);
+    try std.testing.expectEqualStrings("summary", second.save.chat[0].parts[0].text);
+    try store.publish(1, .rewind, &.{sdk.UserMessage("earlier")});
+    try store.flush();
+    const rewound = try fixture.read();
+    try std.testing.expect(!rewound.save.main_metadata.?.tokens.context_from_provider);
+    try std.testing.expectEqual(@as(u64, 0), rewound.save.main_metadata.?.tokens.context_tokens);
+    try std.testing.expectEqualDeep(tokens.usage, rewound.save.main_metadata.?.tokens.usage);
 }

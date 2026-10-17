@@ -156,7 +156,9 @@ pub fn buildChatRequest(
             if (replay_reasoning) {
                 if (reasoning_signature.len > 0) {
                     try s.objectField("reasoning_details");
-                    try writeRaw(&s, reasoning_signature);
+                    const normalized = try @import("../reasoning.zig").normalizeDetails(a, reasoning_signature);
+                    defer a.free(normalized);
+                    try writeRaw(&s, normalized);
                 } else {
                     try s.objectField("reasoning_content");
                     try s.write(reasoning_text.items);
@@ -824,4 +826,24 @@ fn postSseTimed(
 
 fn postSseTask(a: std.mem.Allocator, io: std.Io, client: ?*std.http.Client, url: []const u8, body: []const u8, headers: []const std.http.Header, event_ctx: ?*anyopaque, on_event: *const fn (?*anyopaque, []const u8) anyerror!void, last_chunk: ?*std.atomic.Value(i64), events_emitted: ?*std.atomic.Value(bool)) !Response {
     return postSse(a, io, client, url, body, headers, event_ctx, on_event, last_chunk, events_emitted);
+}
+
+test "reasoning replay normalizes legacy deltas and respects the replay flag" {
+    const a = std.testing.allocator;
+    const signature = "[{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"one\"},{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"two\"},{\"type\":\"reasoning.encrypted\",\"index\":1,\"data\":\"secret\"}]";
+    const params = model.GenerateParams{ .messages = &.{.{ .role = .assistant, .content = &.{types.Part.reasoningPart("onetwo", signature)} }} };
+    const body = try buildChatRequest(a, "model", params, false, true);
+    defer a.free(body);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+    defer parsed.deinit();
+    const message = parsed.value.object.get("messages").?.array.items[0];
+    const details = message.object.get("reasoning_details").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), details.len);
+    try std.testing.expectEqualStrings("onetwo", details[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings("secret", details[1].object.get("data").?.string);
+    try std.testing.expect(!message.object.contains("reasoning_content"));
+    const disabled = try buildChatRequest(a, "model", params, false, false);
+    defer a.free(disabled);
+    try std.testing.expect(std.mem.indexOf(u8, disabled, "reasoning_details") == null);
+    try std.testing.expect(std.mem.indexOf(u8, disabled, "reasoning_content") == null);
 }

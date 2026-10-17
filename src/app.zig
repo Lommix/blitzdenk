@@ -946,6 +946,10 @@ pub const App = struct {
             std.log.scoped(.session).err("session reset postponed: {s}", .{@errorName(err)});
             return;
         };
+        self.context_factory.startSession(&self.config) catch |err| {
+            std.log.scoped(.session).err("session model snapshot failed: {s}", .{@errorName(err)});
+            return;
+        };
         self.journalClear();
         if (self.session_store) |store| store.bump();
         if (self.mcp_load) |*task| task.deinit();
@@ -1017,6 +1021,7 @@ pub const App = struct {
             // descendant finishes, even when their own turn is already reaped.
             try self.handleReapedAgent(id);
         }
+        if (self.mainAgent()) |agent| self.sdk_usage = agent.usage;
         self.registry.retryDue();
         self.running = self.registry.countActive() > 0;
         if (self.running != running_before) self.dirty = true;

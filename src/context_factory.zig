@@ -35,6 +35,10 @@ ssh_dir: ?std.Io.Dir = null,
 ssh_aliases: std.ArrayList(SshAlias) = .empty,
 flags: Flags = .{},
 general_prompt_size: usize = 0,
+session_arena: std.heap.ArenaAllocator = undefined,
+session_bindings: std.ArrayList(SessionModelBinding) = .empty,
+session_active: bool = false,
+config_reload_in_progress: bool = false,
 // -------------------------------------------------------------------------------
 
 pub const CapabilityRule = struct {
@@ -121,6 +125,14 @@ pub const AgentModelConfig = struct {
     effort: r.config.ReasoningEffort = .medium,
 };
 
+pub const SessionModelBinding = struct {
+    agent_type: AgentType,
+    name: []const u8,
+    model: r.config.ModelEntry,
+    provider: r.config.Provider,
+    effort: r.config.ReasoningEffort,
+};
+
 pub const AgentConfigDiagnostic = union(enum) {
     no_agent_model: []const u8,
     invalid_provider,
@@ -179,6 +191,7 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8, cwd: []const
         .loaded_tools = try buildDefaultTools(alloc),
         .prompt_arena = std.heap.ArenaAllocator.init(alloc),
         .capability_arena = std.heap.ArenaAllocator.init(alloc),
+        .session_arena = std.heap.ArenaAllocator.init(alloc),
         .io = io,
         .skill_dir = skill_dir,
         .config_dir = config_dir,
@@ -283,30 +296,144 @@ pub fn buildAgentApiConfig(
     env: *const std.process.Environ.Map,
 ) AgentConfigResult {
     const def = self.getAgent(agent_type) orelse return .{ .diagnostic = .invalid_provider };
+    if (self.sessionBindingFor(def.name)) |binding| {
+        return configFromProviderModel(&binding.provider, &binding.model, binding.effort, env);
+    }
     if (def.model) |ag_cfg| {
         const model = cfg.getModel(ag_cfg.model) orelse return .{ .diagnostic = .invalid_provider };
         const provider = cfg.getProvider(model.provider) orelse return .{ .diagnostic = .invalid_provider };
-
-        const key = provider.resolveKey(env);
-        if (key.len == 0 and provider.getKeyEnvar().len > 0) {
-            return .{ .diagnostic = .{ .missing_api_key = provider.getKeyEnvar() } };
-        }
-
-        return .{ .config = .{
-            .api_key = key,
-            .base_url = provider.getUrl(),
-            .model = model.getName(),
-            .params = model.params,
-            .reasoning_effort = ag_cfg.effort,
-            .reasoning = model.reasoning,
-            .rate_limit = provider.rate_limit,
-            .replay_reasoning = model.replay_reasoning,
-            .session_key_header = provider.getSessionKeyHeader(),
-            .vision = model.vision,
-        } };
+        return configFromProviderModel(provider, model, ag_cfg.effort, env);
     }
 
     return .{ .diagnostic = .{ .no_agent_model = def.name } };
+}
+
+fn configFromProviderModel(
+    provider: *const r.config.Provider,
+    model: *const r.config.ModelEntry,
+    effort: r.config.ReasoningEffort,
+    env: *const std.process.Environ.Map,
+) AgentConfigResult {
+    const key = provider.resolveKey(env);
+    if (key.len == 0 and provider.getKeyEnvar().len > 0) {
+        return .{ .diagnostic = .{ .missing_api_key = provider.getKeyEnvar() } };
+    }
+
+    return .{ .config = .{
+        .api_key = key,
+        .base_url = provider.getUrl(),
+        .model = model.getName(),
+        .params = model.params,
+        .reasoning_effort = effort,
+        .reasoning = model.reasoning,
+        .rate_limit = provider.rate_limit,
+        .replay_reasoning = model.replay_reasoning,
+        .session_key_header = provider.getSessionKeyHeader(),
+        .vision = model.vision,
+    } };
+}
+
+pub fn startSession(self: *Self, cfg: *const r.config.BlitzdenkCfg) !void {
+    var arena = std.heap.ArenaAllocator.init(self.alloc);
+    errdefer arena.deinit();
+    var bindings: std.ArrayList(SessionModelBinding) = .empty;
+    errdefer bindings.deinit(self.alloc);
+    for (0..self.agent_counter) |i| {
+        const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));
+        const def = self.getAgent(agent_type) orelse continue;
+        const model = def.model orelse continue;
+        try bindings.append(self.alloc, try snapshotBinding(arena.allocator(), cfg, agent_type, def.name, model.model, model.effort));
+    }
+    self.session_bindings.deinit(self.alloc);
+    self.session_arena.deinit();
+    self.session_arena = arena;
+    self.session_bindings = bindings;
+    self.session_active = true;
+}
+
+pub fn applySessionBindings(self: *Self, cfg: *const r.config.BlitzdenkCfg) !void {
+    if (!self.session_active) return;
+    for (0..self.agent_counter) |i| {
+        const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));
+        const def = self.getAgent(agent_type) orelse continue;
+        if (def.model == null) continue;
+        if (self.sessionBindingFor(def.name) != null) continue;
+        try self.captureSessionBinding(cfg, agent_type);
+    }
+}
+
+fn sessionBindingFor(self: *const Self, name: []const u8) ?*const SessionModelBinding {
+    for (self.session_bindings.items, 0..) |binding, i| {
+        if (std.mem.eql(u8, binding.name, name)) return &self.session_bindings.items[i];
+    }
+    return null;
+}
+
+fn snapshotBinding(
+    arena: std.mem.Allocator,
+    cfg: *const r.config.BlitzdenkCfg,
+    agent_type: AgentType,
+    name: []const u8,
+    handle: r.config.ModelHandle,
+    effort: r.config.ReasoningEffort,
+) !SessionModelBinding {
+    const model = cfg.getModel(handle) orelse return error.UnknownModel;
+    const provider = cfg.getProvider(model.provider) orelse return error.InvalidProvider;
+    var entry = model.*;
+    entry.params = try entry.params.clone(arena);
+    return .{
+        .agent_type = agent_type,
+        .name = try arena.dupe(u8, name),
+        .model = entry,
+        .provider = provider.*,
+        .effort = effort,
+    };
+}
+
+fn captureSessionBinding(self: *Self, cfg: *const r.config.BlitzdenkCfg, agent_type: AgentType) !void {
+    const def = self.getAgent(agent_type) orelse return;
+    const model = def.model orelse return;
+    try self.overwriteSessionBinding(cfg, agent_type, def.name, model.model, model.effort);
+}
+
+fn overwriteSessionBinding(
+    self: *Self,
+    cfg: *const r.config.BlitzdenkCfg,
+    agent_type: AgentType,
+    name: []const u8,
+    handle: r.config.ModelHandle,
+    effort: r.config.ReasoningEffort,
+) !void {
+    const replacement = try snapshotBinding(self.session_arena.allocator(), cfg, agent_type, name, handle, effort);
+    for (self.session_bindings.items) |*binding| {
+        if (!std.mem.eql(u8, binding.name, name)) continue;
+        binding.* = replacement;
+        return;
+    }
+    try self.session_bindings.append(self.alloc, replacement);
+}
+
+pub fn agentModelName(self: *const Self, cfg: *const r.config.BlitzdenkCfg, agent_type: AgentType) ?[]const u8 {
+    const def = self.getAgent(agent_type) orelse return null;
+    if (self.sessionBindingFor(def.name)) |binding| return binding.model.getName();
+    const ag_cfg = def.model orelse return null;
+    const model = cfg.getModel(ag_cfg.model) orelse return null;
+    return model.getName();
+}
+
+pub fn modelCost(self: *const Self, cfg: *const r.config.BlitzdenkCfg, name: []const u8, usage: r.sdk.Usage) f64 {
+    for (self.session_bindings.items) |*binding| {
+        if (!std.mem.eql(u8, binding.model.getName(), name)) continue;
+        return if (binding.model.cost) |cost| cost.calculate(usage) else 0;
+    }
+    return cfg.modelCost(name, usage);
+}
+
+pub fn agentEffort(self: *const Self, agent_type: AgentType) ?r.config.ReasoningEffort {
+    const def = self.getAgent(agent_type) orelse return null;
+    if (self.sessionBindingFor(def.name)) |binding| return binding.effort;
+    const ag_cfg = def.model orelse return null;
+    return ag_cfg.effort;
 }
 
 pub fn setAgentPrompt(self: *Self, agent_type: AgentType, prompt: []const u8) !void {
@@ -315,37 +442,73 @@ pub fn setAgentPrompt(self: *Self, agent_type: AgentType, prompt: []const u8) !v
     def.prompt = dup;
 }
 
-pub fn setAgentModel(self: *Self, cfg: *const r.config.BlitzdenkCfg, agent_type: AgentType, model: r.config.ModelHandle) !void {
+pub fn setAgentModel(
+    self: *Self,
+    cfg: *const r.config.BlitzdenkCfg,
+    agent_type: AgentType,
+    model: r.config.ModelHandle,
+    force: bool,
+) !void {
     const def = self.getAgentMut(agent_type) orelse return error.UnknownAgent;
     _ = cfg.getModel(model) orelse return error.UnknownModel;
-    const effort = if (def.model) |current| current.effort else .medium;
-    def.model = .{
-        .model = model,
-        .effort = effort,
-    };
+    const effort = if (self.config_reload_in_progress and !force)
+        (if (def.model) |current| current.effort else .medium)
+    else if (self.sessionBindingFor(def.name)) |binding|
+        binding.effort
+    else if (def.model) |current|
+        current.effort
+    else
+        .medium;
+    if (self.session_active and (!self.config_reload_in_progress or force)) {
+        try self.overwriteSessionBinding(cfg, agent_type, def.name, model, effort);
+    }
+    def.model = .{ .model = model, .effort = effort };
 }
 
-pub fn setAgentEffort(self: *Self, agent_type: AgentType, effort: r.config.ReasoningEffort) !void {
+pub fn setAgentEffort(self: *Self, agent_type: AgentType, effort: r.config.ReasoningEffort, force: bool) !void {
     const def = self.getAgentMut(agent_type) orelse return error.UnknownAgent;
-    if (def.model == null) return error.NoModel;
-    def.model.?.effort = effort;
+    const binding_exists = self.sessionBindingFor(def.name) != null;
+    if (def.model == null and !binding_exists) return error.NoModel;
+    if (def.model) |*current| current.effort = effort;
+    if (self.session_active and (!self.config_reload_in_progress or force)) {
+        for (self.session_bindings.items) |*binding| {
+            if (!std.mem.eql(u8, binding.name, def.name)) continue;
+            binding.effort = effort;
+            break;
+        }
+    }
 }
 
 pub fn collectUnboundAgents(self: *const Self, alloc: std.mem.Allocator, out: *std.ArrayList([]const u8)) !void {
     for (0..self.agent_counter) |i| {
         const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));
         const def = self.getAgent(agent_type) orelse continue;
-        if (def.model == null) try out.append(alloc, def.name);
+        if (def.model == null and self.sessionBindingFor(def.name) == null) try out.append(alloc, def.name);
     }
 }
 
 pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: NewAgentDef) !AgentType {
-    if (self.agent_counter > std.math.maxInt(u6)) return error.TooManyAgents;
     if (self.findAgentType(def.name) != null) return error.DuplicateAgentName;
     if (def.tools.len > MAX_AGENT_TOOLS) return error.TooManyTools;
     for (def.tools) |name| if (name.len > 128) return error.NameTooLong;
 
-    const idx: AgentType = @enumFromInt(self.agent_counter);
+    const idx: AgentType = if (self.sessionBindingFor(def.name)) |binding|
+        binding.agent_type
+    else blk: {
+        var index = self.agent_counter;
+        while (index <= std.math.maxInt(u6)) : (index += 1) {
+            const candidate: AgentType = @enumFromInt(index);
+            var reserved = false;
+            for (self.session_bindings.items) |binding| {
+                if (binding.agent_type == candidate) {
+                    reserved = true;
+                    break;
+                }
+            }
+            if (!reserved) break :blk candidate;
+        }
+        return error.TooManyAgents;
+    };
     const alloc = self.prompt_arena.allocator();
     self.agents.set(idx, .{
         .name = try alloc.dupe(u8, def.name),
@@ -362,7 +525,10 @@ pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: NewAgentDef
         } else null,
     });
     try self.setAgentTools(idx, def.tools);
-    self.agent_counter += 1;
+    if (self.session_active and !self.config_reload_in_progress and self.sessionBindingFor(def.name) == null) {
+        try self.captureSessionBinding(cfg, idx);
+    }
+    self.agent_counter = @max(self.agent_counter, @as(u32, @intFromEnum(idx)) + 1);
     return idx;
 }
 
@@ -657,6 +823,7 @@ pub fn configureAgent(
 
 pub fn agentVision(self: *const Self, cfg: *const r.config.BlitzdenkCfg, agent_type: AgentType) bool {
     if (self.getAgent(agent_type)) |def| {
+        if (self.sessionBindingFor(def.name)) |binding| return binding.model.vision;
         if (def.model) |m| {
             const model = cfg.getModel(m.model) orelse return false;
             return model.vision;
@@ -795,6 +962,8 @@ pub fn resetLoadedTools(self: *Self) !void {
 pub fn deinit(self: *Self) void {
     self.loaded_tools.deinit(self.alloc);
     self.capability_arena.deinit();
+    self.session_bindings.deinit(self.alloc);
+    self.session_arena.deinit();
     for (self.skill_names.items) |name| self.alloc.free(name);
     self.skill_names.deinit(self.alloc);
     self.skills.deinit(self.alloc);
@@ -934,4 +1103,140 @@ test "capability catalogue probes binaries through the exec pool" {
     try pool.setSsh("u", "h", "/", "");
     defer pool.clearSsh();
     try std.testing.expect(route_before != pool.routeKey());
+}
+
+const ModelContractTest = struct {
+    factory: Self,
+    cfg: r.config.BlitzdenkCfg = .{},
+    config_arena: std.heap.ArenaAllocator,
+
+    fn init(self: *@This()) void {
+        self.* = .{
+            .factory = .{
+                .alloc = std.testing.allocator,
+                .prompt_arena = .init(std.testing.allocator),
+                .capability_arena = .init(std.testing.allocator),
+                .session_arena = .init(std.testing.allocator),
+                .io = std.testing.io,
+                .config_dir = null,
+                .skill_dir = null,
+            },
+            .config_arena = .init(std.testing.allocator),
+        };
+        self.factory.agents.set(.general, .{ .name = "general", .description = "", .prompt = "" });
+    }
+
+    fn deinit(self: *@This()) void {
+        self.factory.session_bindings.deinit(std.testing.allocator);
+        self.factory.session_arena.deinit();
+        self.factory.prompt_arena.deinit();
+        self.factory.capability_arena.deinit();
+        self.config_arena.deinit();
+    }
+
+    fn model(self: *@This(), name: []const u8, url: []const u8) !r.config.ModelHandle {
+        const provider = self.cfg.reserveProvider(url, "", "key") orelse return error.TooManyProviders;
+        provider.rate_limit = 37;
+        _ = provider.setSessionKeyHeader("x-session");
+        const handle = self.cfg.commitProvider();
+        const alloc = self.config_arena.allocator();
+        const stops = try alloc.alloc([]const u8, 1);
+        stops[0] = try alloc.dupe(u8, name);
+        return self.cfg.addModel(.{
+            .name = name,
+            .provider = handle,
+            .vision = true,
+            .replay_reasoning = false,
+            .cost = .{ .input = 2 },
+            .params = .{ .openai = .{ .stop = stops, .thinking = .{ .type = try alloc.dupe(u8, name) }, .temperature = 0.7 } },
+        });
+    }
+
+    fn config(self: *@This(), agent_type: AgentType) !r.models.Config {
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        return switch (self.factory.buildAgentApiConfig(agent_type, &self.cfg, &env)) {
+            .config => |value| value,
+            .diagnostic => error.InvalidProviderConfiguration,
+        };
+    }
+};
+
+test "session model contract owns configuration through reload and refreshes on new session" {
+    var fixture: ModelContractTest = undefined;
+    fixture.init();
+    defer fixture.deinit();
+    const factory = &fixture.factory;
+    const first = try fixture.model("first", "https://first.invalid");
+    try factory.setAgentModel(&fixture.cfg, .general, first, false);
+    try factory.setAgentEffort(.general, .high, false);
+    const worker = try factory.addAgent(&fixture.cfg, .{ .name = "worker", .description = "", .prompt = "", .model = .{ .model = first, .effort = .max } });
+    try factory.startSession(&fixture.cfg);
+    var live = try r.agent.Agent.init(std.testing.allocator, std.testing.io, try fixture.config(worker), .{});
+    defer live.deinit();
+
+    fixture.cfg.reset();
+    _ = fixture.config_arena.reset(.free_all);
+    _ = factory.prompt_arena.reset(.free_all);
+    factory.agents = .initFill(null);
+    factory.agents.set(.general, .{ .name = "general", .description = "", .prompt = "" });
+    factory.agent_counter = 3;
+    factory.config_reload_in_progress = true;
+    const second = try fixture.model("second", "https://second.invalid");
+    try factory.setAgentModel(&fixture.cfg, .general, second, false);
+    try factory.setAgentEffort(.general, .low, false);
+    const newcomer = try factory.addAgent(&fixture.cfg, .{ .name = "newcomer", .description = "", .prompt = "", .model = .{ .model = second } });
+    const reordered = try factory.addAgent(&fixture.cfg, .{ .name = "worker", .description = "", .prompt = "", .model = .{ .model = second, .effort = .low } });
+    try factory.applySessionBindings(&fixture.cfg);
+    factory.config_reload_in_progress = false;
+
+    try std.testing.expectEqual(worker, reordered);
+    try std.testing.expect(worker != newcomer);
+    const pinned = try fixture.config(reordered);
+    try std.testing.expectEqualStrings("first", pinned.model);
+    try std.testing.expectEqualStrings("https://first.invalid", pinned.base_url);
+    try std.testing.expectEqualStrings("first", pinned.params.openai.stop.?[0]);
+    try std.testing.expectEqualStrings("first", pinned.params.openai.thinking.?.type);
+    try std.testing.expectEqualStrings("x-session", pinned.session_key_header);
+    try std.testing.expectEqual(@as(u32, 37), pinned.rate_limit);
+    try std.testing.expectEqual(r.config.ReasoningEffort.max, pinned.reasoning_effort.?);
+    try std.testing.expect(pinned.vision);
+    try std.testing.expect(!pinned.replay_reasoning);
+    try std.testing.expectEqual(@as(f64, 2), factory.modelCost(&fixture.cfg, "first", .{ .input_tokens = 1_000_000 }));
+    try std.testing.expectEqualStrings("second", (try fixture.config(newcomer)).model);
+    try std.testing.expectEqualStrings("first", factory.agentModelName(&fixture.cfg, .general).?);
+    try std.testing.expectEqual(r.config.ReasoningEffort.high, factory.agentEffort(.general).?);
+    try std.testing.expectEqualStrings("first", live.model.languageModel().modelId());
+    var spawned = try r.agent.Agent.init(std.testing.allocator, std.testing.io, pinned, .{});
+    defer spawned.deinit();
+    try std.testing.expectEqualStrings("first", spawned.model.languageModel().modelId());
+
+    try factory.startSession(&fixture.cfg);
+    try std.testing.expectEqualStrings("second", (try fixture.config(reordered)).model);
+    try std.testing.expectEqual(r.config.ReasoningEffort.low, factory.agentEffort(.general).?);
+    try std.testing.expectEqualStrings("first", live.model.languageModel().modelId());
+}
+
+test "runtime model changes and forced reloads update the session contract" {
+    var fixture: ModelContractTest = undefined;
+    fixture.init();
+    defer fixture.deinit();
+    const factory = &fixture.factory;
+    const first = try fixture.model("first", "https://first.invalid");
+    const second = try fixture.model("second", "https://second.invalid");
+    try factory.setAgentModel(&fixture.cfg, .general, first, false);
+    try factory.startSession(&fixture.cfg);
+    try factory.setAgentModel(&fixture.cfg, .general, second, false);
+    try factory.setAgentEffort(.general, .max, false);
+    try std.testing.expectEqualStrings("second", (try fixture.config(.general)).model);
+    try std.testing.expectEqual(r.config.ReasoningEffort.max, factory.agentEffort(.general).?);
+    factory.config_reload_in_progress = true;
+    try factory.setAgentModel(&fixture.cfg, .general, first, true);
+    try factory.setAgentEffort(.general, .low, true);
+    factory.config_reload_in_progress = false;
+    try std.testing.expectEqualStrings("first", (try fixture.config(.general)).model);
+    try std.testing.expectEqual(r.config.ReasoningEffort.low, factory.agentEffort(.general).?);
+    const late = try factory.addAgent(&fixture.cfg, .{ .name = "late", .description = "", .prompt = "", .model = .{ .model = second } });
+    try std.testing.expect(factory.sessionBindingFor("late") != null);
+    try std.testing.expectEqualStrings("second", (try fixture.config(late)).model);
 }

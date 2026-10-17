@@ -586,3 +586,66 @@ const HistoryTrace = struct {
         self.count += 1;
     }
 };
+
+test "cached provider clients outlive request arenas" {
+    const alloc = std.testing.allocator;
+    inline for (.{ sdk.openai.Chat, sdk.anthropic.Chat, sdk.responses.Chat, sdk.compat.Chat }) |Chat| {
+        var chat = try Chat.init(alloc, "offline", .{ .api_key = "", .base_url = "unsupported://example" });
+        defer chat.deinit(alloc);
+        var scratch = std.heap.ArenaAllocator.init(alloc);
+        {
+            defer scratch.deinit();
+            try std.testing.expectError(error.NetworkError, chat.languageModel().generate(scratch.allocator(), std.testing.io, .{}, null, 0));
+            const client = chat.client orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(alloc.ptr, client.allocator.ptr);
+            try std.testing.expectEqual(alloc.vtable, client.allocator.vtable);
+        }
+        const client = chat.client.?;
+        try std.testing.expectError(error.NetworkError, chat.languageModel().generate(alloc, std.testing.io, .{}, null, 0));
+        try std.testing.expectEqual(client, chat.client.?);
+    }
+}
+
+test "streamed reasoning details form complete replay blocks and visible traces" {
+    const Fixture = struct {
+        bytes: usize = 0,
+        fn emit(ctx: ?*anyopaque, chunk: sdk.StreamChunk) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            if (chunk.type == .reasoning) self.bytes += chunk.text.len;
+        }
+    };
+    const alloc = std.testing.allocator;
+    const stream =
+        \\data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","index":0,"text":"Think ","format":"unknown"}]}}]}
+        \\data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","index":0,"text":"carefully"},{"type":"reasoning.encrypted","index":1,"data":"abc"}]}}]}
+        \\data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.encrypted","index":1,"data":"def"}],"content":"Done"},"finish_reason":"stop"}]}
+        \\data: [DONE]
+    ;
+    var fixture: Fixture = .{};
+    var ctx = sdk.model.StreamContext{ .emit = Fixture.emit, .emit_ctx = &fixture };
+    const result = try sdk.openai.parseChatStream(alloc, stream, &ctx);
+    defer alloc.destroy(result);
+    defer result.deinit(alloc);
+    try std.testing.expectEqualStrings("Think carefully", result.reasoning);
+    try std.testing.expectEqual(result.reasoning.len, fixture.bytes);
+    var details = try std.json.parseFromSlice(std.json.Value, alloc, result.reasoning_signature, .{});
+    defer details.deinit();
+    try std.testing.expectEqual(@as(usize, 2), details.value.array.items.len);
+    try std.testing.expectEqualStrings("Think carefully", details.value.array.items[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings("abcdef", details.value.array.items[1].object.get("data").?.string);
+}
+
+test "reasoning content and reasoning details are displayed only once" {
+    const alloc = std.testing.allocator;
+    const Fixture = struct {
+        fn emit(_: ?*anyopaque, _: sdk.StreamChunk) void {}
+    };
+    var ctx = sdk.model.StreamContext{ .emit = Fixture.emit };
+    const result = try sdk.openai.parseChatStream(alloc,
+        \\data: {"choices":[{"delta":{"reasoning_content":"one","reasoning_details":[{"type":"reasoning.text","index":0,"text":"one"}]}}]}
+        \\data: {"choices":[{"delta":{"reasoning_content":"two","reasoning_details":[{"type":"reasoning.text","index":0,"text":"two"}]}}]}
+    , &ctx);
+    defer alloc.destroy(result);
+    defer result.deinit(alloc);
+    try std.testing.expectEqualStrings("onetwo", result.reasoning);
+}

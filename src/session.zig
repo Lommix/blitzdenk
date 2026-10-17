@@ -53,10 +53,14 @@ fn decodeMessage(alloc: std.mem.Allocator, wire: WireMessage) !sdk.Message {
     var parts: std.ArrayList(sdk.Part) = .empty;
     for (wire.parts) |part| switch (part) {
         .text => |text| try parts.append(alloc, .{ .text = text }),
-        .thinking => |thinking| try parts.append(alloc, .{ .reasoning = .{
-            .text = thinking.text,
-            .signature = thinking.signature orelse "",
-        } }),
+        .thinking => |thinking| {
+            const signature = if (thinking.signature) |value| try sdk.reasoning.normalizeDetails(alloc, value) else "";
+            const text = if (thinking.text.len == 0 and signature.len > 0)
+                try sdk.reasoning.textFromDetails(alloc, signature)
+            else
+                thinking.text;
+            try parts.append(alloc, .{ .reasoning = .{ .text = text, .signature = signature } });
+        },
         .image => |image| try parts.append(alloc, .{ .image = .{
             .url = try std.fmt.allocPrint(alloc, "data:{s};base64,{s}", .{ image.media_type, image.data }),
             .media_type = image.media_type,
@@ -108,7 +112,7 @@ fn encodeMessage(alloc: std.mem.Allocator, message: sdk.Message) !WireMessage {
         .text => |text| try parts.append(alloc, .{ .text = try util.sanitizeUtf8(alloc, text) }),
         .reasoning => |reasoning| try parts.append(alloc, .{ .thinking = .{
             .text = try util.sanitizeUtf8(alloc, reasoning.text),
-            .signature = if (reasoning.signature.len > 0) reasoning.signature else null,
+            .signature = if (reasoning.signature.len > 0) try sdk.reasoning.normalizeDetails(alloc, reasoning.signature) else null,
         } }),
         .image => |image| try parts.append(alloc, .{ .image = try encodeImage(image) }),
         .tool_call => |call| try parts.append(alloc, .{ .tool_call = .{
@@ -174,7 +178,16 @@ pub const SaveState = struct {
     agents: []const WireAgent = &.{},
 };
 
+pub const TokenState = struct {
+    usage: sdk.Usage = .{},
+    context_tokens: u64 = 0,
+    context_from_provider: bool = false,
+    context_estimate: u64 = 0,
+    model: []const u8 = "",
+};
+
 pub const WireAgent = struct {
+    tokens: TokenState = .{},
     id: u32,
     type_idx: u8 = 0,
     name: []const u8 = "",
@@ -282,6 +295,8 @@ pub fn applySaveState(a: *app.App, save: *const SaveState) !void {
     }
     a.main_agent_id = if (save.main_agent) |id| .unpack(id) else null;
     if (a.main_agent_id) |id| a.registry.pin(id);
+    for (save.archived_agents) |entry| a.registry.addHistoricalUsage(entry.tokens.model, entry.tokens.usage);
+    a.sdk_usage = if (a.mainAgent()) |agent| agent.usage else .{};
     a.dirty = true;
     a.running = false;
 }
@@ -314,7 +329,16 @@ fn restoreSubAgent(a: *app.App, entry: *const WireAgent, alloc: std.mem.Allocato
     errdefer a.registry.release(id);
     agent.background = entry.background;
     try setRestoredChat(agent, entry.chat, alloc);
+    agent.usage = entry.tokens.usage;
+    const same_model = std.mem.eql(u8, entry.tokens.model, agent.model.languageModel().modelId());
+    const restore_context = same_model and entry.tokens.context_tokens > 0;
+    if (restore_context) agent.setContextState(.{
+        .tokens = entry.tokens.context_tokens,
+        .from_provider = entry.tokens.context_from_provider,
+        .estimate = entry.tokens.context_estimate,
+    });
     try a.configureAgent(id, agent);
+    if (!restore_context) agent.refreshContextEstimate();
     agent.reported_task_done = true;
     a.registry.slots[id.index].state.store(.complete, .release);
 }
@@ -353,6 +377,7 @@ const SessionTestRig = struct {
         self.factory = .{
             .alloc = std.testing.allocator,
             .prompt_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+            .session_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
             .capability_arena = std.heap.ArenaAllocator.init(std.testing.allocator),
             .io = io,
             .config_dir = null,
@@ -363,7 +388,7 @@ const SessionTestRig = struct {
         _ = self.cfg.reserveProvider("http://localhost:8080/v1", "", "").?;
         const provider = self.cfg.commitProvider();
         const model = try self.cfg.addModel(.{ .name = "local-model", .provider = provider });
-        try self.factory.setAgentModel(&self.cfg, .general, model);
+        try self.factory.setAgentModel(&self.cfg, .general, model, false);
         self.registry = r.agent_registry.Registry.init(std.testing.allocator, io);
 
         self.a = undefined;
@@ -395,6 +420,8 @@ const SessionTestRig = struct {
         self.registry.deinit();
         self.pool.deinit();
         self.env.deinit();
+        self.factory.session_bindings.deinit(std.testing.allocator);
+        self.factory.session_arena.deinit();
         self.factory.prompt_arena.deinit();
         self.factory.capability_arena.deinit();
         self.a.arena_session.deinit();
@@ -905,4 +932,97 @@ test "multiple pending child links survive declaration and journal replay" {
     try applySaveState(&resumed.a, &loaded.save);
     const entry = resumed.a.tool_status_entries.value.getAgent(parent).?.entries.get("launch").?;
     try testing.expectEqualSlices(r.AgentId, &children, entry.child_ids.items);
+}
+
+test "session restores token counts and normalizes legacy reasoning without losing signatures" {
+    const testing = std.testing;
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+    const signature = "[{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"one\"},{\"type\":\"reasoning.text\",\"index\":0,\"text\":\"two\"}]";
+    const tokens = TokenState{
+        .usage = .{ .input_tokens = 1200, .output_tokens = 20, .total_tokens = 1220, .cache_read_tokens = 600, .reasoning_tokens = 10 },
+        .context_tokens = 1800,
+        .context_from_provider = true,
+        .context_estimate = 1700,
+        .model = "local-model",
+    };
+    const save = SaveState{
+        .chat = &.{},
+        .timeline = &.{},
+        .main_agent = 65536,
+        .main_metadata = .{
+            .id = 65536,
+            .name = "main",
+            .tokens = tokens,
+            .chat = &.{.{ .role = .agent, .parts = &.{.{ .thinking = .{ .text = "", .signature = signature } }} }},
+        },
+    };
+    try applySaveState(&rig.a, &save);
+    const agent = rig.a.mainAgent().?;
+    try testing.expectEqualDeep(tokens.usage, agent.usage);
+    try testing.expectEqualDeep(tokens.usage, rig.a.sdk_usage);
+    try testing.expectEqualDeep(tokens.usage, rig.registry.usage());
+    const context = agent.contextSnapshot();
+    try testing.expectEqual(@as(u64, 1800), context.tokens);
+    try testing.expectEqual(@as(u64, 1700), context.estimate);
+    try testing.expect(context.from_provider);
+    const reasoning = agent.history()[0].parts()[0].reasoning;
+    try testing.expectEqualStrings("onetwo", reasoning.text);
+    var details = try std.json.parseFromSlice(std.json.Value, testing.allocator, reasoning.signature, .{});
+    defer details.deinit();
+    try testing.expectEqual(@as(usize, 1), details.value.array.items.len);
+    try testing.expectEqualStrings("onetwo", details.value.array.items[0].object.get("text").?.string);
+    const signed_message = try decodeMessage(rig.a.sessionAlloc(), .{ .role = .agent, .parts = &.{.{ .thinking = .{ .text = "thinking", .signature = "opaque-provider-signature" } }} });
+    try testing.expectEqualStrings("opaque-provider-signature", signed_message.parts()[0].reasoning.signature);
+}
+
+test "archived usage reaches usageByModel after restore" {
+    const testing = std.testing;
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+    const usage = sdk.Usage{ .input_tokens = 700, .output_tokens = 300, .total_tokens = 1000 };
+    const save = SaveState{
+        .chat = &.{},
+        .timeline = &.{},
+        .archived_ids = &.{70000},
+        .archived_agents = &.{.{ .id = 70000, .name = "archived", .tokens = .{ .usage = usage, .model = "retired-model" } }},
+    };
+    try applySaveState(&rig.a, &save);
+    try testing.expectEqualDeep(usage, rig.registry.usage());
+    const by_model = try rig.registry.usageByModel(testing.allocator);
+    defer testing.allocator.free(by_model);
+    try testing.expectEqual(@as(usize, 1), by_model.len);
+    try testing.expectEqualStrings("retired-model", by_model[0].model);
+    try testing.expectEqualDeep(usage, by_model[0].usage);
+}
+
+test "model change restores a fresh context estimate" {
+    const testing = std.testing;
+    var rig: SessionTestRig = undefined;
+    try rig.init();
+    defer rig.deinit();
+    const save = SaveState{
+        .chat = &.{},
+        .timeline = &.{},
+        .main_agent = 65536,
+        .main_metadata = .{
+            .id = 65536,
+            .name = "main",
+            .tokens = .{
+                .usage = .{ .input_tokens = 1200, .output_tokens = 20, .total_tokens = 1220 },
+                .context_tokens = 1800,
+                .context_from_provider = true,
+                .context_estimate = 1700,
+                .model = "old-model",
+            },
+            .chat = &.{.{ .role = .user, .parts = &.{.{ .text = "hello" }} }},
+        },
+    };
+    try applySaveState(&rig.a, &save);
+    const context = rig.a.mainAgent().?.contextSnapshot();
+    try testing.expect(context.tokens > 0);
+    try testing.expect(!context.from_provider);
+    try testing.expectEqual(@as(u64, 0), context.estimate);
 }

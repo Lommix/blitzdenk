@@ -892,6 +892,8 @@ pub fn run(
                     app.lua_inject_hooks_enabled.store(false, .release);
                     var lua_reload_failed = false;
 
+                    context_factory.config_reload_in_progress = true;
+                    defer context_factory.config_reload_in_progress = false;
                     app.lua_vm.reset() catch |err| {
                         reset_failed = true;
                         lua_reload_failed = true;
@@ -923,6 +925,8 @@ pub fn run(
                         };
                     }
                     if (!lua_reload_failed) app.lua_vm.clearLastError();
+                    context_factory.config_reload_in_progress = false;
+                    try context_factory.applySessionBindings(&app.config);
                     app.lua_vm.readConfigFields();
                     app.invalidateTimelineRenderCache();
                     if (app.input_mode != .wizard) app.warnUnboundAgentModels();
@@ -1702,7 +1706,7 @@ fn printHeadlessFooter(app: *App, io: std.Io) void {
     const g = app.tool_status_entries.lock(io);
     const tool_count = g.ptr.agents[app.main_agent_id.?.index].entries.count();
     g.unlock();
-    const cost = app.config.modelCost(agent.model.languageModel().modelId(), app.sdk_usage);
+    const cost = app.context_factory.modelCost(&app.config, agent.model.languageModel().modelId(), app.sdk_usage);
 
     var buf: [256]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);

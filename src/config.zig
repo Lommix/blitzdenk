@@ -59,6 +59,12 @@ pub const ModelCost = struct {
     input: f64 = 0,
     output: f64 = 0,
     cache: f64 = 0,
+
+    pub fn calculate(self: ModelCost, usage: sdk.Usage) f64 {
+        return (@as(f64, @floatFromInt(usage.input_tokens)) / 1e6) * self.input +
+            (@as(f64, @floatFromInt(usage.output_tokens)) / 1e6) * self.output +
+            (@as(f64, @floatFromInt(usage.cache_read_tokens)) / 1e6) * self.cache;
+    }
 };
 
 pub const ModelSpec = struct {
@@ -148,9 +154,7 @@ pub const BlitzdenkCfg = struct {
         for (self.models[0..self.model_count]) |*model| {
             const cost = model.cost orelse continue;
             if (!std.mem.eql(u8, model.getName(), name)) continue;
-            return (@as(f64, @floatFromInt(usage.input_tokens)) / 1e6) * cost.input +
-                (@as(f64, @floatFromInt(usage.output_tokens)) / 1e6) * cost.output +
-                (@as(f64, @floatFromInt(usage.cache_read_tokens)) / 1e6) * cost.cache;
+            return cost.calculate(usage);
         }
         return 0;
     }

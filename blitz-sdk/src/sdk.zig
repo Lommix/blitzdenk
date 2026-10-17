@@ -1,4 +1,3 @@
-
 pub const types = @import("types.zig");
 pub const model = @import("model.zig");
 pub const options = @import("options.zig");
@@ -70,3 +69,9 @@ pub const embed = @import("embed.zig").embed;
 pub const embedMany = @import("embed.zig").embedMany;
 pub const generateImage = @import("image.zig").generateImage;
 pub const schemaFrom = schema.schemaFrom;
+
+pub const reasoning = @import("reasoning.zig");
+
+test {
+    @import("std").testing.refAllDecls(@This());
+}

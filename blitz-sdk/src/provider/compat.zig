@@ -18,6 +18,7 @@ pub const Options = struct {
 };
 
 pub const Chat = struct {
+    allocator: std.mem.Allocator,
     model_id: []const u8,
     api_key: []const u8,
     base_url: []const u8,
@@ -30,14 +31,24 @@ pub const Chat = struct {
     pub fn init(alloc: std.mem.Allocator, model_id: []const u8, opts: Options) !Chat {
         const base = opts.base_url orelse auth.resolveKey(opts.env, base_url_env) orelse "";
         const key = opts.api_key orelse auth.resolveKey(opts.env, "COMPAT_API_KEY") orelse "";
+        const owned_model = try alloc.dupe(u8, model_id);
+        errdefer alloc.free(owned_model);
+        const owned_key = try alloc.dupe(u8, key);
+        errdefer alloc.free(owned_key);
+        const owned_url = try alloc.dupe(u8, base);
+        errdefer alloc.free(owned_url);
+        const headers = try auth.cloneHeaders(alloc, opts.headers);
+        errdefer auth.freeHeaders(alloc, headers);
+        const session_header = try alloc.dupe(u8, opts.session_key_header);
         return .{
-            .model_id = try alloc.dupe(u8, model_id),
-            .api_key = try alloc.dupe(u8, key),
-            .base_url = try alloc.dupe(u8, base),
-            .extra_headers = try auth.cloneHeaders(alloc, opts.headers),
+            .allocator = alloc,
+            .model_id = owned_model,
+            .api_key = owned_key,
+            .base_url = owned_url,
+            .extra_headers = headers,
             .rate_limit = opts.rate_limit,
             .replay_reasoning = opts.replay_reasoning,
-            .session_key_header = try alloc.dupe(u8, opts.session_key_header),
+            .session_key_header = session_header,
         };
     }
 
@@ -49,14 +60,14 @@ pub const Chat = struct {
         alloc.free(self.session_key_header);
         if (self.client) |c| {
             c.deinit();
-            alloc.destroy(c);
+            self.allocator.destroy(c);
         }
     }
 
-    fn ensureClient(self: *Chat, alloc: std.mem.Allocator, io: std.Io) !*std.http.Client {
+    fn ensureClient(self: *Chat, io: std.Io) !*std.http.Client {
         if (self.client) |c| return c;
-        const c = try alloc.create(std.http.Client);
-        c.* = .{ .allocator = alloc, .io = io };
+        const c = try self.allocator.create(std.http.Client);
+        c.* = .{ .allocator = self.allocator, .io = io };
         self.client = c;
         return c;
     }
@@ -137,7 +148,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(alloc, io), url, body, headers, max_retries, requestOptions(self, params));
+        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(io), url, body, headers, max_retries, requestOptions(self, params));
         defer alloc.free(response);
         return openai.parseChatResponse(alloc, response);
     }
@@ -160,7 +171,7 @@ pub const Chat = struct {
         defer alloc.free(url);
         const request_options = requestOptions(self, params);
         var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
-        const sse_text = try jsonx.postSseWithRetry(alloc, io, client orelse try self.ensureClient(alloc, io), url, body, headers, max_retries, request_options, &live, emitLiveEvent);
+        const sse_text = try jsonx.postSseWithRetry(alloc, io, client orelse try self.ensureClient(io), url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         defer alloc.free(sse_text);
         if (!jsonx.sseHasData(sse_text)) return error.NetworkError;
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
@@ -194,7 +205,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/embeddings", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(alloc, io), url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation, .rate_limit = self.rate_limit, .rate_limit_url = self.base_url });
+        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(io), url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation, .rate_limit = self.rate_limit, .rate_limit_url = self.base_url });
         defer alloc.free(response);
         return openai.parseEmbedResponse(alloc, response);
     }

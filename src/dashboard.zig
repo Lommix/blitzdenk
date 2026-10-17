@@ -183,17 +183,17 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
     for (0..app.context_factory.agent_counter) |agent_idx| {
         const ag_type: r.ContextFactory.AgentType = @enumFromInt(agent_idx);
         const def = app.context_factory.agents.get(ag_type) orelse continue;
-        const model = def.model orelse continue;
+        const model_name = app.context_factory.agentModelName(&app.config, ag_type) orelse continue;
         last_idx = agent_idx;
         name_w = @max(name_w, strWidth(def.name));
-        const model_name = if (app.config.getModel(model.model)) |m| m.getName() else "unknown";
         model_w = @max(model_w, strWidth(model_name));
     }
 
     for (0..app.context_factory.agent_counter) |agent_idx| {
         const ag_type: r.ContextFactory.AgentType = @enumFromInt(agent_idx);
         const def = app.context_factory.agents.get(ag_type) orelse continue;
-        const model = def.model orelse continue;
+        const model_name = app.context_factory.agentModelName(&app.config, ag_type) orelse continue;
+        const effort = app.context_factory.agentEffort(ag_type) orelse continue;
 
         if (!header_shown) {
             try out.append(alloc, try r.tui.Line.new(alloc, "│", .{}, .{ .fg = app.theme.muted }));
@@ -205,10 +205,9 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
         try l.pushSpan(alloc, .{ .content = if (last_idx == agent_idx) "└[" else "├[", .style = .{ .fg = app.theme.muted } });
         try pushPadded(&l, alloc, def.name, name_w, .{ .fg = app.theme.muted, .modifier = .{ .bold = true } });
         try l.pushSpan(alloc, .{ .content = " ", .style = .{ .fg = app.theme.muted } });
-        const model_name = if (app.config.getModel(model.model)) |m| m.getName() else "unknown";
         try pushPadded(&l, alloc, model_name, model_w, .{ .fg = app.theme.info });
         try l.pushSpan(alloc, .{ .content = " ", .style = .{ .fg = app.theme.muted } });
-        try l.pushSpanPrint(alloc, "@{s}", .{@tagName(model.effort)}, .{ .fg = app.theme.text });
+        try l.pushSpanPrint(alloc, "@{s}", .{@tagName(effort)}, .{ .fg = app.theme.text });
         try out.append(alloc, l);
     }
 }

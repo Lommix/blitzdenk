@@ -705,7 +705,7 @@ pub const Blitz = LuaType{
                                 .task = agent.task_description,
                                 .state = stateLabel(slot_state, agent),
                                 .ctx = agent.contextPercent(),
-                                .context_tokens = agent.context_tokens,
+                                .context_tokens = agent.contextSnapshot().tokens,
                                 .context_limit = agent.context_limit,
                                 .model = agent.model.languageModel().modelId(),
                                 .main = if (a.main_agent_id) |main| main.pack() == id.pack() else false,
@@ -945,7 +945,7 @@ pub const Blitz = LuaType{
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, model: u32, force: ?bool) !void {
                                 if (try isToolVm(state)) return;
                                 const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
-                                try a.context_factory.setAgentModel(&a.config, agent_type, @enumFromInt(model));
+                                try a.context_factory.setAgentModel(&a.config, agent_type, @enumFromInt(model), force orelse false);
                                 try a.refreshLiveAgentTools();
                                 if (force orelse false) try a.refreshLiveAgentModels(agent_type);
                             }
@@ -968,7 +968,7 @@ pub const Blitz = LuaType{
                                 if (try isToolVm(state)) return;
                                 const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
                                 const eff = r.config.parseReasoningEffort(effort) orelse return error.UnknownEffort;
-                                try a.context_factory.setAgentEffort(agent_type, eff);
+                                try a.context_factory.setAgentEffort(agent_type, eff, force orelse false);
                                 try a.refreshLiveAgentTools();
                                 if (force orelse false) try a.refreshLiveAgentModels(agent_type);
                             }
@@ -985,10 +985,7 @@ pub const Blitz = LuaType{
                     .fn_ptr = LuaFnBind((struct {
                         fn lua_fn(a: *r.app.App, agent_type_id: u32) ![]const u8 {
                             const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
-                            const def = a.context_factory.agents.getPtrConst(agent_type).* orelse return error.UnknownAgent;
-                            const model = def.model orelse return error.NoModel;
-                            const entry = a.config.getModel(model.model) orelse return error.UnknownModel;
-                            return entry.getName();
+                            return a.context_factory.agentModelName(&a.config, agent_type) orelse return error.NoModel;
                         }
                     }).lua_fn, "get_model_name"),
                 } },
@@ -1002,9 +999,7 @@ pub const Blitz = LuaType{
                     .fn_ptr = LuaFnBind((struct {
                         fn lua_fn(a: *r.app.App, agent_type_id: u32) ![]const u8 {
                             const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
-                            const def = a.context_factory.agents.getPtrConst(agent_type).* orelse return error.UnknownAgent;
-                            const model = def.model orelse return error.NoModel;
-                            return @tagName(model.effort);
+                            return @tagName(a.context_factory.agentEffort(agent_type) orelse return error.NoModel);
                         }
                     }).lua_fn, "get_agent_effort"),
                 } },
@@ -1029,7 +1024,7 @@ pub const Blitz = LuaType{
                                 defer arena.deinit();
                                 const entries = try a.registry.usageByModel(arena.allocator());
                                 var cost: f64 = 0;
-                                for (entries) |e| cost += a.config.modelCost(e.model, e.usage);
+                                for (entries) |e| cost += a.context_factory.modelCost(&a.config, e.model, e.usage);
                                 const useage = a.registry.usage();
                                 return .{
                                     .input = useage.input_tokens,

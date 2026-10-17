@@ -43,6 +43,12 @@ pub const Status = enum {
 
 pub const Activity = enum { idle, processing, thinking, writing, calling, retrying };
 
+pub const ContextState = struct {
+    tokens: u64 = 0,
+    from_provider: bool = false,
+    estimate: u64 = 0,
+};
+
 pub const Identity = struct {
     type_idx: u8 = 0,
     name: []const u8 = "",
@@ -107,8 +113,8 @@ pub const Agent = struct {
     lua_hook_digests: inject.LuaHookDigests = .{},
     lua_reload_generation_seen: u64 = 0,
     usage: sdk.Usage = .{},
-    context_tokens: u64 = 0,
-    context_from_provider: bool = false,
+    context_state: ContextState = .{},
+    context_mutex: std.Io.Mutex = .init,
     context_limit: u64,
     status: Status = .idle,
     activity: Activity = .idle,
@@ -154,7 +160,7 @@ pub const Agent = struct {
         const task_description = try metadata.allocator().dupe(u8, options.identity.task_description);
         const cwd = try metadata.allocator().dupe(u8, options.identity.cwd);
         const params = try config.params.clone(metadata.allocator());
-        const model = try models.Model.init(metadata.allocator(), config);
+        const model = try models.Model.init(alloc, config);
         return .{
             .alloc = alloc,
             .io = io,
@@ -181,8 +187,8 @@ pub const Agent = struct {
         if (self.compact_task) |*task| task.deinit();
         if (self.task) |*task| task.deinit();
         if (self.messages) |*messages| messages.deinit();
-        if (self.pending_model) |*model| model.deinitClient();
-        self.model.deinitClient();
+        if (self.pending_model) |*model| model.deinit(self.alloc);
+        self.model.deinit(self.alloc);
         if (self.cache_key) |key| self.alloc.free(key);
         self.state_arena.deinit();
         self.step_arena.deinit();
@@ -250,10 +256,10 @@ pub const Agent = struct {
 
     pub fn updateModel(self: *Agent, config: models.Config) !void {
         const params = try config.params.clone(self.metadata.allocator());
-        const replacement = try models.Model.init(self.metadata.allocator(), config);
+        const replacement = try models.Model.init(self.alloc, config);
         const effort = config.reasoning_effort orelse self.reasoning_effort;
         if (self.task != null or self.compact_task != null) {
-            if (self.pending_model) |*stale| stale.deinitClient();
+            if (self.pending_model) |*stale| stale.deinit(self.alloc);
             self.pending_model = replacement;
             self.pending_effort = effort;
             self.pending_vision = config.vision;
@@ -271,8 +277,9 @@ pub const Agent = struct {
 
     fn installModel(self: *Agent, replacement: models.Model) void {
         self.run_model = null;
-        self.model.deinitClient();
+        self.model.deinit(self.alloc);
         self.model = replacement;
+        self.setContextState(.{});
     }
 
     pub fn applyPendingModel(self: *Agent) void {
@@ -405,7 +412,12 @@ pub const Agent = struct {
             self.clearRunHooks();
             return err;
         };
-        self.task.?.provider_context_tokens = if (self.context_from_provider) self.context_tokens else null;
+        const context = self.contextSnapshot();
+        self.task.?.provider_context_tokens = if (context.from_provider) context.tokens else null;
+        self.task.?.provider_context_estimate = context.estimate;
+        self.task.?.journal = self.journal;
+        self.task.?.journal_id = self.journal_id;
+        self.task.?.journal_usage = self.usage;
         self.task.?.compaction_count = self.compaction.completion_count.load(.acquire);
         self.status = .running;
         self.task.?.start();
@@ -445,10 +457,7 @@ pub const Agent = struct {
             .step => |step| {
                 self.usage.add(step.usage);
                 const step_context_tokens = step.usage.input_tokens + step.usage.cache_read_tokens + step.usage.cache_write_tokens;
-                if (step_context_tokens > 0 and step.compaction_count == self.compaction.completion_count.load(.acquire)) {
-                    self.context_tokens = step_context_tokens;
-                    self.context_from_provider = true;
-                }
+                if (step_context_tokens > 0) self.applyProviderContext(step_context_tokens, step.context_estimate, step.compaction_count);
                 self.endStream();
                 self.activity = .processing;
                 self.provider_retry_after_ms = null;
@@ -490,6 +499,8 @@ pub const Agent = struct {
         };
         if (!task.isFinished() or task.queue.count() != 0) return false;
         task.wait();
+        self.usage = task.journal_usage;
+        if (task.provider_context_tokens) |tokens| self.setContextState(.{ .tokens = tokens, .from_provider = true, .estimate = task.provider_context_estimate });
         const completed = task.result != null;
         const next_messages = if (completed) task.takeMessages() else null;
         const failure = task.failure;
@@ -523,7 +534,7 @@ pub const Agent = struct {
             const blocked_retry = failure != null and failure.? != error.Canceled and self.contextNearLimit();
             if ((is_overflow or blocked_retry) and !self.flags.overflow_recovery and has_checkpoint) {
                 self.flags.overflow_recovery = true;
-                self.context_from_provider = false;
+                self.clearProviderBasis();
                 self.requestCompaction(.auto, true);
                 if (!(self.startCompaction(null) catch false)) {
                     self.last_error = if (is_overflow) error.ContextOverflow else failure.?;
@@ -556,7 +567,54 @@ pub const Agent = struct {
 
     pub fn contextNearLimit(self: *const Agent) bool {
         if (self.context_limit == 0) return false;
-        return self.context_tokens >= compact.autoCompactLimit(self.context_limit);
+        return self.contextSnapshot().tokens >= compact.autoCompactLimit(self.context_limit);
+    }
+
+    pub fn contextSnapshot(self: *const Agent) ContextState {
+        const mutable: *Agent = @constCast(self);
+        mutable.context_mutex.lockUncancelable(mutable.io);
+        defer mutable.context_mutex.unlock(mutable.io);
+        return mutable.context_state;
+    }
+
+    pub fn setContextState(self: *Agent, next: ContextState) void {
+        self.context_mutex.lockUncancelable(self.io);
+        defer self.context_mutex.unlock(self.io);
+        self.context_state = next;
+    }
+
+    pub fn refreshContextEstimate(self: *Agent) void {
+        self.setContextState(.{ .tokens = self.estimateContext(self.history()) });
+    }
+
+    fn resetContextEstimate(self: *Agent, messages: []const sdk.Message) void {
+        self.setContextState(.{ .tokens = self.estimateContext(messages) });
+        if (self.task) |*task| {
+            task.provider_context_tokens = null;
+            task.provider_context_estimate = 0;
+        }
+    }
+
+    fn publishCompactionContext(self: *Agent, messages: []const sdk.Message) void {
+        const estimate = self.estimateContext(messages);
+        self.context_mutex.lockUncancelable(self.io);
+        defer self.context_mutex.unlock(self.io);
+        const count = self.compaction.completion_count.fetchAdd(1, .release) +% 1;
+        if (self.task) |*task| task.compaction_count = count;
+        self.context_state = .{ .tokens = estimate };
+    }
+
+    fn applyProviderContext(self: *Agent, tokens: u64, estimate: u64, compaction_count: usize) void {
+        self.context_mutex.lockUncancelable(self.io);
+        defer self.context_mutex.unlock(self.io);
+        if (compaction_count != self.compaction.completion_count.load(.acquire)) return;
+        self.context_state = .{ .tokens = tokens, .from_provider = true, .estimate = estimate };
+    }
+
+    fn clearProviderBasis(self: *Agent) void {
+        self.context_mutex.lockUncancelable(self.io);
+        defer self.context_mutex.unlock(self.io);
+        self.context_state.from_provider = false;
     }
 
     pub fn retryDue(self: *const Agent) bool {
@@ -606,12 +664,13 @@ pub const Agent = struct {
 
     pub fn contextPercent(self: *const Agent) u8 {
         if (self.context_limit == 0) return 0;
-        return @intCast(@min(100, self.context_tokens * 100 / self.context_limit));
+        return @intCast(@min(100, self.contextSnapshot().tokens * 100 / self.context_limit));
     }
 
-    fn requestStart(ctx: ?*anyopaque, _: sdk.options.RequestInfo) void {
+    fn requestStart(ctx: ?*anyopaque, info: sdk.options.RequestInfo) void {
         const self: *Agent = @ptrCast(@alignCast(ctx.?));
         _ = self.last_active_ns.swap(@intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds), .monotonic);
+        if (self.task) |*task| task.request_estimate = self.estimateContext(info.messages);
     }
 
     fn prepareStep(ctx: ?*anyopaque, info: sdk.options.PrepareStepInfo) anyerror!sdk.options.PrepareStepResult {
@@ -662,12 +721,28 @@ pub const Agent = struct {
         return .{ .messages = combined, .replace = replace, .replacement_kind = replacement_kind, .tools = refreshed_tools };
     }
 
+    fn estimateContext(self: *Agent, messages: []const sdk.Message) u64 {
+        const model_id = if (self.task) |*task| task.model.modelId() else self.model.languageModel().modelId();
+        const replay = switch (self.model) {
+            .openai => |chat| chat.replay_reasoning,
+            else => true,
+        };
+        return compact.estimateRequestTokens(model_id, self.tools, messages, replay);
+    }
+
     fn currentContextEstimate(self: *Agent, messages: []const sdk.Message) u64 {
+        const estimate = self.estimateContext(messages);
         if (self.task) |*task| {
-            return task.provider_context_tokens orelse compact.estimateNextRequestTokens(task.model.modelId(), self.tools, messages);
+            if (task.provider_context_tokens) |tokens| {
+                return tokens +| (if (task.provider_context_estimate > 0) estimate -| task.provider_context_estimate else 0);
+            }
+            return estimate;
         }
-        if (self.context_from_provider) return self.context_tokens;
-        return @max(self.context_tokens, compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, messages));
+        const context = self.contextSnapshot();
+        if (context.from_provider) {
+            return context.tokens +| (if (context.estimate > 0) estimate -| context.estimate else 0);
+        }
+        return @max(context.tokens, estimate);
     }
 
     fn maybeCompactForStep(self: *Agent, messages: []const sdk.Message) ?[]const sdk.Message {
@@ -702,18 +777,16 @@ pub const Agent = struct {
             return null;
         };
         self.compaction.noteSuccess();
-        self.resetInjectDigests();
         self.usage.add(outcome.usage);
-        self.context_tokens = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, cloned);
-        self.context_from_provider = false;
+        const context_estimate = self.estimateContext(cloned);
         self.compaction.last_compacted_message_count = cloned.len;
-        self.compaction.last_compacted_estimate = self.context_tokens;
+        self.compaction.last_compacted_estimate = context_estimate;
         self.compaction.must_progress_past_message_count = cloned.len;
         self.compaction.resetInFlight();
-        const compaction_count = self.compaction.completion_count.fetchAdd(1, .release) +% 1;
         if (self.task) |*task| {
             task.provider_context_tokens = null;
-            task.compaction_count = compaction_count;
+            task.provider_context_estimate = 0;
+            task.journal_usage.add(outcome.usage);
         }
         self.turn_checkpoint = 0;
         return cloned;
@@ -746,6 +819,7 @@ pub const Agent = struct {
         if (outcome) |value| {
             self.compaction.noteSuccess();
             self.compaction.completed_continue_after = self.compaction.continue_after;
+            self.usage.add(value.usage);
             self.publishHistory(.compaction, value.messages.messages) catch |err| {
                 var orphan = value.messages;
                 orphan.deinit();
@@ -758,14 +832,10 @@ pub const Agent = struct {
             self.messages = value.messages;
             self.history_gen +%= 1;
             self.turn_checkpoint = 0;
-            self.usage.add(value.usage);
-            self.context_tokens = compact.estimateNextRequestTokens(self.model.languageModel().modelId(), self.tools, self.history());
-            self.context_from_provider = false;
             self.compaction.last_compacted_message_count = self.history().len;
-            self.compaction.last_compacted_estimate = self.context_tokens;
+            self.compaction.last_compacted_estimate = self.contextSnapshot().tokens;
             self.compaction.must_progress_past_message_count = self.history().len;
             self.compaction.resetInFlight();
-            _ = self.compaction.completion_count.fetchAdd(1, .release);
             const display = self.tool_display.lock(self.io);
             display.ptr.clearRetainingCapacity();
             display.unlock();
@@ -826,8 +896,22 @@ pub const Agent = struct {
     }
 
     fn publishHistory(self: *Agent, change: sdk.options.HistoryChange, messages: []const sdk.Message) !void {
-        if (self.journal) |store| try store.publish(self.journal_id, change, messages);
-        if (change == .compaction) self.resetInjectDigests();
+        if (change == .compaction) {
+            self.publishCompactionContext(messages);
+            self.resetInjectDigests();
+        } else if (change != .append) {
+            self.resetContextEstimate(messages);
+        }
+        if (self.journal) |store| {
+            const context = self.contextSnapshot();
+            try store.publishState(self.journal_id, change, messages, .{
+                .usage = if (self.task) |*task| task.journal_usage else self.usage,
+                .context_tokens = context.tokens,
+                .context_from_provider = context.from_provider,
+                .context_estimate = context.estimate,
+                .model = self.model.languageModel().modelId(),
+            });
+        }
     }
 
     pub fn removeFromJournal(self: *Agent) void {
@@ -1123,8 +1207,9 @@ test "overflow recovery falls back to the history estimate when the provider bas
     try agent.setTools(&.{.{ .name = "test", .execute = Fixture.toolExecute }});
 
     try agent.observe(.{ .step = .{ .number = 1, .usage = .{ .input_tokens = 50_000 } } });
-    try std.testing.expect(agent.context_from_provider);
-    try std.testing.expectEqual(@as(u64, 50_000), agent.context_tokens);
+    const applied = agent.contextSnapshot();
+    try std.testing.expect(applied.from_provider);
+    try std.testing.expectEqual(@as(u64, 50_000), applied.tokens);
 
     const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
     try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .max_steps = 2 });
@@ -1133,7 +1218,7 @@ test "overflow recovery falls back to the history estimate when the provider bas
     try std.testing.expect(agent.reap());
 
     try std.testing.expectEqual(Status.compacting, agent.status);
-    try std.testing.expect(!agent.context_from_provider);
+    try std.testing.expect(!agent.contextSnapshot().from_provider);
     try std.testing.expect(agent.compact_task != null);
     try std.testing.expectEqual(true, agent.compaction.continue_after);
 }
@@ -1170,8 +1255,7 @@ test "run cannot start while an async compaction is in flight" {
         sdk.UserMessage(huge),
         sdk.AssistantMessage("recent"),
     });
-    agent.context_tokens = 55_000;
-    agent.context_from_provider = true;
+    agent.setContextState(.{ .tokens = 55_000, .from_provider = true });
 
     try std.testing.expect(try agent.startCompaction(null));
     try std.testing.expect(agent.compact_task != null);
@@ -1319,4 +1403,73 @@ test "prepared messages retain queued content after another injection" {
     try agent.queueReminder("next notice");
     try std.testing.expectEqual(@as(usize, 1), prepared.messages.len);
     try std.testing.expectEqualStrings("first notice", prepared.messages[0].text());
+}
+
+test "provider context retains its basis and includes new messages after resume" {
+    var agent = try Agent.init(std.testing.allocator, std.testing.io, .{
+        .api_key = "",
+        .model = "model",
+        .base_url = "unsupported://example",
+        .params = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    const history = [_]sdk.Message{sdk.UserMessage("before")};
+    try agent.setMessages(&history);
+    agent.setContextState(.{ .tokens = 1000, .from_provider = true, .estimate = compact.estimateNextRequestTokens("model", &.{}, &history) });
+    try std.testing.expectEqual(@as(u64, 1000), agent.currentContextEstimate(&history));
+    const grown = [_]sdk.Message{ history[0], sdk.UserMessage("x" ** 3000) };
+    try std.testing.expect(agent.currentContextEstimate(&grown) >= 2000);
+    try agent.replaceMessages(&history, .rewind);
+    try std.testing.expect(!agent.contextSnapshot().from_provider);
+    try std.testing.expect(agent.currentContextEstimate(&history) < 1000);
+}
+
+test "worker journals provider usage before UI events are drained" {
+    const store_mod = @import("session_store.zig");
+    const Fixture = struct {
+        fn modelId(_: *anyopaque) []const u8 {
+            return "model";
+        }
+        fn generate(_: *anyopaque, alloc: std.mem.Allocator, _: std.Io, _: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            const result = try alloc.create(sdk.model.GenerateResult);
+            result.* = .{
+                .text = try alloc.dupe(u8, "done"),
+                .finish_reason = .stop,
+                .usage = .{ .input_tokens = 1000, .cache_read_tokens = 200, .cache_write_tokens = 30, .output_tokens = 50, .reasoning_tokens = 20, .total_tokens = 1280 },
+            };
+            return result;
+        }
+        fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, _: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            return generate(ctx, alloc, io, params, client, retries);
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = store_mod.Store{ .gpa = std.testing.allocator, .io = std.testing.io, .base = .{ .handle = tmp.dir.handle } };
+    defer store.deinit();
+    try store.create("/project");
+    var agent = try Agent.init(std.testing.allocator, std.testing.io, .{ .api_key = "", .model = "model", .base_url = "unsupported://example", .params = .{ .openai = .{} } }, .{});
+    defer agent.deinit();
+    agent.journal = &store;
+    agent.journal_id = 65536;
+    try agent.publishMetadata(.agent);
+    try store.enqueue(.{ .kind = .main_agent, .agentID = agent.journal_id });
+    try agent.setMessages(&.{sdk.UserMessage("before")});
+    var fixture: u8 = 0;
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = "new prompt" });
+    agent.task.?.wait();
+    try std.testing.expect(agent.task.?.queue.count() > 0);
+    try std.testing.expectEqual(@as(u64, 0), agent.usage.total_tokens);
+    try store.flush();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const loaded = (try store_mod.load(arena.allocator(), std.testing.io, store.base, store.file_name.?)).?;
+    const tokens = loaded.save.main_metadata.?.tokens;
+    try std.testing.expectEqual(@as(u64, 1280), tokens.usage.total_tokens);
+    try std.testing.expectEqual(@as(u64, 20), tokens.usage.reasoning_tokens);
+    try std.testing.expectEqual(@as(u64, 1230), tokens.context_tokens);
+    try std.testing.expect(tokens.context_from_provider);
+    try std.testing.expect(tokens.context_estimate > 0);
+    try std.testing.expectEqualStrings("model", tokens.model);
 }

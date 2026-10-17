@@ -425,16 +425,26 @@ pub const Registry = struct {
         if (added.total_tokens == 0 and added.input_tokens == 0 and added.output_tokens == 0 and added.reasoning_tokens == 0 and added.cache_read_tokens == 0 and added.cache_write_tokens == 0) return;
         self.total_usage.add(added);
         slot.accounted_usage = agent.usage;
-        const model_name = agent.model.languageModel().modelId();
-        const entry = self.model_usage.getOrPut(self.alloc, model_name) catch return;
+        self.addModelUsage(agent.model.languageModel().modelId(), added);
+    }
+
+    pub fn addHistoricalUsage(self: *Registry, model: []const u8, amount: sdk.Usage) void {
+        self.total_usage.add(amount);
+        if (std.meta.eql(amount, .{})) return;
+        self.addModelUsage(model, amount);
+    }
+
+    fn addModelUsage(self: *Registry, model: []const u8, amount: sdk.Usage) void {
+        if (model.len == 0) return;
+        const entry = self.model_usage.getOrPut(self.alloc, model) catch return;
         if (!entry.found_existing) {
-            entry.key_ptr.* = self.alloc.dupe(u8, model_name) catch {
+            entry.key_ptr.* = self.alloc.dupe(u8, model) catch {
                 _ = self.model_usage.pop();
                 return;
             };
             entry.value_ptr.* = .{};
         }
-        entry.value_ptr.add(added);
+        entry.value_ptr.add(amount);
     }
 
     fn cancelDepth(self: *Registry, depth: u16) void {

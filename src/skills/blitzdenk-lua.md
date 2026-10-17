@@ -71,10 +71,15 @@ Every agent needs a bound model; unbound agents fail to spawn. Bind with
 `blitz.add_agent`. Set the effort separately with
 `blitz.set_agent_effort(agent_type, effort)`.
 
-Pass `force = true` to either call to also swap the model on live agents of
-that type: `blitz.set_agent_model(agent_type, handle, true)`. Idle
-agents swap at once. An agent mid-run keeps its current model until that run
-ends, then adopts the new one. Without `force`, only new agents use the change.
+After startup config loads, Blitzdenk copies each agent type's model,
+provider settings, and effort into a session contract. Hot reloads preserve
+existing bindings, including for agents spawned later. Newly registered types
+join the contract when configured. `/new` captures the latest config again.
+
+Outside hot reload, changing a type's model or effort updates future spawns
+in that session. During reload, an explicit force overrides the contract.
+Forced changes also reach live agents: idle agents adopt them immediately;
+busy agents finish their current run first.
 
 The first-run wizard writes `~/.config/blitzdenk/provider.lua` and `blitz.lua`
 imports it with `pcall(require, "provider")`. Edit or delete that file to
@@ -281,8 +286,8 @@ end
 
 `blitz.agent.get_model(agent_id)` returns the model id the live agent runs on
 right now, `blitz.agent.get_effort(agent_id)` its reasoning effort tag. A
-`set_agent_model`/`set_agent_effort` with `force = true` rewrites the type
-definition and queues the swap on live agents of that type: idle agents adopt
+`set_agent_model`/`set_agent_effort` with `force = true` rewrites the session
+contract and queues the swap on live agents of that type: idle agents adopt
 at once, a running agent keeps pumping data on its previous binding until the
 run ends. Type getters and the render can go stale mid run; the live read
 never does. Unknown agent ids raise an error.

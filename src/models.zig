@@ -165,20 +165,6 @@ pub const Model = union(Kind) {
         }
     }
 
-    /// Release runtime resources when the configuration is owned by an arena.
-    pub fn deinitClient(self: *Model) void {
-        switch (self.*) {
-            inline else => |*chat| {
-                if (chat.client) |client| {
-                    const alloc = client.allocator;
-                    client.deinit();
-                    alloc.destroy(client);
-                    chat.client = null;
-                }
-            },
-        }
-    }
-
     pub fn languageModel(self: *Model) sdk.LanguageModel {
         return switch (self.*) {
             inline else => |*chat| chat.languageModel(),

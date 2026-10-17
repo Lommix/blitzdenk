@@ -207,13 +207,23 @@ pub fn autoCompactLimit(context_limit: u64) u64 {
 }
 
 pub fn estimateNextRequestTokens(model_id: []const u8, tools: []const sdk.Tool, messages: []const sdk.Message) u64 {
+    return estimateRequestTokens(model_id, tools, messages, true);
+}
+
+pub fn estimateRequestTokens(model_id: []const u8, tools: []const sdk.Tool, messages: []const sdk.Message, replay_reasoning: bool) u64 {
     var bytes: u64 = model_id.len;
     for (tools) |tool| {
         bytes += tool.name.len;
         bytes += tool.description.len;
         bytes += tool.input_schema.len;
     }
-    for (messages) |message| bytes += messageBytes(message);
+    for (messages) |message| {
+        bytes += message.role.string().len + 8;
+        for (message.parts()) |part| {
+            if (part == .reasoning and !replay_reasoning) continue;
+            bytes += partBytes(part);
+        }
+    }
     return approxTokens(bytes);
 }
 
@@ -351,12 +361,12 @@ fn messageBytes(message: sdk.Message) u64 {
 fn partBytes(part: sdk.Part) u64 {
     return switch (part) {
         .text => |text| text.len,
-        .reasoning => |reasoning| reasoning.text.len + reasoning.signature.len,
+        .reasoning => |reasoning| reasoning.text.len,
         .image => IMAGE_ESTIMATE_TOKENS * 3,
         .tool_call => |call| call.id.len + call.name.len + call.input.len,
         .tool_result => |result| result.id.len + result.name.len + result.output.len + 16,
         .file => |file| file.url.len + file.media_type.len + file.filename.len,
-        .provider_data => |data| data.provider.len + data.data.len,
+        .provider_data => |data| data.provider.len + sdk.reasoning.providerBytes(data.data),
     };
 }
 
@@ -550,4 +560,17 @@ test "ordinary SDK compaction generates and installs a summary" {
     defer forced.deinit();
     try std.testing.expectEqual(@as(usize, 2), forced.messages.messages.len);
     try std.testing.expect(std.mem.endsWith(u8, forced.messages.messages[1].text(), "generated summary"));
+}
+
+test "reasoning replay signatures do not inflate context or cut points" {
+    const plain = [_]sdk.Message{.{ .role = .assistant, .content = &.{sdk.Part.reasoningPart("thinking", "")} }};
+    const signed = [_]sdk.Message{.{ .role = .assistant, .content = &.{sdk.Part.reasoningPart("thinking", "signature" ** 100_000)} }};
+    try std.testing.expectEqual(estimateNextRequestTokens("model", &.{}, &plain), estimateNextRequestTokens("model", &.{}, &signed));
+    try std.testing.expectEqual(computeCutIndex(&plain), computeCutIndex(&signed));
+}
+test "context estimates follow reasoning replay settings" {
+    const plain = [_]sdk.Message{sdk.AssistantMessage("answer")};
+    const traced = [_]sdk.Message{.{ .role = .assistant, .content = &.{ .{ .text = "answer" }, sdk.Part.reasoningPart("thinking" ** 1000, "signature") } }};
+    try std.testing.expectEqual(estimateRequestTokens("model", &.{}, &plain, false), estimateRequestTokens("model", &.{}, &traced, false));
+    try std.testing.expect(estimateRequestTokens("model", &.{}, &traced, true) > estimateRequestTokens("model", &.{}, &plain, true));
 }

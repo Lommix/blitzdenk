@@ -4,6 +4,7 @@ const model = @import("../model.zig");
 const auth = @import("../auth.zig");
 const errors = @import("../errors.zig");
 const jsonx = @import("jsonx.zig");
+const reasoning_mod = @import("../reasoning.zig");
 
 pub const default_base_url = "https://api.openai.com/v1";
 pub const api_key_env = "OPENAI_API_KEY";
@@ -19,6 +20,7 @@ pub const Options = struct {
 };
 
 pub const Chat = struct {
+    allocator: std.mem.Allocator,
     model_id: []const u8,
     api_key: []const u8,
     base_url: []const u8,
@@ -30,14 +32,24 @@ pub const Chat = struct {
 
     pub fn init(alloc: std.mem.Allocator, model_id: []const u8, opts: Options) !Chat {
         const key = opts.api_key orelse auth.resolveKey(opts.env, api_key_env) orelse "";
+        const owned_model = try alloc.dupe(u8, model_id);
+        errdefer alloc.free(owned_model);
+        const owned_key = try alloc.dupe(u8, key);
+        errdefer alloc.free(owned_key);
+        const owned_url = try alloc.dupe(u8, opts.base_url);
+        errdefer alloc.free(owned_url);
+        const headers = try auth.cloneHeaders(alloc, opts.headers);
+        errdefer auth.freeHeaders(alloc, headers);
+        const session_header = try alloc.dupe(u8, opts.session_key_header);
         return .{
-            .model_id = try alloc.dupe(u8, model_id),
-            .api_key = try alloc.dupe(u8, key),
-            .base_url = try alloc.dupe(u8, opts.base_url),
-            .extra_headers = try auth.cloneHeaders(alloc, opts.headers),
+            .allocator = alloc,
+            .model_id = owned_model,
+            .api_key = owned_key,
+            .base_url = owned_url,
+            .extra_headers = headers,
             .rate_limit = opts.rate_limit,
             .replay_reasoning = opts.replay_reasoning,
-            .session_key_header = try alloc.dupe(u8, opts.session_key_header),
+            .session_key_header = session_header,
         };
     }
 
@@ -49,14 +61,14 @@ pub const Chat = struct {
         alloc.free(self.session_key_header);
         if (self.client) |c| {
             c.deinit();
-            alloc.destroy(c);
+            self.allocator.destroy(c);
         }
     }
 
-    fn ensureClient(self: *Chat, alloc: std.mem.Allocator, io: std.Io) !*std.http.Client {
+    fn ensureClient(self: *Chat, io: std.Io) !*std.http.Client {
         if (self.client) |c| return c;
-        const c = try alloc.create(std.http.Client);
-        c.* = .{ .allocator = alloc, .io = io };
+        const c = try self.allocator.create(std.http.Client);
+        c.* = .{ .allocator = self.allocator, .io = io };
         self.client = c;
         return c;
     }
@@ -139,7 +151,7 @@ pub const Chat = struct {
         const url = try std.fmt.allocPrint(alloc, "{s}/chat/completions", .{self.base_url});
         defer alloc.free(url);
 
-        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(alloc, io), url, body, headers, max_retries, requestOptions(self, params));
+        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(io), url, body, headers, max_retries, requestOptions(self, params));
         defer alloc.free(response);
         return parseChatResponse(alloc, response);
     }
@@ -163,7 +175,7 @@ pub const Chat = struct {
 
         const request_options = requestOptions(self, params);
         var live = LiveStream{ .alloc = alloc, .sctx = sctx, .options = request_options };
-        const sse_text = try jsonx.postSseWithRetry(alloc, io, client orelse try self.ensureClient(alloc, io), url, body, headers, max_retries, request_options, &live, emitLiveEvent);
+        const sse_text = try jsonx.postSseWithRetry(alloc, io, client orelse try self.ensureClient(io), url, body, headers, max_retries, request_options, &live, emitLiveEvent);
         defer alloc.free(sse_text);
         if (!jsonx.sseHasData(sse_text)) return error.NetworkError;
         var final_ctx = model.StreamContext{ .emit = emitFinalTool, .emit_ctx = sctx };
@@ -197,7 +209,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/embeddings", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(alloc, io), url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation, .rate_limit = self.rate_limit, .rate_limit_url = self.base_url });
+        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(io), url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation, .rate_limit = self.rate_limit, .rate_limit_url = self.base_url });
         defer alloc.free(response);
         return parseEmbedResponse(alloc, response);
     }
@@ -234,7 +246,7 @@ pub const Chat = struct {
         defer auth.freeHeaders(alloc, headers);
         const url = try std.fmt.allocPrint(alloc, "{s}/images/generations", .{self.base_url});
         defer alloc.free(url);
-        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(alloc, io), url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation, .rate_limit = self.rate_limit, .rate_limit_url = self.base_url });
+        const response = try jsonx.postWithRetry(alloc, io, client orelse try self.ensureClient(io), url, w.written(), headers, max_retries, .{ .timeout_ms = params.timeout_ms, .cancellation = params.cancellation, .rate_limit = self.rate_limit, .rate_limit_url = self.base_url });
         defer alloc.free(response);
         return parseImageResponse(alloc, response);
     }
@@ -281,7 +293,7 @@ fn emitLiveEvent(ctx: ?*anyopaque, data: []const u8) !void {
     const event = try std.fmt.allocPrint(live.alloc, "data: {s}\n", .{data});
     defer live.alloc.free(event);
     var event_ctx = model.StreamContext{ .emit = emitLive, .emit_ctx = live.sctx };
-    const result = try parseChatStream(live.alloc, event, &event_ctx);
+    const result = try parseChatStreamImpl(live.alloc, event, &event_ctx, false);
     defer live.alloc.destroy(result);
     defer result.deinit(live.alloc);
 }
@@ -317,7 +329,11 @@ pub fn parseChatResponse(a: std.mem.Allocator, body: []const u8) !*model.Generat
                             }
                         }
                         if (msg.object.get("reasoning_details")) |details| {
-                            if (details == .array) result.reasoning_signature = try std.json.Stringify.valueAlloc(a, details, .{});
+                            if (details == .array) {
+                                const raw = try std.json.Stringify.valueAlloc(a, details, .{});
+                                defer a.free(raw);
+                                result.reasoning_signature = try reasoning_mod.normalizeDetails(a, raw);
+                            }
                         }
                         if (msg.object.get("tool_calls")) |tcs| {
                             if (tcs == .array) {
@@ -359,6 +375,10 @@ pub fn parseChatResponse(a: std.mem.Allocator, body: []const u8) !*model.Generat
         }
     }
 
+    if (result.reasoning.len == 0 and result.reasoning_signature.len > 0) {
+        a.free(result.reasoning);
+        result.reasoning = try reasoning_mod.textFromDetails(a, result.reasoning_signature);
+    }
     result.usage = parseUsage(root);
     if (root.object.get("id")) |v| {
         if (v == .string) result.response.id = try a.dupe(u8, v.string);
@@ -402,6 +422,10 @@ pub fn parseUsage(root: std.json.Value) types.Usage {
 }
 
 pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.StreamContext) !*model.GenerateResult {
+    return parseChatStreamImpl(a, sse_text, sctx, true);
+}
+
+fn parseChatStreamImpl(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.StreamContext, save_details: bool) !*model.GenerateResult {
     const result = try a.create(model.GenerateResult);
     errdefer {
         result.deinit(a);
@@ -477,16 +501,26 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
                 sctx.send(.{ .type = .text, .text = c.string });
             }
         }
-        if (delta.object.get("reasoning_content") orelse delta.object.get("reasoning")) |c| {
-            if (c == .string and c.string.len > 0) {
-                try reasoning.appendSlice(a, c.string);
-                sctx.send(.{ .type = .reasoning, .text = c.string });
-            }
+        const reasoning_delta = delta.object.get("reasoning_content") orelse delta.object.get("reasoning");
+        const has_reasoning_delta = if (reasoning_delta) |c| c == .string and c.string.len > 0 else false;
+        if (has_reasoning_delta) {
+            const content = reasoning_delta.?.string;
+            try reasoning.appendSlice(a, content);
+            sctx.send(.{ .type = .reasoning, .text = content });
         }
         if (delta.object.get("reasoning_details")) |details| {
             if (details == .array) {
                 for (details.array.items) |detail| {
-                    try reasoning_details.append(a, try std.json.Stringify.valueAlloc(a, detail, .{}));
+                    if (save_details) try reasoning_details.append(a, try std.json.Stringify.valueAlloc(a, detail, .{}));
+                    if (!has_reasoning_delta and detail == .object) {
+                        for ([_][]const u8{ "text", "summary" }) |key| {
+                            if (detail.object.get(key)) |content| {
+                                if (content != .string) continue;
+                                try reasoning.appendSlice(a, content.string);
+                                sctx.send(.{ .type = .reasoning, .text = content.string });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -540,7 +574,11 @@ pub fn parseChatStream(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
     try normalizeTaggedReasoning(a, &text, &reasoning);
     result.text = try text.toOwnedSlice(a);
     result.reasoning = try reasoning.toOwnedSlice(a);
-    if (reasoning_details.items.len > 0) result.reasoning_signature = try encodeJsonArray(a, reasoning_details.items);
+    if (reasoning_details.items.len > 0) {
+        const raw = try encodeJsonArray(a, reasoning_details.items);
+        defer a.free(raw);
+        result.reasoning_signature = try reasoning_mod.normalizeDetails(a, raw);
+    }
     for (reasoning_details.items) |detail| a.free(detail);
     reasoning_details.deinit(a);
     reasoning_details = .empty;

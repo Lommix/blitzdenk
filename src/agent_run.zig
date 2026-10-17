@@ -22,6 +22,7 @@ pub const StepEvent = struct {
     tool_results: []const ToolResultEvent = &.{},
     usage: sdk.Usage = .{},
     compaction_count: usize = 0,
+    context_estimate: u64 = 0,
 };
 
 pub const Event = union(enum) {
@@ -56,7 +57,7 @@ pub const EventQueue = struct {
         try self.events.append(self.arena.allocator(), try cloneEvent(self.arena.allocator(), event));
     }
 
-    fn appendStep(self: *EventQueue, step: sdk.options.StepInfo, compaction_count: usize) !void {
+    fn appendStep(self: *EventQueue, step: sdk.options.StepInfo, compaction_count: usize, context_estimate: u64) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const alloc = self.arena.allocator();
@@ -71,6 +72,7 @@ pub const EventQueue = struct {
             .tool_results = tool_results,
             .usage = step.usage,
             .compaction_count = compaction_count,
+            .context_estimate = context_estimate,
         } });
     }
 
@@ -113,6 +115,11 @@ pub const RunTask = struct {
     checkpoint_arena: std.heap.ArenaAllocator,
     checkpoint: ?[]const sdk.Message = null,
     provider_context_tokens: ?u64 = null,
+    provider_context_estimate: u64 = 0,
+    request_estimate: u64 = 0,
+    journal: ?*@import("session_store.zig").Store = null,
+    journal_id: u32 = 0,
+    journal_usage: sdk.Usage = .{},
     compaction_count: usize = 0,
     failure: ?anyerror = null,
 
@@ -203,6 +210,8 @@ pub const RunTask = struct {
             .on_tool_call = onTool,
             .on_tool_call_ctx = self,
         };
+        options.hooks.on_response = onResponse;
+        options.hooks.on_response_ctx = self;
         options.hooks.on_step_finish = onStep;
         options.hooks.on_step_finish_ctx = self;
         self.tool_call_hook = options.hooks.on_tool_call;
@@ -273,17 +282,38 @@ pub const RunTask = struct {
         };
     }
 
+    fn onResponse(ctx: ?*anyopaque, info: sdk.options.ResponseInfo) void {
+        const self: *RunTask = @ptrCast(@alignCast(ctx.?));
+        if (self.options.hooks.on_response) |hook| hook(self.options.hooks.on_response_ctx, info);
+        if (info.err != null) return;
+        const context_tokens = info.usage.input_tokens + info.usage.cache_read_tokens + info.usage.cache_write_tokens;
+        if (context_tokens > 0) {
+            self.provider_context_tokens = context_tokens;
+            self.provider_context_estimate = self.request_estimate;
+        }
+        self.journal_usage.add(info.usage);
+        if (self.journal) |store| store.enqueue(.{
+            .kind = .usage,
+            .agentID = self.journal_id,
+            .tokens = .{
+                .usage = self.journal_usage,
+                .context_tokens = self.provider_context_tokens orelse self.request_estimate,
+                .context_from_provider = self.provider_context_tokens != null,
+                .context_estimate = self.provider_context_estimate,
+                .model = self.model.modelId(),
+            },
+        }) catch |err| log.err("journal usage failed: {s}", .{@errorName(err)});
+    }
+
     fn onStep(ctx: ?*anyopaque, step: sdk.options.StepInfo) void {
         const self: *RunTask = @ptrCast(@alignCast(ctx.?));
-        const context_tokens = step.usage.input_tokens + step.usage.cache_read_tokens + step.usage.cache_write_tokens;
-        if (context_tokens > 0) self.provider_context_tokens = context_tokens;
         if (!builtin.is_test) log.info("step {d}: in={d} cached={d} out={d}", .{
             step.number,
             step.usage.input_tokens + step.usage.cache_read_tokens,
             step.usage.cache_read_tokens,
             step.usage.output_tokens,
         });
-        self.queue.appendStep(step, self.compaction_count) catch |err| {
+        self.queue.appendStep(step, self.compaction_count, self.provider_context_estimate) catch |err| {
             log.err("dropped step event step={d} calls={d} results={d}: {s}", .{ step.number, step.tool_calls.len, step.tool_results.len, @errorName(err) });
         };
     }
@@ -364,6 +394,7 @@ fn cloneEvent(alloc: std.mem.Allocator, event: Event) !Event {
             .tool_results = try cloneToolResultEvents(alloc, value.tool_results),
             .usage = value.usage,
             .compaction_count = value.compaction_count,
+            .context_estimate = value.context_estimate,
         } },
         .provider_error => |value| .{ .provider_error = .{
             .status_code = value.status_code,
