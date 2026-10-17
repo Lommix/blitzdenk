@@ -586,7 +586,7 @@
 ---@field inline_images? boolean
 ---@field notify_on_reload? boolean
 ---@field debug_log? boolean
----strict|default|yolo|smart
+---strict|default|yolo
 ---@field approval_mode? string
 
 ---@class BlitzTheme

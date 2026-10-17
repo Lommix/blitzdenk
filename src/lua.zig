@@ -494,7 +494,7 @@ const AppFlagsDef = LuaType{ .table_def = .{ .name = "BlitzAppFlags", .fields = 
     .{ .name = "inline_images", .ty = LuaType.boolean, .optional = true },
     .{ .name = "notify_on_reload", .ty = LuaType.boolean, .optional = true },
     .{ .name = "debug_log", .ty = LuaType.boolean, .optional = true },
-    .{ .name = "approval_mode", .ty = LuaType.string, .optional = true, .desc = "strict|default|yolo|smart" },
+    .{ .name = "approval_mode", .ty = LuaType.string, .optional = true, .desc = "strict|default|yolo" },
 } } };
 const FlagsStrings = struct {
     show_thinking: ?bool = null,
