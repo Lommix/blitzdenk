@@ -232,6 +232,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.WRITE,
 	blitz.tools.ASK,
 	blitz.tools.START_MCP,
+	blitz.tools.SKILL,
 	Tools.codemode,
 	Tools.cancel_tool,
 	Tools.message_tool,
@@ -469,6 +470,7 @@ on code quality. Not for finding bugs in written code; use code-reviewer.
 	tools = {
 		blitz.tools.READ,
 		blitz.tools.BASH,
+		blitz.tools.SKILL,
 	},
 })
 
@@ -500,5 +502,6 @@ testing gaps. Do not overstate severity. Tone: matter-of-fact, no flattery, no f
 	tools = {
 		blitz.tools.READ,
 		blitz.tools.BASH,
+		blitz.tools.SKILL,
 	},
 })

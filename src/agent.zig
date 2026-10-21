@@ -230,6 +230,13 @@ pub const Agent = struct {
         self.flags.agents_context_files_seen = false;
     }
 
+    pub fn hasTool(self: *const Agent, name: []const u8) bool {
+        for (self.tools) |tool| {
+            if (std.mem.eql(u8, tool.name, name)) return true;
+        }
+        return false;
+    }
+
     pub fn setTools(self: *Agent, tools: []const sdk.Tool) !void {
         if (self.task != null) return error.RunInProgress;
         try self.setToolsLive(tools);

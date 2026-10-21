@@ -56,6 +56,7 @@ pub const general_default_tool_set = .{
     r.tools.search.GlobTool,
     r.tools.search.GrepTool,
     r.tools.start.StartMcpTool,
+    r.tools.skill.SkillTool,
 };
 
 pub const AgentDef = struct {
@@ -775,6 +776,7 @@ pub fn resetDefs(self: *Self) void {
             r.tools.read.ReadTool.def.name,
             r.tools.ask.AskTool.def.name,
             r.tools.start.StartMcpTool.def.name,
+            r.tools.skill.SkillTool.def.name,
         }),
     });
 

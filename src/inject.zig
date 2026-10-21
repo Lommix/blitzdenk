@@ -164,6 +164,7 @@ fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.A
 fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
     const def = app.context_factory.agentTypeAt(agent.type_idx) orelse return;
     if (!def.skills) return;
+    if (!agent.hasTool(r.tools.skill.SkillTool.def.name)) return;
 
     const alloc = app.gpa;
     const reg = &app.context_factory.skills;
@@ -173,7 +174,7 @@ fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.A
     for (reg.entries.items) |entry| {
         if (!entry.meta.model_invocable) continue;
         count += 1;
-        try rows.writer.print("- `{s}` ({s}): ", .{ entry.meta.name, entry.path });
+        try rows.writer.print("- `{s}`: ", .{entry.meta.name});
         try writeCatalogField(&rows.writer, entry.meta.description);
         try rows.writer.writeByte('\n');
     }
@@ -185,7 +186,7 @@ fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.A
 }
 
 fn inject_mcp_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
-    if (!agentHasMcpStartTool(agent)) return;
+    if (!agent.hasTool(r.tools.start.StartMcpTool.def.name)) return;
 
     const names = app.context_factory.availableMcpNames();
     if (names.len == 0) {
@@ -221,7 +222,7 @@ fn emitCatalog(w: *std.Io.Writer, tag: []const u8, count: usize, serialized: []c
 }
 
 fn inject_capability_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
-    if (!agentHasBashTool(agent)) return;
+    if (!agent.hasTool(r.tools.bash.BashTool.def.name)) return;
 
     const factory = app.context_factory;
     try factory.ensureCapabilityCatalog(app.exec_pool);
@@ -250,20 +251,6 @@ fn inject_lua_reload_notice(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.
     if (generation == agent.lua_reload_generation_seen) return;
     agent.lua_reload_generation_seen = generation;
     try w.writeAll("[LUA VM RELOADED]\n");
-}
-
-fn agentHasMcpStartTool(agent: *const r.agent.Agent) bool {
-    for (agent.tools) |tool| {
-        if (std.mem.eql(u8, tool.name, r.tools.start.StartMcpTool.def.name)) return true;
-    }
-    return false;
-}
-
-fn agentHasBashTool(agent: *const r.agent.Agent) bool {
-    for (agent.tools) |tool| {
-        if (std.mem.eql(u8, tool.name, r.tools.bash.BashTool.def.name)) return true;
-    }
-    return false;
 }
 
 fn writeCatalogField(w: *std.Io.Writer, value: []const u8) !void {

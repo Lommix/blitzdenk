@@ -121,6 +121,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
     blitz.tools.PATCH,
     blitz.tools.GLOB,
     blitz.tools.GREP,
+    blitz.tools.SKILL,
     tools.web_fetch,          -- custom tool from require("tools")
 })
 ```

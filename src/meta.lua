@@ -244,6 +244,8 @@
 ---@field GREP string
 ---load a registered mcp tools into session
 ---@field START_MCP string
+---load a skill's full instructions by name
+---@field SKILL string
 
 ---@class BlitzAgentCreatedEvent
 ---packed AgentId of the new agent

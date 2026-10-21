@@ -1471,6 +1471,7 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "GLOB", .desc = "read only file search", .ty = LuaType.string, .value = .{ .string = tl.search.GlobTool.def.name } },
             .{ .name = "GREP", .desc = "read only text serach", .ty = LuaType.string, .value = .{ .string = tl.search.GrepTool.def.name } },
             .{ .name = "START_MCP", .desc = "load a registered mcp tools into session", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },
+            .{ .name = "SKILL", .desc = "load a skill's full instructions by name", .ty = LuaType.string, .value = .{ .string = tl.skill.SkillTool.def.name } },
         },
     },
 };
