@@ -926,6 +926,7 @@ test "append log interleaves agents and compaction preserves display and preview
 }
 
 test "partial exchange and torn record repair retain archive and make resumed work reachable" {
+    std.testing.log_level = .err;
     var fixture: TestLog = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -970,6 +971,7 @@ test "partial exchange and torn record repair retain archive and make resumed wo
 }
 
 test "invalid complete records stop before their effects" {
+    std.testing.log_level = .err;
     const invalid = [_][]const u8{
         "{\"kind\":\"unknown\"}\n",
         "{\"kind\":\"message\",\"agentID\":99,\"message\":{\"role\":\"user\",\"parts\":[]}}\n",
@@ -1042,6 +1044,7 @@ test "partial writes acknowledge complete lines and retain exactly the suffix" {
 }
 
 test "metadata switching removal and cleared status fields survive replay" {
+    std.testing.log_level = .err;
     var fixture: TestLog = undefined;
     try fixture.init();
     defer fixture.deinit();

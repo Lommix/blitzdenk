@@ -146,6 +146,7 @@ fn futureTimestamp(seconds: i96) std.Io.Timestamp {
 }
 
 test "editor activity in a real config dir drives reload decisions" {
+    std.testing.log_level = .err;
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
