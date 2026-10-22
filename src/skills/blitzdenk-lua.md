@@ -671,6 +671,9 @@ end
 and skips the ssh wrap. Use it for commands that only make sense locally, like
 `git status` before a push or a local `ssh-add` check.
 
+Use `ctx.cwd` for files the tools see. Use `ctx.local_cwd` only with
+`force_local`.
+
 ## UI and status
 
 ```lua

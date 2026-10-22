@@ -113,7 +113,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     defer ctx.base.exec_pool.alloc.free(res.stdout);
     defer ctx.base.exec_pool.alloc.free(res.stderr);
 
-    const full = formatBashResult(ctx.alloc, res.stdout, res.stderr, res.exit_code, res.signal, res.ty == .timeout, timeout_ms, res.stdout_truncated, res.stderr_truncated) catch
+    const stderr = r.filterTransportStderr(ctx, res.stderr);
+    const full = formatBashResult(ctx.alloc, res.stdout, stderr, res.exit_code, res.signal, res.ty == .timeout, timeout_ms, res.stdout_truncated, res.stderr_truncated) catch
         return r.errResult(call, "oom");
 
     const spill = if (r.isOversized(full, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES))

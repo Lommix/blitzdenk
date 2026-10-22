@@ -1281,12 +1281,29 @@ pub const App = struct {
         if (self.main_agent_id == id) self.main_agent_id = null;
     }
 
+    const BACKGROUND_RESULT_INLINE_CAP: usize = 4000;
+
     fn finishBackgroundAgent(self: *App, agent_id: r.AgentId, agent: *r.agent.Agent) !void {
-        var notice_buf: [160]u8 = undefined;
-        const notice = if (self.writeBackgroundResult(agent_id, agent)) |path| blk: {
+        var content: std.ArrayList(u8) = .empty;
+        defer content.deinit(self.gpa);
+        try self.collectBackgroundResult(agent, &content);
+
+        const inline_end = r.util.utf8Prefix(content.items, BACKGROUND_RESULT_INLINE_CAP).len;
+        const escaped = r.util.escapeMarkup(self.gpa, content.items[0..inline_end]) catch null;
+        defer if (escaped) |text| self.gpa.free(text);
+        const preview = escaped orelse content.items[0..inline_end];
+
+        const notice = if (content.items.len <= BACKGROUND_RESULT_INLINE_CAP)
+            try std.fmt.allocPrint(self.gpa, "Agent result done:\n{s}", .{preview})
+        else if (self.saveBackgroundResult(agent_id, content.items)) |path| blk: {
             defer self.gpa.free(path);
-            break :blk try std.fmt.bufPrint(&notice_buf, "Agent result done: {s}", .{path});
-        } else |err| try std.fmt.bufPrint(&notice_buf, "Agent result failed to save: {s}", .{@errorName(err)});
+            break :blk try std.fmt.allocPrint(
+                self.gpa,
+                "Agent result done (first {d} of {d} bytes; full text saved at: {s}):\n{s}",
+                .{ inline_end, content.items.len, path, preview },
+            );
+        } else |_| try std.fmt.allocPrint(self.gpa, "Agent result done:\n{s}", .{preview});
+        defer self.gpa.free(notice);
 
         if (agent.parent) |packed_id| {
             const parent_id = r.AgentId.unpack(packed_id);
@@ -1302,9 +1319,7 @@ pub const App = struct {
         }
     }
 
-    fn writeBackgroundResult(self: *App, agent_id: r.AgentId, agent: *const r.agent.Agent) ![]const u8 {
-        var content: std.ArrayList(u8) = .empty;
-        defer content.deinit(self.gpa);
+    fn collectBackgroundResult(self: *App, agent: *const r.agent.Agent, content: *std.ArrayList(u8)) !void {
         var wrote_text = false;
         var index = agent.history().len;
         while (index > 0) {
@@ -1321,15 +1336,17 @@ pub const App = struct {
             };
             if (wrote_text) break;
         }
-        if (!wrote_text) {
-            if (agent.last_error) |err|
-                try content.print(self.gpa, "Agent failed: {s}\n", .{@errorName(err)})
-            else
-                try content.appendSlice(self.gpa, "Agent produced no text output.\n");
-        }
+        if (wrote_text) return;
+        if (agent.last_error) |err|
+            try content.print(self.gpa, "Agent failed: {s}\n", .{@errorName(err)})
+        else
+            try content.appendSlice(self.gpa, "Agent produced no text output.\n");
+    }
+
+    fn saveBackgroundResult(self: *App, agent_id: r.AgentId, content: []const u8) ![]const u8 {
         var name_buf: [64]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "agent-{d}.md", .{agent_id.pack()});
-        return r.artifact.write(self.exec_pool, self.gpa, name, content.items);
+        return r.artifact.write(self.exec_pool, self.gpa, name, content);
     }
 
     pub fn enterPermSelect(self: *App) void {
@@ -1656,7 +1673,9 @@ pub const App = struct {
         }
         switch (task.outcome) {
             .connected => {
-                self.exec_pool.setSsh(task.user(), task.host(), task.cwd(), task.control()) catch {
+                var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const cwd = r.util.expandHomePath(task.cwd(), task.home(), &cwd_buf);
+                self.exec_pool.setSsh(task.user(), task.host(), cwd, task.control()) catch {
                     self.notifications.append(self.gpa, self.nowMillis(), "SSH: failed: failed to allocate target", .{}) catch {};
                     return;
                 };
@@ -1821,7 +1840,7 @@ pub const App = struct {
             .registry = self.registry,
             .exec_pool = self.exec_pool,
             .self_id = id,
-            .cwd = agent.cwd,
+            .cwd = if (agent.cwd.len > 0) agent.cwd else self.cwd,
             .permissions = .{ .ctx = @ptrCast(@constCast(self)), .request = requestPermissionOpaque },
             .display = .{ .ctx = @ptrCast(@constCast(self)) },
             .app = @ptrCast(@constCast(self)),
@@ -5652,7 +5671,7 @@ test "finished retained agents survive reaping and take queued messages" {
     try std.testing.expectEqual(@as(usize, 0), app.timeline.items.len);
 }
 
-test "background agent result is written for read" {
+test "background agent result is collected and saved" {
     var agent = try r.agent.Agent.init(std.testing.allocator, std.testing.io, .{
         .api_key = "key",
         .model = "model",
@@ -5671,7 +5690,10 @@ test "background agent result is written for read" {
     var pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &env);
     defer pool.deinit();
     app.exec_pool = &pool;
-    const path = try app.writeBackgroundResult(.{ .index = 127, .generation = 65535 }, &agent);
+    var collected: std.ArrayList(u8) = .empty;
+    defer collected.deinit(std.testing.allocator);
+    try app.collectBackgroundResult(&agent, &collected);
+    const path = try app.saveBackgroundResult(.{ .index = 127, .generation = 65535 }, collected.items);
     defer std.testing.allocator.free(path);
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, path) catch {};
     try std.testing.expect(std.mem.startsWith(u8, path, "/tmp/blitzdenk/"));

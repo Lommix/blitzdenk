@@ -150,7 +150,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
         const cmd_path = commandPath(cmd);
-        const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, cmd_path }) catch
+        const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.routeCwd(), cmd_path }) catch
             return r.errResult(call, "failed to resolve path");
 
         if (cmd == .file_add) {
@@ -204,7 +204,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     for (patch.commands, abs_paths.items, 0..) |cmd, resolved, ci| {
         if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-        const abs_cmd = withResolvedPath(alloc, ctx.base.cwd, cmd, resolved) catch
+        const abs_cmd = withResolvedPath(alloc, ctx.base.routeCwd(), cmd, resolved) catch
             return r.errResult(call, "failed to resolve path");
 
         var diag: ApplyDiagnostics = .{};
@@ -1198,12 +1198,7 @@ fn readFileViaExec(
 
     if (res.ty != .success) {
         if (missing_ok and std.mem.indexOf(u8, res.stderr, "No such file") != null) return null;
-        if (diag) |d| {
-            d.message = if (res.stderr.len > 0)
-                (ctx.alloc.dupe(u8, res.stderr) catch "read command failed")
-            else
-                "read command failed";
-        }
+        if (diag) |d| d.message = r.execFailure(ctx, "failed to read", path, res.stderr);
         return ApplyError.ExecFailed;
     }
 
@@ -1225,10 +1220,7 @@ fn writeFileViaExec(
     defer ctx.base.exec_pool.alloc.free(res.stderr);
 
     if (res.ty != .success) {
-        diag.message = if (res.stderr.len > 0)
-            (ctx.alloc.dupe(u8, res.stderr) catch "write command failed")
-        else
-            "write command failed";
+        diag.message = r.execFailure(ctx, "failed to write", path, res.stderr);
         return ApplyError.ExecFailed;
     }
 }
@@ -1241,10 +1233,8 @@ fn deleteFileViaExec(ctx: r.ToolContext, path: []const u8, diag: *ApplyDiagnosti
     if (res.ty != .success) {
         if (std.mem.indexOf(u8, res.stderr, "No such file") != null) {
             diag.message = "file does not exist";
-        } else if (res.stderr.len > 0) {
-            diag.message = ctx.alloc.dupe(u8, res.stderr) catch "delete command failed";
         } else {
-            diag.message = "delete command failed";
+            diag.message = r.execFailure(ctx, "failed to delete", path, res.stderr);
         }
         return ApplyError.ExecFailed;
     }

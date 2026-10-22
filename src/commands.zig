@@ -234,7 +234,10 @@ pub const Command = union(enum) {
                 if (path.len == 0) return;
                 if (app.exec_pool.ssh_active and app.exec_pool.ssh_target != null) {
                     const base = app.exec_pool.effectiveCwd(app.cwd);
-                    if (std.fs.path.resolve(app.appAlloc(), &.{ base, path })) |resolved| {
+                    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const home = app.path_completion.remote_home orelse "";
+                    const target_path = r.util.expandHomePath(path, home, &path_buf);
+                    if (std.fs.path.resolve(app.appAlloc(), &.{ base, target_path })) |resolved| {
                         if (app.exec_pool.ssh_target) |*tar| {
                             const new_remote = app.exec_pool.alloc.dupe(u8, resolved) catch return;
                             app.exec_pool.alloc.free(tar.cwd);

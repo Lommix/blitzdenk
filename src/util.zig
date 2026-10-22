@@ -18,6 +18,33 @@ pub fn sanitizeUtf8(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf8(text)});
 }
 
+pub fn escapeMarkup(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (text) |c| switch (c) {
+        '&' => try out.appendSlice(alloc, "&amp;"),
+        '<' => try out.appendSlice(alloc, "&lt;"),
+        '>' => try out.appendSlice(alloc, "&gt;"),
+        else => try out.append(alloc, c),
+    };
+    return out.toOwnedSlice(alloc);
+}
+
+pub fn utf8Prefix(text: []const u8, max: usize) []const u8 {
+    if (text.len <= max) return text;
+    var end = max;
+    while (end > 0 and (text[end] & 0xC0) == 0x80) end -= 1;
+    return text[0..end];
+}
+
+pub fn expandHomePath(path: []const u8, home: []const u8, buf: []u8) []const u8 {
+    if (home.len == 0 or home[0] != '/') return path;
+    if (std.mem.eql(u8, path, "~")) return home;
+    if (std.mem.startsWith(u8, path, "~/"))
+        return std.fmt.bufPrint(buf, "{s}{s}", .{ home, path[1..] }) catch path;
+    return path;
+}
+
 ///Mostly clones `T`. passthrough for function ptr and anything opaque.
 pub fn deepClone(comptime T: type, value: T, alloc: std.mem.Allocator) !T {
     return switch (@typeInfo(T)) {
@@ -63,4 +90,12 @@ pub fn deepClone(comptime T: type, value: T, alloc: std.mem.Allocator) !T {
 
         else => @compileError("deepClone unsupported type: " ++ @typeName(T)),
     };
+}
+
+test "expand home path" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/home/u", expandHomePath("~", "/home/u", &buf));
+    try std.testing.expectEqualStrings("/home/u/proj", expandHomePath("~/proj", "/home/u", &buf));
+    try std.testing.expectEqualStrings("~user/x", expandHomePath("~user/x", "/home/u", &buf));
+    try std.testing.expectEqualStrings("~/x", expandHomePath("~/x", "", &buf));
 }

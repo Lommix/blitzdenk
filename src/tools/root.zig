@@ -26,6 +26,51 @@ pub const STATUS_BUF: usize = 512;
 /// Global file mutation lock, it just works!
 pub var file_mutex: std.Io.Mutex = .init;
 
+pub fn isHarnessPath(path: []const u8) bool {
+    var prefix_buf: [80]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&prefix_buf, "{s}/{d}/", .{ r.util.TMP_DIR, std.c.getpid() }) catch return false;
+    return std.mem.startsWith(u8, path, prefix);
+}
+
+fn transportLine(line: []const u8) bool {
+    const text = std.mem.trim(u8, line, " \t\r");
+    return std.mem.startsWith(u8, text, "ssh:") or
+        std.mem.startsWith(u8, text, "Warning: Permanently added") or
+        std.mem.startsWith(u8, text, "Warning: Identity file") or
+        std.mem.startsWith(u8, text, "Host key verification failed") or
+        std.mem.startsWith(u8, text, "kex_exchange_identification:") or
+        std.mem.indexOf(u8, text, "Permission denied (publickey") != null;
+}
+
+pub fn filterTransportStderr(ctx: ToolContext, stderr: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, stderr, " \t\r\n");
+    if (trimmed.len == 0) return "";
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(ctx.alloc);
+    var lines = std.mem.splitScalar(u8, trimmed, '\n');
+    while (lines.next()) |line| {
+        if (transportLine(line)) continue;
+        if (out.items.len > 0) out.append(ctx.alloc, '\n') catch continue;
+        out.appendSlice(ctx.alloc, std.mem.trim(u8, line, " \t\r")) catch continue;
+    }
+    if (out.items.len == 0) return "";
+    return ctx.alloc.dupe(u8, out.items) catch "";
+}
+
+pub fn failureDetail(ctx: ToolContext, stderr: []const u8) []const u8 {
+    const filtered = filterTransportStderr(ctx, stderr);
+    return if (filtered.len == 0) "command failed" else filtered;
+}
+
+pub fn execFailure(ctx: ToolContext, action: []const u8, path: []const u8, stderr: []const u8) []const u8 {
+    const detail = failureDetail(ctx, stderr);
+    return std.fmt.allocPrint(ctx.alloc, "{s} {s}: {s}", .{ action, path, detail }) catch action;
+}
+
+pub fn pathFailure(ctx: ToolContext, message: []const u8, path: []const u8) []const u8 {
+    return std.fmt.allocPrint(ctx.alloc, "{s}: {s}", .{ message, path }) catch message;
+}
+
 pub fn setToolStatusPrint(ctx: ToolContext, call: ToolCall, comptime fmt: []const u8, args: anytype) void {
     const app: *r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var buf: [STATUS_BUF]u8 = undefined;

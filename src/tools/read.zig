@@ -39,12 +39,13 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
 
     var buf: [r.STATUS_BUF]u8 = undefined;
-    const rel_path = if (ctx.base.cwd.len > 0)
-        r.replaceAll(args.file_path, ctx.base.cwd, ".", &buf)
+    const cwd = ctx.base.routeCwd();
+    const rel_path = if (cwd.len > 0)
+        r.replaceAll(args.file_path, cwd, ".", &buf)
     else
         args.file_path;
 
-    const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.base.cwd, args.file_path }) catch
+    const resolved = std.fs.path.resolve(ctx.alloc, &.{ ctx.base.routeCwd(), args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
@@ -67,20 +68,21 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     const is_url = std.mem.startsWith(u8, args.file_path, "http://") or
         std.mem.startsWith(u8, args.file_path, "https://");
+    const harness_path = !is_url and r.isHarnessPath(resolved);
 
     const sniffed_type = if (is_url)
         null
     else
-        sniffImageType(ctx, resolved);
+        sniffImageType(ctx, resolved, harness_path);
     if (is_url) {
         if (!ctx.agent().flags.vision)
             return r.errResult(call, "URL reads load images, but this model has no vision; use bash with curl to fetch the content");
-        return viewImage(ctx, call, args.file_path, true, resolved);
+        return viewImage(ctx, call, args.file_path, true, resolved, harness_path);
     }
     if (sniffed_type) |_| {
         if (!ctx.agent().flags.vision)
             return nonVisionResult(ctx, call, sniffed_type);
-        return viewImage(ctx, call, args.file_path, false, resolved);
+        return viewImage(ctx, call, args.file_path, false, resolved, harness_path);
     }
 
     const start_line: u64 = if (args.offset) |o| (if (o > 0) o else 1) else 1;
@@ -90,43 +92,31 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const start_str = std.fmt.bufPrint(&start_buf, "{d}", .{start_line}) catch return r.errResult(call, "out of memory");
     const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{max_lines}) catch return r.errResult(call, "out of memory");
 
-    const read_res = ctx.base.exec_pool.runAndWait(.{
-        .argv = &.{
-            "/bin/sh",
-            "-c",
-            \\if [ ! -e "$1" ]; then echo "MISS:$1"; exit 0; fi
-            \\if [ ! -f "$1" ]; then echo "NOTFILE:$1"; exit 0; fi
-            \\if [ ! -r "$1" ]; then echo "NOREAD:$1"; exit 0; fi
-            \\total=$(wc -l < "$1")
-            \\[ -n "$(tail -c 1 "$1")" ] && total=$((total + 1))
-            \\if [ "$total" -eq 0 ]; then echo "EMPTY:"; exit 0; fi
-            \\if [ "$total" -lt "$2" ]; then echo "OFFSET:$total"; exit 0; fi
-            \\cat -n -- "$1" | tail -n +"$2" | head -n "$3"
-            ,
-            "read",
-            resolved,
-            start_str,
-            max_str,
-        },
-        .max_output = 4 * 1024 * 1024,
-    }) catch return r.errResult(call, "failed to read file");
+    var read_res = runRead(ctx, resolved, start_str, max_str, false) catch |err|
+        return r.errResult(call, r.execFailure(ctx, "failed to read", resolved, @errorName(err)));
+    if (harness_path and ctx.base.routeIsRemote() and isMissingResult(read_res)) {
+        ctx.base.exec_pool.alloc.free(read_res.stdout);
+        ctx.base.exec_pool.alloc.free(read_res.stderr);
+        read_res = runRead(ctx, resolved, start_str, max_str, true) catch |err|
+            return r.errResult(call, r.execFailure(ctx, "failed to read", resolved, @errorName(err)));
+    }
     defer ctx.base.exec_pool.alloc.free(read_res.stdout);
     defer ctx.base.exec_pool.alloc.free(read_res.stderr);
 
-    if (read_res.ty != .success) return r.errResult(call, "failed to read file");
+    if (read_res.ty != .success) return r.errResult(call, r.execFailure(ctx, "failed to read", resolved, read_res.stderr));
     if (read_res.stdout_truncated or read_res.stderr_truncated) return r.errResult(call, "requested section exceeds the 4MB read limit; retry with offset and limit");
     const out = read_res.toOwned(ctx.alloc) catch return r.errResult(call, "oom");
     if (std.mem.startsWith(u8, out, "MISS:")) {
         ctx.alloc.free(out);
-        return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "file not found: {s}", .{args.file_path}) catch "file not found");
+        return r.errResult(call, r.pathFailure(ctx, "file not found", args.file_path));
     }
     if (std.mem.startsWith(u8, out, "NOTFILE:")) {
         ctx.alloc.free(out);
-        return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "not a regular file: {s}", .{args.file_path}) catch "not a regular file");
+        return r.errResult(call, r.pathFailure(ctx, "not a regular file", args.file_path));
     }
     if (std.mem.startsWith(u8, out, "NOREAD:")) {
         ctx.alloc.free(out);
-        return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "file is not readable: {s}", .{args.file_path}) catch "file is not readable");
+        return r.errResult(call, r.pathFailure(ctx, "file is not readable", args.file_path));
     }
     if (std.mem.startsWith(u8, out, "EMPTY:")) {
         ctx.alloc.free(out);
@@ -157,8 +147,37 @@ fn looksBinary(data: []const u8) bool {
 
 const SNIFF_BYTES = "4100";
 
-fn sniffImageType(ctx: r.ToolContext, resolved: []const u8) ?[]const u8 {
-    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "head", "-c", SNIFF_BYTES, "--", resolved } }) catch
+const READ_SCRIPT =
+    \\if [ ! -e "$1" ]; then echo "MISS:$1"; exit 0; fi
+    \\if [ ! -f "$1" ]; then echo "NOTFILE:$1"; exit 0; fi
+    \\if [ ! -r "$1" ]; then echo "NOREAD:$1"; exit 0; fi
+    \\total=$(wc -l < "$1")
+    \\[ -n "$(tail -c 1 "$1")" ] && total=$((total + 1))
+    \\if [ "$total" -eq 0 ]; then echo "EMPTY:"; exit 0; fi
+    \\if [ "$total" -lt "$2" ]; then echo "OFFSET:$total"; exit 0; fi
+    \\cat -n -- "$1" | tail -n +"$2" | head -n "$3"
+;
+
+fn runRead(ctx: r.ToolContext, resolved: []const u8, start_str: []const u8, max_str: []const u8, force_local: bool) !r.r.exec.CmdResult {
+    return ctx.base.exec_pool.runAndWait(.{
+        .argv = &.{ "/bin/sh", "-c", READ_SCRIPT, "read", resolved, start_str, max_str },
+        .max_output = 4 * 1024 * 1024,
+        .force_local = force_local,
+    });
+}
+
+fn isMissingResult(res: r.r.exec.CmdResult) bool {
+    return res.ty == .success and std.mem.startsWith(u8, res.stdout, "MISS:");
+}
+
+fn sniffImageType(ctx: r.ToolContext, resolved: []const u8, harness_path: bool) ?[]const u8 {
+    if (sniffImageAt(ctx, resolved, false)) |media_type| return media_type;
+    if (harness_path and ctx.base.routeIsRemote()) return sniffImageAt(ctx, resolved, true);
+    return null;
+}
+
+fn sniffImageAt(ctx: r.ToolContext, resolved: []const u8, force_local: bool) ?[]const u8 {
+    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "head", "-c", SNIFF_BYTES, "--", resolved }, .force_local = force_local }) catch
         return null;
     defer ctx.base.exec_pool.alloc.free(res.stdout);
     defer ctx.base.exec_pool.alloc.free(res.stderr);
@@ -177,11 +196,11 @@ fn nonVisionResult(ctx: r.ToolContext, call: r.r.sdk.ToolCall, media_type: ?[]co
     return r.okResult(call, msg);
 }
 
-fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall, file_path: []const u8, is_url: bool, resolved: []const u8) r.r.sdk.ToolOutput {
+fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall, file_path: []const u8, is_url: bool, resolved: []const u8, harness_path: bool) r.r.sdk.ToolOutput {
     const raw = if (is_url)
-        loadRemoteImage(ctx, file_path) catch |err| return r.errResult(call, imageLoadError(err, true))
+        loadUrlImage(ctx, file_path) catch |err| return r.errResult(call, imageLoadError(err, true))
     else
-        loadLocalImage(ctx, resolved) catch |err| return r.errResult(call, imageLoadError(err, false));
+        loadLocalImage(ctx, resolved, harness_path) catch |err| return r.errResult(call, imageLoadError(err, false));
     defer ctx.base.exec_pool.alloc.free(raw);
 
     const media_type = detectImageMediaType(raw) orelse
@@ -208,19 +227,26 @@ const ImageLoadError = error{
     DownloadTimedOut,
 };
 
-fn imageLoadError(err: anyerror, remote: bool) []const u8 {
+fn imageLoadError(err: anyerror, is_url: bool) []const u8 {
     return switch (err) {
         error.EmptyImage => "image is empty",
         error.ImageTooLarge => "image exceeds the 4 MB limit",
         error.DownloadTimedOut => "image download timed out",
         error.DownloadFailed => "failed to download image",
-        error.ReadFailed => if (remote) "failed to download image" else "failed to read image",
-        else => if (remote) "failed to download image" else "failed to read image",
+        error.ReadFailed => if (is_url) "failed to download image" else "failed to read image",
+        else => if (is_url) "failed to download image" else "failed to read image",
     };
 }
 
-fn loadLocalImage(ctx: r.ToolContext, resolved: []const u8) ImageLoadError![]const u8 {
-    const size_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "stat", "-c", "%s", resolved } }) catch
+fn loadLocalImage(ctx: r.ToolContext, resolved: []const u8, harness_path: bool) ImageLoadError![]const u8 {
+    if (loadImageAt(ctx, resolved, false)) |raw| return raw else |err| {
+        if (harness_path and ctx.base.routeIsRemote()) return loadImageAt(ctx, resolved, true);
+        return err;
+    }
+}
+
+fn loadImageAt(ctx: r.ToolContext, resolved: []const u8, force_local: bool) ImageLoadError![]const u8 {
+    const size_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "stat", "-c", "%s", resolved }, .force_local = force_local }) catch
         return error.ReadFailed;
     defer ctx.base.exec_pool.alloc.free(size_res.stdout);
     defer ctx.base.exec_pool.alloc.free(size_res.stderr);
@@ -231,7 +257,7 @@ fn loadLocalImage(ctx: r.ToolContext, resolved: []const u8) ImageLoadError![]con
     if (size == 0) return error.EmptyImage;
     if (size > MAX_IMAGE_BYTES) return error.ImageTooLarge;
 
-    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", "--", resolved }, .max_output = MAX_IMAGE_BYTES }) catch
+    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", "--", resolved }, .max_output = MAX_IMAGE_BYTES, .force_local = force_local }) catch
         return error.ReadFailed;
     defer ctx.base.exec_pool.alloc.free(read_res.stderr);
     if (read_res.ty != .success) {
@@ -249,7 +275,7 @@ fn loadLocalImage(ctx: r.ToolContext, resolved: []const u8) ImageLoadError![]con
     return read_res.stdout;
 }
 
-fn loadRemoteImage(ctx: r.ToolContext, url: []const u8) ImageLoadError![]const u8 {
+fn loadUrlImage(ctx: r.ToolContext, url: []const u8) ImageLoadError![]const u8 {
     const result = ctx.base.exec_pool.runAndWaitTimeout(.{ .argv = &.{
         "curl",
         "-fsSL",
@@ -257,7 +283,7 @@ fn loadRemoteImage(ctx: r.ToolContext, url: []const u8) ImageLoadError![]const u
         "4194304",
         "--",
         url,
-    }, .max_output = MAX_IMAGE_BYTES }, 30_000) catch return error.DownloadFailed;
+    }, .max_output = MAX_IMAGE_BYTES, .force_local = true }, 30_000) catch return error.DownloadFailed;
     defer ctx.base.exec_pool.alloc.free(result.stderr);
     if (result.ty == .timeout) {
         ctx.base.exec_pool.alloc.free(result.stdout);

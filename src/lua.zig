@@ -262,7 +262,8 @@ const BlitzDraw = LuaType{ .table_def = .{ .name = "BlitzDraw", .fields = &.{
 } } };
 const AgentIdDef: LuaType = .integer;
 const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
-    .{ .name = "cwd", .ty = LuaType.string },
+    .{ .name = "cwd", .ty = LuaType.string, .desc = "Working directory for tool file operations." },
+    .{ .name = "local_cwd", .ty = LuaType.string, .desc = "Working directory for force_local commands." },
     .{ .name = "agent_id", .ty = AgentIdDef },
     .{ .name = "state", .ty = LuaType.table },
     .{ .name = "set_status", .ty = LuaType{ .raw = "fun(self: BlitzCtx, msg: string)" }, .desc = "Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines." },
@@ -3479,6 +3480,7 @@ fn pushEventPayload(L: *c.lua_State, event: r.events.AppEvent) c_int {
 // ── ToolContext bridge (passed as light userdata during tool calls) ──
 
 const CtxBridge = struct {
+    local_cwd: []const u8,
     cwd: []const u8,
     tool_ctx: ToolContext,
     tool_call: ToolCall,
@@ -4869,7 +4871,8 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
     }
 
     var bridge = CtxBridge{
-        .cwd = ctx.base.cwd,
+        .local_cwd = ctx.base.cwd,
+        .cwd = ctx.alloc.dupe(u8, ctx.base.routeCwd()) catch ctx.base.cwd,
         .tool_ctx = ctx,
         .tool_call = call,
     };
@@ -4971,6 +4974,7 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
     c.lua_newtable(L);
 
     setFieldAny(L, -2, "cwd", bridge.cwd);
+    setFieldAny(L, -2, "local_cwd", bridge.local_cwd);
     setFieldAny(L, -2, "vision", ctxVision(bridge));
 
     setFieldAny(L, -2, "agent_id", bridge.tool_ctx.base.self_id);

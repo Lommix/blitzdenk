@@ -26,6 +26,14 @@ pub const BaseContext = struct {
     display: Display = .{},
     app: ?*anyopaque = null,
     owner: ?Owner = null,
+
+    pub fn routeCwd(self: BaseContext) []const u8 {
+        return self.exec_pool.effectiveCwd(self.cwd);
+    }
+
+    pub fn routeIsRemote(self: BaseContext) bool {
+        return self.exec_pool.ssh_active and self.exec_pool.ssh_target != null;
+    }
 };
 
 pub const Context = struct {

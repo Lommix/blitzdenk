@@ -41,7 +41,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
 
-    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.file_path }) catch
+    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.routeCwd(), args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
 
     const lock = &r.file_mutex;
@@ -87,11 +87,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     defer ctx.base.exec_pool.alloc.free(res.stderr);
 
     if (res.ty != .success) {
-        const msg = if (res.stderr.len > 0)
-            alloc.dupe(u8, res.stderr) catch "write failed"
-        else
-            "write failed";
-        return r.errResult(call, msg);
+        return r.errResult(call, r.execFailure(ctx, "failed to write", resolved, res.stderr));
     }
 
     r.writeToolChangedStatus(ctx, call, "write", if (has_before) before else null, args.content, args.file_path);

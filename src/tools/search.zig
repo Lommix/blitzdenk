@@ -103,7 +103,7 @@ fn runGlob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, "failed to build glob command");
     argv.append(ctx.alloc, "--hidden") catch
         return r.errResult(call, "failed to build glob command");
-    appendIncludeGlob(ctx.alloc, &argv, ctx.base.cwd, args.file_path, args.pattern) catch
+    appendIncludeGlob(ctx.alloc, &argv, ctx.base.routeCwd(), args.file_path, args.pattern) catch
         return r.errResult(call, "failed to build glob command");
     appendSearchPath(ctx.alloc, &argv, args.file_path) catch
         return r.errResult(call, "failed to build glob command");
@@ -139,7 +139,7 @@ fn runGrep(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (args.glob) |glob| {
         if (glob.len == 0) return r.errResult(call, "glob must not be empty");
-        appendIncludeGlob(ctx.alloc, &argv, ctx.base.cwd, args.file_path, glob) catch
+        appendIncludeGlob(ctx.alloc, &argv, ctx.base.routeCwd(), args.file_path, glob) catch
             return r.errResult(call, "failed to build grep command");
     }
     argv.append(ctx.alloc, "--hidden") catch
@@ -261,21 +261,22 @@ fn runSearch(
         return r.errResult(call, "search output exceeded the 4MB capture cap; narrow the query or add filters");
     }
 
+    const stderr = r.filterTransportStderr(ctx, raw.stderr);
     if (raw.ty == .timeout) return r.errResult(call, "search timed out after 10 seconds; narrow path or globs and retry");
     // Ripgrep exit code 1 means the search completed successfully but found
     // nothing. It is not a process failure (exit code 2 is).
     if (raw.exit_code == 1) return r.okResult(call, failure.empty_message);
     if (raw.ty == .failed) {
-        const content = formatSearchError(ctx.alloc, failure, raw.exit_code, raw.stderr) catch
+        const content = formatSearchError(ctx.alloc, failure, raw.exit_code, stderr) catch
             return r.errResult(call, "failed to format search error");
         return r.errResult(call, content);
     }
-    if (raw.stdout.len == 0 and raw.stderr.len == 0) return r.okResult(call, failure.empty_message);
+    if (raw.stdout.len == 0 and stderr.len == 0) return r.okResult(call, failure.empty_message);
 
-    const output: []const u8 = if (raw.stderr.len == 0)
+    const output: []const u8 = if (stderr.len == 0)
         raw.stdout
     else
-        std.fmt.allocPrint(ctx.alloc, "{s}{s}", .{ raw.stdout, raw.stderr }) catch
+        std.fmt.allocPrint(ctx.alloc, "{s}{s}", .{ raw.stdout, stderr }) catch
             return r.errResult(call, "failed to format search output");
     const content = copyTruncatedSpill(ctx, call.id, output) catch
         return r.errResult(call, "failed to format search output");

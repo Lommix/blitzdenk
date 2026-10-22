@@ -60,7 +60,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
     if (args.old_string.len == 0) return r.errResult(call, "old_string is empty");
 
-    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.file_path }) catch
+    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.routeCwd(), args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
 
     if (std.mem.eql(u8, args.old_string, args.new_string)) {
@@ -73,13 +73,13 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     };
     defer r.file_mutex.unlock(ctx.io);
 
-    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved }, .max_output = MAX_EDIT_SIZE }) catch
-        return r.errResult(call, "failed to read file");
+    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved }, .max_output = MAX_EDIT_SIZE }) catch |err|
+        return r.errResult(call, r.execFailure(ctx, "failed to read", resolved, @errorName(err)));
     defer ctx.base.exec_pool.alloc.free(read_res.stdout);
     defer ctx.base.exec_pool.alloc.free(read_res.stderr);
 
     if (read_res.ty != .success) {
-        return r.errResult(call, "invalid file");
+        return r.errResult(call, r.execFailure(ctx, "failed to read", resolved, read_res.stderr));
     }
 
     if (read_res.stdout_truncated) {
@@ -135,8 +135,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-    const verify_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved }, .max_output = MAX_EDIT_SIZE }) catch
-        return r.errResult(call, "failed to re-read file");
+    const verify_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved }, .max_output = MAX_EDIT_SIZE }) catch |err|
+        return r.errResult(call, r.execFailure(ctx, "failed to re-read", resolved, @errorName(err)));
     defer ctx.base.exec_pool.alloc.free(verify_res.stdout);
     defer ctx.base.exec_pool.alloc.free(verify_res.stderr);
 
@@ -144,7 +144,11 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, "file exceeds the 4MB edit limit");
     }
 
-    if (verify_res.ty != .success or !std.mem.eql(u8, verify_res.stdout, file_content)) {
+    if (verify_res.ty != .success) {
+        return r.errResult(call, r.execFailure(ctx, "failed to re-read", resolved, verify_res.stderr));
+    }
+
+    if (!std.mem.eql(u8, verify_res.stdout, file_content)) {
         return r.errResult(call, "file changed on disk while the edit was pending; re-read the file and retry");
     }
 
@@ -154,11 +158,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     defer ctx.base.exec_pool.alloc.free(write_res.stderr);
 
     if (write_res.ty != .success) {
-        const msg = if (write_res.stderr.len > 0)
-            alloc.dupe(u8, write_res.stderr) catch "write failed"
-        else
-            "write failed";
-        return r.errResult(call, msg);
+        return r.errResult(call, r.execFailure(ctx, "failed to write", resolved, write_res.stderr));
     }
 
     r.markConfigTouched(ctx, resolved);

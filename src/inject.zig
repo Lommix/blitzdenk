@@ -94,6 +94,12 @@ pub const InjectionsHooks = struct {
 };
 
 fn inject_cwd_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
+    const route_key = app.exec_pool.routeKey();
+    if (agent.flags.route_key_seen != route_key) {
+        agent.flags.route_key_seen = route_key;
+        agent.flags.cwd_seen = false;
+        agent.flags.agents_context_files_seen = false;
+    }
     if (agent.flags.cwd_seen) return;
     agent.flags.cwd_seen = true;
 
@@ -116,39 +122,56 @@ fn inject_cwd_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Ag
     try w.print("[CWD] {s}\n[OS] {s}\n[TMP TESTING DIR] {s}/{d}/\n", .{ cwd, os_name, r.util.TMP_DIR, std.c.getpid() });
 }
 
+const CONTEXT_FILE_CAP: usize = 8192;
+
+const ContextFile = struct {
+    text: []const u8,
+    truncated: bool,
+};
+
+fn readRouteContextFile(app: *r.app.App, alloc: std.mem.Allocator, path: []const u8, force_local: bool) ?ContextFile {
+    var cap_buf: [24]u8 = undefined;
+    const head_arg = std.fmt.bufPrint(&cap_buf, "{d}", .{CONTEXT_FILE_CAP + 1}) catch return null;
+    const res = app.exec_pool.runAndWait(.{
+        .argv = &.{ "head", "-c", head_arg, "--", path },
+        .max_output = CONTEXT_FILE_CAP + 1,
+        .force_local = force_local,
+    }) catch return null;
+    defer app.exec_pool.alloc.free(res.stdout);
+    defer app.exec_pool.alloc.free(res.stderr);
+    if (res.ty != .success or res.stdout.len == 0) return null;
+    const truncated = res.stdout.len > CONTEXT_FILE_CAP;
+    const text = r.util.sanitizeUtf8(alloc, res.stdout[0..@min(res.stdout.len, CONTEXT_FILE_CAP)]) catch return null;
+    const escaped = r.util.escapeMarkup(alloc, text) catch return null;
+    return .{ .text = escaped, .truncated = truncated };
+}
+
 fn inject_agents_context(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
     if (agent.flags.agents_context_files_seen) return;
 
-    const io = app.io;
+    const alloc = agent.step_arena.allocator();
     const factory = app.context_factory;
 
-    var global_path: ?[]const u8 = null;
     if (app.lua_config_dir) |dir_path| {
-        if (factory.config_dir) |dir| {
-            if (hasContextFile(io, dir)) global_path = std.mem.trimEnd(u8, dir_path, "/");
+        const path = std.fmt.allocPrint(alloc, "{s}/AGENTS.md", .{std.mem.trimEnd(u8, dir_path, "/")}) catch return;
+        if (readRouteContextFile(app, alloc, path, true)) |file| {
+            try w.print("<user_instructions>\n{s}", .{file.text});
+            if (file.truncated) try w.print("\n[truncated at {d} bytes]", .{CONTEXT_FILE_CAP});
+            try w.writeAll("\n</user_instructions>\n");
         }
     }
 
-    var local_path: ?[]const u8 = null;
     if (!factory.flags.skip_local_context_file) {
-        const cwd = if (agent.cwd.len > 0) agent.cwd else app.cwd;
-        if (std.Io.Dir.openDirAbsolute(io, cwd, .{})) |dir| {
-            defer dir.close(io);
-            if (hasContextFile(io, dir)) local_path = std.mem.trimEnd(u8, cwd, "/");
-        } else |_| {}
+        const cwd = app.exec_pool.effectiveCwd(if (agent.cwd.len > 0) agent.cwd else app.cwd);
+        const path = std.fmt.allocPrint(alloc, "{s}/AGENTS.md", .{std.mem.trimEnd(u8, cwd, "/")}) catch return;
+        if (readRouteContextFile(app, alloc, path, false)) |file| {
+            try w.print("<project_instructions>\n{s}", .{file.text});
+            if (file.truncated) try w.print("\n[truncated at {d} bytes]", .{CONTEXT_FILE_CAP});
+            try w.writeAll("\n</project_instructions>\n");
+        }
     }
 
-    if (global_path == null and local_path == null) return;
-
     agent.flags.agents_context_files_seen = true;
-    try w.writeAll("Read these files for user and project instructions:\n");
-    if (global_path) |path| try w.print("- {s}/AGENTS.md\n", .{path});
-    if (local_path) |path| try w.print("- {s}/AGENTS.md\n", .{path});
-}
-
-fn hasContextFile(io: std.Io, dir: std.Io.Dir) bool {
-    const stat = dir.statFile(io, "AGENTS.md", .{}) catch return false;
-    return stat.kind == .file;
 }
 
 fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.Agent) !void {

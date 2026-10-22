@@ -429,7 +429,10 @@
 ---@field required? boolean
 
 ---@class BlitzCtx
+---Working directory for tool file operations.
 ---@field cwd string
+---Working directory for force_local commands.
+---@field local_cwd string
 ---@field agent_id integer
 ---@field state table
 ---Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines.

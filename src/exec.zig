@@ -227,11 +227,13 @@ pub const CmdPool = struct {
     /// and detect routing changes.
     pub fn routeKey(self: *const Self) u64 {
         if (!self.ssh_active) return 1;
-        const target = self.ssh_target.?;
+        const target = self.ssh_target orelse return 1;
         var hash = std.hash.Wyhash.init(0);
         hash.update(target.user);
-        hash.update("@");
+        hash.update(&.{0});
         hash.update(target.host);
+        hash.update(&.{0});
+        hash.update(target.cwd);
         return hash.final();
     }
 
@@ -674,13 +676,26 @@ pub const CmdPool = struct {
         defer out.deinit(alloc);
 
         try out.appendSlice(alloc, "cd ");
-        try appendShellQuoted(alloc, &out, ssh_root);
+        try appendShellPath(alloc, &out, ssh_root);
         try out.appendSlice(alloc, " && ");
         for (argv, 0..) |a, i| {
             if (i > 0) try out.append(alloc, ' ');
             try appendShellQuoted(alloc, &out, a);
         }
         return out.toOwnedSlice(alloc);
+    }
+
+    fn appendShellPath(alloc: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+        if (std.mem.eql(u8, s, "~")) {
+            try out.appendSlice(alloc, "\"$HOME\"");
+            return;
+        }
+        if (std.mem.startsWith(u8, s, "~/")) {
+            try out.appendSlice(alloc, "\"$HOME\"/");
+            try appendShellQuoted(alloc, out, s[2..]);
+            return;
+        }
+        try appendShellQuoted(alloc, out, s);
     }
 
     fn appendShellQuoted(alloc: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
@@ -1131,4 +1146,20 @@ test "output beyond the cap keeps the tail and marks truncation" {
     try std.testing.expect(capped.stdout.len <= 64 * 1024);
     try std.testing.expect(capped.stdout_truncated);
     try std.testing.expect(!capped.stderr_truncated);
+}
+
+test "remote shell line expands a leading tilde in the cwd" {
+    const line = try CmdPool.buildRemoteShellLine(std.testing.allocator, "~/project", &.{"ls"});
+    defer std.testing.allocator.free(line);
+    try std.testing.expectEqualStrings("cd \"$HOME\"/'project' && 'ls'", line);
+
+    const home = try CmdPool.buildRemoteShellLine(std.testing.allocator, "~", &.{"ls"});
+    defer std.testing.allocator.free(home);
+    try std.testing.expectEqualStrings("cd \"$HOME\" && 'ls'", home);
+}
+
+test "remote shell line quotes cwd and argv safely" {
+    const line = try CmdPool.buildRemoteShellLine(std.testing.allocator, "/tmp/it's", &.{ "/bin/echo", "hi" });
+    defer std.testing.allocator.free(line);
+    try std.testing.expectEqualStrings("cd '/tmp/it'\\''s' && '/bin/echo' 'hi'", line);
 }
