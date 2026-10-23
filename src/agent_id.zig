@@ -1,4 +1,3 @@
-
 pub const max_agents = 128;
 
 pub const AgentId = packed struct {

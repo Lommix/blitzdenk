@@ -123,4 +123,3 @@ pub const Buffer = struct {
         }
     };
 };
-

@@ -46,8 +46,8 @@ pub fn LuaFnBind(
 ) fn (?*c.lua_State) callconv(.c) c_int {
     const FnInfo = @typeInfo(@TypeOf(func)).@"fn";
 
-    comptime var arg_types: [FnInfo.params.len]type = undefined;
-    inline for (FnInfo.params, 0..) |p, i| arg_types[i] = p.type.?;
+    comptime var arg_types: [FnInfo.param_types.len]type = undefined;
+    inline for (FnInfo.param_types, 0..) |p, i| arg_types[i] = p.?;
     const Args = @Tuple(&arg_types);
 
     return struct {
@@ -57,8 +57,8 @@ pub fn LuaFnBind(
             var args: Args = undefined;
             var offset: c_int = 1;
 
-            inline for (FnInfo.params, 0..) |p, i| {
-                switch (p.type.?) {
+            inline for (FnInfo.param_types, 0..) |p, i| {
+                switch (p.?) {
                     *r.app.App => {
                         @field(args, std.fmt.comptimePrint("{}", .{i})) = getAppFromRegistry(state) orelse {
                             _ = c.luaL_error(state, "failed to get app");
@@ -795,7 +795,7 @@ pub const Blitz = LuaType{
                             };
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, args: Arg) !r.config.ProviderHandle {
-                                if (try isToolVm(state)) return @enumFromInt(0);
+                                if (try isToolVm(state)) return @fromBackingInt(@intCast(0));
                                 const slot = a.config.reserveProvider(args.url, args.key_envar orelse "", args.key orelse "") orelse return error.MaxProviderReached;
                                 slot.rate_limit = args.rate_limit orelse 0;
                                 if (args.session_key_header) |header| if (!slot.setSessionKeyHeader(header)) return error.SessionHeaderTooLong;
@@ -842,8 +842,8 @@ pub const Blitz = LuaType{
                             };
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, args: Arg) !r.config.ModelHandle {
-                                if (try isToolVm(state)) return @enumFromInt(0);
-                                const handle: r.config.ProviderHandle = @enumFromInt(args.provider);
+                                if (try isToolVm(state)) return @fromBackingInt(@intCast(0));
+                                const handle: r.config.ProviderHandle = @fromBackingInt(@intCast(args.provider));
                                 const provider = a.config.getProvider(handle) orelse return error.UnknownProvider;
                                 const params: r.models.ModelParams = switch (provider.kind) {
                                     .openai => .{ .openai = .{
@@ -905,7 +905,7 @@ pub const Blitz = LuaType{
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, def: Args) !u32 {
                                 if (try isToolVm(state)) {
-                                    if (a.context_factory.findAgentType(def.name)) |agent_type| return @intFromEnum(agent_type);
+                                    if (a.context_factory.findAgentType(def.name)) |agent_type| return @backingInt(agent_type);
                                     return 0;
                                 }
                                 const effort = if (def.effort) |eff|
@@ -921,12 +921,12 @@ pub const Blitz = LuaType{
                                     .skills = def.skills orelse true,
                                     .tools = def.tools,
                                     .model = if (def.model) |handle| .{
-                                        .model = @enumFromInt(handle),
+                                        .model = @fromBackingInt(@intCast(handle)),
                                         .effort = effort,
                                     } else null,
                                 });
 
-                                return @intFromEnum(agent_type);
+                                return @backingInt(agent_type);
                             }
                         }).lua_fn, "add_agent"),
                     },
@@ -946,7 +946,7 @@ pub const Blitz = LuaType{
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, model: u32, force: ?bool) !void {
                                 if (try isToolVm(state)) return;
                                 const agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id);
-                                try a.context_factory.setAgentModel(&a.config, agent_type, @enumFromInt(model), force orelse false);
+                                try a.context_factory.setAgentModel(&a.config, agent_type, @fromBackingInt(@intCast(model)), force orelse false);
                                 try a.refreshLiveAgentTools();
                                 if (force orelse false) try a.refreshLiveAgentModels(agent_type);
                             }
@@ -2565,7 +2565,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                         const id = a.registry.reserve(null) orelse return;
                         a.cmd_queue.append(a.io, .{ .spawn_agent = .{
                             .agent_id = id,
-                            .agent_type = @intFromEnum(r.ContextFactory.AgentType.general),
+                            .agent_type = @backingInt(r.ContextFactory.AgentType.general),
                             .prompt = &parts,
                             .timeline_entry = entry,
                             .cwd = a.cwd,
@@ -3148,7 +3148,7 @@ fn pushAny(L: *c.lua_State, value: anytype) void {
         .bool => c.lua_pushboolean(L, @intFromBool(value)),
         .comptime_int, .int => c.lua_pushinteger(L, @intCast(value)),
         .comptime_float, .float => c.lua_pushnumber(L, @floatCast(value)),
-        .@"enum" => c.lua_pushinteger(L, @intFromEnum(value)),
+        .@"enum" => c.lua_pushinteger(L, @backingInt(value)),
         .pointer => |ptr| {
             if (ptr.size == .slice and ptr.child == u8) {
                 _ = c.lua_pushlstring(L, value.ptr, value.len);
@@ -3181,10 +3181,10 @@ fn pushAny(L: *c.lua_State, value: anytype) void {
                 }));
                 return;
             }
-            c.lua_createtable(L, 0, @intCast(str.fields.len));
-            inline for (str.fields) |field| {
-                pushAny(L, @field(value, field.name));
-                c.lua_setfield(L, -2, fieldName(field.name));
+            c.lua_createtable(L, 0, @intCast(str.field_names.len));
+            inline for (str.field_names) |field_name| {
+                pushAny(L, @field(value, field_name));
+                c.lua_setfield(L, -2, fieldName(field_name));
             }
         },
         .void => {},
@@ -3374,8 +3374,8 @@ fn readAnyValueAlloc(
             const n = c.lua_tointegerx(state, idx, null);
             const info = @typeInfo(T).@"enum";
             if (n < 0 or n > std.math.maxInt(info.tag_type)) return .Err(name ++ " overflow");
-            if (info.is_exhaustive and n >= info.fields.len) return .Err(name ++ " invalid enum value");
-            return .Ok(@enumFromInt(@as(info.tag_type, @intCast(n))));
+            if (info.mode == .exhaustive and n >= info.field_names.len) return .Err(name ++ " invalid enum value");
+            return .Ok(@fromBackingInt(@intCast(@as(info.tag_type, @intCast(n)))));
         },
         .array => |arr| {
             if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " not a table");
@@ -3404,10 +3404,10 @@ fn readAnyValueAlloc(
             }
             if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " is not a table");
             var result: T = undefined;
-            inline for (str.fields) |field| {
-                const res = readAnyFieldAlloc(field.type, state, field.name, idx, allocator);
+            inline for (str.field_names, str.field_types) |field_name, FieldType| {
+                const res = readAnyFieldAlloc(FieldType, state, field_name, idx, allocator);
                 switch (res) {
-                    .ok => |val| @field(result, field.name) = val,
+                    .ok => |val| @field(result, field_name) = val,
                     .err => |msg| return .Err(msg),
                 }
             }

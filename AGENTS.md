@@ -2,7 +2,7 @@
 
 A coding harness written in Zig with vendored Lua, no dependencies.
 
-Zig version: 0.16.0
+Zig version: 0.17.0
 
 ## Commands
 

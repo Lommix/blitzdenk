@@ -172,10 +172,7 @@ fn formatBashResult(
 
 fn signalName(sig: u32) ?[]const u8 {
     const named = std.enums.fromInt(std.posix.SIG, sig) orelse return null;
-    inline for (std.meta.fields(std.posix.SIG)) |field| {
-        if (@intFromEnum(named) == field.value) return field.name;
-    }
-    return null;
+    return std.enums.tagName(std.posix.SIG, named);
 }
 
 fn stripAnsi(input: []const u8, out: []u8) []u8 {
@@ -238,7 +235,7 @@ fn runWithDeadline(
     deadline_ms: i64,
 ) RunError!exec.CmdResult {
     const handle = ctx.base.exec_pool.runWithOpts(opts) catch return error.OutOfMemory;
-    const slot = &ctx.base.exec_pool.slots[@intFromEnum(handle)];
+    const slot = &ctx.base.exec_pool.slots[@backingInt(handle)];
 
     const start_ms: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(ctx.io, .real).nanoseconds, std.time.ns_per_ms));
     while (true) {
@@ -271,7 +268,7 @@ test "formatBashResult strips ansi and renders result markers" {
     defer alloc.free(red);
     try std.testing.expectEqualStrings("red", red);
 
-    const term = try formatBashResult(alloc, "x", "", 0, @intFromEnum(std.posix.SIG.TERM), false, 60_000, false, false);
+    const term = try formatBashResult(alloc, "x", "", 0, @backingInt(std.posix.SIG.TERM), false, 60_000, false, false);
     defer alloc.free(term);
     try std.testing.expectEqualStrings("x\n[killed by signal: SIGTERM]", term);
 

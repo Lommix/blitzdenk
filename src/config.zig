@@ -80,7 +80,7 @@ pub const ModelSpec = struct {
 pub const ModelEntry = struct {
     name: [256]u8 = undefined,
     name_len: usize = 0,
-    provider: ProviderHandle = @enumFromInt(0),
+    provider: ProviderHandle = @fromBackingInt(@intCast(0)),
     vision: bool = false,
     replay_reasoning: bool = true,
     reasoning: bool = true,
@@ -113,21 +113,21 @@ pub const BlitzdenkCfg = struct {
     }
 
     pub fn commitProvider(self: *BlitzdenkCfg) ProviderHandle {
-        const handle: ProviderHandle = @enumFromInt(self.provider_count);
+        const handle: ProviderHandle = @fromBackingInt(@intCast(self.provider_count));
         self.providers[self.provider_count].active = true;
         self.provider_count += 1;
         return handle;
     }
 
     pub fn getProvider(self: *const BlitzdenkCfg, handle: ProviderHandle) ?*const Provider {
-        const index = @intFromEnum(handle);
+        const index = @backingInt(handle);
         if (index >= self.provider_count or !self.providers[index].active) return null;
         return &self.providers[index];
     }
 
     pub fn addModel(self: *BlitzdenkCfg, spec: ModelSpec) !ModelHandle {
         if (self.model_count >= MAX_MODELS) return error.MaxModelsReached;
-        const provider_idx = @intFromEnum(spec.provider);
+        const provider_idx = @backingInt(spec.provider);
         if (provider_idx >= self.provider_count or !self.providers[provider_idx].active) return error.UnknownProvider;
         if (spec.name.len > 256) return error.NameTooLong;
         const slot = &self.models[self.model_count];
@@ -141,11 +141,11 @@ pub const BlitzdenkCfg = struct {
         slot.params = spec.params;
         slot.cost = spec.cost;
         self.model_count += 1;
-        return @enumFromInt(self.model_count - 1);
+        return @fromBackingInt(@intCast(self.model_count - 1));
     }
 
     pub fn getModel(self: *const BlitzdenkCfg, handle: ModelHandle) ?*const ModelEntry {
-        const index = @intFromEnum(handle);
+        const index = @backingInt(handle);
         if (index >= self.model_count) return null;
         return &self.models[index];
     }

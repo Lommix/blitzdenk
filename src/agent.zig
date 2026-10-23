@@ -1156,7 +1156,7 @@ test "agent schedules auto retry on retryable provider failure and resets on suc
 }
 
 fn hugeInflatedHistory() [4]sdk.Message {
-    const payload = [_]u8{'x'} ** 900_000;
+    const payload: [900_000]u8 = @splat('x');
     const part = [_]sdk.Part{.{ .text = &payload }};
     return .{
         sdk.SystemMessage("system"),
@@ -1258,11 +1258,11 @@ test "run cannot start while an async compaction is in flight" {
         .params = .{ .openai = .{} },
     }, .{ .context_limit = 60_000 });
     defer agent.deinit();
-    const huge = "x" ** 200_000;
+    const huge: [200_000]u8 = @splat('x');
     try agent.setMessages(&.{
         sdk.SystemMessage("system"),
         sdk.UserMessage("old turn content"),
-        sdk.UserMessage(huge),
+        sdk.UserMessage(&huge),
         sdk.AssistantMessage("recent"),
     });
     agent.setContextState(.{ .tokens = 55_000, .from_provider = true });
@@ -1355,7 +1355,8 @@ fn testInStepCompaction(initial_context: u64, first_step_context: u64, later_ste
         .params = .{ .openai = .{} },
     }, .{ .context_limit = 250_000 });
     defer agent.deinit();
-    var history: [150]sdk.Message = @splat(sdk.UserMessage("x" ** 6000));
+    const filler: [6000]u8 = @splat('x');
+    var history: [150]sdk.Message = @splat(sdk.UserMessage(&filler));
     history[0] = sdk.SystemMessage("system");
     try agent.setMessages(&history);
     try agent.setTools(&.{.{ .name = "test", .execute = Fixture.toolExecute }});
@@ -1428,7 +1429,8 @@ test "provider context retains its basis and includes new messages after rewind"
     const basis = compact.estimateNextRequestTokens("model", &.{}, &history);
     agent.setContextState(.{ .tokens = 1000, .from_provider = true, .estimate = basis });
     try std.testing.expectEqual(@as(u64, 1000), agent.currentContextEstimate(&history));
-    const grown = [_]sdk.Message{ history[0], sdk.UserMessage("x" ** 3000) };
+    const filler: [3000]u8 = @splat('x');
+    const grown = [_]sdk.Message{ history[0], sdk.UserMessage(&filler) };
     const grown_estimate = compact.estimateNextRequestTokens("model", &.{}, &grown);
     try std.testing.expectEqual(@as(u64, 1000) + grown_estimate - basis, agent.currentContextEstimate(&grown));
     try agent.replaceMessages(&history, .rewind);

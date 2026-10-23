@@ -118,7 +118,7 @@ pub const Manager = struct {
                     },
                     .func = &toolTrampoline,
                 },
-                .flags = .{ .allowed_agents = .initFull(), .add_to_agents = true },
+                .flags = .{ .allowed_agents = .full, .add_to_agents = true },
             });
         }
     }
@@ -452,7 +452,7 @@ const Client = struct {
 
     fn resolveAuthorization(alloc: std.mem.Allocator, cfg: ServerConfig) !?[]const u8 {
         if (cfg.key_envar) |envar| {
-            const name = try alloc.dupeZ(u8, envar);
+            const name = try alloc.dupeSentinel(u8, envar, 0);
             defer alloc.free(name);
             if (std.c.getenv(name.ptr)) |value| {
                 const token = std.mem.span(value);
@@ -723,7 +723,7 @@ const Client = struct {
         try self.captureSession(t, &response.head);
 
         if (status == .not_found and t.session_id != null) return error.McpSessionExpired;
-        if (@intFromEnum(status) >= 400) {
+        if (@backingInt(status) >= 400) {
             const reader = response.reader(&.{});
             try self.drainAndWarn(reader, status);
             return error.McpHttpError;
@@ -760,7 +760,7 @@ const Client = struct {
             if (writer.end == 0) break;
             try output.appendSlice(self.alloc, scratch[0..writer.end]);
         }
-        log.warn("MCP http {d}: {s}", .{ @intFromEnum(status), output.items });
+        log.warn("MCP http {d}: {s}", .{ @backingInt(status), output.items });
         output.deinit(self.alloc);
     }
 

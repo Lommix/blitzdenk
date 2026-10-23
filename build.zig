@@ -48,6 +48,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "agent-id", .module = agent_id_mod },
         },
     });
+    const ctime_trans = b.addTranslateC(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("src/ctime.h"),
+    });
+    const ctime_mod = ctime_trans.createModule();
     const permissions_mod = b.addModule("permissions", .{
         .root_source_file = b.path("src/permissions.zig"),
         .target = target,
@@ -71,6 +77,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "models", .module = models_mod },
                 .{ .name = "permissions", .module = permissions_mod },
                 .{ .name = "c", .module = lua_c_mod },
+                .{ .name = "ctime", .module = ctime_mod },
                 .{ .name = "build_options", .module = options_mod },
             },
         }),
@@ -100,6 +107,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "models", .module = models_mod },
                 .{ .name = "permissions", .module = permissions_mod },
                 .{ .name = "c", .module = lua_c_mod },
+                .{ .name = "ctime", .module = ctime_mod },
                 .{ .name = "build_options", .module = options_mod },
             },
         }),
@@ -116,7 +124,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/bench_render.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "blitz-sdk", .module = blitz_sdk_mod },
                 .{ .name = "exec", .module = exec_mod },
@@ -125,6 +133,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "models", .module = models_mod },
                 .{ .name = "permissions", .module = permissions_mod },
                 .{ .name = "c", .module = lua_c_mod },
+                .{ .name = "ctime", .module = ctime_mod },
                 .{ .name = "build_options", .module = options_mod },
             },
         }),
@@ -135,9 +144,7 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&run_bench.step);
     run_bench.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
@@ -155,7 +162,7 @@ pub fn build(b: *std.Build) void {
 fn build_lua_c(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.builtin.Optimize,
 ) *std.Build.Module {
     const trans = b.addTranslateC(.{
         .target = target,

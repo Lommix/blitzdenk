@@ -997,8 +997,9 @@ fn countParagraphRows(lines: []Line, width: u16) usize {
             const start = i;
             i += 2;
             while (i < lines.len and tableLineKind(&lines[i]) == .row) : (i += 1) {}
-            var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
-            count += layoutTableRows(scratch.get(), lines[start..i], width, null) catch 0;
+            var scratch_buf: [4096]u8 = undefined;
+            var scratch = std.heap.BufferFirstAllocator.init(&scratch_buf, std.heap.page_allocator);
+            count += layoutTableRows(scratch.allocator(), lines[start..i], width, null) catch 0;
             continue;
         }
 
@@ -1055,7 +1056,7 @@ fn layoutTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: ?*s
                     var row_height: usize = 1;
                     for (col_widths) |col_w| {
                         var spans = [_]Span{.{ .content = std.mem.trim(u8, cells.next() orelse "", " \t\r") }};
-                        const cell_line: Line = .{ .spans = .{ .items = &spans, .capacity = spans.len } };
+                        const cell_line: Line = .{ .spans = .{ .items = &spans, .capacity = spans.len, .pointer_stability = .{} } };
                         row_height = @max(row_height, wrapLineCount(&cell_line, col_w, col_w));
                     }
                     height += row_height + @as(usize, if (is_header) 1 else 0);
@@ -1112,7 +1113,7 @@ fn appendFormattedTableRow(alloc: std.mem.Allocator, text: []const u8, col_width
             .content = std.mem.trim(u8, cells.next() orelse "", " \t\r"),
             .style = cell_style,
         }};
-        const cell_line: Line = .{ .spans = .{ .items = &spans, .capacity = spans.len } };
+        const cell_line: Line = .{ .spans = .{ .items = &spans, .capacity = spans.len, .pointer_stability = .{} } };
         try wrapLine(alloc, &cell_line, col_w, &wrapped[col]);
         height = @max(height, wrapped[col].items.len);
     }

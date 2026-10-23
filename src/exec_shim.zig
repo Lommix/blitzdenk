@@ -11,7 +11,7 @@ pub fn enter(init: std.process.Init) !void {
     if (!std.mem.eql(u8, mode, flag)) return;
     const parent = std.fmt.parseInt(std.posix.pid_t, args.next() orelse std.process.exit(126), 10) catch std.process.exit(126);
     if (parent <= 0) std.process.exit(126);
-    _ = std.posix.prctl(.SET_PDEATHSIG, .{ @intFromEnum(std.posix.SIG.KILL), 0, 0, 0 }) catch std.process.exit(126);
+    _ = std.posix.prctl(.SET_PDEATHSIG, .{ @backingInt(std.posix.SIG.KILL), 0, 0, 0 }) catch std.process.exit(126);
     if (std.posix.getppid() != parent) std.process.exit(126);
     if (std.c.setsid() < 0) std.process.exit(126);
     const argv = try init.minimal.args.toSlice(init.arena.allocator());

@@ -76,7 +76,7 @@ pub const AgentType = enum(u6) {
 
     pub fn fromLuaInt(value: u32) !AgentType {
         if (value > std.math.maxInt(u6)) return error.UnknownAgent;
-        return @enumFromInt(value);
+        return @fromBackingInt(@intCast(value));
     }
 };
 
@@ -84,7 +84,7 @@ pub const ToolFlags = struct {
     allowed_agents: AgentType.Set,
     add_to_agents: bool = false,
 
-    pub const all = ToolFlags{ .allowed_agents = .initFull() };
+    pub const all = ToolFlags{ .allowed_agents = .full };
 };
 
 pub const ToolSet = struct {
@@ -340,7 +340,7 @@ pub fn startSession(self: *Self, cfg: *const r.config.BlitzdenkCfg) !void {
     var bindings: std.ArrayList(SessionModelBinding) = .empty;
     errdefer bindings.deinit(self.alloc);
     for (0..self.agent_counter) |i| {
-        const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));
+        const agent_type: AgentType = @fromBackingInt(@intCast(@as(u6, @intCast(i))));
         const def = self.getAgent(agent_type) orelse continue;
         const model = def.model orelse continue;
         try bindings.append(self.alloc, try snapshotBinding(arena.allocator(), cfg, agent_type, def.name, model.model, model.effort));
@@ -355,7 +355,7 @@ pub fn startSession(self: *Self, cfg: *const r.config.BlitzdenkCfg) !void {
 pub fn applySessionBindings(self: *Self, cfg: *const r.config.BlitzdenkCfg, prune_stale: bool) !void {
     if (!self.session_active) return;
     for (0..self.agent_counter) |i| {
-        const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));
+        const agent_type: AgentType = @fromBackingInt(@intCast(@as(u6, @intCast(i))));
         const def = self.getAgent(agent_type) orelse continue;
         if (def.model == null) continue;
         if (self.sessionBindingFor(def.name) != null) continue;
@@ -491,7 +491,7 @@ pub fn setAgentEffort(self: *Self, agent_type: AgentType, effort: r.config.Reaso
 
 pub fn collectUnboundAgents(self: *const Self, alloc: std.mem.Allocator, out: *std.ArrayList([]const u8)) !void {
     for (0..self.agent_counter) |i| {
-        const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));
+        const agent_type: AgentType = @fromBackingInt(@intCast(@as(u6, @intCast(i))));
         const def = self.getAgent(agent_type) orelse continue;
         if (def.model == null and self.sessionBindingFor(def.name) == null) try out.append(alloc, def.name);
     }
@@ -507,7 +507,7 @@ pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: NewAgentDef
     else blk: {
         var index = self.agent_counter;
         while (index <= std.math.maxInt(u6)) : (index += 1) {
-            const candidate: AgentType = @enumFromInt(index);
+            const candidate: AgentType = @fromBackingInt(@intCast(index));
             var reserved = false;
             for (self.session_bindings.items) |binding| {
                 if (binding.agent_type == candidate) {
@@ -538,13 +538,13 @@ pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: NewAgentDef
     if (self.session_active and !self.config_reload_in_progress and self.sessionBindingFor(def.name) == null) {
         try self.captureSessionBinding(cfg, idx);
     }
-    self.agent_counter = @max(self.agent_counter, @as(u32, @intFromEnum(idx)) + 1);
+    self.agent_counter = @max(self.agent_counter, @as(u32, @backingInt(idx)) + 1);
     return idx;
 }
 
 pub fn findAgentType(self: *const Self, name: []const u8) ?AgentType {
     for (0..self.agent_counter) |i| {
-        const agent_type: AgentType = @enumFromInt(@as(u6, @intCast(i)));
+        const agent_type: AgentType = @fromBackingInt(@intCast(@as(u6, @intCast(i))));
         const def = self.getAgent(agent_type) orelse continue;
         if (std.mem.eql(u8, def.name, name)) return agent_type;
     }
@@ -557,7 +557,7 @@ pub fn agentSlotCount(self: *const Self) u32 {
 
 pub fn agentTypeAt(self: *const Self, index: u32) ?*const AgentDef {
     if (index >= self.agent_counter) return null;
-    return self.getAgent(@enumFromInt(@as(u6, @intCast(index))));
+    return self.getAgent(@fromBackingInt(@intCast(@as(u6, @intCast(index)))));
 }
 
 pub fn agentName(self: *const Self, agent_type: AgentType) []const u8 {
@@ -828,7 +828,7 @@ pub fn configureAgent(
 ) !void {
     try self.refreshAgentTools(agent, base);
     const alloc = agent.state_arena.allocator();
-    const prompt = try self.build_system_prompt(alloc, @enumFromInt(agent.type_idx), agent.flags.vision);
+    const prompt = try self.build_system_prompt(alloc, @fromBackingInt(@intCast(agent.type_idx)), agent.flags.vision);
     try agent.setSystemPrompt(prompt);
 }
 
@@ -855,7 +855,7 @@ fn refreshAgentToolsInternal(self: *const Self, agent: *r.agent.Agent, base: r.t
     var definitions: [MAX_AGENT_TOOLS]r.tools.Tool = undefined;
     var count: usize = 0;
     const vision = agent.flags.vision;
-    var it = self.iter(@enumFromInt(agent.type_idx));
+    var it = self.iter(@fromBackingInt(@intCast(agent.type_idx)));
     while (it.next()) |tool| {
         if (tool.def.requires_vision and !vision) continue;
         definitions[count] = tool;
@@ -1265,7 +1265,7 @@ test "reload reclaims binding slots released by renamed agents" {
     const first = try fixture.model("first", "https://first.invalid");
     const alpha = try factory.addAgent(&fixture.cfg, .{ .name = "alpha", .description = "", .prompt = "", .model = .{ .model = first } });
     try factory.startSession(&fixture.cfg);
-    try std.testing.expectEqual(@as(u6, 3), @intFromEnum(alpha));
+    try std.testing.expectEqual(@as(u6, 3), @backingInt(alpha));
     const initial = try fixture.config(alpha);
     try std.testing.expectEqualStrings("first", initial.model);
 
@@ -1280,7 +1280,7 @@ test "reload reclaims binding slots released by renamed agents" {
     const beta = try factory.addAgent(&fixture.cfg, .{ .name = "beta", .description = "", .prompt = "", .model = .{ .model = second } });
     try factory.applySessionBindings(&fixture.cfg, true);
     factory.config_reload_in_progress = false;
-    try std.testing.expectEqual(@as(u6, 4), @intFromEnum(beta));
+    try std.testing.expectEqual(@as(u6, 4), @backingInt(beta));
     try std.testing.expect(factory.sessionBindingFor("alpha") == null);
     try std.testing.expect(factory.sessionBindingFor("beta") != null);
 
@@ -1296,8 +1296,8 @@ test "reload reclaims binding slots released by renamed agents" {
     const beta_again = try factory.addAgent(&fixture.cfg, .{ .name = "beta", .description = "", .prompt = "", .model = .{ .model = third } });
     try factory.applySessionBindings(&fixture.cfg, true);
     factory.config_reload_in_progress = false;
-    try std.testing.expectEqual(@as(u6, 4), @intFromEnum(beta_again));
-    try std.testing.expectEqual(@as(u6, 3), @intFromEnum(gamma));
+    try std.testing.expectEqual(@as(u6, 4), @backingInt(beta_again));
+    try std.testing.expectEqual(@as(u6, 3), @backingInt(gamma));
     try std.testing.expect(factory.sessionBindingFor("beta") != null);
     try std.testing.expectEqualStrings("second", (try fixture.config(beta_again)).model);
     try std.testing.expectEqualStrings("third", (try fixture.config(gamma)).model);

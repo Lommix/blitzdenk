@@ -51,7 +51,7 @@ const overflow_patterns = [_][]const u8{
 
 pub fn isOverflow(message: []const u8) bool {
     for (overflow_patterns) |p| {
-        if (std.ascii.indexOfIgnoreCase(message, p) != null) return true;
+        if (std.ascii.findIgnoreCase(message, p) != null) return true;
     }
     return false;
 }
@@ -62,17 +62,17 @@ pub fn classify(
     body: []const u8,
 ) ErrorPayload {
     const msg = extractMessage(alloc, body) orelse
-        std.fmt.allocPrint(alloc, "{d} {s}", .{ @intFromEnum(status), status.phrase() orelse "" }) catch "api error";
+        std.fmt.allocPrint(alloc, "{d} {s}", .{ @backingInt(status), status.phrase() orelse "" }) catch "api error";
     if (isOverflow(msg)) {
         return .{ .context_overflow = .{ .message = msg, .response_body = body } };
     }
     const retryable = switch (status) {
         .too_many_requests, .service_unavailable => true,
-        else => @intFromEnum(status) >= 500,
+        else => @backingInt(status) >= 500,
     };
     return .{ .api = .{
         .message = msg,
-        .status_code = @intFromEnum(status),
+        .status_code = @backingInt(status),
         .is_retryable = retryable,
         .response_body = body,
     } };

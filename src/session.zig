@@ -312,7 +312,7 @@ pub fn bindJournal(a: *app.App) void {
 
 fn restoreSubAgent(a: *app.App, entry: *const WireAgent, alloc: std.mem.Allocator) !void {
     if (entry.type_idx > std.math.maxInt(u6)) return error.UnknownAgentType;
-    const model_config = switch (a.context_factory.buildAgentApiConfig(@enumFromInt(@as(u6, @intCast(entry.type_idx))), &a.config, a.exec_pool.env)) {
+    const model_config = switch (a.context_factory.buildAgentApiConfig(@fromBackingInt(@intCast(@as(u6, @intCast(entry.type_idx)))), &a.config, a.exec_pool.env)) {
         .config => |config| config,
         .diagnostic => return error.InvalidProviderConfiguration,
     };
@@ -437,7 +437,7 @@ const SessionTestRig = struct {
         };
         const id = self.registry.reserve(parent) orelse return error.RegistryFull;
         const agent = try self.registry.activate(id, model_config, .{ .identity = .{
-            .type_idx = @intFromEnum(r.ContextFactory.AgentType.general),
+            .type_idx = @backingInt(r.ContextFactory.AgentType.general),
             .name = name,
             .task_description = task,
             .parent = if (parent) |p| p.pack() else null,

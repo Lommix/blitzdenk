@@ -13,9 +13,9 @@ fn schemaType(comptime T: type) []const u8 {
         .float, .comptime_float => "{\"type\":\"number\"}",
         .@"enum" => blk: {
             comptime var result: []const u8 = "{\"type\":\"string\",\"enum\":[";
-            inline for (info.@"enum".fields, 0..) |f, i| {
+            inline for (info.@"enum".field_names, 0..) |field_name, i| {
                 if (i > 0) result = result ++ ",";
-                result = result ++ "\"" ++ f.name ++ "\"";
+                result = result ++ "\"" ++ field_name ++ "\"";
             }
             break :blk result ++ "]}";
         },
@@ -30,21 +30,21 @@ fn schemaType(comptime T: type) []const u8 {
         .@"struct" => |struct_info| blk: {
             if (struct_info.is_tuple) {
                 comptime var result: []const u8 = "{\"type\":\"array\",\"prefixItems\":[";
-                inline for (struct_info.fields, 0..) |field, i| {
+                inline for (struct_info.field_types, 0..) |FieldType, i| {
                     if (i > 0) result = result ++ ",";
-                    result = result ++ schemaType(field.type);
+                    result = result ++ schemaType(FieldType);
                 }
                 break :blk result ++ "]}";
             }
             comptime var result: []const u8 = "{\"type\":\"object\",\"properties\":{";
-            inline for (struct_info.fields, 0..) |field, i| {
+            inline for (struct_info.field_names, struct_info.field_types, 0..) |field_name, FieldType, i| {
                 if (i > 0) result = result ++ ",";
-                result = result ++ "\"" ++ jsonName(T, field) ++ "\":" ++ fieldSchema(T, field);
+                result = result ++ "\"" ++ jsonName(T, field_name) ++ "\":" ++ fieldSchema(T, field_name, FieldType);
             }
             result = result ++ "},\"required\":[";
-            inline for (struct_info.fields, 0..) |field, i| {
+            inline for (struct_info.field_names, 0..) |field_name, i| {
                 if (i > 0) result = result ++ ",";
-                result = result ++ "\"" ++ jsonName(T, field) ++ "\"";
+                result = result ++ "\"" ++ jsonName(T, field_name) ++ "\"";
             }
             break :blk result ++ "],\"additionalProperties\":false}";
         },
@@ -54,9 +54,10 @@ fn schemaType(comptime T: type) []const u8 {
 
 fn fieldSchema(
     comptime T: type,
-    comptime field: std.builtin.Type.StructField,
+    comptime field_name: []const u8,
+    comptime FieldType: type,
 ) []const u8 {
-    if (comptime schemaTag(T, field)) |tag| {
+    if (comptime schemaTag(T, field_name)) |tag| {
         comptime var result: []const u8 = "{";
         if (tag.description) |d| {
             result = result ++ "\"description\":\"" ++ d ++ "\",";
@@ -72,18 +73,18 @@ fn fieldSchema(
             }
             return result ++ "]}";
         }
-        const base = schemaType(field.type);
+        const base = schemaType(FieldType);
         return result ++ base[1..];
     }
-    return schemaType(field.type);
+    return schemaType(FieldType);
 }
 
-fn jsonName(comptime T: type, comptime field: std.builtin.Type.StructField) []const u8 {
-    if (comptime fieldHasDecl(T, field.name)) {
-        const decl = @field(T, field.name ++ "_json");
+fn jsonName(comptime T: type, comptime field_name: []const u8) []const u8 {
+    if (comptime fieldHasDecl(T, field_name)) {
+        const decl = @field(T, field_name ++ "_json");
         return decl;
     }
-    return field.name;
+    return field_name;
 }
 
 fn fieldHasDecl(comptime T: type, comptime name: []const u8) bool {
@@ -96,12 +97,12 @@ const TagInfo = struct {
     enum_vals: ?[]const u8 = null,
 };
 
-fn schemaTag(comptime T: type, comptime field: std.builtin.Type.StructField) ?TagInfo {
-    if (comptime std.mem.eql(u8, field.name, "_schema_tags")) return null;
+fn schemaTag(comptime T: type, comptime field_name: []const u8) ?TagInfo {
+    if (comptime std.mem.eql(u8, field_name, "_schema_tags")) return null;
     if (!@hasDecl(T, "_schema_tags")) return null;
     const tags = T._schema_tags;
     inline for (tags) |entry| {
-        if (comptime std.mem.eql(u8, entry[0], field.name)) {
+        if (comptime std.mem.eql(u8, entry[0], field_name)) {
             return TagInfo{
                 .description = entry[1],
                 .enum_vals = entry[2],

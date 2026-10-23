@@ -57,8 +57,8 @@ pub fn deepClone(comptime T: type, value: T, alloc: std.mem.Allocator) !T {
         },
         .@"struct" => |s| blk: {
             var out: T = undefined;
-            inline for (s.fields) |f| {
-                @field(out, f.name) = try deepClone(f.type, @field(value, f.name), alloc);
+            inline for (s.field_names, s.field_types) |field_name, FieldType| {
+                @field(out, field_name) = try deepClone(FieldType, @field(value, field_name), alloc);
             }
             break :blk out;
         },

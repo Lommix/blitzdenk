@@ -45,7 +45,7 @@ pub const CompactRequestResult = enum {
 pub const Registry = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
-    slots: [max_agents]Slot = [_]Slot{.{}} ** max_agents,
+    slots: [max_agents]Slot = @splat(.{}),
     finish_counter: u64 = 0,
     total_usage: sdk.Usage = .{},
     model_usage: std.StringArrayHashMapUnmanaged(sdk.Usage) = .{},
@@ -333,7 +333,7 @@ pub const Registry = struct {
     /// Read-only completion decision shared by result notices and rail anchors.
     /// Slot state alone cannot describe parked parents or revived descendants.
     pub fn subtreeDone(self: *const Registry, id: AgentId) bool {
-        var visited = [_]bool{false} ** max_agents;
+        var visited: [max_agents]bool = @splat(false);
         return self.subtreeDoneVisit(id, &visited);
     }
 

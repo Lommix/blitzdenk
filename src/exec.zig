@@ -309,7 +309,7 @@ pub const CmdPool = struct {
 
         slot.future = std.Io.async(self.io, workerFn, .{ self, slot, spawned_argv, duped_cwd, duped_stdin, env_box, opts.kill_process_group });
 
-        return @enumFromInt(idx);
+        return @fromBackingInt(@intCast(idx));
     }
 
     fn shouldRouteSsh(self: *const Self, force_local: bool) bool {
@@ -400,7 +400,7 @@ pub const CmdPool = struct {
     /// fiber is currently `await`ing is undefined behavior (panic: `await`
     /// raced with `await`). Owners release exactly once, when done.
     pub fn release(self: *Self, handle: Handle) void {
-        const slot = &self.slots[@intFromEnum(handle)];
+        const slot = &self.slots[@backingInt(handle)];
         if (!slot.in_use.load(.acquire)) return;
         if (!slot.owned.swap(false, .acq_rel)) return;
 
@@ -425,7 +425,7 @@ pub const CmdPool = struct {
     /// stable before reading: the worker is joined (cancelled first when
     /// still running) before duping.
     pub fn killAndCollect(self: *Self, handle: Handle) !CmdResult {
-        const slot = &self.slots[@intFromEnum(handle)];
+        const slot = &self.slots[@backingInt(handle)];
         const timed_out = !slot.done.load(.acquire);
         errdefer self.release(handle);
         if (timed_out) slot.future.cancel(self.io) catch {};
@@ -508,7 +508,7 @@ pub const CmdPool = struct {
                 slot.result_ty = if (code == 0) .success else .failed;
             },
             .signal => |sig| {
-                slot.signal = @intFromEnum(sig);
+                slot.signal = @backingInt(sig);
                 slot.exit_code = null;
                 slot.result_ty = .failed;
             },
@@ -714,7 +714,7 @@ pub const CmdPool = struct {
     /// Caller frees stdout/stderr.
     pub fn runAndWait(self: *Self, opts: RunOpts) !CmdResult {
         const handle = try self.runWithOpts(opts);
-        const slot = &self.slots[@intFromEnum(handle)];
+        const slot = &self.slots[@backingInt(handle)];
         slot.future.await(self.io) catch {};
         return self.killAndCollect(handle);
     }
@@ -723,7 +723,7 @@ pub const CmdPool = struct {
     /// worker and returns its partial output with `.timeout`.
     pub fn runAndWaitTimeout(self: *Self, opts: RunOpts, timeout_ms: i64) !CmdResult {
         const handle = try self.runWithOpts(opts);
-        const slot = &self.slots[@intFromEnum(handle)];
+        const slot = &self.slots[@backingInt(handle)];
         const start_ms = nowMs(self.io);
         var polls: usize = 0;
 

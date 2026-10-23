@@ -89,8 +89,8 @@ pub const Terminal = struct {
         raw.lflag.ISIG = false;
         raw.lflag.IEXTEN = false;
         // Read returns after 1 byte, no timeout
-        raw.cc[@intFromEnum(posix.V.MIN)] = 1;
-        raw.cc[@intFromEnum(posix.V.TIME)] = 0;
+        raw.cc[@backingInt(posix.V.MIN)] = 1;
+        raw.cc[@backingInt(posix.V.TIME)] = 0;
 
         try posix.tcsetattr(fd, .FLUSH, raw);
 

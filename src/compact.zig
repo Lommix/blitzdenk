@@ -543,8 +543,8 @@ test "ordinary SDK compaction generates and installs a summary" {
         }
     };
 
-    const big = "x" ** 70_000;
-    const messages = [_]sdk.Message{ sdk.SystemMessage("system"), sdk.UserMessage(big), sdk.UserMessage("recent") };
+    const big: [70_000]u8 = @splat('x');
+    const messages = [_]sdk.Message{ sdk.SystemMessage("system"), sdk.UserMessage(&big), sdk.UserMessage("recent") };
     var fixture: u8 = 0;
     const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
     var outcome = try compactOrdinary(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, &messages, null, false, "compaction-session");
@@ -560,16 +560,17 @@ test "ordinary SDK compaction generates and installs a summary" {
 }
 
 test "reasoning replay signatures do not inflate context or cut points" {
-    const tail = "x" ** 60_000;
+    const tail: [60_000]u8 = @splat('x');
+    const signature: [900_000]u8 = @splat('s');
     const plain = [_]sdk.Message{
         sdk.SystemMessage("system"),
-        sdk.UserMessage(tail),
+        sdk.UserMessage(&tail),
         .{ .role = .assistant, .content = &.{sdk.Part.reasoningPart("thinking", "")} },
     };
     const signed = [_]sdk.Message{
         sdk.SystemMessage("system"),
-        sdk.UserMessage(tail),
-        .{ .role = .assistant, .content = &.{sdk.Part.reasoningPart("thinking", "signature" ** 100_000)} },
+        sdk.UserMessage(&tail),
+        .{ .role = .assistant, .content = &.{sdk.Part.reasoningPart("thinking", &signature)} },
     };
     try std.testing.expectEqual(estimateNextRequestTokens("model", &.{}, &plain), estimateNextRequestTokens("model", &.{}, &signed));
     const cut = computeCutIndex(&plain);
@@ -577,8 +578,9 @@ test "reasoning replay signatures do not inflate context or cut points" {
     try std.testing.expectEqual(cut, computeCutIndex(&signed));
 }
 test "context estimates follow reasoning replay settings" {
+    const thinking: [8000]u8 = @splat('t');
     const plain = [_]sdk.Message{sdk.AssistantMessage("answer")};
-    const traced = [_]sdk.Message{.{ .role = .assistant, .content = &.{ .{ .text = "answer" }, sdk.Part.reasoningPart("thinking" ** 1000, "signature") } }};
+    const traced = [_]sdk.Message{.{ .role = .assistant, .content = &.{ .{ .text = "answer" }, sdk.Part.reasoningPart(&thinking, "signature") } }};
     try std.testing.expectEqual(estimateRequestTokens("model", &.{}, &plain, false), estimateRequestTokens("model", &.{}, &traced, false));
     try std.testing.expect(estimateRequestTokens("model", &.{}, &traced, true) > estimateRequestTokens("model", &.{}, &plain, true));
 }

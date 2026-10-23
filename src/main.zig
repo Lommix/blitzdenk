@@ -4,9 +4,7 @@
 // ----------------------------------------------------------------
 const std = @import("std");
 const builtin = @import("builtin");
-const ct = @cImport({
-    @cInclude("time.h");
-});
+const ct = @import("ctime");
 const r = @import("root.zig");
 const App = r.app.App;
 const BlitzdenkCfg = r.config.BlitzdenkCfg;
@@ -184,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
         .cmd => |parsed| parsed == .cleanup,
         .err, .none => false,
     });
-    if ((cli_flags.debug_log or builtin.mode == .Debug) and !cleanup_cmd) openDebugLog(io, init.environ_map);
+    if ((cli_flags.debug_log or builtin.mode == .debug) and !cleanup_cmd) openDebugLog(io, init.environ_map);
 
     const cmd: CliCommand = if (split.prompt) |p|
         CliCommand{ .prompt = p }

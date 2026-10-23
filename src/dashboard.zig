@@ -181,7 +181,7 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
     var name_w: usize = 0;
     var model_w: usize = 0;
     for (0..app.context_factory.agent_counter) |agent_idx| {
-        const ag_type: r.ContextFactory.AgentType = @enumFromInt(agent_idx);
+        const ag_type: r.ContextFactory.AgentType = @fromBackingInt(@intCast(agent_idx));
         const def = app.context_factory.agents.get(ag_type) orelse continue;
         const model_name = app.context_factory.agentModelName(&app.config, ag_type) orelse continue;
         last_idx = agent_idx;
@@ -190,7 +190,7 @@ pub fn build_info(app: *r.app.App, out: *std.ArrayList(r.tui.Line)) !void {
     }
 
     for (0..app.context_factory.agent_counter) |agent_idx| {
-        const ag_type: r.ContextFactory.AgentType = @enumFromInt(agent_idx);
+        const ag_type: r.ContextFactory.AgentType = @fromBackingInt(@intCast(agent_idx));
         const def = app.context_factory.agents.get(ag_type) orelse continue;
         const model_name = app.context_factory.agentModelName(&app.config, ag_type) orelse continue;
         const effort = app.context_factory.agentEffort(ag_type) orelse continue;

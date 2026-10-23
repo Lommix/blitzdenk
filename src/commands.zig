@@ -99,7 +99,7 @@ pub const Command = union(enum) {
         parent_id: ?r.AgentId = null,
         agent_id: r.AgentId,
         prompt: []const r.sdk.Part,
-        agent_type: u8 = @intFromEnum(r.ContextFactory.AgentType.general),
+        agent_type: u8 = @backingInt(r.ContextFactory.AgentType.general),
         timeline_entry: ?TimelineEntry = null,
         cwd: []const u8 = "",
         background: bool = false,
@@ -286,7 +286,7 @@ pub const Command = union(enum) {
                     return;
                 }
                 const model_config = switch (app.context_factory.buildAgentApiConfig(
-                    @enumFromInt(arg.agent_type),
+                    @fromBackingInt(@intCast(arg.agent_type)),
                     &app.config,
                     app.exec_pool.env,
                 )) {
@@ -322,7 +322,7 @@ pub const Command = union(enum) {
                     app.cwd;
                 const agent = try app.registry.activate(arg.agent_id, model_config, .{ .identity = .{
                     .type_idx = arg.agent_type,
-                    .name = app.context_factory.agentName(@enumFromInt(arg.agent_type)),
+                    .name = app.context_factory.agentName(@fromBackingInt(@intCast(arg.agent_type))),
                     .task_description = arg.task,
                     .parent = if (arg.parent_id) |id| id.pack() else null,
                     .depth = if (arg.parent_id) |id| app.registry.get(id).?.depth + 1 else 0,
@@ -334,7 +334,7 @@ pub const Command = union(enum) {
                 try app.configureAgent(arg.agent_id, agent);
 
                 _ = app.event_bus.emit(app, .{
-                    .agent_created = .{ .id = arg.agent_id, .name = app.context_factory.agentName(@enumFromInt(arg.agent_type)), .depth = agent.depth },
+                    .agent_created = .{ .id = arg.agent_id, .name = app.context_factory.agentName(@fromBackingInt(@intCast(arg.agent_type))), .depth = agent.depth },
                 });
 
                 if (arg.parent_id == null and !arg.background) {

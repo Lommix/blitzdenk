@@ -126,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
     const work_dir = try std.fmt.allocPrint(arena, "/tmp/blitzdenk-bench-{d}", .{std.c.getpid()});
     std.Io.Dir.cwd().createDirPath(io, work_dir) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, work_dir) catch {};
-    _ = std.c.chdir(try arena.dupeZ(u8, work_dir));
+    _ = std.c.chdir(try arena.dupeSentinel(u8, work_dir, 0));
 
     const context_factory = try r.ContextFactory.init(gpa, io, work_dir, work_dir);
     var app = try App.init(io, gpa, context_factory, work_dir);

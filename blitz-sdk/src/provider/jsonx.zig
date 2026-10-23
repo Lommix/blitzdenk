@@ -401,7 +401,7 @@ pub fn postWithRetry(
     while (true) {
         if (options.cancellation) |token| try token.check();
         const response = try postTimed(a, io, client, url, body, headers, options.timeout_ms, options.cancellation);
-        if (@intFromEnum(response.status) < 400) return response.body;
+        if (@backingInt(response.status) < 400) return response.body;
         if (!isRetryableStatus(response.status) or attempt >= max_retries) {
             defer a.free(response.body);
             return reportError(a, response, options);
@@ -439,7 +439,7 @@ pub fn postSseWithRetry(
             }
             return err;
         };
-        if (@intFromEnum(response.status) < 400) return response.body;
+        if (@backingInt(response.status) < 400) return response.body;
         if (!isRetryableStatus(response.status) or attempt >= max_retries) {
             defer a.free(response.body);
             return reportError(a, response, options);
@@ -459,7 +459,7 @@ fn sleepBackoff(io: std.Io, attempt: u32, retry_after_ms: ?u64, cancellation: ?*
 }
 
 fn isRetryableStatus(status: std.http.Status) bool {
-    return status == .too_many_requests or @intFromEnum(status) >= 500;
+    return status == .too_many_requests or @backingInt(status) >= 500;
 }
 
 fn reportError(a: std.mem.Allocator, response: Response, options: RequestOptions) HttpError {
@@ -487,7 +487,7 @@ fn notifyError(a: std.mem.Allocator, response: Response, options: RequestOptions
             .attempt = attempt,
         },
         .context_overflow => |value| .{
-            .status_code = @intFromEnum(response.status),
+            .status_code = @backingInt(response.status),
             .response_body = value.response_body,
             .is_retryable = false,
             .context_overflow = true,
@@ -518,12 +518,12 @@ pub fn reportStreamError(a: std.mem.Allocator, options: RequestOptions, body: []
         std.mem.eql(u8, event_type, "response.incomplete");
     if (!failed) return null;
     const context_overflow = errors.isOverflow(body);
-    const retryable = std.ascii.indexOfIgnoreCase(body, "rate_limit") != null or
-        std.ascii.indexOfIgnoreCase(body, "overloaded") != null or
-        std.ascii.indexOfIgnoreCase(body, "unavailable") != null or
-        std.ascii.indexOfIgnoreCase(body, "server") != null or
-        std.ascii.indexOfIgnoreCase(body, "timeout") != null or
-        std.ascii.indexOfIgnoreCase(body, "unmapped") != null;
+    const retryable = std.ascii.findIgnoreCase(body, "rate_limit") != null or
+        std.ascii.findIgnoreCase(body, "overloaded") != null or
+        std.ascii.findIgnoreCase(body, "unavailable") != null or
+        std.ascii.findIgnoreCase(body, "server") != null or
+        std.ascii.findIgnoreCase(body, "timeout") != null or
+        std.ascii.findIgnoreCase(body, "unmapped") != null;
     if (options.on_provider_error) |callback| callback(options.on_provider_error_ctx, .{
         .status_code = 0,
         .response_body = body,
@@ -531,7 +531,7 @@ pub fn reportStreamError(a: std.mem.Allocator, options: RequestOptions, body: []
         .context_overflow = context_overflow,
     });
     if (context_overflow) return error.ContextOverflow;
-    return if (std.ascii.indexOfIgnoreCase(body, "rate_limit") != null) error.RateLimited else error.ApiError;
+    return if (std.ascii.findIgnoreCase(body, "rate_limit") != null) error.RateLimited else error.ApiError;
 }
 
 fn timeoutTask(io: std.Io, timeout_ms: u64) void {
@@ -732,7 +732,7 @@ fn postSse(
         const chunk = scratch[0..writer.end];
         try output.appendSlice(a, chunk);
         if (last_chunk) |stamp| stamp.store(nowNs(io), .release);
-        if (@intFromEnum(status) >= 400) {
+        if (@backingInt(status) >= 400) {
             continue;
         }
         try pending.appendSlice(a, chunk);

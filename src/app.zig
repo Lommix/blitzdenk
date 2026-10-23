@@ -3,9 +3,7 @@ const r = @import("root.zig");
 const text_utils = r.tui.text_utils;
 const log = std.log.scoped(.app);
 
-const ct = @cImport({
-    @cInclude("time.h");
-});
+const ct = @import("ctime");
 
 pub const CONTEXT_LIMIT = 124 * 1024;
 const COMMAND_COMPLETION_ROWS = 64;
@@ -263,7 +261,7 @@ const ToolStatusAgent = struct {
 };
 
 const ToolStatusStore = struct {
-    agents: [r.agent_registry.max_agents]ToolStatusAgent = [_]ToolStatusAgent{.{}} ** r.agent_registry.max_agents,
+    agents: [r.agent_registry.max_agents]ToolStatusAgent = @splat(.{}),
     archived: std.AutoHashMapUnmanaged(u32, ToolStatusAgent) = .empty,
     pending_children: std.AutoHashMapUnmanaged(u32, std.ArrayList(struct { owner: r.AgentId, call_id: []const u8 })) = .empty,
 
@@ -1095,7 +1093,7 @@ pub const App = struct {
         }
 
         if (pc.probe_handle) |handle| {
-            const slot = &self.exec_pool.slots[@intFromEnum(handle)];
+            const slot = &self.exec_pool.slots[@backingInt(handle)];
             if (slot.done.load(.acquire)) {
                 self.harvestProbe(handle);
             } else if (now_ms - pc.probe_started_ms > r.completion.PROBE_TIMEOUT_MS) {
@@ -1746,7 +1744,7 @@ pub const App = struct {
             const state = slot.state.load(.acquire);
             if (state == .free or state == .reserved) continue;
             const agent = &slot.agent.?;
-            if (agent.type_idx != @intFromEnum(agent_type)) continue;
+            if (agent.type_idx != @backingInt(agent_type)) continue;
             agent.updateModel(config) catch |err| {
                 std.log.scoped(.app).warn("model update failed for agent `{s}`: {s}", .{ agent.name, @errorName(err) });
             };
@@ -2435,7 +2433,7 @@ pub const App = struct {
             const state = slot.state.load(.acquire);
             if (state == .free or state == .reserved) continue;
             const agent = &slot.agent.?;
-            if (agent.type_idx != @intFromEnum(r.ContextFactory.AgentType.general)) continue;
+            if (agent.type_idx != @backingInt(r.ContextFactory.AgentType.general)) continue;
             return agent.flags.vision;
         }
         return self.context_factory.agentVision(&self.config, .general);
@@ -2840,7 +2838,7 @@ pub const App = struct {
             self.cmd_queue.append(io, .{
                 .spawn_agent = .{
                     .agent_id = id,
-                    .agent_type = @intFromEnum(r.ContextFactory.AgentType.general),
+                    .agent_type = @backingInt(r.ContextFactory.AgentType.general),
                     .prompt = parts,
                     .timeline_entry = timeline_entry,
                     .cwd = self.cwd,
@@ -3369,12 +3367,12 @@ fn appendSshAliasCompletions(app: *App, alloc: std.mem.Allocator, prefix: []cons
 }
 
 const CompletionRows = struct {
-    items: [COMMAND_COMPLETION_ROWS]CommandCompletion = [_]CommandCompletion{.{ .text = "" }} ** COMMAND_COMPLETION_ROWS,
+    items: [COMMAND_COMPLETION_ROWS]CommandCompletion = @splat(.{ .text = "" }),
     len: usize = 0,
 };
 
 fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: usize) CompletionRows {
-    var matches: [COMMAND_COMPLETION_ROWS]?CommandCompletion = [_]?CommandCompletion{null} ** COMMAND_COMPLETION_ROWS;
+    var matches: [COMMAND_COMPLETION_ROWS]?CommandCompletion = @splat(null);
     var count: usize = 0;
 
     const prefix = switch (app.input_mode) {

@@ -506,12 +506,12 @@ fn renderFlowchart(alloc: std.mem.Allocator, output_alloc: std.mem.Allocator, sr
             first = false;
             continue;
         }
-        if (std.ascii.indexOfIgnoreCase(line, "subgraph") == 0) {
+        if (std.ascii.startsWithIgnoreCase(line, "subgraph")) {
             in_subgraph = true;
             continue;
         }
         if (in_subgraph) {
-            if (std.ascii.indexOfIgnoreCase(line, "end") == 0) in_subgraph = false;
+            if (std.ascii.startsWithIgnoreCase(line, "end")) in_subgraph = false;
             continue;
         }
         try processGraphLine(alloc, line, &nodes, &edges, &ids);

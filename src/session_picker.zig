@@ -1,4 +1,3 @@
-
 pub const EMPTY_PROMPT_LABEL = "<no prompt saved>";
 
 pub const Row = struct {
