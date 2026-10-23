@@ -28,6 +28,23 @@ pub const Slot = struct {
     agent: ?agent_mod.Agent = null,
     event: std.Io.Event = .unset,
     accounted_usage: sdk.Usage = .{},
+    cache_key_buf: [48]u8 = undefined,
+    cache_key_len: usize = 0,
+    cache_seq: u32 = 0,
+
+    fn setCacheKey(self: *Slot, index: usize) void {
+        self.cache_seq +%= 1;
+        const key = std.fmt.bufPrint(&self.cache_key_buf, "blitz-{d}-{d}-{d}", .{ std.c.getpid(), index, self.cache_seq }) catch {
+            self.cache_key_len = 0;
+            return;
+        };
+        self.cache_key_len = key.len;
+    }
+
+    fn cacheKey(self: *const Slot) ?[]const u8 {
+        if (self.cache_key_len == 0) return null;
+        return self.cache_key_buf[0..self.cache_key_len];
+    }
 };
 
 pub const ModelUsage = struct {
@@ -51,14 +68,9 @@ pub const Registry = struct {
     model_usage: std.StringArrayHashMapUnmanaged(sdk.Usage) = .{},
     pending_mutex: std.Io.Mutex = .{ .state = .init(.unlocked) },
     pending: std.ArrayListUnmanaged(agent_mod.Agent) = .empty,
-    cache_key_buf: [40]u8 = undefined,
-    cache_key_len: usize = 0,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io) Registry {
-        var self = Registry{ .alloc = alloc, .io = io };
-        const key = std.fmt.bufPrint(&self.cache_key_buf, "blitz-{d}", .{std.c.getpid()}) catch "";
-        self.cache_key_len = key.len;
-        return self;
+        return .{ .alloc = alloc, .io = io };
     }
 
     pub fn deinit(self: *Registry) void {
@@ -99,6 +111,7 @@ pub const Registry = struct {
             if (slot.state.cmpxchgStrong(.free, .reserved, .acq_rel, .monotonic) == null) {
                 slot.parent = if (parent) |id| id.pack() else null;
                 slot.generation +%= 1;
+                slot.setCacheKey(index);
                 slot.event.reset();
                 return .{ .index = @intCast(index), .generation = slot.generation };
             }
@@ -125,6 +138,7 @@ pub const Registry = struct {
         slot.finish_seq = 0;
         slot.parent = if (parent) |id| id.pack() else null;
         slot.generation +%= 1;
+        slot.setCacheKey(index);
         slot.event.set(self.io);
         return .{ .index = @intCast(index), .generation = slot.generation };
     }
@@ -163,6 +177,7 @@ pub const Registry = struct {
         const slot = self.reservedSlot(id) orelse return error.InvalidReservation;
         var agent = try agent_mod.Agent.init(self.alloc, self.io, config, options);
         errdefer agent.deinit();
+        if (slot.cacheKey()) |key| agent.cache_key = try self.alloc.dupe(u8, key);
         slot.parent = agent.parent;
         slot.agent = agent;
         slot.state.store(.active, .release);
@@ -174,6 +189,7 @@ pub const Registry = struct {
         const slot = &self.slots[id.index];
         if (slot.state.cmpxchgStrong(.free, .reserved, .acq_rel, .monotonic) != null) return error.SlotOccupied;
         slot.generation = id.generation;
+        slot.setCacheKey(id.index);
         slot.event.reset();
         errdefer self.releaseReservation(id);
         return self.activate(id, config, options);
@@ -195,7 +211,8 @@ pub const Registry = struct {
             agent.deinit();
         }
         const generation = slot.generation;
-        slot.* = .{ .generation = generation };
+        const cache_seq = slot.cache_seq;
+        slot.* = .{ .generation = generation, .cache_seq = cache_seq };
     }
 
     pub fn get(self: *Registry, id: AgentId) ?*agent_mod.Agent {
@@ -247,7 +264,7 @@ pub const Registry = struct {
         if (slot.state.load(.acquire) != .active) slot.event.reset();
         agent.reported_task_done = false;
         var options = options_in;
-        if (options.cache_key == null) options.cache_key = self.cache_key_buf[0..self.cache_key_len];
+        if (options.cache_key == null) options.cache_key = slot.cacheKey();
         try agent.start(options);
         slot.state.store(.active, .release);
     }
@@ -287,12 +304,22 @@ pub const Registry = struct {
         const agent = if (slot.agent) |*value| value else return error.AgentNotFound;
         if (agent.compact_task != null) return .running;
         const running = agent.task != null;
-        agent.requestCompaction(.external, running);
-        if (running) return .queued;
-        const started = try agent.startCompaction(self.cache_key_buf[0..self.cache_key_len]);
+        if (running) {
+            agent.requestCompaction(.external, true);
+            return .queued;
+        }
+        const previous = slot.state.load(.acquire);
+        if (previous == .free or previous == .reserved) return error.AgentNotFound;
+        if (slot.state.cmpxchgStrong(previous, .active, .acq_rel, .monotonic) != null) return error.AgentNotFound;
+        agent.requestCompaction(.external, false);
+        const started = agent.startCompaction(slot.cacheKey()) catch |err| {
+            slot.state.store(previous, .release);
+            return err;
+        };
         if (started) {
             slot.event.reset();
-            slot.state.store(.active, .release);
+        } else {
+            slot.state.store(previous, .release);
         }
         return if (started) .started else .empty;
     }

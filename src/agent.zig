@@ -353,10 +353,19 @@ pub const Agent = struct {
         const force = request == .external;
         const cut_index = if (force) compact.computeForcedCutIndex(self.history()) else compact.computeCutIndex(self.history());
         if (cut_index == 0 and self.model != .response) return false;
+        if (self.cache_key == null or self.cache_key.?.len == 0) {
+            if (fallback_cache_key) |key| {
+                if (key.len > 0) {
+                    const owned = try self.alloc.dupe(u8, key);
+                    if (self.cache_key) |old| self.alloc.free(old);
+                    self.cache_key = owned;
+                }
+            }
+        }
         self.compaction.completed_continue_after = null;
         self.compaction.estimated_input_tokens = estimate;
         self.compact_task = compact.Task.init(self.alloc, self.io, &self.model, self.tools, self.history(), force);
-        self.compact_task.?.cache_key = self.cache_key orelse fallback_cache_key;
+        self.compact_task.?.cache_key = self.cache_key;
         _ = self.last_active_ns.swap(@intCast(std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds), .monotonic);
         self.status = .compacting;
         self.compact_task.?.start();
