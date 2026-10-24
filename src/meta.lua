@@ -88,7 +88,7 @@
 ---@field agent_type? integer
 ---working directory of the spawned agent; a relative path resolves against the parent agent cwd
 ---@field cwd? string
----run detached from the timeline: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of timeline entries. Use with on_complete to build silent subagents
+---run detached from the timeline: the agent never becomes the main agent and streams nothing into it; its final answer is queued to the parent as a system reminder, spilling to a file when oversized. Use with on_complete to build silent subagents
 ---@field background? boolean
 ---short task description shown in agent listings
 ---@field task? string

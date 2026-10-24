@@ -120,7 +120,7 @@ Tools.cancel_tool = blitz.register_tool({
 
 Tools.agent_tool = blitz.register_tool({
 	name = "agent",
-	description = [[Launch a new background agent to handle a task autonomously. The tool returns immediately. When the agent finishes, you receive a result file path. Subagents will wake you up]],
+	description = [[Launch a new background agent to handle a task autonomously. The tool returns immediately. When the agent finishes, its answer is injected into your context; oversized answers spill to a file. Subagents will wake you up]],
 	args = {
 		description = { type = "string", description = "A short (3-5 word) description of the task", required = true },
 		prompt = { type = "string", description = "The task for the agent to perform", required = true },

@@ -520,7 +520,7 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "prompt", .ty = LuaType.string },
     .{ .name = "agent_type", .ty = LuaType.integer, .optional = true },
     .{ .name = "cwd", .ty = LuaType.string, .optional = true, .desc = "working directory of the spawned agent; a relative path resolves against the parent agent cwd" },
-    .{ .name = "background", .ty = LuaType.boolean, .optional = true, .desc = "run detached from the timeline: the agent never becomes the main agent, streams nothing into it and its result goes to a file instead of timeline entries. Use with on_complete to build silent subagents" },
+    .{ .name = "background", .ty = LuaType.boolean, .optional = true, .desc = "run detached from the timeline: the agent never becomes the main agent and streams nothing into it; its final answer is queued to the parent as a system reminder, spilling to a file when oversized. Use with on_complete to build silent subagents" },
     .{ .name = "task", .ty = LuaType.string, .optional = true, .desc = "short task description shown in agent listings" },
     .{ .name = "clean", .ty = LuaType.boolean, .optional = true, .desc = "bare agent: no system-reminder injections and no AGENTS.md context, so the blitz.hooks.inject hook never runs for it" },
     .{ .name = "on_complete", .ty = LuaType{ .raw = "fun(agent_id: integer, status: integer)" }, .optional = true, .desc = "runs once on the main thread when the spawned agent completes after its children; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside" },

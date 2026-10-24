@@ -30,13 +30,6 @@ pub fn escapeMarkup(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
-pub fn utf8Prefix(text: []const u8, max: usize) []const u8 {
-    if (text.len <= max) return text;
-    var end = max;
-    while (end > 0 and (text[end] & 0xC0) == 0x80) end -= 1;
-    return text[0..end];
-}
-
 pub fn expandHomePath(path: []const u8, home: []const u8, buf: []u8) []const u8 {
     if (home.len == 0 or home[0] != '/') return path;
     if (std.mem.eql(u8, path, "~")) return home;

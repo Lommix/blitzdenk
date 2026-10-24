@@ -6,10 +6,11 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 pub const ReadTool = r.Tool{
     .def = .{
         .name = "read",
-        .description = "Read the contents of a file. Supports text files and images (png, jpeg, gif, webp). For text files, output is truncated to " ++ r.DISPLAY_CAP_TEXT ++
+        .description = "Read the contents of a file. Output includes line numbers. Supports text files and images (png, jpeg, gif, webp). For text files, output is truncated to " ++ r.DISPLAY_CAP_TEXT ++
             \\ (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
         ,
         .prompt_snippet = "Read file contents and images",
+        .prompt_guidelines = "Prefer the read tool over bash cat/sed for file contents",
         .parameters_schema =
         \\{
         \\  "type": "object",

@@ -290,7 +290,9 @@ pub fn truncateOutputToOwnedSpill(
 
     const raw = std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ tail, notice }) catch
         return output;
-    return ensureValidUtf8(alloc, raw);
+    const sanitized = ensureValidUtf8(alloc, raw);
+    if (sanitized.ptr != raw.ptr) alloc.free(raw);
+    return sanitized;
 }
 
 /// True when `output` would be truncated by the given caps (matches
@@ -300,8 +302,8 @@ pub fn isOversized(output: []const u8, max_bytes: usize, max_lines: usize) bool 
     return output.len > max_bytes or countLines(output) > max_lines;
 }
 
-pub fn writeSpillFile(pool: *@import("exec").CmdPool, alloc: std.mem.Allocator, call_id: []const u8, content: []const u8) ?[]const u8 {
-    const basename = std.fmt.allocPrint(alloc, "blitz-spill-{s}.txt", .{call_id}) catch return null;
+pub fn writeSpillFile(pool: *@import("exec").CmdPool, alloc: std.mem.Allocator, tag: []const u8, content: []const u8) ?[]const u8 {
+    const basename = std.fmt.allocPrint(alloc, "blitz-spill-{s}.txt", .{tag}) catch return null;
     defer alloc.free(basename);
     return r.artifact.write(pool, alloc, basename, content) catch null;
 }
@@ -329,13 +331,11 @@ fn collectLinesBack(output: []const u8, max_bytes: usize, max_lines: usize) Tail
     }
     if (output.len - line_start <= max_bytes)
         return .{ .start = line_start, .line_bound = line_bound, .byte_bound = false };
-    var tail_start = utf8Floor(output, output.len - max_bytes);
-    if (tail_start == 0 or output[tail_start - 1] != '\n') {
-        if (std.mem.indexOfScalarPos(u8, output, tail_start, '\n')) |nl| {
-            tail_start = nl + 1;
-        } else {
-            tail_start = output.len;
-        }
+    const floor = output.len - max_bytes;
+    var tail_start = utf8Floor(output, floor);
+    if (tail_start == 0) tail_start = floor;
+    if (output[tail_start - 1] != '\n') {
+        if (std.mem.indexOfScalarPos(u8, output, tail_start, '\n')) |nl| tail_start = nl + 1;
     }
     if (tail_start < line_start) tail_start = line_start;
     return .{ .start = tail_start, .line_bound = line_bound, .byte_bound = true };
@@ -352,8 +352,7 @@ fn utf8Floor(s: []const u8, end: usize) usize {
 /// Return `raw` if already valid UTF-8; otherwise owned lossy copy (U+FFFD).
 fn ensureValidUtf8(alloc: std.mem.Allocator, raw: []const u8) []const u8 {
     if (std.unicode.utf8ValidateSlice(raw)) return raw;
-    return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf8(raw)}) catch
-        "(binary output; failed to sanitize utf-8)";
+    return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf8(raw)}) catch raw;
 }
 
 pub fn countLines(output: []const u8) usize {

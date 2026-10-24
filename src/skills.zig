@@ -262,8 +262,21 @@ pub fn skillSendText(alloc: std.mem.Allocator, name: []const u8, path: []const u
 }
 
 pub fn skillTimelineText(alloc: std.mem.Allocator, name: []const u8, prompt: []const u8) ![]const u8 {
-    if (prompt.len == 0) return std.fmt.allocPrint(alloc, "[skill-{s}]", .{name});
-    return std.fmt.allocPrint(alloc, "[skill-{s}] {s}", .{ name, prompt });
+    if (prompt.len == 0) return std.fmt.allocPrint(alloc, "# {s}\n", .{name});
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, "# ");
+    try out.appendSlice(alloc, name);
+    try out.appendSlice(alloc, "\n\n> ");
+    for (prompt) |c| {
+        if (c == '\n') {
+            try out.appendSlice(alloc, "\n> ");
+        } else {
+            try out.append(alloc, c);
+        }
+    }
+    try out.append(alloc, '\n');
+    return out.toOwnedSlice(alloc);
 }
 
 fn parseBool(val: []const u8, default: bool) bool {

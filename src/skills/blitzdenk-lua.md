@@ -222,10 +222,10 @@ or replacing the agent before that fires `blitz.AWAIT_CANCELED` instead, and a
 Lua reload drops the callback.
 
 `background = true` detaches the agent from the timeline. The agent never
-becomes the main agent, streams nothing into it, and writes its final output to
-a result file instead of timeline entries. Combine it with `on_complete` to
-build a silent subagent: read the answer in the callback with
-`blitz.agent.result(id)`.
+becomes the main agent and streams nothing into it. A finished child with a
+parent queues its final answer into the parent chat.
+Combine it with `on_complete` to build a silent subagent: read the answer
+in the callback with `blitz.agent.result(id)`.
 
 `clean = true` in `blitz.agent.spawn`, or `clean` on the `agent` tool, builds a
 bare agent: no AGENTS.md context, and no `<system-reminder>` injection on any

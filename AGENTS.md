@@ -9,6 +9,16 @@ Zig version: 0.17.0
 - `zig build` compile the binary
 - `zig build gen` generate the lua meta file `src/meta.lua`
 - `make test` run the blitzdenk suite
+- `make check` verify formatting, generated meta, and tests
+
+## Sub-agent flow
+
+- Reserve, spawn, state: `src/agent_registry.zig`, `src/commands.zig`
+- Run loop: `src/agent.zig`, `src/agent_run.zig`
+- Result injection into the parent: `App.finishBackgroundAgent` in `src/app.zig`
+- Lua surface: `src/lua.zig`, `src/blitz_default.lua`
+- Tui state and render: `src/app.zig`
+-
 
 ## RULES
 
