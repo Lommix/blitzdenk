@@ -276,10 +276,9 @@ pub const Store = struct {
         for (displays.items) |display| {
             const entry = try @import("util.zig").deepClone(app.TimelineEntry, display.entry, target.sessionAlloc());
             try target.timeline.append(target.sessionAlloc(), entry);
+            target.adoptDisplayedPreview(entry.parts);
         }
         if (displays.items.len > 0) {
-            target.dropStreamingPreview();
-            target.sdk_preview_flushed = true;
             target.dirty = true;
         }
     }

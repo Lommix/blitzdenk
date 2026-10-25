@@ -407,6 +407,7 @@ pub const App = struct {
     history_cursor: usize = 0,
     timeline: std.ArrayList(TimelineEntry) = .empty,
     streaming_entry: ?TimelineEntry = null,
+    preview_reference: ?[]const TimelinePart = null,
     sdk_preview_parts: std.ArrayList(SdkPreviewPart) = .empty,
     sdk_preview_flushed: bool = false,
     sdk_run_rendered_steps: usize = 0,
@@ -922,6 +923,7 @@ pub const App = struct {
     pub fn selectMainAgent(self: *App, id: ?r.AgentId) !void {
         if (!self.journal_restoring) if (self.session_store) |store| try store.enqueue(.{ .kind = .main_agent, .agentID = if (id) |value| value.pack() else null });
         self.main_agent_id = id;
+        self.preview_reference = null;
     }
 
     fn journalClear(self: *App) void {
@@ -2575,6 +2577,7 @@ pub const App = struct {
         if (self.session_store) |store| store.enqueue(.{ .kind = .timeline_truncate, .length = start }) catch return;
 
         self.timeline.shrinkRetainingCapacity(start);
+        self.preview_reference = null;
         if (self.timeline_render_cache.items.len > start) {
             self.timeline_render_cache.shrinkRetainingCapacity(start);
         }
@@ -2615,9 +2618,47 @@ pub const App = struct {
 
     pub fn dropStreamingPreview(self: *App) void {
         self.streaming_entry = null;
+        self.preview_reference = null;
         self.sdk_preview_parts = .empty;
         _ = self.arena_streaming_snapshot.reset(.free_all);
         _ = self.arena_streaming_preview.reset(.free_all);
+    }
+
+    fn timelineCoversText(shown: []const TimelinePart, kind: SdkPreviewPart.Kind, text: []const u8) bool {
+        if (text.len == 0) return true;
+        for (shown) |part| switch (part) {
+            .message => |available| if (kind == .message and std.mem.indexOf(u8, available, text) != null) return true,
+            .thinking => |available| if (kind == .thinking and std.mem.indexOf(u8, available, text) != null) return true,
+            else => {},
+        };
+        return false;
+    }
+
+    fn timelineCoversCall(shown: []const TimelinePart, call_id: []const u8) bool {
+        for (shown) |part| {
+            if (part == .tool_call and std.mem.eql(u8, part.tool_call.call_id, call_id)) return true;
+        }
+        return false;
+    }
+
+    fn timelinePartsCovered(shown: []const TimelinePart, parts: []const TimelinePart) bool {
+        for (parts) |part| switch (part) {
+            .message => |text| if (!timelineCoversText(shown, .message, text)) return false,
+            .thinking => |text| if (!timelineCoversText(shown, .thinking, text)) return false,
+            .tool_call => |call| if (!timelineCoversCall(shown, call.call_id)) return false,
+            .plain_text, .diff => return false,
+        };
+        return true;
+    }
+
+    pub fn adoptDisplayedPreview(self: *App, shown: []const TimelinePart) void {
+        if (self.streaming_entry) |entry| {
+            if (!timelinePartsCovered(shown, entry.parts)) return;
+            self.dropStreamingPreview();
+        } else if (self.sdk_preview_parts.items.len > 0) {
+            return;
+        }
+        if (self.preview_reference == null) self.preview_reference = shown;
     }
 
     fn appendSdkPreviewText(self: *App, alloc: std.mem.Allocator, kind: SdkPreviewPart.Kind, text: []const u8) !void {
@@ -2771,8 +2812,12 @@ pub const App = struct {
             } }),
         };
         if (parts.items.len == 0) {
-            self.streaming_entry = null;
             return;
+        }
+        if (self.preview_reference) |shown| {
+            if (timelinePartsCovered(shown, parts.items)) {
+                return;
+            }
         }
         self.streaming_entry = .{ .role = .agent, .parts = try parts.toOwnedSlice(alloc) };
     }
@@ -2809,6 +2854,7 @@ pub const App = struct {
     /// Shared by the TUI Enter handler and headless mode.
     pub fn sendPrompt(self: *App, io: std.Io, parts: []const r.sdk.Part, timeline_text: []const u8) !void {
         try self.waitForMcpTools();
+        self.preview_reference = null;
         const alloc = self.sessionAlloc();
         const timeline_entry = try TimelineEntry.userMessageSimple(alloc, .user, timeline_text);
         _ = self.event_bus.emit(self, .{ .user_message_sent = timeline_text });
@@ -5608,6 +5654,7 @@ test "finished retained agents survive reaping and take queued messages" {
     defer app.arena_streaming_snapshot.deinit();
     app.timeline = .empty;
     app.streaming_entry = null;
+    app.preview_reference = null;
     app.sdk_preview_parts = .empty;
     app.sdk_preview_flushed = false;
     app.sdk_usage = .{};
@@ -5921,6 +5968,7 @@ test "waiting main agent shows waiting progress and cancel stops the tree" {
     app.arena_streaming_snapshot = .init(std.testing.allocator);
     defer app.arena_streaming_snapshot.deinit();
     app.timeline = .empty;
+    app.preview_reference = null;
     app.sdk_run_rendered_steps = 0;
     app.event_bus = .{};
     app.active_permission = null;

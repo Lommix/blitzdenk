@@ -408,6 +408,7 @@ const SessionTestRig = struct {
         self.a.tool_status_entries = .{};
         self.a.pending_diffs = .{};
         self.a.streaming_entry = null;
+        self.a.preview_reference = null;
         self.a.main_agent_id = null;
         self.a.event_bus = .{};
         self.a.session_store = null;
