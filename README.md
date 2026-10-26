@@ -14,7 +14,7 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 ## Core features and patterns
 
 - Tiny system prompt, minimal tool descriptions. Simple is efficient.
-- Unbreakable multi agent session saves and recovery.
+- Durable multi agent sessions. Always recover.
 - All IO goes through GNU core utils (ls, tee, cat, etc.)
 - Optional SSH tunnel layer. Tools run on a remote host.
 - MCP and Skill support.
