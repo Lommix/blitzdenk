@@ -126,6 +126,17 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 })
 ```
 
+## Image reads
+
+The read tool scales images above the configured limit and returns the result
+as PNG. A format the built-in decoder cannot read is returned unscaled, with
+a note in the tool result. The PNG is reduced further when needed to stay
+within the image byte limit.
+
+```lua
+blitz.set_read_image_max(4096, 4096)
+```
+
 ## Env capabilities
 
 Rules form the `<env_capabilities>` catalogue. It is injected once per chat as

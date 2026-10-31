@@ -197,6 +197,12 @@ fn nonVisionResult(ctx: r.ToolContext, call: r.r.sdk.ToolCall, media_type: ?[]co
     return r.okResult(call, msg);
 }
 
+const ScaledImage = struct {
+    bytes: []u8,
+    width: u32,
+    height: u32,
+};
+
 fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall, file_path: []const u8, is_url: bool, resolved: []const u8, harness_path: bool) r.r.sdk.ToolOutput {
     const raw = if (is_url)
         loadUrlImage(ctx, file_path) catch |err| return r.errResult(call, imageLoadError(err, true))
@@ -204,20 +210,86 @@ fn viewImage(ctx: r.ToolContext, call: r.r.sdk.ToolCall, file_path: []const u8, 
         loadLocalImage(ctx, resolved, harness_path) catch |err| return r.errResult(call, imageLoadError(err, false));
     defer ctx.base.exec_pool.alloc.free(raw);
 
-    const media_type = detectImageMediaType(raw) orelse
+    const source_media_type = detectImageMediaType(raw) orelse
         return r.errResult(call, "unsupported image format; expected PNG, JPEG, GIF, or WebP");
+    var output_media_type = source_media_type;
+    const source_size = r.r.image.dimensions(raw);
 
-    const encoded_len = std.base64.standard.Encoder.calcSize(raw.len);
+    var encoded_raw: []const u8 = raw;
+    var scaled: ?ScaledImage = null;
+    var scale_error: ?anyerror = null;
+    defer if (scaled) |value| ctx.alloc.free(value.bytes);
+
+    if (source_size) |size| {
+        const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+        const max = app.readImageMax();
+        if (exceedsReadImageMax(size, max)) {
+            if (scaleImageToPng(ctx, raw, size, max)) |value| {
+                scaled = value;
+                encoded_raw = value.bytes;
+                output_media_type = "image/png";
+            } else |err| {
+                scale_error = err;
+            }
+        }
+    }
+
+    const encoded_len = std.base64.standard.Encoder.calcSize(encoded_raw.len);
     const encoded = ctx.alloc.alloc(u8, encoded_len) catch return r.errResult(call, "out of memory");
-    _ = std.base64.standard.Encoder.encode(encoded, raw);
+    defer ctx.alloc.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, encoded_raw);
 
-    const note = std.fmt.allocPrint(ctx.alloc, "Read image file [{s}]", .{media_type}) catch
-        return r.errResult(call, "out of memory");
+    const note = if (scaled) |value|
+        std.fmt.allocPrint(
+            ctx.alloc,
+            "Read image file [image/png] ({s} {d}x{d} scaled to {d}x{d})",
+            .{ source_media_type, source_size.?.width, source_size.?.height, value.width, value.height },
+        ) catch return r.errResult(call, "out of memory")
+    else if (scale_error) |err|
+        std.fmt.allocPrint(ctx.alloc, "Read image file [{s}] (not scaled: {s})", .{ source_media_type, imageScaleError(err) }) catch
+            return r.errResult(call, "out of memory")
+    else
+        std.fmt.allocPrint(ctx.alloc, "Read image file [{s}]", .{source_media_type}) catch
+            return r.errResult(call, "out of memory");
 
     return .{ .content = note, .image = .{
-        .url = std.fmt.allocPrint(ctx.alloc, "data:{s};base64,{s}", .{ media_type, encoded }) catch return r.errResult(call, "out of memory"),
-        .media_type = media_type,
+        .url = std.fmt.allocPrint(ctx.alloc, "data:{s};base64,{s}", .{ output_media_type, encoded }) catch return r.errResult(call, "out of memory"),
+        .media_type = output_media_type,
     } };
+}
+
+fn exceedsReadImageMax(size: r.r.image.Size, max: r.r.image.Size) bool {
+    return (max.width != 0 and size.width > max.width) or (max.height != 0 and size.height > max.height);
+}
+
+fn scaleImageToPng(ctx: r.ToolContext, raw: []const u8, size: r.r.image.Size, max: r.r.image.Size) !ScaledImage {
+    var box_width = if (max.width == 0) size.width else max.width;
+    var box_height = if (max.height == 0) size.height else max.height;
+    while (true) {
+        var img = try r.r.image.decode(ctx.alloc, raw);
+        const scaled = r.r.image.scaleToFit(ctx.alloc, img, box_width, box_height) catch |err| {
+            img.deinit(ctx.alloc);
+            return err;
+        };
+        defer scaled.deinit(ctx.alloc);
+        const png = try r.r.image.encodePng(ctx.alloc, scaled);
+        if (png.len <= MAX_IMAGE_BYTES or (box_width == 1 and box_height == 1)) {
+            return .{ .bytes = png, .width = scaled.width, .height = scaled.height };
+        }
+        ctx.alloc.free(png);
+        box_width = @max(1, box_width -| box_width / 4);
+        box_height = @max(1, box_height -| box_height / 4);
+    }
+}
+
+fn imageScaleError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.Unsupported => "format cannot be scaled",
+        error.TooLarge => "image is too large to decode",
+        error.Corrupt => "image could not be decoded",
+        error.OutOfMemory => "out of memory",
+        else => "scaling failed",
+    };
 }
 
 const ImageLoadError = error{

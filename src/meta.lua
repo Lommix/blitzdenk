@@ -687,6 +687,8 @@
 ---@field context_percent fun(): number
 ---Set the default context edge, in tokens, used for statusbar percentage and auto-compaction.
 ---@field set_compact_edge fun(tokens: integer)
+---Set the maximum width and height, in pixels, for images returned by the read tool. Larger images are scaled down. 0 disables the limit for that axis. Default 2048x2048.
+---@field set_read_image_max fun(width: integer, height: integer)
 ---Bind a vim-style key combo to a Lua callback.
 ---Examples: "<C-c>", "<M-S-a>", "<Esc>", "<Up>", "<F1>", "a"
 ---

@@ -1072,6 +1072,24 @@ pub const Blitz = LuaType{
                 },
             },
             .{
+                .name = "set_read_image_max",
+                .desc = "Set the maximum width and height, in pixels, for images returned by the read tool. Larger images are scaled down. 0 disables the limit for that axis. Default 2048x2048.",
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{
+                            .{ .name = "width", .ty = LuaType.integer },
+                            .{ .name = "height", .ty = LuaType.integer },
+                        },
+                        .fn_ptr = LuaFnBind((struct {
+                            fn lua_fn(state: *c.lua_State, a: *r.app.App, width: u32, height: u32) !void {
+                                if (try isToolVm(state)) return;
+                                a.setReadImageMax(width, height);
+                            }
+                        }).lua_fn, "set_read_image_max"),
+                    },
+                },
+            },
+            .{
                 .name = "bind",
                 .desc =
                 \\Bind a vim-style key combo to a Lua callback.
@@ -3756,6 +3774,7 @@ pub const LuaVm = struct {
         if (self.app) |a| {
             a.config.reset();
             a.default_context_limit = app.CONTEXT_LIMIT;
+            a.resetReadImageMax();
         }
         try self.initLuaState();
         if (self.app) |a| self.setApp(a);

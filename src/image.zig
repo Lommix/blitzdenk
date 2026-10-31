@@ -28,12 +28,155 @@ pub fn sniffFormat(data: []const u8) ?Format {
     return null;
 }
 
+pub const Size = struct {
+    width: u32,
+    height: u32,
+};
+
+pub fn dimensions(data: []const u8) ?Size {
+    if (data.len >= 24 and std.mem.eql(u8, data[0..8], &png_sig) and std.mem.eql(u8, data[12..16], "IHDR")) {
+        const width = std.mem.readInt(u32, data[16..20], .big);
+        const height = std.mem.readInt(u32, data[20..24], .big);
+        if (width == 0 or height == 0) return null;
+        return .{ .width = width, .height = height };
+    }
+    if (data.len >= 4 and data[0] == 0xFF and data[1] == 0xD8) return jpegDimensions(data);
+    if (data.len >= 10 and (std.mem.eql(u8, data[0..6], "GIF87a") or std.mem.eql(u8, data[0..6], "GIF89a"))) {
+        return .{
+            .width = std.mem.readInt(u16, data[6..8], .little),
+            .height = std.mem.readInt(u16, data[8..10], .little),
+        };
+    }
+    if (data.len >= 30 and std.mem.eql(u8, data[0..4], "RIFF") and std.mem.eql(u8, data[8..12], "WEBP")) return webpDimensions(data);
+    return null;
+}
+
+fn jpegDimensions(data: []const u8) ?Size {
+    var pos: usize = 2;
+    while (pos + 4 <= data.len) {
+        if (data[pos] != 0xFF) {
+            pos += 1;
+            continue;
+        }
+        var marker_pos = pos + 1;
+        while (marker_pos < data.len and data[marker_pos] == 0xFF) marker_pos += 1;
+        if (marker_pos >= data.len) return null;
+        const marker = data[marker_pos];
+        pos = marker_pos + 1;
+        if (marker == 0x00 or marker == 0x01 or marker == 0xD8 or (marker >= 0xD0 and marker <= 0xD7)) continue;
+        if (marker == 0xD9 or marker == 0xDA) return null;
+        if (pos + 2 > data.len) return null;
+        const segment_len = std.mem.readInt(u16, data[pos..][0..2], .big);
+        if (segment_len < 2) return null;
+        const is_sof = switch (marker) {
+            0xC0...0xC3, 0xC5...0xC7, 0xC9...0xCB, 0xCD...0xCF => true,
+            else => false,
+        };
+        if (is_sof) {
+            if (segment_len < 8 or pos + 7 > data.len) return null;
+            const height = std.mem.readInt(u16, data[pos + 3 ..][0..2], .big);
+            const width = std.mem.readInt(u16, data[pos + 5 ..][0..2], .big);
+            if (width == 0 or height == 0) return null;
+            return .{ .width = width, .height = height };
+        }
+        pos += segment_len;
+    }
+    return null;
+}
+
+fn webpDimensions(data: []const u8) ?Size {
+    if (std.mem.eql(u8, data[12..16], "VP8X")) {
+        const width = readU24Le(data[24..27]) + 1;
+        const height = readU24Le(data[27..30]) + 1;
+        return .{ .width = width, .height = height };
+    }
+    if (std.mem.eql(u8, data[12..16], "VP8L")) {
+        if (data[20] != 0x2F) return null;
+        const bits = std.mem.readInt(u32, data[21..25], .little);
+        return .{
+            .width = (bits & 0x3FFF) + 1,
+            .height = ((bits >> 14) & 0x3FFF) + 1,
+        };
+    }
+    if (std.mem.eql(u8, data[12..16], "VP8 ")) {
+        if (data[23] != 0x9D or data[24] != 0x01 or data[25] != 0x2A) return null;
+        const width = std.mem.readInt(u16, data[26..28], .little) & 0x3FFF;
+        const height = std.mem.readInt(u16, data[28..30], .little) & 0x3FFF;
+        if (width == 0 or height == 0) return null;
+        return .{ .width = width, .height = height };
+    }
+    return null;
+}
+
+fn readU24Le(data: []const u8) u32 {
+    return @as(u32, data[0]) | @as(u32, data[1]) << 8 | @as(u32, data[2]) << 16;
+}
+
 pub fn decode(alloc: std.mem.Allocator, data: []const u8) (Error || std.mem.Allocator.Error)!Image {
     return switch (sniffFormat(data) orelse return Error.Unsupported) {
         .png => decodePng(alloc, data),
         .jpeg => decodeJpeg(alloc, data),
         .gif => decodeGif(alloc, data),
     };
+}
+
+pub fn encodePng(alloc: std.mem.Allocator, img: Image) (std.mem.Allocator.Error || std.Io.Writer.Error)![]u8 {
+    std.debug.assert(img.pixels.len == @as(usize, img.width) * img.height * 4);
+    const stride = @as(usize, img.width) * 4;
+    const raw_len = (stride + 1) * @as(usize, img.height);
+    const raw = try alloc.alloc(u8, raw_len);
+    defer alloc.free(raw);
+
+    var y: usize = 0;
+    while (y < img.height) : (y += 1) {
+        const src = img.pixels[y * stride ..][0..stride];
+        const dst = raw[y * (stride + 1) ..][0 .. stride + 1];
+        dst[0] = 1;
+        for (src, 0..) |byte, x| {
+            const left = if (x >= 4) src[x - 4] else 0;
+            dst[x + 1] = byte -% left;
+        }
+    }
+
+    var deflated = try std.Io.Writer.Allocating.initCapacity(alloc, 4096);
+    defer deflated.deinit();
+    const window = try alloc.alloc(u8, std.compress.flate.max_window_len);
+    defer alloc.free(window);
+    var compressor = try std.compress.flate.Compress.init(&deflated.writer, window, .zlib, std.compress.flate.Compress.Options.level_1);
+    try compressor.writer.writeAll(raw);
+    try compressor.finish();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, &png_sig);
+
+    var ihdr: [13]u8 = undefined;
+    std.mem.writeInt(u32, ihdr[0..4], img.width, .big);
+    std.mem.writeInt(u32, ihdr[4..8], img.height, .big);
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    ihdr[10] = 0;
+    ihdr[11] = 0;
+    ihdr[12] = 0;
+
+    try appendPngChunk(alloc, &out, "IHDR", &ihdr);
+    try appendPngChunk(alloc, &out, "IDAT", deflated.writer.buffered());
+    try appendPngChunk(alloc, &out, "IEND", &.{});
+    return out.toOwnedSlice(alloc);
+}
+
+fn appendPngChunk(alloc: std.mem.Allocator, out: *std.ArrayList(u8), kind: []const u8, data: []const u8) std.mem.Allocator.Error!void {
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_buf, @intCast(data.len), .big);
+    try out.appendSlice(alloc, &len_buf);
+    try out.appendSlice(alloc, kind);
+    try out.appendSlice(alloc, data);
+    var crc: std.hash.Crc32 = .init();
+    crc.update(kind);
+    crc.update(data);
+    var crc_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &crc_buf, crc.final(), .big);
+    try out.appendSlice(alloc, &crc_buf);
 }
 
 pub fn downsampleMaxSide(alloc: std.mem.Allocator, img: Image, max_side: u32) !Image {
@@ -466,8 +609,8 @@ fn decodeGif(alloc: std.mem.Allocator, data: []const u8) (Error || std.mem.Alloc
     }
     if (pos + 9 > data.len) return Error.Corrupt;
 
-    const frame_left = std.mem.readInt(u16, data[pos + 1 ..][0..2], .little);
-    const frame_top = std.mem.readInt(u16, data[pos + 3 ..][0..2], .little);
+    const frame_left = std.mem.readInt(u16, data[pos..][0..2], .little);
+    const frame_top = std.mem.readInt(u16, data[pos + 2 ..][0..2], .little);
     const frame_w = std.mem.readInt(u16, data[pos + 4 ..][0..2], .little);
     const frame_h = std.mem.readInt(u16, data[pos + 6 ..][0..2], .little);
     if (frame_w == 0 or frame_h == 0) return Error.Corrupt;

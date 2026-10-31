@@ -6,6 +6,7 @@ const log = std.log.scoped(.app);
 const ct = @import("ctime");
 
 pub const CONTEXT_LIMIT = 124 * 1024;
+pub const READ_IMAGE_MAX = 2048;
 const COMMAND_COMPLETION_ROWS = 64;
 
 const WIDGET_PAD_X: u16 = 2;
@@ -400,6 +401,7 @@ pub const App = struct {
     lua_reload_generation: std.atomic.Value(u64) = .init(0),
     flags: AppFlags = .{},
     default_context_limit: u32 = CONTEXT_LIMIT,
+    read_image_max: std.atomic.Value(u64) = .init(packReadImageMax(READ_IMAGE_MAX, READ_IMAGE_MAX)),
     last_unbound_warn: ?[]const u8 = null,
     screenshot_buf: ?[]const u8 = null,
     dirty: bool = true,
@@ -1748,6 +1750,26 @@ pub const App = struct {
 
     pub fn markLuaReloadDone(self: *App) void {
         self.lua_reload_requested.store(false, .release);
+    }
+
+    pub fn setReadImageMax(self: *App, width: u32, height: u32) void {
+        self.read_image_max.store(packReadImageMax(width, height), .release);
+    }
+
+    pub fn readImageMax(self: *const App) r.image.Size {
+        const value = self.read_image_max.load(.acquire);
+        return .{
+            .width = @truncate(value >> 32),
+            .height = @truncate(value),
+        };
+    }
+
+    pub fn resetReadImageMax(self: *App) void {
+        self.setReadImageMax(READ_IMAGE_MAX, READ_IMAGE_MAX);
+    }
+
+    fn packReadImageMax(width: u32, height: u32) u64 {
+        return @as(u64, width) << 32 | height;
     }
 
     fn refreshRunningAgentTools(ctx: ?*anyopaque, agent: *r.agent.Agent) anyerror!void {
