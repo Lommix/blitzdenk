@@ -16,7 +16,53 @@ pub const ServerConfig = struct {
     key: ?[]const u8 = null,
     key_envar: ?[]const u8 = null,
     timeout_s: u64 = DEFAULT_TIMEOUT_S,
+    oauth: bool = false,
+    client_id: ?[]const u8 = null,
+    client_secret: ?[]const u8 = null,
+    scopes: []const []const u8 = &.{},
+    redirect_port: u16 = r.oauth.DEFAULT_REDIRECT_PORT,
 };
+
+pub const ServerState = enum { loaded, auth_required, failed };
+
+pub const ServerStatus = struct {
+    name_buf: [64]u8 = undefined,
+    name_len: usize = 0,
+    reason_buf: [64]u8 = undefined,
+    reason_len: usize = 0,
+    state: ServerState,
+    oauth: bool,
+
+    pub fn name(self: *const ServerStatus) []const u8 {
+        return self.name_buf[0..self.name_len];
+    }
+
+    pub fn reason(self: *const ServerStatus) []const u8 {
+        return self.reason_buf[0..self.reason_len];
+    }
+};
+
+pub fn wantsOAuth(cfg: ServerConfig) bool {
+    return cfg.oauth and cfg.url != null and staticKey(cfg) == null;
+}
+
+pub fn staticKey(cfg: ServerConfig) ?[]const u8 {
+    if (cfg.key_envar) |envar| {
+        var name_buf: [256]u8 = undefined;
+        if (envar.len < name_buf.len) {
+            @memcpy(name_buf[0..envar.len], envar);
+            name_buf[envar.len] = 0;
+            if (std.c.getenv(@ptrCast(&name_buf))) |value| {
+                const token = std.mem.span(value);
+                if (token.len > 0) return token;
+            }
+        }
+    }
+    if (cfg.key) |key| {
+        if (key.len > 0) return key;
+    }
+    return null;
+}
 
 pub const RegisteredTool = struct {
     tool: r.tools.Tool,
@@ -35,6 +81,8 @@ pub const Manager = struct {
     clients: std.ArrayList(Client) = .empty,
     bindings: std.ArrayList(ToolBinding) = .empty,
     tools: std.ArrayList(RegisteredTool) = .empty,
+    statuses: std.ArrayList(ServerStatus) = .empty,
+    token_dir: ?[]const u8 = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io) Manager {
         return .{ .alloc = alloc, .io = io };
@@ -46,6 +94,7 @@ pub const Manager = struct {
         self.clients.deinit(self.alloc);
         self.bindings.deinit(self.alloc);
         self.tools.deinit(self.alloc);
+        self.statuses.deinit(self.alloc);
     }
 
     pub fn clear(self: *Manager) void {
@@ -61,6 +110,7 @@ pub const Manager = struct {
         self.clients.clearRetainingCapacity();
         self.bindings.clearRetainingCapacity();
         self.tools.clearRetainingCapacity();
+        self.statuses.clearRetainingCapacity();
     }
 
     pub fn loadServers(self: *Manager, configs: []const ServerConfig) void {
@@ -71,20 +121,41 @@ pub const Manager = struct {
             return;
         };
 
+        self.statuses.ensureTotalCapacity(self.alloc, configs.len) catch return;
+
+        var arena_state = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena_state.deinit();
+        const records: []const r.oauth.Record = if (self.token_dir) |dir|
+            (r.oauth.Store{ .io = self.io, .dir = dir }).load(arena_state.allocator())
+        else
+            &.{};
+
         for (configs) |cfg| {
-            self.addServer(cfg) catch |err| {
+            var status: ServerStatus = .{ .state = .loaded, .oauth = cfg.oauth and cfg.url != null };
+            status.name_len = @min(cfg.name.len, status.name_buf.len);
+            @memcpy(status.name_buf[0..status.name_len], cfg.name[0..status.name_len]);
+            self.addServer(cfg, records) catch |err| {
                 if (err == error.Canceled) return;
                 log.warn("failed to load MCP server '{s}': {s}", .{ cfg.name, @errorName(err) });
+                status.state = if (err == error.McpAuthRequired) .auth_required else .failed;
+                const reason = @errorName(err);
+                status.reason_len = @min(reason.len, status.reason_buf.len);
+                @memcpy(status.reason_buf[0..status.reason_len], reason[0..status.reason_len]);
             };
+            self.statuses.appendAssumeCapacity(status);
         }
+    }
+
+    pub fn serverStatuses(self: *const Manager) []const ServerStatus {
+        return self.statuses.items;
     }
 
     pub fn registeredTools(self: *Manager) []const RegisteredTool {
         return self.tools.items;
     }
 
-    fn addServer(self: *Manager, cfg: ServerConfig) !void {
-        var client = try Client.start(self.alloc, self.io, cfg);
+    fn addServer(self: *Manager, cfg: ServerConfig, records: []const r.oauth.Record) !void {
+        var client = try Client.start(self.alloc, self.io, cfg, self.token_dir, records);
         const client_index = self.clients.items.len;
         self.clients.append(self.alloc, client) catch |err| {
             client.deinit();
@@ -185,7 +256,11 @@ fn toolTrampoline(ctx: r.tools.ToolContext, call: r.sdk.ToolCall) r.sdk.ToolOutp
     r.tools.setToolStatus(ctx, call, w.finish()) catch {};
     const client = &manager.clients.items[binding.client_index];
     const content = client.callTool(ctx.alloc, binding.remote_name, call.input) catch |err| {
-        const msg = std.fmt.allocPrint(ctx.alloc, "MCP tool call failed: {s}", .{@errorName(err)}) catch "MCP tool call failed";
+        const msg = switch (err) {
+            error.McpAuthRequired => std.fmt.allocPrint(ctx.alloc, "MCP server '{s}' needs authorization. Ask the user to run /mcp connect {s}", .{ client.name, client.name }),
+            error.McpInsufficientScope => std.fmt.allocPrint(ctx.alloc, "MCP server '{s}' denied the call: insufficient scope, requires: {s}", .{ client.name, client.insufficientScope() }),
+            else => std.fmt.allocPrint(ctx.alloc, "MCP tool call failed: {s}", .{@errorName(err)}),
+        } catch "MCP tool call failed";
         return errResult(call, msg);
     };
 
@@ -319,6 +394,7 @@ const FakeMcp = struct {
 
 test "MCP http client speaks streamable http with session reuse and sse responses" {
     var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer io_state.deinit();
     const io = io_state.io();
     const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var server = try address.listen(io, .{});
@@ -403,11 +479,27 @@ const Client = struct {
         client: std.http.Client,
         session_id: ?[]const u8 = null,
         timeout_ms: u64,
+        oauth: ?OAuth = null,
+        scope_buf: [256]u8 = undefined,
+        scope_len: usize = 0,
     };
 
-    fn start(alloc: std.mem.Allocator, io: std.Io, cfg: ServerConfig) !Client {
-        if (cfg.url) |url| return startHttp(alloc, io, cfg, url);
+    const OAuth = struct {
+        arena: std.heap.ArenaAllocator,
+        record: r.oauth.Record,
+        store_dir: ?[]const u8,
+    };
+
+    fn start(alloc: std.mem.Allocator, io: std.Io, cfg: ServerConfig, token_dir: ?[]const u8, records: []const r.oauth.Record) !Client {
+        if (cfg.url) |url| return startHttp(alloc, io, cfg, url, token_dir, records);
         return startStdio(alloc, io, cfg);
+    }
+
+    fn insufficientScope(self: *const Client) []const u8 {
+        return switch (self.transport) {
+            .http => |*t| t.scope_buf[0..t.scope_len],
+            else => "",
+        };
     }
 
     fn startStdio(alloc: std.mem.Allocator, io: std.Io, cfg: ServerConfig) !Client {
@@ -429,13 +521,27 @@ const Client = struct {
         };
     }
 
-    fn startHttp(alloc: std.mem.Allocator, io: std.Io, cfg: ServerConfig, url: []const u8) !Client {
+    fn startHttp(alloc: std.mem.Allocator, io: std.Io, cfg: ServerConfig, url: []const u8, token_dir: ?[]const u8, records: []const r.oauth.Record) !Client {
         const authorization: ?[]const u8 = try resolveAuthorization(alloc, cfg);
         errdefer if (authorization) |a| alloc.free(a);
         const url_dup = try alloc.dupe(u8, url);
         errdefer alloc.free(url_dup);
         const name = try alloc.dupe(u8, cfg.name);
         errdefer alloc.free(name);
+
+        var oauth: ?OAuth = null;
+        if (cfg.oauth and authorization == null) {
+            var arena = std.heap.ArenaAllocator.init(alloc);
+            errdefer arena.deinit();
+            const a = arena.allocator();
+            const key = try r.oauth.normalizeUrl(a, url);
+            const found = r.oauth.Store.find(records, key);
+            oauth = .{
+                .record = if (found) |rec| try r.util.deepClone(r.oauth.Record, rec, a) else .{ .url = key },
+                .store_dir = if (token_dir) |d| try a.dupe(u8, d) else null,
+                .arena = arena,
+            };
+        }
 
         return .{
             .alloc = alloc,
@@ -446,23 +552,14 @@ const Client = struct {
                 .authorization = authorization,
                 .client = .{ .allocator = alloc, .io = io },
                 .timeout_ms = std.math.mul(u64, cfg.timeout_s, std.time.ms_per_s) catch std.math.maxInt(u64),
+                .oauth = oauth,
             } },
         };
     }
 
     fn resolveAuthorization(alloc: std.mem.Allocator, cfg: ServerConfig) !?[]const u8 {
-        if (cfg.key_envar) |envar| {
-            const name = try alloc.dupeSentinel(u8, envar, 0);
-            defer alloc.free(name);
-            if (std.c.getenv(name.ptr)) |value| {
-                const token = std.mem.span(value);
-                if (token.len > 0) return try std.fmt.allocPrint(alloc, "Bearer {s}", .{token});
-            }
-        }
-        if (cfg.key) |key| {
-            if (key.len > 0) return try std.fmt.allocPrint(alloc, "Bearer {s}", .{key});
-        }
-        return null;
+        const token = staticKey(cfg) orelse return null;
+        return try std.fmt.allocPrint(alloc, "Bearer {s}", .{token});
     }
 
     fn deinit(self: *Client) void {
@@ -476,6 +573,7 @@ const Client = struct {
                 self.alloc.free(t.url);
                 if (t.authorization) |a| self.alloc.free(a);
                 if (t.session_id) |s| self.alloc.free(s);
+                if (t.oauth) |*o| o.arena.deinit();
             },
         }
         self.alloc.free(self.name);
@@ -484,7 +582,51 @@ const Client = struct {
     fn initialize(self: *Client) !void {
         self.mu.lockUncancelable(self.io);
         defer self.mu.unlock(self.io);
-        try self.initializeLocked();
+        self.initializeLocked() catch |err| {
+            if (err != error.McpUnauthorized) return err;
+            try self.reauthorize();
+            self.initializeLocked() catch |e| return if (e == error.McpUnauthorized) error.McpAuthRequired else e;
+        };
+    }
+
+    fn reauthorize(self: *Client) !void {
+        const t = switch (self.transport) {
+            .http => |*t| t,
+            else => return error.McpAuthRequired,
+        };
+        const o = if (t.oauth) |*o| o else return error.McpAuthRequired;
+        if (o.record.refresh_token == null) return error.McpAuthRequired;
+        try self.refreshLocked(t);
+    }
+
+    fn refreshLocked(self: *Client, t: *Http) !void {
+        const o = &t.oauth.?;
+        const result = r.oauth.refresh(o.arena.allocator(), &t.client, &o.record, r.oauth.nowSeconds(self.io));
+        const persist = if (result) |_| true else |err| err == error.AuthRequired and o.record.access_token == null;
+        if (persist) if (o.store_dir) |dir| {
+            (r.oauth.Store{ .io = self.io, .dir = dir }).put(self.alloc, o.record) catch |err| log.warn("MCP '{s}': token store update failed: {s}", .{ self.name, @errorName(err) });
+        };
+        result catch |err| return if (err == error.AuthRequired) error.McpAuthRequired else err;
+    }
+
+    fn ensureFreshToken(self: *Client, t: *Http) !void {
+        const o = if (t.oauth) |*o| o else return;
+        if (o.record.access_token == null or o.record.refresh_token == null) return;
+        if (o.record.usable(r.oauth.nowSeconds(self.io))) return;
+        self.refreshLocked(t) catch |err| switch (err) {
+            error.McpAuthRequired => {},
+            else => return err,
+        };
+    }
+
+    fn dropSession(self: *Client) void {
+        switch (self.transport) {
+            .http => |*t| if (t.session_id) |old| {
+                self.alloc.free(old);
+                t.session_id = null;
+            },
+            else => {},
+        }
     }
 
     fn initializeLocked(self: *Client) !void {
@@ -544,7 +686,7 @@ const Client = struct {
         return out.toOwnedSlice(self.alloc);
     }
 
-    fn callTool(self: *Client, alloc: std.mem.Allocator, remote_name: []const u8, arguments_json: []const u8) !ToolCallResult {
+    pub fn callTool(self: *Client, alloc: std.mem.Allocator, remote_name: []const u8, arguments_json: []const u8) !ToolCallResult {
         const id = self.nextRequestId();
         var req = std.Io.Writer.Allocating.init(self.alloc);
         defer req.deinit();
@@ -577,7 +719,7 @@ const Client = struct {
     fn request(self: *Client, id: i64, line: []const u8) !std.json.Parsed(std.json.Value) {
         self.mu.lockUncancelable(self.io);
         defer self.mu.unlock(self.io);
-        return self.requestWithRetry(id, line, 0);
+        return self.requestWithRetry(id, line, 0) catch |err| return if (err == error.McpUnauthorized) error.McpAuthRequired else err;
     }
 
     fn requestWithRetry(self: *Client, id: ?i64, line: []const u8, attempt: u8) !std.json.Parsed(std.json.Value) {
@@ -596,6 +738,13 @@ const Client = struct {
                 }
                 break :blk try self.requestWithRetry(id, line, 1);
             },
+            error.McpUnauthorized => blk: {
+                if (attempt > 0) break :blk error.McpAuthRequired;
+                try self.reauthorize();
+                self.dropSession();
+                try self.initializeLocked();
+                break :blk try self.requestWithRetry(id, line, 1);
+            },
             else => err,
         };
     }
@@ -603,7 +752,10 @@ const Client = struct {
     fn requestLocked(self: *Client, id: ?i64, line: []const u8) !std.json.Parsed(std.json.Value) {
         return switch (self.transport) {
             .stdio => |*t| self.stdioRoundTrip(t, id.?, line),
-            .http => |*t| self.httpRequestTimed(t, id, line),
+            .http => |*t| blk: {
+                try self.ensureFreshToken(t);
+                break :blk self.httpRequestTimed(t, id, line);
+            },
         };
     }
 
@@ -686,7 +838,12 @@ const Client = struct {
         var header_count: usize = 0;
         headers_buf[header_count] = .{ .name = "accept", .value = "application/json, text/event-stream" };
         header_count += 1;
-        if (t.authorization) |a| {
+        const bearer: ?[]const u8 = if (t.authorization != null) null else if (t.oauth) |o|
+            if (o.record.access_token) |tok| try std.fmt.allocPrint(self.alloc, "Bearer {s}", .{tok}) else null
+        else
+            null;
+        defer if (bearer) |b| self.alloc.free(b);
+        if (t.authorization orelse bearer) |a| {
             headers_buf[header_count] = .{ .name = "authorization", .value = a };
             header_count += 1;
         }
@@ -723,6 +880,24 @@ const Client = struct {
         try self.captureSession(t, &response.head);
 
         if (status == .not_found and t.session_id != null) return error.McpSessionExpired;
+        if (status == .unauthorized) {
+            try self.drainAndWarn(response.reader(&.{}), status);
+            return error.McpUnauthorized;
+        }
+        if (status == .forbidden) {
+            var it = response.head.iterateHeaders();
+            while (it.next()) |header| {
+                if (!std.ascii.eqlIgnoreCase(header.name, "www-authenticate")) continue;
+                const challenge = r.oauth.parseBearerChallenge(header.value) orelse continue;
+                const code = challenge.@"error" orelse continue;
+                if (!std.mem.eql(u8, code, "insufficient_scope")) continue;
+                const scope = challenge.scope orelse "";
+                t.scope_len = @min(scope.len, t.scope_buf.len);
+                @memcpy(t.scope_buf[0..t.scope_len], scope[0..t.scope_len]);
+                try self.drainAndWarn(response.reader(&.{}), status);
+                return error.McpInsufficientScope;
+            }
+        }
         if (@backingInt(status) >= 400) {
             const reader = response.reader(&.{});
             try self.drainAndWarn(reader, status);

@@ -3,8 +3,6 @@
 A minimal self improving coding harness for POSIX. No dependencies, vendored Lua.
 Ships as a single <2MB binary using less then 99MB of ram.
 
-> Goal: Becoming the Neovim of harnesses
-
 ![demo](docs/assets/screenshot.png)
 
 ```shell

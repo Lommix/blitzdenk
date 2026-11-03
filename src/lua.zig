@@ -514,6 +514,11 @@ const McpServerDef = LuaType{ .table_def = .{ .name = "BlitzMcpServerDef", .fiel
     .{ .name = "key_envar", .ty = LuaType.string, .optional = true, .desc = "env var holding the bearer token; preferred over key" },
     .{ .name = "timeout", .ty = LuaType.number, .optional = true, .desc = "request timeout in seconds for url servers, 0 disables; default 300" },
     .{ .name = "tools_prefix", .ty = LuaType.string, .optional = true },
+    .{ .name = "oauth", .ty = LuaType.boolean, .optional = true, .desc = "url servers only: authorize with OAuth through `/mcp connect <name>`; key and key_envar take precedence" },
+    .{ .name = "client_id", .ty = LuaType.string, .optional = true, .desc = "pre-registered OAuth client id; skips dynamic client registration" },
+    .{ .name = "client_secret", .ty = LuaType.string, .optional = true, .desc = "OAuth client secret for a pre-registered confidential client" },
+    .{ .name = "scopes", .ty = StringListDef, .optional = true, .desc = "OAuth scopes to request; default from the server challenge or metadata" },
+    .{ .name = "redirect_port", .ty = LuaType.integer, .optional = true, .desc = "loopback OAuth callback port; default 47823, ephemeral when busy" },
 } } };
 const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fields = &.{
     .{ .name = "parent_id", .ty = AgentIdDef, .optional = true },
@@ -1996,6 +2001,11 @@ const BlitzMcp = LuaType{
                                 key_envar: ?[]const u8,
                                 timeout: ?f64,
                                 tools_prefix: []const u8,
+                                oauth: ?bool,
+                                client_id: ?[]const u8,
+                                client_secret: ?[]const u8,
+                                scopes: ?[][]const u8,
+                                redirect_port: ?u32,
                             };
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, args: Args) !u32 {
@@ -2003,6 +2013,8 @@ const BlitzMcp = LuaType{
                                 const command = args.command orelse "";
                                 const url = if (args.url) |u| (if (u.len == 0) @as(?[]const u8, null) else u) else null;
                                 if ((url != null) == (command.len != 0)) return error.InvalidMcpServerDef;
+                                const port = args.redirect_port orelse r.oauth.DEFAULT_REDIRECT_PORT;
+                                if (port == 0 or port > std.math.maxInt(u16)) return error.InvalidMcpServerDef;
                                 try a.lua_vm.mcp_entries.appendBounded(LuaMcpServerEntry{
                                     .name = args.name,
                                     .command = command,
@@ -2012,6 +2024,11 @@ const BlitzMcp = LuaType{
                                     .key_envar = args.key_envar,
                                     .timeout_s = if (args.timeout) |t| std.math.lossyCast(u64, t) else @import("mcp.zig").DEFAULT_TIMEOUT_S,
                                     .tools_prefix = args.tools_prefix,
+                                    .oauth = args.oauth orelse false,
+                                    .client_id = args.client_id,
+                                    .client_secret = args.client_secret,
+                                    .scopes = args.scopes orelse &.{},
+                                    .redirect_port = @intCast(port),
                                 });
 
                                 return @intCast(a.lua_vm.mcp_entries.items.len);
@@ -3588,6 +3605,11 @@ pub const LuaMcpServerEntry = struct {
     key_envar: ?[]const u8 = null,
     timeout_s: u64 = @import("mcp.zig").DEFAULT_TIMEOUT_S,
     tools_prefix: []const u8,
+    oauth: bool = false,
+    client_id: ?[]const u8 = null,
+    client_secret: ?[]const u8 = null,
+    scopes: [][]const u8 = &.{},
+    redirect_port: u16 = r.oauth.DEFAULT_REDIRECT_PORT,
     enabled: bool = false,
     conf_enabled: bool = false,
 };
@@ -3896,7 +3918,16 @@ pub const LuaVm = struct {
             .key_envar = entry.key_envar,
             .timeout_s = entry.timeout_s,
             .tools_prefix = entry.tools_prefix,
+            .oauth = entry.oauth,
+            .client_id = entry.client_id,
+            .client_secret = entry.client_secret,
+            .scopes = entry.scopes,
+            .redirect_port = entry.redirect_port,
         };
+    }
+
+    pub fn mcpConfig(self: *LuaVm, name: []const u8) ?@import("mcp.zig").ServerConfig {
+        return mcpToConfig(self.findMcp(name) orelse return null);
     }
 
     pub fn getEnabledMcpServers(self: *LuaVm, alloc: Allocator) ![]@import("mcp.zig").ServerConfig {

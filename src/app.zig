@@ -67,6 +67,8 @@ pub const CommandCompletion = struct {
 
 const builtin_command_completions: []const CommandCompletion = &.{
     .{ .text = "/ssh", .description = "connect user@host:cwd" },
+    .{ .text = "/mcp connect", .description = "authorize and enable an MCP server" },
+    .{ .text = "/mcp cancel", .description = "cancel MCP authorization" },
 };
 
 pub const AppFlags = packed struct {
@@ -438,6 +440,9 @@ pub const App = struct {
     lua_inject_hooks_enabled: std.atomic.Value(bool) = .init(false),
     mcp_manager: r.mcp.Manager,
     mcp_load: ?r.mcp.LoadTask = null,
+    mcp_reload_pending: bool = false,
+    mcp_auth: ?r.oauth.Task = null,
+    mcp_auth_url_shown: bool = false,
     ssh_connect: ?r.ssh.SshConnectTask = null,
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
@@ -531,6 +536,7 @@ pub const App = struct {
         self.event_bus.joinPending(self.io);
         if (self.update_check) |*task| task.deinit();
         if (self.mcp_load) |*task| task.deinit();
+        if (self.mcp_auth) |*task| task.deinit();
         if (self.ssh_connect) |*task| task.deinit();
         self.mcp_manager.deinit();
         self.lua_vm.deinit();
@@ -1004,6 +1010,7 @@ pub const App = struct {
 
     pub fn tick(self: *App) !void {
         try self.finishMcpLoad(false);
+        self.finishMcpAuth();
         self.finishSshConnect();
         self.registry.flush();
         const running_before = self.running;
@@ -1583,7 +1590,10 @@ pub const App = struct {
     }
 
     pub fn loadMcpTools(self: *App, servers: []const r.mcp.ServerConfig) void {
-        if (self.mcp_load != null) return;
+        if (self.mcp_load != null) {
+            self.mcp_reload_pending = true;
+            return;
+        }
         for (self.mcp_manager.registeredTools()) |entry| self.context_factory.remove(entry.tool.def.name);
 
         self.mcp_load = .init(self.io, &self.mcp_manager, servers);
@@ -1592,6 +1602,72 @@ pub const App = struct {
 
     pub fn waitForMcpTools(self: *App) !void {
         try self.finishMcpLoad(true);
+    }
+
+    pub fn startMcpConnect(self: *App, name: []const u8) void {
+        self.lua_vm.vm_mu.lockUncancelable(self.io);
+        const cfg = self.lua_vm.mcpConfig(name) orelse {
+            self.lua_vm.vm_mu.unlock(self.io);
+            self.notifications.append(self.gpa, self.nowMillis(), "MCP: unknown server {s}", .{name}) catch {};
+            return;
+        };
+        const store_dir = self.mcp_manager.token_dir;
+        if (!r.mcp.wantsOAuth(cfg) or store_dir == null) {
+            _ = self.lua_vm.enableMcp(name);
+            self.lua_vm.vm_mu.unlock(self.io);
+            self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: enabled", .{name}) catch {};
+            self.reloadMcpTools() catch {};
+            return;
+        }
+        self.cancelMcpAuth();
+        const task = r.oauth.Task.init(self.gpa, self.io, .{
+            .name = cfg.name,
+            .url = cfg.url.?,
+            .client_id = cfg.client_id,
+            .client_secret = cfg.client_secret,
+            .scopes = cfg.scopes,
+            .redirect_port = cfg.redirect_port,
+            .store_dir = store_dir.?,
+        }, r.oauth.xdg_opener);
+        self.lua_vm.vm_mu.unlock(self.io);
+        self.mcp_auth = task catch {
+            self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: out of memory", .{name}) catch {};
+            return;
+        };
+        self.mcp_auth.?.start();
+        self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: authorizing", .{name}) catch {};
+        self.dirty = true;
+    }
+
+    pub fn cancelMcpAuth(self: *App) void {
+        if (self.mcp_auth) |*task| task.deinit();
+        self.mcp_auth = null;
+        self.mcp_auth_url_shown = false;
+    }
+
+    fn finishMcpAuth(self: *App) void {
+        const task = if (self.mcp_auth) |*task| task else return;
+        if (!self.mcp_auth_url_shown and task.phase() == .awaiting_callback) {
+            self.mcp_auth_url_shown = true;
+            if (task.opener_failed) self.pushSystemMessage("Open this URL to authorize MCP server `{s}`:\n{s}", .{ task.name(), task.auth_url });
+        }
+        if (!task.isFinished()) return;
+        defer {
+            self.cancelMcpAuth();
+            self.dirty = true;
+        }
+        switch (task.outcome) {
+            .authorized, .no_auth_needed => {
+                {
+                    self.lua_vm.vm_mu.lockUncancelable(self.io);
+                    defer self.lua_vm.vm_mu.unlock(self.io);
+                    _ = self.lua_vm.enableMcp(task.name());
+                }
+                self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: authorized", .{task.name()}) catch {};
+                self.reloadMcpTools() catch {};
+            },
+            .failed => self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: auth failed: {s}", .{ task.name(), task.err_kind.text() }) catch {},
+        }
     }
 
     pub fn cancelSshConnect(self: *App) void {
@@ -1688,10 +1764,8 @@ pub const App = struct {
         const task = if (self.mcp_load) |*task| task else return;
         if (!wait and !task.isFinished()) return;
         task.wait();
-        defer {
-            task.deinit();
-            self.mcp_load = null;
-        }
+        task.deinit();
+        self.mcp_load = null;
 
         {
             self.lua_vm.vm_mu.lockUncancelable(self.io);
@@ -1701,6 +1775,15 @@ pub const App = struct {
         }
         _ = self.event_bus.emit(self, .mcp_tools_reloaded);
         self.dirty = true;
+        for (self.mcp_manager.serverStatuses()) |*status| switch (status.state) {
+            .loaded => if (status.oauth) self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: loaded", .{status.name()}) catch {},
+            .auth_required => self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: auth required, run /mcp connect {s}", .{ status.name(), status.name() }) catch {},
+            .failed => self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: failed: {s}", .{ status.name(), status.reason() }) catch {},
+        };
+        if (self.mcp_reload_pending) {
+            self.mcp_reload_pending = false;
+            try self.reloadMcpTools();
+        }
     }
     pub fn reloadLuaTools(self: *App) !void {
         const alloc = self.sessionAlloc();

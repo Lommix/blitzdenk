@@ -14,6 +14,16 @@
 ---request timeout in seconds for url servers, 0 disables; default 300
 ---@field timeout? number
 ---@field tools_prefix? string
+---url servers only: authorize with OAuth through `/mcp connect <name>`; key and key_envar take precedence
+---@field oauth? boolean
+---pre-registered OAuth client id; skips dynamic client registration
+---@field client_id? string
+---OAuth client secret for a pre-registered confidential client
+---@field client_secret? string
+---OAuth scopes to request; default from the server challenge or metadata
+---@field scopes? string[]
+---loopback OAuth callback port; default 47823, ephemeral when busy
+---@field redirect_port? integer
 
 ---@class BlitzMcp
 ---Register an MCP server, stdio command or remote url. Disabled until explicitly enabled.

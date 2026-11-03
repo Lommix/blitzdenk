@@ -652,6 +652,33 @@ local ctx = blitz.mcp.add({
 blitz.mcp.enable(ctx)
 ```
 
+### OAuth servers
+
+`oauth = true` opts a `url` server into OAuth. Nothing opens a browser until
+the user runs `/mcp connect <name>`: it authorizes when needed, then enables
+the server and reloads tools (`mcp_tools_reloaded` fires). `/mcp cancel` stops
+a pending authorization. `key_envar` and `key` still win; with a static key
+the flow never runs. Stdio servers ignore `oauth`.
+
+```lua
+local linear = blitz.mcp.add({
+    name = "linear",
+    url = "https://mcp.linear.app/mcp",
+    oauth = true,
+    tools_prefix = "lin_",
+})
+```
+
+Dynamic client registration is used when the server offers it. Otherwise set
+`client_id` (and `client_secret` for confidential clients). `scopes` overrides
+the requested scopes. The callback listens on `127.0.0.1:47823` by default
+(`redirect_port`), falling back to a free port when busy.
+
+Tokens live in `oauth/tokens.json` in the config directory, keyed by server
+url, so renaming a server keeps its login. Access tokens refresh on expiry.
+Deleting a record or the file logs out. A server that answers 401 at load is
+skipped with a notification naming the connect command.
+
 ## SSH mode
 
 While ssh routing is on, every call (bash, read, write, edit,

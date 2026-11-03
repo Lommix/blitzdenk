@@ -621,6 +621,7 @@ pub fn run(
     if (config_lua) |info| {
         app.lua_config_dir = info.dir_path;
         app.lua_config_abs = info.abs_path;
+        app.mcp_manager.token_dir = r.oauth.storeDir(arena, info.dir_path) catch null;
     }
     defer {
         app.cancelPermissions(null);
@@ -1262,6 +1263,20 @@ pub fn run(
                                                     app.notifications.append(gpa, app.nowMillis(), "SSH mode disabled", .{}) catch {};
                                                     app.input.clear();
                                                 },
+                                                .mcp_connect => |name| {
+                                                    app.startMcpConnect(name);
+                                                    app.input.clear();
+                                                },
+                                                .mcp_cancel => {
+                                                    const active = app.mcp_auth != null;
+                                                    app.cancelMcpAuth();
+                                                    app.notifications.append(gpa, app.nowMillis(), "{s}", .{if (active) "MCP authorization canceled" else "MCP: no authorization running"}) catch {};
+                                                    app.input.clear();
+                                                },
+                                                .mcp_usage => {
+                                                    app.notifications.append(gpa, app.nowMillis(), "usage: /mcp connect <name> | /mcp cancel", .{}) catch {};
+                                                    app.input.clear();
+                                                },
                                             }
                                             break;
                                         }
@@ -1738,6 +1753,9 @@ pub const AppCommand = union(enum) {
     ssh: SshArgs,
     /// /ssh off  (or bare /ssh)
     ssh_off,
+    mcp_connect: []const u8,
+    mcp_cancel,
+    mcp_usage,
 
     pub const SshArgs = struct { user: []const u8, host: []const u8, cwd: []const u8 };
 
@@ -1750,6 +1768,15 @@ pub const AppCommand = union(enum) {
         if (std.mem.eql(u8, verb, "ssh")) {
             if (rest.len == 0 or std.mem.eql(u8, rest, "off")) return .ssh_off;
             return parseSsh(rest);
+        }
+        if (std.mem.eql(u8, verb, "mcp")) {
+            var args = std.mem.tokenizeScalar(u8, rest, ' ');
+            const sub = args.next() orelse return .mcp_usage;
+            const arg = args.next();
+            if (args.next() != null) return .mcp_usage;
+            if (std.mem.eql(u8, sub, "connect")) return if (arg) |name| .{ .mcp_connect = name } else .mcp_usage;
+            if (std.mem.eql(u8, sub, "cancel") and arg == null) return .mcp_cancel;
+            return .mcp_usage;
         }
         return null;
     }
@@ -1766,6 +1793,30 @@ pub const AppCommand = union(enum) {
         } };
     }
 };
+
+test "AppCommand parses mcp commands" {
+    const Expect = union(enum) { connect: []const u8, cancel, usage, none };
+    const cases = [_]struct { []const u8, Expect }{
+        .{ "/mcp connect linear", .{ .connect = "linear" } },
+        .{ "/mcp connect  linear ", .{ .connect = "linear" } },
+        .{ "/mcp connect", .usage },
+        .{ "/mcp", .usage },
+        .{ "/mcp cancel", .cancel },
+        .{ "/mcp cancel now", .usage },
+        .{ "/mcp connect a b", .usage },
+        .{ "/mcp frob", .usage },
+        .{ "/mcpx connect a", .none },
+    };
+    for (cases) |case| {
+        const got = AppCommand.parse(case[0]);
+        switch (case[1]) {
+            .connect => |name| try std.testing.expectEqualStrings(name, got.?.mcp_connect),
+            .cancel => try std.testing.expect(got.? == .mcp_cancel),
+            .usage => try std.testing.expect(got.? == .mcp_usage),
+            .none => try std.testing.expect(got == null),
+        }
+    }
+}
 
 fn approvalFail(val: []const u8) noreturn {
     std.debug.print("blitz: invalid --approval mode '{s}' (strict|default|yolo)\n", .{val});
