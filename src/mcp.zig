@@ -1096,11 +1096,17 @@ fn flattenContent(alloc: std.mem.Allocator, value: *const std.json.Value, image:
         } else if (std.mem.eql(u8, ty, "image") and image.* == null) {
             const data = stringField(item, "data") orelse "";
             const media_type = stringField(item, "mimeType") orelse "image/png";
-            if (data.len > 0 and data.len <= r.inline_images.max_source_bytes) image.* = .{
-                .url = try std.fmt.allocPrint(alloc, "data:{s};base64,{s}", .{ media_type, data }),
-                .media_type = try alloc.dupe(u8, media_type),
-            };
-            try w.print("[MCP content: {s}]", .{ty});
+            if (data.len == 0) {
+                try w.print("[MCP content: {s}]", .{ty});
+            } else if (data.len <= r.tools.MAX_IMAGE_BASE64_BYTES) {
+                image.* = .{
+                    .url = try std.fmt.allocPrint(alloc, "data:{s};base64,{s}", .{ media_type, data }),
+                    .media_type = try alloc.dupe(u8, media_type),
+                };
+                try w.print("[MCP content: {s}]", .{ty});
+            } else {
+                try w.print("[MCP content: {s} omitted, exceeds the 4MB image limit]", .{ty});
+            }
         } else {
             try w.print("[MCP content: {s}]", .{ty});
         }

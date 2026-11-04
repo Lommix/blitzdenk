@@ -1299,19 +1299,16 @@ pub const App = struct {
         defer content.deinit(self.gpa);
         try self.collectBackgroundResult(agent, &content);
 
-        const escaped = r.util.escapeMarkup(self.gpa, content.items) catch content.items;
-        defer if (escaped.ptr != content.items.ptr) self.gpa.free(escaped);
-
         var id_buf: [16]u8 = undefined;
         const spill_id = try std.fmt.bufPrint(&id_buf, "agent-{d}", .{agent_id.pack()});
-        const spill = if (r.tools.isOversized(escaped, r.tools.MAX_DISPLAY_BYTES, r.tools.MAX_DISPLAY_LINES))
+        const spill = if (r.tools.isOversized(content.items, r.tools.MAX_DISPLAY_BYTES, r.tools.MAX_DISPLAY_LINES))
             r.tools.writeSpillFile(self.exec_pool, self.gpa, spill_id, content.items)
         else
             null;
         defer if (spill) |path| self.gpa.free(path);
 
-        const truncated = r.tools.truncateOutputToOwnedSpill(self.gpa, escaped, r.tools.MAX_DISPLAY_BYTES, r.tools.MAX_DISPLAY_LINES, spill);
-        defer if (truncated.ptr != escaped.ptr) self.gpa.free(truncated);
+        const truncated = r.tools.truncateOutputToOwnedSpill(self.gpa, content.items, r.tools.MAX_DISPLAY_BYTES, r.tools.MAX_DISPLAY_LINES, spill);
+        defer if (truncated.ptr != content.items.ptr) self.gpa.free(truncated);
 
         const notice = try std.fmt.allocPrint(self.gpa, "Agent result done:\n{s}", .{truncated});
         defer self.gpa.free(notice);

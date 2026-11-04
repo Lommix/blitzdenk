@@ -451,9 +451,9 @@
 ---@field approve fun(self: BlitzCtx, description: string): integer, string|nil
 ---@field plan fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil
 ---@field ask fun(self: BlitzCtx, header: string, question: string, options: string[]): integer, string|nil
----Run one tool of this agent. Returns the tool result text; the nested error text on failure. Rejects nested codemode.
+---Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. Rejects nested codemode.
 ---@field call fun(self: BlitzCtx, name: string, args: table): string
----Run an array of { name, args } requests in parallel, limit 8. Returns one result text per request, in input order. A failed item does not abort the batch.
+---Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order. A failed item does not abort the batch.
 ---@field batch fun(self: BlitzCtx, requests: table): string[]
 
 ---@class BlitzCall
@@ -462,8 +462,9 @@
 ---@field arguments table
 
 ---@class BlitzToolResult
+---Tool result text. Above 32KB or 2000 lines the tail is kept and the full text spills to a file with a locator.
 ---@field msg? string
----{ media_type = string, data = string }
+---{ media_type = string, data = string }; data is base64, decoded size capped at 4MB
 ---@field img? table
 ---@field exit_loop? boolean
 

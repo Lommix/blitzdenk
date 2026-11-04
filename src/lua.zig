@@ -182,8 +182,8 @@ const CapabilityRuleDef = LuaType{ .table_def = .{ .name = "BlitzCapabilityRule"
     .{ .name = "rule", .ty = LuaType.string, .desc = "prompt line added when the binary exists" },
 } } };
 const ToolResultDef = LuaType{ .table_def = .{ .name = "BlitzToolResult", .fields = &.{
-    .{ .name = "msg", .ty = LuaType.string, .optional = true },
-    .{ .name = "img", .ty = LuaType.table, .optional = true, .desc = "{ media_type = string, data = string }" },
+    .{ .name = "msg", .ty = LuaType.string, .optional = true, .desc = "Tool result text. Above 32KB or 2000 lines the tail is kept and the full text spills to a file with a locator." },
+    .{ .name = "img", .ty = LuaType.table, .optional = true, .desc = "{ media_type = string, data = string }; data is base64, decoded size capped at 4MB" },
     .{ .name = "exit_loop", .ty = LuaType.boolean, .optional = true },
 } } };
 const WidgetBufDef = LuaType{ .table_def = .{ .name = "BlitzWidgetBuf", .fields = &.{
@@ -271,8 +271,8 @@ const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "approve", .ty = LuaType{ .raw = "fun(self: BlitzCtx, description: string): integer, string|nil" } },
     .{ .name = "plan", .ty = LuaType{ .raw = "fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil" } },
     .{ .name = "ask", .ty = LuaType{ .raw = "fun(self: BlitzCtx, header: string, question: string, options: string[]): integer, string|nil" } },
-    .{ .name = "call", .ty = LuaType{ .raw = "fun(self: BlitzCtx, name: string, args: table): string" }, .desc = "Run one tool of this agent. Returns the tool result text; the nested error text on failure. Rejects nested codemode." },
-    .{ .name = "batch", .ty = LuaType{ .raw = "fun(self: BlitzCtx, requests: table): string[]" }, .desc = "Run an array of { name, args } requests in parallel, limit 8. Returns one result text per request, in input order. A failed item does not abort the batch." },
+    .{ .name = "call", .ty = LuaType{ .raw = "fun(self: BlitzCtx, name: string, args: table): string" }, .desc = "Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. Rejects nested codemode." },
+    .{ .name = "batch", .ty = LuaType{ .raw = "fun(self: BlitzCtx, requests: table): string[]" }, .desc = "Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order. A failed item does not abort the batch." },
 } } };
 const CallDef = LuaType{ .table_def = .{ .name = "BlitzCall", .fields = &.{
     .{ .name = "id", .ty = LuaType.string },
@@ -4819,6 +4819,13 @@ fn errorBody(msg: []const u8) []const u8 {
     return msg[separator + 2 ..];
 }
 
+fn capLuaToolError(ctx: ToolContext, call: ToolCall, msg: []const u8) ToolResult {
+    const sanitized = r.util.sanitizeUtf8(ctx.alloc, msg) catch return failedResult(call, "lua tool error");
+    const capped = r.tools.capOutput(ctx.base.exec_pool, ctx.alloc, call.id, sanitized);
+    if (capped.ptr != sanitized.ptr) ctx.alloc.free(sanitized);
+    return failedResult(call, capped);
+}
+
 fn loadToolConfig(vm: *LuaVm, a: *r.app.App) !void {
     if (a.lua_config_dir) |dir| {
         const inject = try std.fmt.allocPrint(vm.luaArena(), "package.path = \"{s}/?.lua;\" .. package.path", .{dir});
@@ -4907,8 +4914,7 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
     loadToolConfig(vm, app_ptr) catch {
         const msg = vm.getLastError();
         hookLog(.err, "tool config load failed: {s}", .{msg});
-        const owned = r.util.sanitizeUtf8(ctx.alloc, if (msg.len > 0) errorBody(msg) else "failed to load lua tool config") catch "failed to load lua tool config";
-        return failedResult(call, owned);
+        return capLuaToolError(ctx, call, if (msg.len > 0) errorBody(msg) else "failed to load lua tool config");
     };
 
     const entry = findEntry(vm, call.name) orelse return failedResult(call, "tool not found");
@@ -4940,9 +4946,9 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
         const err_ptr = c.lua_tolstring(L, -1, &err_len);
         const err_view = if (err_ptr != null) err_ptr[0..err_len] else "lua error";
         hookLog(.err, "tool {s} error: {s}", .{ call.name, err_view });
-        const owned = r.util.sanitizeUtf8(ctx.alloc, errorBody(err_view)) catch "lua error";
+        const failed = capLuaToolError(ctx, call, errorBody(err_view));
         c.lua_pop(L, 1);
-        return failedResult(call, owned);
+        return failed;
     }
 
     const stdout = vm.stdout_buf.items;
@@ -4962,12 +4968,12 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
         vm.stdout_buf.clearRetainingCapacity();
     }
 
-    const ret = interpretReturns(L, call, ctx.alloc);
+    const ret = interpretReturns(L, ctx, call);
     c.lua_pop(L, 1);
     return ret;
 }
 
-fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) ToolResult {
+fn interpretReturns(L: *c.lua_State, ctx: ToolContext, call: ToolCall) ToolResult {
     // Single return at top (-1): expect {msg = string|nil, img = table|nil, exit_loop = bool|nil}.
     if (c.lua_type(L, -1) != c.LUA_TTABLE) return failedResult(call, "lua tool did not return a table");
 
@@ -4981,7 +4987,12 @@ fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) T
     const content_view = if (content_ptr != null) content_ptr[0..len] else "";
     // Dupe out of Lua memory before pop frees the string.
     // Lua strings are byte strings; sanitize so invalid UTF-8 from user tools never enters history.
-    const owned = r.util.sanitizeUtf8(alloc, content_view) catch "oom";
+    const sanitized = r.util.sanitizeUtf8(ctx.alloc, content_view) catch {
+        c.lua_pop(L, 1);
+        return failedResult(call, "oom");
+    };
+    const content = r.tools.capOutput(ctx.base.exec_pool, ctx.alloc, call.id, sanitized);
+    if (content.ptr != sanitized.ptr) ctx.alloc.free(sanitized);
     c.lua_pop(L, 1);
 
     _ = c.lua_getfield(L, -1, "img");
@@ -4991,7 +5002,7 @@ fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) T
         var mt_len: usize = 0;
         const mt_ptr = c.lua_tolstring(L, -1, &mt_len);
         const media_type: []const u8 = if (mt_ptr) |p|
-            r.util.sanitizeUtf8(alloc, p[0..mt_len]) catch "image/png"
+            r.util.sanitizeUtf8(ctx.alloc, p[0..mt_len]) catch "image/png"
         else
             "image/png";
         c.lua_pop(L, 1);
@@ -4999,20 +5010,25 @@ fn interpretReturns(L: *c.lua_State, call: ToolCall, alloc: std.mem.Allocator) T
         _ = c.lua_getfield(L, -1, "data");
         var d_len: usize = 0;
         const d_ptr = c.lua_tolstring(L, -1, &d_len);
-        const data: ?[]const u8 = if (d_ptr) |p| r.util.sanitizeUtf8(alloc, p[0..d_len]) catch null else null;
+        if (d_len > r.tools.MAX_IMAGE_BASE64_BYTES) {
+            c.lua_pop(L, 2);
+            ctx.alloc.free(content);
+            return failedResult(call, "lua tool image data exceeds the 4MB image limit");
+        }
+        const data: ?[]const u8 = if (d_ptr) |p| r.util.sanitizeUtf8(ctx.alloc, p[0..d_len]) catch null else null;
         c.lua_pop(L, 1);
 
         if (data) |bytes| {
             if (bytes.len > 0) image = .{
                 .media_type = media_type,
-                .url = std.fmt.allocPrint(alloc, "data:{s};base64,{s}", .{ media_type, bytes }) catch "",
+                .url = std.fmt.allocPrint(ctx.alloc, "data:{s};base64,{s}", .{ media_type, bytes }) catch "",
             };
         }
     }
     c.lua_pop(L, 1);
 
     return .{
-        .content = owned,
+        .content = content,
         .image = image,
         .exit_loop = exit_loop,
     };
@@ -5140,8 +5156,8 @@ fn prepareNestedRun(bridge: *CtxBridge, state: *c.lua_State, name: []const u8, a
     return null;
 }
 
-fn runNestedTool(run: NestedToolRun, alloc: std.mem.Allocator, io: std.Io) anyerror![]const u8 {
-    const output = r.tools.context.runWithOwner(run.tool, alloc, io, run.call, run.owner) catch |err| {
+fn runNestedTool(run: NestedToolRun, pool: *r.exec.CmdPool, alloc: Allocator, io: std.Io) anyerror![]const u8 {
+    const output = r.tools.context.runWithOwner(run.tool, pool, alloc, io, run.call, run.owner) catch |err| {
         if (err == error.Canceled) return err;
         return std.fmt.allocPrint(alloc, "error: nested tool failed: {s}", .{@errorName(err)}) catch err;
     };
@@ -5165,7 +5181,7 @@ fn luaCtxCall(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "ctx.call: out of memory");
         return 0;
     } orelse return 0;
-    const output = runNestedTool(run, bridge.tool_ctx.alloc, bridge.tool_ctx.io) catch |err| {
+    const output = runNestedTool(run, bridge.tool_ctx.base.exec_pool, bridge.tool_ctx.alloc, bridge.tool_ctx.io) catch |err| {
         _ = c.luaL_error(state, "ctx.call: %s", @errorName(err).ptr);
         return 0;
     };
@@ -5180,7 +5196,10 @@ fn luaCtxBatch(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "ctx.batch: requests must be a table");
         return 0;
     }
-    const vm = fromState(state) orelse return 0;
+    const vm = fromState(state) orelse {
+        _ = c.luaL_error(state, "ctx.batch: no lua vm");
+        return 0;
+    };
     const arena = vm.luaArena();
     const tool_ctx = bridge.tool_ctx;
     const count = c.lua_rawlen(state, 2);
@@ -5225,7 +5244,7 @@ fn luaCtxBatch(L: ?*c.lua_State) callconv(.c) c_int {
     var awaited: usize = 0;
     while (awaited < count) {
         while (spawned < count and spawned - awaited < parallel) : (spawned += 1) {
-            futures[spawned] = std.Io.async(tool_ctx.io, runNestedTool, .{ runs[spawned], tool_ctx.alloc, tool_ctx.io });
+            futures[spawned] = std.Io.async(tool_ctx.io, runNestedTool, .{ runs[spawned], tool_ctx.base.exec_pool, tool_ctx.alloc, tool_ctx.io });
         }
         results[awaited] = futures[awaited].await(tool_ctx.io) catch |err| {
             for (futures[awaited..spawned]) |*future| {

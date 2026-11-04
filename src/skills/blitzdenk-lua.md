@@ -188,6 +188,10 @@ Tool function rules:
   `tonumber()` before any `blitz.agent.*` call that takes an agent id or integer;
   those bindings reject a non-number with `not a number`.
 - `error("...")` fails the call. Only the message reaches the chat.
+- Tool results and errors use the same cap as `bash` and `read`: the tail is
+  kept, the full text spills to a file, and the result gets a locator you can
+  page with `read`. `ctx:call` and `ctx:batch` results use the same cap, so a
+  capped result is not complete input for parsing or JSON decoding.
 - Return `{ msg = "..." }`. Attach an image with
   `img = { media_type = "image/png", data = blitz.base64.encode(raw) }`.
   Set `exit_loop = true` to end the agent loop.

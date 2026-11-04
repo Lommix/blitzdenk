@@ -27,18 +27,6 @@ pub fn sanitizeUtf8(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf8(text)});
 }
 
-pub fn escapeMarkup(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-    for (text) |c| switch (c) {
-        '&' => try out.appendSlice(alloc, "&amp;"),
-        '<' => try out.appendSlice(alloc, "&lt;"),
-        '>' => try out.appendSlice(alloc, "&gt;"),
-        else => try out.append(alloc, c),
-    };
-    return out.toOwnedSlice(alloc);
-}
-
 pub fn expandHomePath(path: []const u8, home: []const u8, buf: []u8) []const u8 {
     if (home.len == 0 or home[0] != '/') return path;
     if (std.mem.eql(u8, path, "~")) return home;

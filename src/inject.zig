@@ -142,8 +142,7 @@ fn readRouteContextFile(app: *r.app.App, alloc: std.mem.Allocator, path: []const
     if (res.ty != .success or res.stdout.len == 0) return null;
     const truncated = res.stdout.len > CONTEXT_FILE_CAP;
     const text = r.util.sanitizeUtf8(alloc, res.stdout[0..@min(res.stdout.len, CONTEXT_FILE_CAP)]) catch return null;
-    const escaped = r.util.escapeMarkup(alloc, text) catch return null;
-    return .{ .text = escaped, .truncated = truncated };
+    return .{ .text = text, .truncated = truncated };
 }
 
 fn inject_agents_context(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
@@ -279,9 +278,6 @@ fn inject_lua_reload_notice(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.
 fn writeCatalogField(w: *std.Io.Writer, value: []const u8) !void {
     for (value) |c| {
         switch (c) {
-            '&' => try w.writeAll("&amp;"),
-            '<' => try w.writeAll("&lt;"),
-            '>' => try w.writeAll("&gt;"),
             '\n', '\r' => try w.writeByte(' '),
             else => try w.writeByte(c),
         }

@@ -28,6 +28,14 @@ and `osascript` on macOS. XDG variables are unset on macOS; `stateDir` and
 - Lua surface: `src/lua.zig`, `src/blitz_default.lua`
 - Tui state and render: `src/app.zig`
 
+## Tool execution and output
+
+- Install, trampoline, nested runs: `src/tools/context.zig`
+- Caps, spills, display limits: `src/tools/display.zig`
+- SDK result copy: `blitz-sdk/src/generate.zig` (`executeOne`, `freeToolResults`)
+- Lua tool VM: `src/lua.zig` (`luaToolTrampoline`, `interpretReturns`, `luaCtxCall`, `luaCtxBatch`)
+- MCP tool bridge: `src/mcp.zig` (`toolTrampoline`, `flattenContent`)
+
 ## The skill file: blitzdenk-lua.md
 
 - Keep up to date with changes.

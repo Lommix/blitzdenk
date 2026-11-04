@@ -18,9 +18,12 @@ pub const search = @import("search.zig");
 pub const start = @import("start.zig");
 pub const skill = @import("skill.zig");
 
-pub const MAX_DISPLAY_BYTES = 32 * 1024;
-pub const MAX_DISPLAY_LINES = 2000;
-pub const DISPLAY_CAP_TEXT = std.fmt.comptimePrint("{d} lines or {d}KB", .{ MAX_DISPLAY_LINES, @divTrunc(MAX_DISPLAY_BYTES, 1024) });
+pub const display = @import("display.zig");
+pub const MAX_DISPLAY_BYTES = display.MAX_DISPLAY_BYTES;
+pub const MAX_DISPLAY_LINES = display.MAX_DISPLAY_LINES;
+pub const MAX_IMAGE_BYTES = display.MAX_IMAGE_BYTES;
+pub const MAX_IMAGE_BASE64_BYTES = display.MAX_IMAGE_BASE64_BYTES;
+pub const DISPLAY_CAP_TEXT = display.DISPLAY_CAP_TEXT;
 pub const STATUS_BUF: usize = 512;
 
 /// Global file mutation lock, it just works!
@@ -239,132 +242,9 @@ pub fn replaceAll(input: []const u8, needle: []const u8, replacement: []const u8
     return buffer[0..out_len];
 }
 
-pub fn truncateOutputToOwned(
-    alloc: std.mem.Allocator,
-    output: []const u8,
-    max_bytes: usize,
-    max_lines: usize,
-) []const u8 {
-    return truncateOutputToOwnedSpill(alloc, output, max_bytes, max_lines, null);
-}
-
-/// Truncate `output` to its tail (last `max_lines` lines, last `max_bytes`
-/// bytes — whichever binds first), with an optional spill locator embedded in
-/// the notice. `spill_locator` points at a file (or null) holding the full output.
-pub fn truncateOutputToOwnedSpill(
-    alloc: std.mem.Allocator,
-    output: []const u8,
-    max_bytes: usize,
-    max_lines: usize,
-    spill_locator: ?[]const u8,
-) []const u8 {
-    const total_lines = countLines(output);
-    if (output.len <= max_bytes and total_lines <= max_lines) return ensureValidUtf8(alloc, output);
-
-    const cut = collectLinesBack(output, max_bytes, max_lines);
-    const tail = output[cut.start..];
-    const kept = countLines(tail);
-
-    var cap_buf: [64]u8 = undefined;
-    const kb = @divTrunc(max_bytes, 1024);
-    const cap_text = if (cut.byte_bound and cut.line_bound)
-        std.fmt.bufPrint(&cap_buf, "{d}-line and {d}KB caps", .{ max_lines, kb }) catch "caps"
-    else if (cut.byte_bound)
-        std.fmt.bufPrint(&cap_buf, "{d}KB cap", .{kb}) catch "cap"
-    else
-        std.fmt.bufPrint(&cap_buf, "{d}-line cap", .{max_lines}) catch "cap";
-
-    const notice = if (spill_locator) |path|
-        std.fmt.allocPrint(
-            alloc,
-            "[Truncated: kept tail {d} of {d} lines ({s}). Full result saved at: {s} — call read with offset/limit to page through it.]",
-            .{ kept, total_lines, cap_text, path },
-        ) catch return output
-    else
-        std.fmt.allocPrint(
-            alloc,
-            "[Truncated: kept tail {d} of {d} lines ({s})]",
-            .{ kept, total_lines, cap_text },
-        ) catch return output;
-    defer alloc.free(notice);
-
-    const raw = std.fmt.allocPrint(alloc, "{s}\n\n{s}", .{ tail, notice }) catch
-        return output;
-    const sanitized = ensureValidUtf8(alloc, raw);
-    if (sanitized.ptr != raw.ptr) alloc.free(raw);
-    return sanitized;
-}
-
-/// True when `output` would be truncated by the given caps (matches
-/// truncateOutputToOwnedSpill's entry condition). Callers gate spill-file
-/// writes on this.
-pub fn isOversized(output: []const u8, max_bytes: usize, max_lines: usize) bool {
-    return output.len > max_bytes or countLines(output) > max_lines;
-}
-
-pub fn writeSpillFile(pool: *@import("exec").CmdPool, alloc: std.mem.Allocator, tag: []const u8, content: []const u8) ?[]const u8 {
-    const basename = std.fmt.allocPrint(alloc, "blitz-spill-{s}.txt", .{tag}) catch return null;
-    defer alloc.free(basename);
-    return r.artifact.write(pool, alloc, basename, content) catch null;
-}
-
-/// Collect trailing lines from the end of `output`: the last `max_lines`
-/// lines (matching `countLines` semantics), byte-clamped to `max_bytes` from
-/// the end, then advanced to a line boundary. `byte_bound` reports whether
-/// the byte clamp actually cut the kept tail.
-const TailCut = struct { start: usize, line_bound: bool, byte_bound: bool };
-
-fn collectLinesBack(output: []const u8, max_bytes: usize, max_lines: usize) TailCut {
-    const total = countLines(output);
-    const line_bound = total > max_lines;
-    var line_start: usize = 0;
-    if (line_bound) {
-        const target_line = total - max_lines; // 0-based index of first kept line
-        var line_idx: usize = 0;
-        var i: usize = 0;
-        while (i < output.len and line_idx < target_line) : (i += 1) {
-            if (output[i] == '\n') {
-                line_idx += 1;
-                line_start = i + 1;
-            }
-        }
-    }
-    if (output.len - line_start <= max_bytes)
-        return .{ .start = line_start, .line_bound = line_bound, .byte_bound = false };
-    const floor = output.len - max_bytes;
-    var tail_start = utf8Floor(output, floor);
-    if (tail_start == 0) tail_start = floor;
-    if (output[tail_start - 1] != '\n') {
-        if (std.mem.indexOfScalarPos(u8, output, tail_start, '\n')) |nl| tail_start = nl + 1;
-    }
-    if (tail_start < line_start) tail_start = line_start;
-    return .{ .start = tail_start, .line_bound = line_bound, .byte_bound = true };
-}
-
-/// Walk end back so it never splits a multi-byte UTF-8 sequence.
-fn utf8Floor(s: []const u8, end: usize) usize {
-    var i = @min(end, s.len);
-    if (i == s.len) return i;
-    while (i > 0 and (s[i] & 0xC0) == 0x80) : (i -= 1) {}
-    return i;
-}
-
-/// Return `raw` if already valid UTF-8; otherwise owned lossy copy (U+FFFD).
-fn ensureValidUtf8(alloc: std.mem.Allocator, raw: []const u8) []const u8 {
-    if (std.unicode.utf8ValidateSlice(raw)) return raw;
-    return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf8(raw)}) catch raw;
-}
-
-pub fn countLines(output: []const u8) usize {
-    var lines: usize = 0;
-    var pos: usize = 0;
-    while (pos < output.len) {
-        lines += 1;
-        if (std.mem.indexOfScalar(u8, output[pos..], '\n')) |nl| {
-            pos += nl + 1;
-        } else {
-            break;
-        }
-    }
-    return lines;
-}
+pub const truncateOutputToOwned = display.truncateOutputToOwned;
+pub const truncateOutputToOwnedSpill = display.truncateOutputToOwnedSpill;
+pub const isOversized = display.isOversized;
+pub const writeSpillFile = display.writeSpillFile;
+pub const capOutput = display.capOutput;
+pub const countLines = display.countLines;

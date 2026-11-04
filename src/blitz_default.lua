@@ -36,6 +36,7 @@ In the script:
 - ctx:call(name, args) runs one tool of this agent, returns its result text (error text on failure)
 - ctx:batch({ { name = ..., args = ... }, ... }) runs up to 8 in parallel, returns one text per request in order
 - print(...) and the return value are the only text that enters the chat. Nested tool results never do: filter them inside the script and keep only what you need.
+- When a result text exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended.
 
 Example, two greps in one step, distilled to one line each:
 local r = ctx:batch({

@@ -1,6 +1,7 @@
 const std = @import("std");
 const sdk = @import("blitz-sdk");
 const exec = @import("exec");
+const display = @import("display.zig");
 const AgentId = @import("agent-id").AgentId;
 const permissions = @import("permissions");
 const agent_mod = @import("../agent.zig");
@@ -131,17 +132,24 @@ fn installInternal(agent: *agent_mod.Agent, base: BaseContext, definitions: []co
     if (live) try agent.setToolsLive(tools) else try agent.setTools(tools);
 }
 
-pub fn runWithOwner(tool: sdk.Tool, alloc: std.mem.Allocator, io: std.Io, call: sdk.ToolCall, owner: Owner) !sdk.ToolOutput {
-    if (tool.execute != trampoline) return tool.run(alloc, io, call);
-    const binding: *const Binding = @ptrCast(@alignCast(tool.execute_ctx.?));
-    var base = binding.base;
-    base.owner = owner;
-    return binding.execute(.{ .alloc = alloc, .io = io, .base = base }, call);
+pub fn runWithOwner(tool: sdk.Tool, pool: *exec.CmdPool, alloc: std.mem.Allocator, io: std.Io, call: sdk.ToolCall, owner: Owner) !sdk.ToolOutput {
+    var output = if (tool.execute != trampoline) blk: {
+        break :blk try tool.run(alloc, io, call);
+    } else blk: {
+        const binding: *const Binding = @ptrCast(@alignCast(tool.execute_ctx.?));
+        var base = binding.base;
+        base.owner = owner;
+        break :blk binding.execute(.{ .alloc = alloc, .io = io, .base = base }, call);
+    };
+    output.content = display.capOutput(pool, alloc, call.id, output.content);
+    return output;
 }
 
 fn trampoline(ctx: ?*anyopaque, alloc: std.mem.Allocator, io: std.Io, call: sdk.ToolCall) anyerror!sdk.ToolOutput {
     const binding: *Binding = @ptrCast(@alignCast(ctx.?));
-    return binding.execute(.{ .alloc = alloc, .io = io, .base = binding.base }, call);
+    var output = binding.execute(.{ .alloc = alloc, .io = io, .base = binding.base }, call);
+    output.content = display.capOutput(binding.base.exec_pool, alloc, call.id, output.content);
+    return output;
 }
 
 test "SDK tool trampoline preserves call context and output" {
@@ -187,11 +195,11 @@ test "SDK tool trampoline preserves call context and output" {
     try std.testing.expectEqualStrings("done", output.content);
     try std.testing.expect(output.exit_loop);
     const owner = Owner{ .agent_id = id, .call_id = "outer" };
-    const owned = try runWithOwner(agent.tools[0], std.testing.allocator, std.testing.io, .{ .id = "call", .name = "test", .input = "{}" }, owner);
+    const owned = try runWithOwner(agent.tools[0], &exec_pool, std.testing.allocator, std.testing.io, .{ .id = "call", .name = "test", .input = "{}" }, owner);
     try std.testing.expectEqualStrings("outer", owned.content);
     const binding: *const Binding = @ptrCast(@alignCast(agent.tools[0].execute_ctx.?));
     try std.testing.expect(binding.base.owner == null);
     var foreign_context: u8 = 98;
-    const foreign = try runWithOwner(.{ .name = "foreign", .execute = Fixture.foreign, .execute_ctx = &foreign_context }, std.testing.allocator, std.testing.io, .{ .id = "call", .name = "foreign", .input = "{}" }, owner);
+    const foreign = try runWithOwner(.{ .name = "foreign", .execute = Fixture.foreign, .execute_ctx = &foreign_context }, &exec_pool, std.testing.allocator, std.testing.io, .{ .id = "call", .name = "foreign", .input = "{}" }, owner);
     try std.testing.expectEqualStrings("foreign", foreign.content);
 }

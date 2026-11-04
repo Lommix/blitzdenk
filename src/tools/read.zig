@@ -1,7 +1,7 @@
 const r = @import("root.zig");
 const std = @import("std");
 
-const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_IMAGE_BYTES = r.MAX_IMAGE_BYTES;
 
 pub const ReadTool = r.Tool{
     .def = .{
