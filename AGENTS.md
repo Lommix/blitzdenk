@@ -11,6 +11,15 @@ Zig version: 0.17.0
 - `make test` run the blitzdenk suite
 - `make check` verify formatting, generated meta, and tests
 
+## Platform
+
+Linux and macOS. Asset OS strings are `linux` and `macos`; derive them from the
+target triple, not from `uname -s` (`darwin`). Browser open uses `open` on macOS
+and `xdg-open` elsewhere. Clipboard images use `wl-paste` or `xclip` on Linux
+and `osascript` on macOS. XDG variables are unset on macOS; `stateDir` and
+`cacheDir` fall back under `$HOME`. Cross-compile check:
+`zig build -Dtarget=aarch64-macos -Doptimize=ReleaseSmall`.
+
 ## Sub-agent flow
 
 - Reserve, spawn, state: `src/agent_registry.zig`, `src/commands.zig`
@@ -18,11 +27,6 @@ Zig version: 0.17.0
 - Result injection into the parent: `App.finishBackgroundAgent` in `src/app.zig`
 - Lua surface: `src/lua.zig`, `src/blitz_default.lua`
 - Tui state and render: `src/app.zig`
--
-
-## RULES
-
-- No comments and no Doc comments!
 
 ## The skill file: blitzdenk-lua.md
 

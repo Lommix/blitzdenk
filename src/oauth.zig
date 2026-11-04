@@ -17,8 +17,8 @@ pub fn nowSeconds(io: std.Io) i64 {
     return std.Io.Clock.real.now(io).toSeconds();
 }
 
-pub fn storeDir(alloc: std.mem.Allocator, config_dir: []const u8) ![]u8 {
-    return std.fs.path.join(alloc, &.{ config_dir, STORE_DIR });
+pub fn storeDir(alloc: std.mem.Allocator, base_dir: []const u8) ![]u8 {
+    return std.fs.path.join(alloc, &.{ base_dir, STORE_DIR });
 }
 
 const UrlParts = struct {
@@ -547,11 +547,15 @@ pub const Opener = struct {
     func: *const fn (ctx: ?*anyopaque, io: std.Io, url: []const u8) error{Canceled}!bool,
 };
 
-pub const xdg_opener: Opener = .{ .func = xdgOpen };
+pub const browser_opener: Opener = .{ .func = openBrowser };
 
-fn xdgOpen(_: ?*anyopaque, io: std.Io, url: []const u8) error{Canceled}!bool {
+fn openBrowser(_: ?*anyopaque, io: std.Io, url: []const u8) error{Canceled}!bool {
+    const argv: []const []const u8 = if (builtin.os.tag == .macos)
+        &.{ "open", url }
+    else
+        &.{ "xdg-open", url };
     var child = std.process.spawn(io, .{
-        .argv = &.{ "xdg-open", url },
+        .argv = argv,
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,

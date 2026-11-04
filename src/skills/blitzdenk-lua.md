@@ -674,10 +674,11 @@ Dynamic client registration is used when the server offers it. Otherwise set
 the requested scopes. The callback listens on `127.0.0.1:47823` by default
 (`redirect_port`), falling back to a free port when busy.
 
-Tokens live in `oauth/tokens.json` in the config directory, keyed by server
-url, so renaming a server keeps its login. Access tokens refresh on expiry.
-Deleting a record or the file logs out. A server that answers 401 at load is
-skipped with a notification naming the connect command.
+Tokens live in `oauth/tokens.json` in the XDG state directory
+(`$XDG_STATE_HOME/blitzdenk`, default `~/.local/state/blitzdenk`), keyed by
+server url, so renaming a server keeps its login. Access tokens refresh on
+expiry. Deleting a record or the file logs out. A server that
+answers 401 at load is skipped with a notification naming the connect command.
 
 ## SSH mode
 

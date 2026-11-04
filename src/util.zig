@@ -12,6 +12,15 @@ pub fn cacheDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !
     return std.fmt.allocPrint(alloc, "{s}/blitzdenk", .{root});
 }
 
+pub fn stateDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) ![]u8 {
+    const xdg = env.get("XDG_STATE_HOME") orelse "";
+    if (xdg.len > 0 and std.fs.path.isAbsolute(xdg))
+        return std.fmt.allocPrint(alloc, "{s}/blitzdenk", .{xdg});
+    const home = env.get("HOME") orelse return error.NoHomeFound;
+    if (!std.fs.path.isAbsolute(home)) return error.NoHomeFound;
+    return std.fmt.allocPrint(alloc, "{s}/.local/state/blitzdenk", .{home});
+}
+
 /// Owned copy of `text`, ill-formed UTF-8 replaced with U+FFFD.
 pub fn sanitizeUtf8(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     if (std.unicode.utf8ValidateSlice(text)) return alloc.dupe(u8, text);
@@ -91,4 +100,23 @@ test "expand home path" {
     try std.testing.expectEqualStrings("/home/u/proj", expandHomePath("~/proj", "/home/u", &buf));
     try std.testing.expectEqualStrings("~user/x", expandHomePath("~user/x", "/home/u", &buf));
     try std.testing.expectEqualStrings("~/x", expandHomePath("~/x", "", &buf));
+}
+
+test "state dir honors XDG_STATE_HOME and falls back to HOME" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    try env.put("XDG_STATE_HOME", "/x/state");
+    const xdg = try stateDir(std.testing.allocator, &env);
+    defer std.testing.allocator.free(xdg);
+    try std.testing.expectEqualStrings("/x/state/blitzdenk", xdg);
+
+    try env.put("XDG_STATE_HOME", "relative/state");
+    try env.put("HOME", "/home/u");
+    const home = try stateDir(std.testing.allocator, &env);
+    defer std.testing.allocator.free(home);
+    try std.testing.expectEqualStrings("/home/u/.local/state/blitzdenk", home);
+
+    try env.put("HOME", "relative/home");
+    try std.testing.expectError(error.NoHomeFound, stateDir(std.testing.allocator, &env));
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const exec = @import("exec");
 const util = @import("util.zig");
 
@@ -112,8 +113,52 @@ fn readMime(alloc: std.mem.Allocator, pool: *exec.CmdPool, argv: []const []const
     return null;
 }
 
+fn readMacClipboard(alloc: std.mem.Allocator, pool: *exec.CmdPool) !?ImageData {
+    const io = pool.io;
+    var tmp_dir = openTmpDir(io) catch return null;
+    defer tmp_dir.close(io);
+    const ns = std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds;
+    const name = try std.fmt.allocPrint(alloc, "clip_{d}.png", .{ns});
+    defer alloc.free(name);
+    const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ util.TMP_DIR, name });
+    defer alloc.free(path);
+    defer tmp_dir.deleteFile(io, name) catch {};
+
+    const access = try std.fmt.allocPrint(alloc, "set outFile to open for access POSIX file \"{s}\" with write permission", .{path});
+    defer alloc.free(access);
+    const res = pool.runAndWaitTimeout(.{
+        .argv = &.{
+            "osascript",
+            "-e",
+            "set pngData to the clipboard as «class PNGf»",
+            "-e",
+            access,
+            "-e",
+            "set eof outFile to 0",
+            "-e",
+            "write pngData to outFile",
+            "-e",
+            "close access outFile",
+        },
+        .force_local = true,
+        .max_output = 4096,
+    }, 2000) catch return null;
+    defer pool.alloc.free(res.stdout);
+    defer pool.alloc.free(res.stderr);
+    if (res.ty != .success) return null;
+
+    const data = tmp_dir.readFileAlloc(io, name, alloc, .limited(MAX_CLIP_IMAGE_BYTES)) catch return null;
+    if (data.len == 0) {
+        alloc.free(data);
+        return null;
+    }
+    return .{ .data = data, .ext = ".png" };
+}
+
 pub fn readImage(alloc: std.mem.Allocator, pool: *exec.CmdPool) !?ImageData {
     const env = pool.env;
+
+    if (builtin.os.tag == .macos) return readMacClipboard(alloc, pool);
 
     const attempts = [_]struct { mime: []const u8, ext: []const u8 }{
         .{ .mime = "image/png", .ext = ".png" },
@@ -134,14 +179,16 @@ pub fn readImage(alloc: std.mem.Allocator, pool: *exec.CmdPool) !?ImageData {
     return null;
 }
 
-pub fn saveImage(io: std.Io, alloc: std.mem.Allocator, data: []const u8, ext: []const u8) ![]const u8 {
-    var tmp_dir = std.Io.Dir.openDirAbsolute(io, util.TMP_DIR, .{ .follow_symlinks = false }) catch |open_err| blk: {
-        std.Io.Dir.createDirAbsolute(io, util.TMP_DIR, .fromMode(0o700)) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-        break :blk std.Io.Dir.openDirAbsolute(io, util.TMP_DIR, .{ .follow_symlinks = false }) catch return open_err;
+fn openTmpDir(io: std.Io) !std.Io.Dir {
+    std.Io.Dir.createDirAbsolute(io, util.TMP_DIR, .fromMode(0o700)) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
     };
+    return std.Io.Dir.openDirAbsolute(io, util.TMP_DIR, .{ .follow_symlinks = false });
+}
+
+pub fn saveImage(io: std.Io, alloc: std.mem.Allocator, data: []const u8, ext: []const u8) ![]const u8 {
+    var tmp_dir = try openTmpDir(io);
     defer tmp_dir.close(io);
     const ns = std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds;
     var random: [8]u8 = undefined;

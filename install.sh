@@ -41,7 +41,10 @@ main() {
   OS=$(uname -s | tr '[:upper:]' '[:lower:]')
   SUFFIX="-gnu"
   case "$OS" in
-    darwin) SUFFIX="" ;;
+    darwin)
+      OS=macos
+      SUFFIX=""
+      ;;
     linux)
       if have ldd && ldd --version 2>&1 | grep -qi musl; then
         SUFFIX="-musl"

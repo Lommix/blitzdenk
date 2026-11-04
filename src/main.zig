@@ -621,7 +621,8 @@ pub fn run(
     if (config_lua) |info| {
         app.lua_config_dir = info.dir_path;
         app.lua_config_abs = info.abs_path;
-        app.mcp_manager.token_dir = r.oauth.storeDir(arena, info.dir_path) catch null;
+        const state_dir: ?[]const u8 = util.stateDir(arena, env) catch null;
+        if (state_dir) |base| app.mcp_manager.token_dir = r.oauth.storeDir(arena, base) catch null;
     }
     defer {
         app.cancelPermissions(null);

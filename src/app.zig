@@ -1552,8 +1552,7 @@ pub const App = struct {
         }
 
         const chosen = rows.items[t.completion_selected].text;
-        const cur_tok = r.completion.tokenAt(self.input.slice(), self.input.cursor);
-        const cur_token = self.input.slice()[cur_tok.start..cur_tok.end];
+        const cur_token = commandCompletionPrefix(self.input.slice(), self.input.cursor);
         const already = std.ascii.eqlIgnoreCase(cur_token, chosen);
 
         switch (move) {
@@ -1628,7 +1627,7 @@ pub const App = struct {
             .scopes = cfg.scopes,
             .redirect_port = cfg.redirect_port,
             .store_dir = store_dir.?,
-        }, r.oauth.xdg_opener);
+        }, r.oauth.browser_opener);
         self.lua_vm.vm_mu.unlock(self.io);
         self.mcp_auth = task catch {
             self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: out of memory", .{name}) catch {};
@@ -3420,10 +3419,7 @@ pub fn myersDiff(old: []const []const u8, new: []const []const u8, alloc: std.me
 }
 
 fn commandCompletionPrefix(input: []const u8, cursor: usize) []const u8 {
-    if (input.len == 0) return "";
-    const end = @min(@as(usize, cursor), input.len);
-    const command_end = std.mem.indexOfScalar(u8, input[0..end], ' ') orelse end;
-    return input[0..command_end];
+    return input[0..@min(cursor, input.len)];
 }
 
 fn commandQueryPrefix(input: []const u8, cursor: usize, query_len: usize, open: bool) []const u8 {
@@ -3447,8 +3443,7 @@ fn commandTokenActive(input: []const u8, cursor: usize) bool {
     if (input.len == 0) return false;
     const end = @min(@as(usize, cursor), input.len);
     if (end == 0) return false;
-    if (input[0] != '/') return false;
-    return std.mem.indexOfScalar(u8, input[0..end], ' ') == null;
+    return input[0] == '/';
 }
 
 fn textWidthCols(text: []const u8) usize {
@@ -3506,6 +3501,23 @@ fn appendSshAliasCompletions(app: *App, alloc: std.mem.Allocator, prefix: []cons
     }
 }
 
+fn appendMcpServerCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
+    if (!std.ascii.startsWithIgnoreCase(prefix, "/mcp connect ")) return;
+    if (count.* >= out.len) return;
+    if (!app.lua_vm.vm_mu.tryLock()) return;
+    defer app.lua_vm.vm_mu.unlock(app.io);
+
+    for (app.lua_vm.mcp_entries.items) |entry| {
+        if (count.* >= out.len) return;
+        const formatted = std.fmt.allocPrint(alloc, "/mcp connect {s}", .{entry.name}) catch return;
+        if (!completionMatches(formatted, prefix)) continue;
+        if (containsCommandCompletion(out[0..count.*], formatted)) continue;
+
+        out[count.*] = .{ .text = formatted };
+        count.* += 1;
+    }
+}
+
 const CompletionRows = struct {
     items: [COMMAND_COMPLETION_ROWS]CommandCompletion = @splat(.{ .text = "" }),
     len: usize = 0,
@@ -3520,6 +3532,7 @@ fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cu
         else => commandCompletionPrefix(input, cursor),
     };
     appendBuiltinCommandCompletions(prefix, &matches, &count);
+    appendMcpServerCompletions(app, alloc, prefix, &matches, &count);
     appendLuaCommandCompletions(app, prefix, &matches, &count);
     appendSkillCommandCompletions(app, alloc, prefix, &matches, &count);
     appendSshAliasCompletions(app, alloc, prefix, &matches, &count);
@@ -3570,8 +3583,9 @@ fn insertCompletionToken(self: *App, entry: []const u8) void {
         self.input.insert(entry);
         return;
     }
-    const token_end = std.mem.indexOfScalar(u8, self.input.slice(), ' ') orelse self.input.len;
-    self.input.deleteRange(0, token_end);
+    const s = self.input.slice();
+    const end = std.mem.indexOfScalarPos(u8, s, self.input.cursor, ' ') orelse s.len;
+    self.input.deleteRange(0, end);
     self.input.insert(entry);
 }
 
@@ -5920,6 +5934,80 @@ test "path completion probes dirs and lists entries" {
     try testing.expect(saw_dir);
     try testing.expect(saw_file);
     try testing.expectEqualStrings("dir", rows.items[0].description.?);
+}
+
+test "command completion spans spaces in multi word commands" {
+    const testing = std.testing;
+    var app: App = undefined;
+    app.io = testing.io;
+    app.gpa = testing.allocator;
+    const lua_vm = try r.lua.LuaVm.init(testing.allocator);
+    defer lua_vm.deinit();
+    app.lua_vm = lua_vm;
+    var factory: r.ContextFactory = undefined;
+    factory.skill_names = .empty;
+    factory.ssh_aliases = .empty;
+    app.context_factory = &factory;
+    app.input_mode = .{ .text = .{} };
+    app.input = .{};
+
+    app.input.set("/mcp ");
+    app.input.cursor = app.input.len;
+    app.syncCompletion();
+    try testing.expect(app.completionIsOpen());
+
+    app.input.set("/mcp co");
+    app.input.cursor = app.input.len;
+    app.syncCompletion();
+    try testing.expect(app.completionIsOpen());
+    var frame = std.heap.ArenaAllocator.init(testing.allocator);
+    defer frame.deinit();
+    const rows = commandCompletions(&app, frame.allocator(), app.input.slice(), app.input.cursor);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("/mcp connect", rows.items[0].text);
+
+    app.input.set("/mcp ");
+    app.input.cursor = app.input.len;
+    app.syncCompletion();
+    app.handleCompletion(.next);
+    try testing.expectEqualStrings("/mcp connect", app.input.slice());
+    app.handleCompletion(.next);
+    try testing.expectEqualStrings("/mcp cancel", app.input.slice());
+    app.handleCompletion(.accept);
+    try testing.expectEqualStrings("/mcp cancel", app.input.slice());
+    try testing.expect(!app.completionIsOpen());
+
+    app.input.set("/mcp connect ");
+    app.input.cursor = app.input.len;
+    app.syncCompletion();
+    try testing.expect(!app.completionIsOpen());
+
+    try lua_vm.mcp_entries.appendBounded(.{ .name = "linear", .tools_prefix = "linear" });
+    try lua_vm.mcp_entries.appendBounded(.{ .name = "github", .tools_prefix = "github" });
+
+    app.input.set("/mcp ");
+    app.input.cursor = app.input.len;
+    const mcp_rows = commandCompletions(&app, frame.allocator(), app.input.slice(), app.input.cursor);
+    try testing.expectEqual(@as(usize, 2), mcp_rows.len);
+
+    app.input.set("/mcp connect ");
+    app.input.cursor = app.input.len;
+    app.syncCompletion();
+    try testing.expect(app.completionIsOpen());
+    const server_rows = commandCompletions(&app, frame.allocator(), app.input.slice(), app.input.cursor);
+    try testing.expectEqual(@as(usize, 2), server_rows.len);
+
+    app.input.set("/mcp connect gi");
+    app.input.cursor = app.input.len;
+    app.syncCompletion();
+    app.handleCompletion(.accept);
+    try testing.expectEqualStrings("/mcp connect github", app.input.slice());
+
+    app.input.set("/mcp connect gixx");
+    app.input.cursor = "/mcp connect gi".len;
+    app.syncCompletion();
+    app.handleCompletion(.accept);
+    try testing.expectEqualStrings("/mcp connect github", app.input.slice());
 }
 
 test "wizard confirm writes provider.lua and marker then returns to text" {
