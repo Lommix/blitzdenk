@@ -44,18 +44,19 @@ pub const SUMMARIZATION_PROMPT =
     \\
     \\## Relevant skills
     \\1. [Ordered list of skills, which are "suggested" to load]
+    \\2. [Or "(none)" if not applicable]
     \\
     \\Rules:
     \\- Keep each section concise. Preserve exact file paths, function names, and error messages.
     \\- If the conversation contains an earlier checkpoint summary, merge its content into the matching sections instead of duplicating or nesting it.
-    \\- Do NOT mention this summarization request or the existence of the checkpoint in the summary.
+    \\- Do not add meta commentary about this summarization request; describe the work itself.
     \\
 ;
 
 pub const SUMMARY_PREFIX =
     \\The messages below are an automatically generated checkpoint condensing an earlier span of this conversation.
     \\You also have access to the state of the tools that were used before the checkpoint.
-    \\Continue the task directly from this summary without acknowledging the checkpoint.
+    \\Continue the task directly from this summary; do not re-introduce or restart the work. If asked about missing context, say earlier messages were condensed into this summary.
     \\Here is the checkpoint summary:
     \\
 ;

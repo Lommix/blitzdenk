@@ -19,7 +19,7 @@ pub const BashTool = r.Tool{
             \\Verify the target path before delete or move commands. Use absolute paths and guard variables (${VAR:?}) in destructive scripts.
         ,
         .prompt_snippet = "Execute a bash command",
-        .prompt_guidelines = "Check the [exit code: N] marker on every bash result; investigate failures before moving on.",
+        .prompt_guidelines = "Check the [exit code: N] marker; investigate unexpected failures before moving on.",
         .parameters_schema =
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Bash command to execute"},
