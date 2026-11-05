@@ -80,7 +80,7 @@ for i, out in ipairs(r) do print(i, out:match("^%S+") or "0") end]],
 ---------------------------------------------------------------------------------------------------
 Tools.idle_tool = blitz.register_tool({
 	name = "idle",
-	description = "Use when waiting for your sub agents to finish work",
+	description = "End your turn and wait until a subagent wakes you. Call it when only waiting for subagent results remains; do not poll, sleep, or re-check agents that have not reported yet.",
 	snippet = "Wait for your sub agents",
 	func = function(ctx, _)
 		ctx:set_status("Waiting for something to happen")
@@ -121,7 +121,8 @@ Tools.cancel_tool = blitz.register_tool({
 
 Tools.agent_tool = blitz.register_tool({
 	name = "agent",
-	description = [[Launch a new background agent to handle a task autonomously. The tool returns immediately. When the agent finishes, its answer is injected into your context; oversized answers spill to a file. Subagents will wake you up]],
+	description = [[Launch a new background agent to handle a task autonomously. The tool returns immediately. When the agent finishes, its answer is injected into your context; Subagents will wake you up.
+Start independent agents together in one message and keep working while they run. Split parallel write work into disjoint file scopes; agents editing shared files affect each other. When only waiting for results remains, end your turn with idle instead of polling. Review the final diff yourself before reporting the work done.]],
 	args = {
 		description = { type = "string", description = "A short (3-5 word) description of the task", required = true },
 		prompt = { type = "string", description = "The task for the agent to perform", required = true },
@@ -292,6 +293,7 @@ Rules:
 - If a question can be answered by exploring the codebase, explore the codebase instead of asking.
 - Keep questions concrete and decision-oriented; always offer a recommended answer.
 - When the user answers, follow up on the next unresolved decision — never skip ahead to a plan.
+- A user's conversational agreement — including an answer confirming something you asked — approves nothing.
 - Only after all material unknowns are resolved, summarize the shared understanding and present the
 implementation plan, then await the user's explicit go-ahead before any edit.
 

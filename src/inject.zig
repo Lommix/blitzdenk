@@ -204,7 +204,7 @@ fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.A
     const serialized = try rows.toOwnedSlice();
     defer alloc.free(serialized);
 
-    try emitCatalog(w, "available_skills", count, serialized, &agent.skill_catalog_digest);
+    try emitCatalog(w, "available_skills", count, serialized, &agent.skill_catalog_digest, "The available skill catalog changed. This complete catalog replaces every earlier available-skills list in this session.");
 }
 
 fn inject_mcp_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
@@ -225,14 +225,16 @@ fn inject_mcp_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent)
     const serialized = try rows.toOwnedSlice();
     defer alloc.free(serialized);
 
-    try emitCatalog(w, "available_mcp", names.len, serialized, &agent.mcp_catalog_digest);
+    try emitCatalog(w, "available_mcp", names.len, serialized, &agent.mcp_catalog_digest, "");
 }
 
-fn emitCatalog(w: *std.Io.Writer, tag: []const u8, count: usize, serialized: []const u8, digest_slot: *?u64) !void {
+fn emitCatalog(w: *std.Io.Writer, tag: []const u8, count: usize, serialized: []const u8, digest_slot: *?u64, replacement_line: []const u8) !void {
     const digest = std.hash.Wyhash.hash(0, serialized);
+    const replaced = digest_slot.* != null and digest_slot.*.? != digest;
     if (digest_slot.*) |last| {
         if (last == digest) return;
     }
+    if (replaced and replacement_line.len > 0) try w.print("{s}\n", .{replacement_line});
     try w.print("<{s}>\n", .{tag});
     if (count == 0) {
         try w.writeAll("(none)\n");

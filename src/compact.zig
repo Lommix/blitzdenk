@@ -42,15 +42,21 @@ pub const SUMMARIZATION_PROMPT =
     \\- [Any data, examples, or references needed to continue]
     \\- [Or "(none)" if not applicable]
     \\
-    \\Keep each section concise. Preserve exact file paths, function names, and error messages.
+    \\## Relevant skills
+    \\1. [Ordered list of skills, which are "suggested" to load]
+    \\
+    \\Rules:
+    \\- Keep each section concise. Preserve exact file paths, function names, and error messages.
+    \\- If the conversation contains an earlier checkpoint summary, merge its content into the matching sections instead of duplicating or nesting it.
+    \\- Do NOT mention this summarization request or the existence of the checkpoint in the summary.
     \\
 ;
 
 pub const SUMMARY_PREFIX =
-    \\Another agent started to solve this problem and produced a summary of its thinking process.
-    \\You also have access to the state of the tools that were used by that agent.
-    \\Use this to build on the work that has already been done and avoid duplicating work.
-    \\Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:
+    \\The messages below are an automatically generated checkpoint condensing an earlier span of this conversation.
+    \\You also have access to the state of the tools that were used before the checkpoint.
+    \\Continue the task directly from this summary without acknowledging the checkpoint.
+    \\Here is the checkpoint summary:
     \\
 ;
 
