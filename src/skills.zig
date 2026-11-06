@@ -1,12 +1,26 @@
 const std = @import("std");
 const context_factory = @import("context_factory.zig");
 
+pub const Filter = struct {
+    enabled: bool = true,
+    only: []const []const u8 = &.{},
+    except: []const []const u8 = &.{},
+};
+
+pub const Target = struct {
+    name: []const u8,
+    is_main: bool,
+    filter: Filter,
+};
+
 pub const SkillMeta = struct {
     name: []const u8,
     description: []const u8,
     when_to_use: ?[]const u8 = null,
     user_invocable: bool = true,
     model_invocable: bool = true,
+    deny_agents: ?[]const u8 = null,
+    main_agent_only: bool = false,
 };
 
 pub const SkillEntry = struct {
@@ -64,6 +78,32 @@ pub const SkillRegistry = struct {
     }
 };
 
+pub fn visibleTo(entry: *const SkillEntry, agent_name: []const u8, is_main: bool, filter: Filter) bool {
+    if (!filter.enabled) return false;
+    if (entry.meta.main_agent_only and !is_main) return false;
+    if (entry.meta.deny_agents) |deny| {
+        if (commaListContains(deny, agent_name)) return false;
+    }
+    if (nameListContains(filter.except, entry.meta.name)) return false;
+    if (filter.only.len > 0 and !nameListContains(filter.only, entry.meta.name)) return false;
+    return true;
+}
+
+fn commaListContains(list: []const u8, name: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, ',');
+    while (it.next()) |item| {
+        if (std.mem.eql(u8, std.mem.trim(u8, item, " \t\"'"), name)) return true;
+    }
+    return false;
+}
+
+fn nameListContains(names: []const []const u8, target: []const u8) bool {
+    for (names) |name| {
+        if (std.ascii.eqlIgnoreCase(name, target)) return true;
+    }
+    return false;
+}
+
 pub fn loadSkill(io: std.Io, alloc: std.mem.Allocator, entry: *const SkillEntry) ?LoadedSkill {
     const raw = std.Io.Dir.cwd().readFileAlloc(io, entry.path, alloc, .limited64(1024 * 1024)) catch return null;
     _ = parseSkillMeta(raw) orelse {
@@ -112,6 +152,8 @@ fn allocEntry(alloc: std.mem.Allocator, meta: SkillMeta, path: []const u8) ?Skil
     errdefer alloc.free(description);
     const when_to_use = if (meta.when_to_use) |w| alloc.dupe(u8, w) catch return null else null;
     errdefer if (when_to_use) |w| alloc.free(w);
+    const deny_agents = if (meta.deny_agents) |list| alloc.dupe(u8, list) catch return null else null;
+    errdefer if (deny_agents) |list| alloc.free(list);
     const path_dup = alloc.dupe(u8, path) catch return null;
     return .{
         .meta = .{
@@ -120,6 +162,8 @@ fn allocEntry(alloc: std.mem.Allocator, meta: SkillMeta, path: []const u8) ?Skil
             .when_to_use = when_to_use,
             .user_invocable = meta.user_invocable,
             .model_invocable = meta.model_invocable,
+            .deny_agents = deny_agents,
+            .main_agent_only = meta.main_agent_only,
         },
         .path = path_dup,
     };
@@ -129,6 +173,7 @@ fn freeEntry(alloc: std.mem.Allocator, entry: SkillEntry) void {
     alloc.free(entry.meta.name);
     alloc.free(entry.meta.description);
     if (entry.meta.when_to_use) |w| alloc.free(w);
+    if (entry.meta.deny_agents) |list| alloc.free(list);
     alloc.free(entry.path);
 }
 
@@ -193,6 +238,7 @@ pub fn parseSkillMeta(raw: []u8) ?SkillMeta {
     const header = raw[4..][0..header_end];
 
     var meta: SkillMeta = .{ .name = "", .description = "" };
+    var in_metadata = false;
 
     var i: usize = 0;
     while (i < header.len) {
@@ -201,7 +247,12 @@ pub fn parseSkillMeta(raw: []u8) ?SkillMeta {
         var line = trimCr(header[line_start..line_end]);
         i = if (line_end < header.len) line_end + 1 else header.len;
 
-        if (line.len == 0 or line[0] == ' ' or line[0] == '\t') continue;
+        if (line.len == 0) continue;
+        if (line[0] == ' ' or line[0] == '\t') {
+            if (in_metadata) parseMetadataLine(line, &meta);
+            continue;
+        }
+        in_metadata = false;
 
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
         const key = unquoteYamlInPlace(trimSpaces(line[0..colon]));
@@ -233,11 +284,74 @@ pub fn parseSkillMeta(raw: []u8) ?SkillMeta {
             meta.user_invocable = parseBool(val, true);
         } else if (std.mem.eql(u8, key, "disable-model-invocation")) {
             meta.model_invocable = !parseBool(val, false);
+        } else if (std.mem.eql(u8, key, "metadata")) {
+            const rest = trimSpaces(stripYamlComment(scalar));
+            if (rest.len == 0) {
+                in_metadata = true;
+            } else if (rest.len >= 2 and rest[0] == '{' and rest[rest.len - 1] == '}') {
+                parseFlowMetadata(rest[1 .. rest.len - 1], &meta);
+            }
         }
     }
 
     if (meta.name.len == 0 or meta.description.len == 0) return null;
     return meta;
+}
+
+fn parseMetadataLine(line_in: []u8, meta: *SkillMeta) void {
+    const line = trimSpaces(trimCr(line_in));
+    if (line.len == 0 or line[0] == '#') return;
+
+    const colon = std.mem.indexOfScalar(u8, line, ':') orelse return;
+    const key = unquoteYamlInPlace(trimSpaces(line[0..colon]));
+    var val = unquoteYamlInPlace(trimSpaces(stripYamlComment(trimSpaces(line[colon + 1 ..]))));
+
+    if (std.mem.eql(u8, key, "blitzdenk.deny-agents")) {
+        if (val.len >= 2 and val[0] == '[' and val[val.len - 1] == ']') val = val[1 .. val.len - 1];
+        meta.deny_agents = val;
+    } else if (std.mem.eql(u8, key, "blitzdenk.main-agent-only")) {
+        meta.main_agent_only = parseBool(val, false);
+    }
+}
+
+/// Splits `a: x, b: [y, z]` on top-level commas, honoring quotes and brackets.
+fn parseFlowMetadata(flow: []u8, meta: *SkillMeta) void {
+    var quote: u8 = 0;
+    var depth: usize = 0;
+    var start: usize = 0;
+    for (flow, 0..) |ch, i| {
+        if (quote != 0) {
+            if (ch == quote) quote = 0;
+            continue;
+        }
+        switch (ch) {
+            '"', '\'' => quote = ch,
+            '[', '{' => depth += 1,
+            ']', '}' => depth -|= 1,
+            ',' => if (depth == 0) {
+                parseMetadataLine(flow[start..i], meta);
+                start = i + 1;
+            },
+            else => {},
+        }
+    }
+    parseMetadataLine(flow[start..], meta);
+}
+
+fn stripYamlComment(val: []u8) []u8 {
+    var quote: u8 = 0;
+    for (val, 0..) |ch, i| {
+        if (quote != 0) {
+            if (ch == quote) quote = 0;
+            continue;
+        }
+        if (ch == '"' or ch == '\'') {
+            quote = ch;
+            continue;
+        }
+        if (ch == '#' and (i == 0 or val[i - 1] == ' ' or val[i - 1] == '\t')) return val[0..i];
+    }
+    return val;
 }
 
 pub fn parseSkillBody(raw: []const u8) ?[]const u8 {

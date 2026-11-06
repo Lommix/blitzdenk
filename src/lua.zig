@@ -479,6 +479,10 @@ const ToolDef = LuaType{ .table_def = .{ .name = "ToolDef", .fields = &.{
         .refs = &.{ CtxDef, CallDef, ToolResultDef },
     } } },
 } } };
+const SkillFilterDef = LuaType{ .table_def = .{ .name = "BlitzSkillFilter", .fields = &.{
+    .{ .name = "only", .ty = StringListDef, .optional = true, .desc = "skill names this agent may load; empty means all" },
+    .{ .name = "except", .ty = StringListDef, .optional = true, .desc = "skill names this agent may not load; wins over only" },
+} } };
 const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
     .{ .name = "name", .ty = LuaType.string },
     .{ .name = "description", .ty = LuaType.string },
@@ -487,8 +491,16 @@ const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
     .{ .name = "model", .ty = LuaType.integer, .optional = true, .desc = "model handle from add_model" },
     .{ .name = "effort", .ty = LuaType.string, .optional = true },
     .{ .name = "in_agent_tool", .ty = LuaType.boolean, .optional = true },
-    .{ .name = "skills", .ty = LuaType.boolean, .optional = true, .desc = "false disables the available_skills catalogue injection for this agent type" },
+    .{ .name = "skills", .ty = LuaType{ .raw_refs = .{ .text = "boolean|BlitzSkillFilter", .refs = &.{SkillFilterDef} } }, .optional = true, .desc = "false disables all skills for this agent; a table restricts the catalogue and the skill tool" },
 } } };
+const SkillFilterArg = struct {
+    enabled: bool = true,
+    only: []const []const u8 = &.{},
+    except: []const []const u8 = &.{},
+};
+const SkillNameList = struct {
+    items: []const []const u8 = &.{},
+};
 const AppFlagsDef = LuaType{ .table_def = .{ .name = "BlitzAppFlags", .fields = &.{
     .{ .name = "show_thinking", .ty = LuaType.boolean, .optional = true },
     .{ .name = "show_diffs", .ty = LuaType.boolean, .optional = true },
@@ -905,7 +917,7 @@ pub const Blitz = LuaType{
                                 model: ?u32 = null,
                                 effort: ?[]const u8,
                                 in_agent_tool: ?bool,
-                                skills: ?bool,
+                                skills: SkillFilterArg = .{},
                             };
 
                             fn lua_fn(state: *c.lua_State, a: *r.app.App, def: Args) !u32 {
@@ -923,7 +935,11 @@ pub const Blitz = LuaType{
                                     .description = def.description,
                                     .prompt = def.prompt,
                                     .in_agent_tool = def.in_agent_tool orelse true,
-                                    .skills = def.skills orelse true,
+                                    .skills = .{
+                                        .enabled = def.skills.enabled,
+                                        .only = def.skills.only,
+                                        .except = def.skills.except,
+                                    },
                                     .tools = def.tools,
                                     .model = if (def.model) |handle| .{
                                         .model = @fromBackingInt(@intCast(handle)),
@@ -1191,6 +1207,29 @@ pub const Blitz = LuaType{
                             try a.context_factory.setAgentTools(agent_type, tool_names);
                         }
                     }).lua_fn, "set_agent_tools"),
+                } },
+            },
+            .{
+                .name = "set_agent_skills",
+                .desc =
+                \\Restrict which skills an agent type can see and load. Pass false to
+                \\disable skills, or a table with optional only and except lists.
+                ,
+                .ty = LuaType{ .function = .{
+                    .args = &.{
+                        .{ .name = "agent_type", .ty = LuaType.integer },
+                        .{ .name = "filter", .ty = LuaType{ .raw_refs = .{ .text = "boolean|BlitzSkillFilter", .refs = &.{SkillFilterDef} } } },
+                    },
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type: r.ContextFactory.AgentType, filter: SkillFilterArg) !void {
+                            if (try isToolVm(state)) return;
+                            try a.context_factory.setAgentSkills(agent_type, .{
+                                .enabled = filter.enabled,
+                                .only = filter.only,
+                                .except = filter.except,
+                            });
+                        }
+                    }).lua_fn, "set_agent_skills"),
                 } },
             },
             .{
@@ -3353,6 +3392,53 @@ fn readAnyValueAlloc(
     if (T == LuaTableRef) {
         if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " is not a table");
         return .Ok(.{ .idx = c.lua_absindex(state, idx) });
+    }
+
+    if (T == SkillFilterArg) {
+        const kind = c.lua_type(state, idx);
+        if (kind == c.LUA_TNIL) return .Ok(.{});
+        if (kind == c.LUA_TBOOLEAN) return .Ok(.{ .enabled = c.lua_toboolean(state, idx) != 0 });
+        if (kind != c.LUA_TTABLE) return .Err(name ++ " must be a boolean or a table");
+
+        const abs = c.lua_absindex(state, idx);
+        c.lua_pushnil(state);
+        while (c.lua_next(state, abs) != 0) {
+            c.lua_pop(state, 1);
+            var len: usize = 0;
+            const known = c.lua_type(state, -1) == c.LUA_TSTRING and blk: {
+                const key = c.lua_tolstring(state, -1, &len)[0..len];
+                break :blk std.mem.eql(u8, key, "only") or std.mem.eql(u8, key, "except");
+            };
+            if (!known) {
+                c.lua_pop(state, 1);
+                return .Err(name ++ " table accepts only the keys `only` and `except`");
+            }
+        }
+
+        const Raw = struct {
+            only: SkillNameList = .{},
+            except: SkillNameList = .{},
+        };
+        const raw = switch (readAnyValueAlloc(Raw, state, name, idx, allocator)) {
+            .ok => |value| value,
+            .err => |msg| return .Err(msg),
+        };
+        return .Ok(.{
+            .only = raw.only.items,
+            .except = raw.except.items,
+        });
+    }
+
+    if (T == SkillNameList) {
+        const kind = c.lua_type(state, idx);
+        if (kind == c.LUA_TNIL) return .Ok(.{});
+        if (kind != c.LUA_TTABLE) return .Err(name ++ " must be a list of strings");
+
+        const items = switch (readAnyValueAlloc([]const []const u8, state, name, idx, allocator)) {
+            .ok => |value| value,
+            .err => |msg| return .Err(msg),
+        };
+        return .Ok(.{ .items = items });
     }
 
     switch (@typeInfo(T)) {
@@ -5863,6 +5949,57 @@ test "add_agent in a tool vm returns the registered handle by name" {
     , .{handle});
     defer std.testing.allocator.free(code);
     try tool_vm.exec(code);
+}
+
+test "skill filters combine lua config and skill metadata" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const files = [_]struct { []const u8, []const u8 }{
+        .{ "research.md", "---\nname: research\ndescription: r\n---\nbody\n" },
+        .{ "deploy.md", "---\nname: deploy\ndescription: d\n---\nbody\n" },
+        .{ "lua.md", "---\nname: lua\ndescription: l\nmetadata:\n  blitzdenk.main-agent-only: \"true\" # main\n---\nbody\n" },
+        .{ "review.md", "---\nname: review\ndescription: v\nmetadata: { blitzdenk.deny-agents: [\"researcher\", other] }\n---\nbody\n" },
+    };
+    for (files) |f| try tmp.dir.writeFile(std.testing.io, .{ .sub_path = f[0], .data = f[1] });
+
+    var app_state = permissionTestApp();
+    const factory = try r.ContextFactory.init(std.testing.allocator, std.testing.io, "/tmp", "/tmp");
+    defer factory.deinit();
+    app_state.context_factory = factory;
+    factory.skills.scan(std.testing.allocator, std.testing.io, tmp.dir, "");
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+    try vm.exec(
+        \\blitz.add_agent({ name = "researcher", description = "d", prompt = "p", tools = {},
+        \\    skills = { only = { "Research", "deploy" }, except = { "deploy" } } })
+        \\blitz.set_agent_skills(blitz.AGENT_GENERAL, false)
+        \\assert(not pcall(blitz.add_agent, { name = "a", description = "d", prompt = "p", tools = {}, skills = { "research" } }))
+        \\assert(not pcall(blitz.add_agent, { name = "b", description = "d", prompt = "p", tools = {}, skills = { onyl = { "research" } } }))
+        \\assert(not pcall(blitz.set_agent_skills, blitz.AGENT_GENERAL, "research"))
+    );
+    try std.testing.expect(factory.findAgentType("a") == null);
+    try std.testing.expect(factory.findAgentType("b") == null);
+
+    const skills = r.skills;
+    const reg = &factory.skills;
+    const general = factory.agentTypeAt(0).?;
+    const researcher = factory.agentTypeAt(@backingInt(factory.findAgentType("researcher").?)).?;
+    const research = reg.find("research").?;
+    const deploy = reg.find("deploy").?;
+    const lua_skill = reg.find("lua").?;
+    const review = reg.find("review").?;
+
+    try std.testing.expect(!skills.visibleTo(research, "general", true, general.skills));
+    try std.testing.expect(skills.visibleTo(research, "researcher", false, researcher.skills));
+    try std.testing.expect(!skills.visibleTo(deploy, "researcher", false, researcher.skills));
+    try std.testing.expect(!skills.visibleTo(lua_skill, "researcher", true, researcher.skills));
+    try std.testing.expect(!skills.visibleTo(lua_skill, "x", false, .{}));
+    try std.testing.expect(skills.visibleTo(lua_skill, "x", true, .{}));
+    try std.testing.expect(!skills.visibleTo(review, "researcher", true, .{}));
+    try std.testing.expect(!skills.visibleTo(review, "other", true, .{}));
+    try std.testing.expect(skills.visibleTo(review, "general", true, .{}));
 }
 
 test "state values round-trip through the Lua stack" {

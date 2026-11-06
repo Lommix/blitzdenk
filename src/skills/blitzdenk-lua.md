@@ -1,6 +1,8 @@
 ---
 name: blitzdenk-lua
 description: "Blitzdenk Lua config (`blitz.lua`): providers/models, custom tools, agents, commands, keybinds, input, hooks, permissions, MCP, SSH, drawing."
+metadata:
+  blitzdenk.main-agent-only: "true"
 ---
 
 # Blitzdenk Lua configuration
@@ -250,8 +252,36 @@ still queues its result notice into a clean parent.
 `cwd` in `blitz.agent.spawn` sets the working directory of the child. A relative
 path resolves against the parent agent cwd.
 
-`skills = false` in `blitz.add_agent` keeps the `<available_skills>` catalogue
-from the type.
+`skills` in `blitz.add_agent` controls which skills the type can see and
+load. `skills = false` turns skills off. A table restricts them:
+
+```lua
+skills = { only = { "zig", "blitzdenk-lua" }, except = { "deploy" } }
+```
+
+`only` is an allowlist; an empty list means all. `except` wins. The filter
+applies to the catalogue, the `skill` tool, and `/skill-<name>`.
+
+For an existing type, including `blitz.AGENT_GENERAL`, call
+`blitz.set_agent_skills(agent_type, filter)` with the same boolean or table.
+The change reaches live agents on their next step.
+
+A skill file can narrow itself in its `metadata` block:
+
+```yaml
+metadata:
+  blitzdenk.deny-agents: "code-reviewer, prose-reviewer"
+  blitzdenk.main-agent-only: "true"
+```
+
+`blitzdenk.deny-agents` is a comma-separated agent type name list. It wins over
+`only`. `blitzdenk.main-agent-only` limits the skill to the runtime main
+agent. Unknown agent names are inert. Agent names match exactly; skill names
+in `only` and `except` match case-insensitively. A skill-side list can only
+deny; it cannot grant a skill that the agent filter denied.
+
+The filter controls the catalogue and the skill load paths. An agent with
+`read` or `bash` can still open the skill file directly.
 
 `blitz.list_agent_types()` returns one row per configured type: `agent_type` is
 the handle `blitz.agent.spawn` takes, plus `name`, `description`, and

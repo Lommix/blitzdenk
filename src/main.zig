@@ -1303,6 +1303,16 @@ pub fn run(
                                                 app.input.clear();
                                                 break;
                                             }
+                                            const target = app.mainSkillTarget() orelse {
+                                                app.pushSystemMessage("skill '{s}' is not available for this agent", .{entry.meta.name});
+                                                app.input.clear();
+                                                break;
+                                            };
+                                            if (!skills.visibleTo(entry, target.name, target.is_main, target.filter)) {
+                                                app.pushSystemMessage("skill '{s}' is not available for this agent", .{entry.meta.name});
+                                                app.input.clear();
+                                                break;
+                                            }
                                             const loaded = skills.loadSkill(app.io, app.sessionAlloc(), entry) orelse {
                                                 app.pushSystemMessage("unknown skill: {s}", .{sc.name});
                                                 app.input.clear();

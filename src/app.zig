@@ -1906,6 +1906,15 @@ pub const App = struct {
         return self.registry.get(id);
     }
 
+    pub fn mainSkillTarget(self: *const App) ?r.skills.Target {
+        if (self.mainAgent()) |agent| {
+            const def = self.context_factory.agentTypeAt(agent.type_idx) orelse return null;
+            return .{ .name = def.name, .is_main = true, .filter = def.skills };
+        }
+        const def = self.context_factory.agentTypeAt(@backingInt(r.ContextFactory.AgentType.general)) orelse return null;
+        return .{ .name = def.name, .is_main = true, .filter = def.skills };
+    }
+
     pub fn configureAgent(self: *const App, id: r.AgentId, agent: *r.agent.Agent) !void {
         try @constCast(self).rememberAgentMetadata(id, agent.name, agent.task_description);
         if (!self.journal_restoring and agent.journal == null) {
@@ -3472,10 +3481,13 @@ fn appendLuaCommandCompletions(app: *App, prefix: []const u8, out: []?CommandCom
 
 fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
     if (count.* >= out.len) return;
+    const target = app.mainSkillTarget() orelse return;
 
-    for (app.context_factory.skill_names.items) |name| {
+    for (app.context_factory.skills.entries.items) |entry| {
         if (count.* >= out.len) return;
-        const formatted = std.fmt.allocPrint(alloc, "/skill-{s}", .{name}) catch return;
+        if (!entry.meta.user_invocable) continue;
+        if (!r.skills.visibleTo(&entry, target.name, target.is_main, target.filter)) continue;
+        const formatted = std.fmt.allocPrint(alloc, "/skill-{s}", .{entry.meta.name}) catch return;
         if (!completionMatches(formatted, prefix)) continue;
         if (containsCommandCompletion(out[0..count.*], formatted)) continue;
 
@@ -5942,9 +5954,11 @@ test "command completion spans spaces in multi word commands" {
     defer lua_vm.deinit();
     app.lua_vm = lua_vm;
     var factory: r.ContextFactory = undefined;
-    factory.skill_names = .empty;
     factory.ssh_aliases = .empty;
+    factory.skills = .{};
+    factory.agent_counter = 0;
     app.context_factory = &factory;
+    app.main_agent_id = null;
     app.input_mode = .{ .text = .{} };
     app.input = .{};
 

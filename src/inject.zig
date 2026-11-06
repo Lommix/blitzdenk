@@ -183,18 +183,27 @@ fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.A
     try w.print("[TIME] {s}\n", .{datetime});
 }
 
+const skill_replacement_line = "The available skill catalog changed. This complete catalog replaces every earlier available-skills list in this session.";
+
 fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
     const def = app.context_factory.agentTypeAt(agent.type_idx) orelse return;
-    if (!def.skills) return;
     if (!agent.hasTool(r.tools.skill.SkillTool.def.name)) return;
+    if (!def.skills.enabled) {
+        if (agent.skill_catalog_digest != null) {
+            try emitCatalog(w, "available_skills", 0, "", &agent.skill_catalog_digest, skill_replacement_line);
+        }
+        return;
+    }
 
     const alloc = app.gpa;
     const reg = &app.context_factory.skills;
+    const is_main = app.mainAgent() == agent;
     var rows = std.Io.Writer.Allocating.init(alloc);
     var count: usize = 0;
 
     for (reg.entries.items) |entry| {
         if (!entry.meta.model_invocable) continue;
+        if (!r.skills.visibleTo(&entry, def.name, is_main, def.skills)) continue;
         count += 1;
         try rows.writer.print("- `{s}`: ", .{entry.meta.name});
         try writeCatalogField(&rows.writer, entry.meta.description);
@@ -204,7 +213,7 @@ fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.A
     const serialized = try rows.toOwnedSlice();
     defer alloc.free(serialized);
 
-    try emitCatalog(w, "available_skills", count, serialized, &agent.skill_catalog_digest, "The available skill catalog changed. This complete catalog replaces every earlier available-skills list in this session.");
+    try emitCatalog(w, "available_skills", count, serialized, &agent.skill_catalog_digest, skill_replacement_line);
 }
 
 fn inject_mcp_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {

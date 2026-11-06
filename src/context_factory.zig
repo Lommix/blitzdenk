@@ -28,7 +28,6 @@ prompt_arena: std.heap.ArenaAllocator,
 io: std.Io,
 config_dir: ?std.Io.Dir,
 skill_dir: ?std.Io.Dir,
-skill_names: std.ArrayList([]const u8) = .empty,
 skills: skills_mod.SkillRegistry = .{},
 cwd: []const u8 = "",
 ssh_dir: ?std.Io.Dir = null,
@@ -64,7 +63,7 @@ pub const AgentDef = struct {
     description: []const u8,
     prompt: []const u8,
     in_agent_tool: bool = true,
-    skills: bool = true,
+    skills: skills_mod.Filter = .{},
     tools: AgentTools = .{},
     model: ?AgentModelConfig = null,
 };
@@ -150,7 +149,7 @@ pub const NewAgentDef = struct {
     description: []const u8,
     prompt: []const u8,
     in_agent_tool: bool = true,
-    skills: bool = true,
+    skills: skills_mod.Filter = .{},
     tools: []const []const u8 = &.{},
     model: ?AgentModelConfig = null,
 };
@@ -497,10 +496,27 @@ pub fn collectUnboundAgents(self: *const Self, alloc: std.mem.Allocator, out: *s
     }
 }
 
+fn dupNameList(alloc: std.mem.Allocator, names: []const []const u8) ![]const []const u8 {
+    if (names.len == 0) return &.{};
+    const out = try alloc.alloc([]const u8, names.len);
+    for (names, 0..) |name, i| out[i] = try alloc.dupe(u8, name);
+    return out;
+}
+
+fn warnUnknownSkills(self: *const Self, agent_name: []const u8, filter: skills_mod.Filter) void {
+    if (!filter.enabled) return;
+    for (filter.only) |name| {
+        if (self.skills.find(name) == null) {
+            std.log.warn("agent '{s}' lists unknown skill '{s}' in skills.only", .{ agent_name, name });
+        }
+    }
+}
+
 pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: NewAgentDef) !AgentType {
     if (self.findAgentType(def.name) != null) return error.DuplicateAgentName;
     if (def.tools.len > MAX_AGENT_TOOLS) return error.TooManyTools;
     for (def.tools) |name| if (name.len > 128) return error.NameTooLong;
+    self.warnUnknownSkills(def.name, def.skills);
 
     const idx: AgentType = if (self.sessionBindingFor(def.name)) |binding|
         binding.agent_type
@@ -525,7 +541,11 @@ pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: NewAgentDef
         .description = try alloc.dupe(u8, def.description),
         .prompt = try alloc.dupe(u8, def.prompt),
         .in_agent_tool = def.in_agent_tool,
-        .skills = def.skills,
+        .skills = .{
+            .enabled = def.skills.enabled,
+            .only = try dupNameList(alloc, def.skills.only),
+            .except = try dupNameList(alloc, def.skills.except),
+        },
         .model = if (def.model) |model| blk: {
             _ = cfg.getModel(model.model) orelse return error.UnknownModel;
             break :blk .{
@@ -735,19 +755,6 @@ pub fn findSshAlias(self: *const Self, name: []const u8) ?SshAlias {
 pub fn rescanSkills(self: *Self, cwd: []const u8) void {
     self.cwd = cwd;
     self.skills.scan(self.alloc, self.io, self.skill_dir, self.cwd);
-    self.rebuildSkillNames();
-}
-
-fn rebuildSkillNames(self: *Self) void {
-    for (self.skill_names.items) |name| self.alloc.free(name);
-    self.skill_names.clearRetainingCapacity();
-    for (self.skills.entries.items) |entry| {
-        const dup = self.alloc.dupe(u8, entry.meta.name) catch continue;
-        self.skill_names.append(self.alloc, dup) catch {
-            self.alloc.free(dup);
-            return;
-        };
-    }
 }
 
 /// Restore embedded defaults and free any Lua-installed definitions.
@@ -947,6 +954,17 @@ pub fn setAgentTools(self: *Self, agent_type: AgentType, names: []const []const 
     }
 }
 
+pub fn setAgentSkills(self: *Self, agent_type: AgentType, filter: skills_mod.Filter) !void {
+    const def = self.getAgentMut(agent_type) orelse return error.UnknownAgent;
+    const alloc = self.prompt_arena.allocator();
+    def.skills = .{
+        .enabled = filter.enabled,
+        .only = try dupNameList(alloc, filter.only),
+        .except = try dupNameList(alloc, filter.except),
+    };
+    self.warnUnknownSkills(def.name, def.skills);
+}
+
 pub fn addAgentTool(self: *Self, agent_type: AgentType, name: []const u8) !void {
     var tools = &(self.getAgentMut(agent_type) orelse return error.UnknownAgent).tools;
     if (tools.len >= MAX_AGENT_TOOLS) return error.TooManyTools;
@@ -975,8 +993,6 @@ pub fn deinit(self: *Self) void {
     self.capability_arena.deinit();
     self.session_bindings.deinit(self.alloc);
     self.session_arena.deinit();
-    for (self.skill_names.items) |name| self.alloc.free(name);
-    self.skill_names.deinit(self.alloc);
     self.skills.deinit(self.alloc);
     freeSshAliases(self.alloc, self.ssh_aliases.items);
     self.ssh_aliases.deinit(self.alloc);

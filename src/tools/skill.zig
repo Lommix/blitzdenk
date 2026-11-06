@@ -36,6 +36,13 @@ fn run(ctx: r.ToolContext, call: r.ToolCall) r.ToolResult {
         std.fmt.allocPrint(ctx.alloc, "skill \"{s}\" is not available for model invocation", .{args.name}) catch "skill is not available for model invocation",
     );
 
+    const agent = ctx.agent();
+    const def = app.context_factory.agentTypeAt(agent.type_idx) orelse return r.errResult(call, "skill unavailable: unknown agent type");
+    if (!r.r.skills.visibleTo(entry, def.name, app.mainAgent() == agent, def.skills)) return r.errResult(
+        call,
+        std.fmt.allocPrint(ctx.alloc, "skill \"{s}\" is not available for this agent", .{entry.meta.name}) catch "skill is not available for this agent",
+    );
+
     var status_buf: [r.STATUS_BUF]u8 = undefined;
     var status_writer = r.tui.AnsiWriter.init(&status_buf);
     status_writer.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "skill ");

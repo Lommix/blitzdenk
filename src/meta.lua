@@ -570,6 +570,12 @@
 ---price per 1M tokens; absent = free
 ---@field cost? BlitzModelCost
 
+---@class BlitzSkillFilter
+---skill names this agent may load; empty means all
+---@field only? string[]
+---skill names this agent may not load; wins over only
+---@field except? string[]
+
 ---@class BlitzAgentDef
 ---@field name string
 ---@field description string
@@ -579,8 +585,8 @@
 ---@field model? integer
 ---@field effort? string
 ---@field in_agent_tool? boolean
----false disables the available_skills catalogue injection for this agent type
----@field skills? boolean
+---false disables all skills for this agent; a table restricts the catalogue and the skill tool
+---@field skills? boolean|BlitzSkillFilter
 
 ---@class BlitzTokenUsage
 ---@field input integer
@@ -713,6 +719,9 @@
 ---Override the tool set for a given agent type. Replaces defaults entirely.
 ---Names must match built-in tool names or names of tools registered via blitz.register_tool.
 ---@field set_agent_tools fun(agent_type: integer, tool_names: string[])
+---Restrict which skills an agent type can see and load. Pass false to
+---disable skills, or a table with optional only and except lists.
+---@field set_agent_skills fun(agent_type: integer, filter: boolean|BlitzSkillFilter)
 ---Register environment capability rules. Each rule names a binary; when it
 ---resolves through the exec pool, the rule line lands in the injected
 ---env_capabilities catalogue of agents that own the bash tool. Binaries
