@@ -326,8 +326,13 @@ fn updateCli(io: std.Io, gpa: std.mem.Allocator, env: *const std.process.Environ
     var pool = r.exec.CmdPool.init(gpa, io, env);
     defer pool.deinit();
 
-    const update = r.update.checkForUpdate(&pool, gpa) catch |err| {
-        std.debug.print("blitz: update check failed: {s}\n", .{@errorName(err)});
+    var failure: ?r.update.DownloadFailure = null;
+    const update = r.update.checkForUpdate(&pool, gpa, &failure) catch |err| {
+        if (failure) |detail| {
+            r.update.printDownloadFailure("update check", detail);
+        } else {
+            std.debug.print("blitz: update check failed: {s}\n", .{@errorName(err)});
+        }
         std.process.exit(1);
     };
     defer update.deinit(gpa);
@@ -337,8 +342,12 @@ fn updateCli(io: std.Io, gpa: std.mem.Allocator, env: *const std.process.Environ
         return;
     }
 
-    r.update.installUpdate(io, &pool, gpa, update) catch |err| {
-        std.debug.print("blitz: update failed: {s}\n", .{@errorName(err)});
+    r.update.installUpdate(io, &pool, gpa, update, &failure) catch |err| {
+        if (failure) |detail| {
+            r.update.printDownloadFailure("update download", detail);
+        } else {
+            std.debug.print("blitz: update failed: {s}\n", .{@errorName(err)});
+        }
         std.process.exit(1);
     };
     std.debug.print("blitz updated to {s} - restart to apply\n", .{update.latest});

@@ -6,6 +6,30 @@ const builtin = @import("builtin");
 const REPO = "Lommix/blitzdenk";
 
 const MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024;
+const MAX_DOWNLOAD_TIMEOUT_MS = 10_000;
+
+pub const DownloadFailure = union(enum) {
+    timeout: i64,
+    gateway: u16,
+    http: u16,
+    transport: ?u8,
+    truncated,
+    empty,
+};
+
+pub fn printDownloadFailure(context: []const u8, failure: DownloadFailure) void {
+    switch (failure) {
+        .timeout => |ms| std.debug.print("blitz: {s} failed: download timed out after {d} ms\n", .{ context, ms }),
+        .gateway => |status| std.debug.print("blitz: {s} failed: upstream gateway/service error (HTTP {d})\n", .{ context, status }),
+        .http => |status| std.debug.print("blitz: {s} failed: server returned HTTP {d}\n", .{ context, status }),
+        .transport => |code| if (code) |exit_code|
+            std.debug.print("blitz: {s} failed: network error (exit code {d})\n", .{ context, exit_code })
+        else
+            std.debug.print("blitz: {s} failed: network error\n", .{context}),
+        .truncated => std.debug.print("blitz: {s} failed: response exceeded the size limit\n", .{context}),
+        .empty => std.debug.print("blitz: {s} failed: empty response\n", .{context}),
+    }
+}
 
 pub const VersionInfo = struct {
     latest: []const u8,
@@ -52,7 +76,8 @@ pub const CheckTask = struct {
 
     fn run(self: *CheckTask) void {
         defer self.finished.store(true, .release);
-        self.result = checkForUpdate(self.pool, self.gpa) catch return;
+        var failure: ?DownloadFailure = null;
+        self.result = checkForUpdate(self.pool, self.gpa, &failure) catch return;
     }
 };
 
@@ -70,9 +95,10 @@ const Release = struct {
 pub fn checkForUpdate(
     pool: *exec.CmdPool,
     gpa: std.mem.Allocator,
+    failure: *?DownloadFailure,
 ) !VersionInfo {
     const url = "https://api.github.com/repos/" ++ REPO ++ "/releases/latest";
-    const body = try download(pool, gpa, url, 6000);
+    const body = try download(pool, gpa, url, 6000, failure);
     defer gpa.free(body);
     return parseRelease(body, gpa);
 }
@@ -96,8 +122,14 @@ pub fn assetName(alloc: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(alloc, "blitz-{s}-{s}{s}.gz", .{ arch, os, suffix });
 }
 
-pub fn installUpdate(io: std.Io, pool: *exec.CmdPool, gpa: std.mem.Allocator, info: VersionInfo) !void {
-    const archive = try download(pool, gpa, info.asset_url, 180_000);
+pub fn installUpdate(
+    io: std.Io,
+    pool: *exec.CmdPool,
+    gpa: std.mem.Allocator,
+    info: VersionInfo,
+    failure: *?DownloadFailure,
+) !void {
+    const archive = try download(pool, gpa, info.asset_url, MAX_DOWNLOAD_TIMEOUT_MS, failure);
     defer gpa.free(archive);
 
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
@@ -160,23 +192,122 @@ fn parseRelease(body: []const u8, gpa: std.mem.Allocator) !VersionInfo {
     };
 }
 
-fn download(pool: *exec.CmdPool, gpa: std.mem.Allocator, url: []const u8, timeout_ms: i64) ![]const u8 {
+fn download(
+    pool: *exec.CmdPool,
+    gpa: std.mem.Allocator,
+    url: []const u8,
+    timeout_ms: i64,
+    failure: *?DownloadFailure,
+) ![]const u8 {
+    failure.* = null;
     const commands = [_][]const []const u8{
-        &.{ "curl", "-fsSL", "--retry", "3", url },
-        &.{ "wget", "-qO-", url },
+        &.{ "curl", "-fsSL", "--retry", "3", "--write-out", "%{stderr}%{http_code}\n", url },
+        &.{ "wget", "-q", "-S", "-O-", url },
     };
+    const deadline = nowMs(pool.io) + @min(timeout_ms, MAX_DOWNLOAD_TIMEOUT_MS);
+
     for (commands) |argv| {
-        const res = pool.runAndWaitTimeout(.{ .argv = argv, .force_local = true, .skip_agent_overlay = true, .max_output = MAX_DOWNLOAD_BYTES }, timeout_ms) catch |err| switch (err) {
+        const remaining_ms = deadline - nowMs(pool.io);
+        if (remaining_ms <= 0) {
+            recordTimeout(failure, @min(timeout_ms, MAX_DOWNLOAD_TIMEOUT_MS));
+            return error.DownloadFailed;
+        }
+
+        const res = pool.runAndWaitTimeout(.{
+            .argv = argv,
+            .force_local = true,
+            .skip_agent_overlay = true,
+            .max_output = MAX_DOWNLOAD_BYTES,
+        }, remaining_ms) catch |err| switch (err) {
             error.Canceled => return err,
             else => continue,
         };
-        gpa.free(res.stderr);
-        if (res.stdout_truncated) {
+        const status = parseHttpStatus(res.stderr);
+        const timed_out = res.ty == .timeout;
+        const truncated = res.stdout_truncated;
+
+        if (timed_out or truncated) {
             gpa.free(res.stdout);
+            gpa.free(res.stderr);
+            if (timed_out) {
+                recordTimeout(failure, @min(timeout_ms, MAX_DOWNLOAD_TIMEOUT_MS));
+            } else {
+                failure.* = .truncated;
+            }
             return error.DownloadFailed;
         }
-        if (res.ty == .success and res.stdout.len > 0) return res.stdout;
+
+        if (res.ty == .success and res.stdout.len > 0) {
+            gpa.free(res.stderr);
+            failure.* = null;
+            return res.stdout;
+        }
+
+        recordFailure(failure, classifyFailure(status, res));
         gpa.free(res.stdout);
+        gpa.free(res.stderr);
     }
     return error.DownloadFailed;
+}
+
+fn classifyFailure(status: ?u16, res: exec.CmdResult) DownloadFailure {
+    if (status) |code| {
+        if (code == 502 or code == 503 or code == 504) return .{ .gateway = code };
+        if (code < 200 or code >= 300) return .{ .http = code };
+    }
+    if (res.exit_code) |code| {
+        if (code == 0) return .empty;
+        return .{ .transport = code };
+    }
+    return .{ .transport = null };
+}
+
+fn recordTimeout(slot: *?DownloadFailure, limit_ms: i64) void {
+    if (slot.*) |current| switch (current) {
+        .gateway, .http => return,
+        else => {},
+    };
+    slot.* = .{ .timeout = limit_ms };
+}
+
+fn recordFailure(slot: *?DownloadFailure, candidate: DownloadFailure) void {
+    const current = slot.* orelse {
+        slot.* = candidate;
+        return;
+    };
+    if (failureRank(candidate) >= failureRank(current)) slot.* = candidate;
+}
+
+fn failureRank(failure: DownloadFailure) u8 {
+    return switch (failure) {
+        .timeout => 4,
+        .gateway, .http => 3,
+        .truncated => 2,
+        .transport => 1,
+        .empty => 0,
+    };
+}
+
+fn parseHttpStatus(stderr: []const u8) ?u16 {
+    var status: ?u16 = null;
+    var lines = std.mem.splitScalar(u8, stderr, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \r\t");
+        if (line.len == 3 and std.ascii.isDigit(line[0]) and std.ascii.isDigit(line[1]) and std.ascii.isDigit(line[2])) {
+            const code = std.fmt.parseInt(u16, line, 10) catch continue;
+            if (code != 0) status = code;
+            continue;
+        }
+        if (!std.mem.startsWith(u8, line, "HTTP/")) continue;
+        const space = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const code_text = line[space + 1 ..];
+        const end = std.mem.indexOfScalar(u8, code_text, ' ') orelse code_text.len;
+        const code = std.fmt.parseInt(u16, code_text[0..end], 10) catch continue;
+        if (code != 0) status = code;
+    }
+    return status;
+}
+
+fn nowMs(io: std.Io) i64 {
+    return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
 }
