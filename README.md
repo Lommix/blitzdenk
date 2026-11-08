@@ -12,17 +12,16 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 ## Core features and patterns
 
 - Tiny system prompt, minimal tool descriptions. Simple is efficient.
-- Durable multi agent sessions. Always recover.
+- Durable multi agent sessions. Nothing is ever lost, always recover.
 - All IO goes through GNU core utils (ls, tee, cat, etc.)
 - Optional SSH tunnel layer. Tools run on a remote host.
-- MCP and Skill support.
+- MCP and Skill support (including remote mcp with oauth)
 - Multi-provider: any OpenAI or Anthropic chat/response schema supported, including local AI.
-- Mermaid diagram render in tui.
+- Image and mermaid diagram render in tui.
 - Hot reload: Agents can extend themself and debug what at the same time.
 - Version management: run `blitz update` on new releases. (pulls release bin from github)
 - Sessions management per project: `blitz continue <?session_id>` resumes, `blitz sessions` list all
 - Render custom widgets from Lua
-- Inline Image rendering (if your terminal supports it)
 
 ## Defaults
 
