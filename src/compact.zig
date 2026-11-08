@@ -61,6 +61,9 @@ pub const SUMMARY_PREFIX =
     \\
 ;
 
+const READ_FILES_TAG = "read-files";
+const MODIFIED_FILES_TAG = "modified-files";
+
 pub const KEEP_RECENT_TOKENS: u64 = 1024 * 16;
 pub const TOOL_RESULT_MAX_CHARS: usize = COMPACT_HEAD_CHARS + COMPACT_TAIL_CHARS;
 pub const COMPACT_HEAD_CHARS: usize = 4096;
@@ -280,10 +283,149 @@ fn installSummaryAt(alloc: std.mem.Allocator, messages: []const sdk.Message, sum
     for (messages[cut_index..]) |message| {
         if (message.role != .system) try next.append(alloc, message);
     }
-    const summary_text = try std.fmt.allocPrint(alloc, "{s}\n{s}", .{ SUMMARY_PREFIX, summary });
+    var scratch = std.heap.ArenaAllocator.init(alloc);
+    defer scratch.deinit();
+    const file_lists = try collectFileLists(scratch.allocator(), messages[0..cut_index]);
+    const summary_text = try formatSummaryText(alloc, summary, file_lists);
     defer alloc.free(summary_text);
     try next.append(alloc, sdk.UserMessage(summary_text));
     return agent_run.OwnedMessages.clone(alloc, next.items);
+}
+
+const FileLists = struct {
+    read: std.ArrayList([]const u8) = .empty,
+    modified: std.ArrayList([]const u8) = .empty,
+};
+
+fn collectFileLists(alloc: std.mem.Allocator, messages: []const sdk.Message) !FileLists {
+    var lists: FileLists = .{};
+    for (messages) |message| {
+        if (isSummaryMessage(message)) {
+            for (message.parts()) |part| switch (part) {
+                .text => |text| try carryFileTags(alloc, text, &lists),
+                else => {},
+            };
+            continue;
+        }
+        for (message.parts()) |part| switch (part) {
+            .tool_call => |call| {
+                if (isPatchToolName(call.name)) try collectPatchTargets(alloc, call.input, &lists.modified);
+                const path = toolFilePath(alloc, call.input) orelse continue;
+                if (isMutatingToolName(call.name)) {
+                    try appendFileOp(&lists.modified, alloc, path);
+                } else if (isReadingToolName(call.name)) {
+                    try appendFileOp(&lists.read, alloc, path);
+                }
+            },
+            else => {},
+        };
+    }
+    return lists;
+}
+
+fn appendFileOp(list: *std.ArrayList([]const u8), alloc: std.mem.Allocator, path: []const u8) !void {
+    for (list.items) |existing| if (std.mem.eql(u8, existing, path)) return;
+    try list.append(alloc, try alloc.dupe(u8, path));
+}
+
+fn toolFilePath(alloc: std.mem.Allocator, input: []const u8) ?[]const u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, input, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    for ([_][]const u8{ "file_path", "path" }) |key| {
+        const value = parsed.value.object.get(key) orelse continue;
+        if (value != .string) continue;
+        const path = std.mem.trim(u8, value.string, " \t\r\n");
+        if (path.len == 0) continue;
+        if (std.mem.indexOfAny(u8, path, "\n\r") != null) continue;
+        if (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://")) continue;
+        return alloc.dupe(u8, path) catch null;
+    }
+    return null;
+}
+
+fn isPatchToolName(name: []const u8) bool {
+    return containsIgnoreCase(name, "patch");
+}
+
+fn isMutatingToolName(name: []const u8) bool {
+    return containsIgnoreCase(name, "write") or
+        containsIgnoreCase(name, "edit") or
+        containsIgnoreCase(name, "patch");
+}
+
+fn isReadingToolName(name: []const u8) bool {
+    return containsIgnoreCase(name, "read");
+}
+
+fn collectPatchTargets(alloc: std.mem.Allocator, input: []const u8, modified: *std.ArrayList([]const u8)) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, input, .{}) catch return;
+    defer parsed.deinit();
+    if (parsed.value != .object) return;
+    const value = parsed.value.object.get("patch") orelse return;
+    if (value != .string) return;
+    var lines = std.mem.splitScalar(u8, value.string, '\n');
+    while (lines.next()) |line| {
+        const path = patchEnvelopePath(line) orelse continue;
+        try appendFileOp(modified, alloc, path);
+    }
+}
+
+fn patchEnvelopePath(line: []const u8) ?[]const u8 {
+    const headers = [_][]const u8{ "*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: " };
+    for (headers) |header| {
+        if (!std.mem.startsWith(u8, line, header)) continue;
+        const path = std.mem.trim(u8, line[header.len..], " \t\r");
+        if (path.len == 0) return null;
+        return path;
+    }
+    return null;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn carryFileTags(alloc: std.mem.Allocator, text: []const u8, lists: *FileLists) !void {
+    try extractFileTag(alloc, text, READ_FILES_TAG, &lists.read);
+    try extractFileTag(alloc, text, MODIFIED_FILES_TAG, &lists.modified);
+}
+
+fn extractFileTag(alloc: std.mem.Allocator, text: []const u8, tag: []const u8, list: *std.ArrayList([]const u8)) !void {
+    var open_buf: [64]u8 = undefined;
+    var close_buf: [64]u8 = undefined;
+    const open = std.fmt.bufPrint(&open_buf, "<{s}>", .{tag}) catch return;
+    const close = std.fmt.bufPrint(&close_buf, "</{s}>", .{tag}) catch return;
+    const start = std.mem.lastIndexOf(u8, text, open) orelse return;
+    const body_start = start + open.len;
+    const end = std.mem.indexOf(u8, text[body_start..], close) orelse return;
+    var lines = std.mem.splitScalar(u8, text[body_start .. body_start + end], '\n');
+    while (lines.next()) |line| {
+        const path = std.mem.trim(u8, line, " \t\r");
+        if (path.len == 0) continue;
+        try appendFileOp(list, alloc, path);
+    }
+}
+
+fn formatSummaryText(alloc: std.mem.Allocator, summary: []const u8, lists: FileLists) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.print("{s}\n{s}", .{ SUMMARY_PREFIX, summary });
+    try writeFileTag(&out.writer, READ_FILES_TAG, lists.read.items);
+    try writeFileTag(&out.writer, MODIFIED_FILES_TAG, lists.modified.items);
+    return out.toOwnedSlice();
+}
+
+fn writeFileTag(writer: *std.Io.Writer, tag: []const u8, paths: []const []const u8) !void {
+    if (paths.len == 0) return;
+    try writer.print("\n<{s}>", .{tag});
+    for (paths) |path| try writer.print("\n{s}", .{path});
+    try writer.print("\n</{s}>", .{tag});
 }
 
 pub fn installResponseParts(alloc: std.mem.Allocator, messages: []const sdk.Message, parts: []const sdk.Part) !agent_run.OwnedMessages {
@@ -527,6 +669,87 @@ fn readSpillTail(io: std.Io, alloc: std.mem.Allocator, output: []const u8) ?[]co
     const tail_chars = @min(COMPACT_TAIL_CHARS, total);
     const tail_start = utf8Offset(content, total - tail_chars);
     return alloc.dupe(u8, content[tail_start..]) catch null;
+}
+
+test "installed summary lists distinct files from read and write calls" {
+    const messages = [_]sdk.Message{
+        sdk.SystemMessage("system"),
+        sdk.UserMessage("work on files"),
+        .{ .role = .assistant, .content = &.{
+            sdk.Part.toolCallPart("c1", "read", "{\"file_path\": \"src/a.zig\"}"),
+            sdk.Part.toolCallPart("c2", "write", "{\"file_path\": \"src/b.zig\"}"),
+            sdk.Part.toolCallPart("c3", "write", "{\"file_path\": \"src/b.zig\"}"),
+            sdk.Part.toolCallPart("c4", "patch", "{\"patch\": \"*** Update File: src/a.zig\\n*** Add File: src/d.zig\\n*** End Patch\"}"),
+            sdk.Part.toolCallPart("c5", "bash", "{\"command\": \"ls\"}"),
+            sdk.Part.toolCallPart("c6", "grep", "{\"pattern\": \"x\", \"file_path\": \"src\"}"),
+            sdk.Part.toolCallPart("c7", "glob", "not json"),
+            sdk.Part.toolCallPart("c8", "read", "{\"file_path\": \"https://example.com/f.zig\"}"),
+            sdk.Part.toolCallPart("c9", "read", "{\"file_path\": \"we\\nird\"}"),
+        } },
+        sdk.UserMessage("recent"),
+    };
+    var outcome = try installSummaryAt(std.testing.allocator, &messages, "checkpoint", messages.len - 1);
+    defer outcome.deinit();
+    const summary = outcome.messages[outcome.messages.len - 1];
+    try std.testing.expect(isSummaryMessage(summary));
+    const text = summary.text();
+    try std.testing.expect(std.mem.indexOf(u8, text, "<read-files>\nsrc/a.zig\n</read-files>") != null);
+    try std.testing.expect(std.mem.endsWith(u8, text, "<modified-files>\nsrc/b.zig\nsrc/a.zig\nsrc/d.zig\n</modified-files>"));
+    try std.testing.expectEqual(@as(usize, 3), outcome.messages.len);
+}
+
+test "second compaction carries previous checkpoint file tags forward" {
+    const previous = try std.fmt.allocPrint(std.testing.allocator, "{s}\ncheckpoint\n<read-files>\nsrc/a.zig\n</read-files>\n<modified-files>\nsrc/b.zig\n</modified-files>", .{SUMMARY_PREFIX});
+    defer std.testing.allocator.free(previous);
+    const messages = [_]sdk.Message{
+        sdk.SystemMessage("system"),
+        sdk.UserMessage(previous),
+        .{ .role = .assistant, .content = &.{
+            sdk.Part.toolCallPart("c1", "edit", "{\"file_path\": \"src/c.zig\"}"),
+        } },
+        sdk.UserMessage("recent"),
+    };
+    var outcome = try installSummaryAt(std.testing.allocator, &messages, "new checkpoint", messages.len - 1);
+    defer outcome.deinit();
+    const text = outcome.messages[outcome.messages.len - 1].text();
+    try std.testing.expect(std.mem.indexOf(u8, text, "<read-files>\nsrc/a.zig\n</read-files>") != null);
+    try std.testing.expect(std.mem.endsWith(u8, text, "<modified-files>\nsrc/b.zig\nsrc/c.zig\n</modified-files>"));
+    for (outcome.messages[1 .. outcome.messages.len - 1]) |message| {
+        try std.testing.expect(!isSummaryMessage(message));
+    }
+}
+
+test "carry-forward binds to the installed tag block over echoed tag text" {
+    const previous = try std.fmt.allocPrint(std.testing.allocator, "{s}\ncheckpoint\nthe plan mentions <read-files> handling below\n1. Run tests\n<read-files>\nsrc/old.zig\n</read-files>\n<modified-files>\nsrc/b.zig\n</modified-files>", .{SUMMARY_PREFIX});
+    defer std.testing.allocator.free(previous);
+    const messages = [_]sdk.Message{
+        sdk.SystemMessage("system"),
+        sdk.UserMessage(previous),
+        .{ .role = .assistant, .content = &.{
+            sdk.Part.toolCallPart("c1", "write", "{\"file_path\": \"src/new.zig\"}"),
+        } },
+        sdk.UserMessage("recent"),
+    };
+    var outcome = try installSummaryAt(std.testing.allocator, &messages, "new checkpoint", messages.len - 1);
+    defer outcome.deinit();
+    const text = outcome.messages[outcome.messages.len - 1].text();
+    try std.testing.expect(std.mem.indexOf(u8, text, "<read-files>\nsrc/old.zig\n</read-files>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Run tests") == null);
+    try std.testing.expect(std.mem.endsWith(u8, text, "<modified-files>\nsrc/b.zig\nsrc/new.zig\n</modified-files>"));
+}
+
+test "summary without file-touched tool calls installs without tags" {
+    const messages = [_]sdk.Message{
+        sdk.SystemMessage("system"),
+        sdk.UserMessage("plain conversation"),
+        sdk.UserMessage("recent"),
+    };
+    var outcome = try installSummaryAt(std.testing.allocator, &messages, "plain checkpoint", messages.len - 1);
+    defer outcome.deinit();
+    const text = outcome.messages[outcome.messages.len - 1].text();
+    try std.testing.expect(std.mem.endsWith(u8, text, "plain checkpoint"));
+    try std.testing.expect(std.mem.indexOf(u8, text, "<read-files") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "<modified-files") == null);
 }
 
 test "ordinary SDK compaction generates and installs a summary" {
