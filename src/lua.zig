@@ -2376,9 +2376,10 @@ const BlitzInput = LuaType{ .table_def = .{ .name = "BlitzInput", .fields = &.{
     .{
         .name = "append",
         .desc =
-        \\Insert text at the input cursor, like typed input. The change is
-        \\queued and lands on the next main-loop pass. Safe from config,
-        \\commands, tools, and listeners.
+        \\Insert text at the cursor, like typed input. Follows the focused
+        \\field: prompt, permission message, SSH passphrase, or wizard text.
+        \\The change is queued and lands on the next main-loop pass. Safe
+        \\from config, commands, tools, and listeners.
         ,
         .ty = LuaType{ .function = .{
             .args = &.{.{ .name = "text", .ty = LuaType.string }},

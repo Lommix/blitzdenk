@@ -485,7 +485,9 @@ end, "sign the input")
   keybinds, and the prompt hook. Tool and listener VMs, and off-thread hooks
   such as inject, raise an error.
 - `set(text)` replaces the text. The cursor moves to the end.
-- `append(text)` inserts text at the cursor, like typed input.
+- `append(text)` inserts text at the cursor, like typed input. It follows the
+  focused field: the prompt, a permission message, an SSH passphrase, or a
+  wizard text field.
 - `history_prev()` and `history_next()` walk the prompt history into the box,
   like `<S-Up>` and `<S-Down>`. `history_next` past the newest entry clears
   the box.

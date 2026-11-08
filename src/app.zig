@@ -2478,7 +2478,7 @@ pub const App = struct {
 
     pub fn appendBytes(self: *App, bytes: []const u8) void {
         self.input_desired_col = null;
-        self.input.insert(bytes);
+        _ = self.fieldOp(.insert, bytes);
         self.syncCompletion();
     }
 

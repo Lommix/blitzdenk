@@ -159,9 +159,10 @@
 ---completion popup re-syncs. The change is queued and lands on the next
 ---main-loop pass. Safe from config, commands, tools, and listeners.
 ---@field set fun(text: string)
----Insert text at the input cursor, like typed input. The change is
----queued and lands on the next main-loop pass. Safe from config,
----commands, tools, and listeners.
+---Insert text at the cursor, like typed input. Follows the focused
+---field: prompt, permission message, SSH passphrase, or wizard text.
+---The change is queued and lands on the next main-loop pass. Safe
+---from config, commands, tools, and listeners.
 ---@field append fun(text: string)
 ---Recall the previous prompt from history into the input box, like
 ---<S-Up>. No-op at the oldest entry, while an agent runs, or outside
