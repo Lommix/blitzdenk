@@ -1018,14 +1018,8 @@ pub fn run(
                                     }
                                     if (app.closeCompletion()) continue;
                                     // esc cancels only an active ask, not the run.
-                                    if ((app.input_mode == .perm_select or app.input_mode == .perm_message) and app.askActive()) {
-                                        if (app.active_permission != null) {
-                                            app.resolveActivePermission(.denied);
-                                        } else {
-                                            app.resolveActiveSelection(null);
-                                        }
-                                        app.auto_scroll = true;
-                                        app.scroll_offset = 0;
+                                    if ((app.input_mode == .perm_select or app.input_mode == .perm_message) and app.askSession() != null) {
+                                        app.cancelAsk();
                                         continue;
                                     }
                                     if (app.running) {
@@ -1116,13 +1110,12 @@ pub fn run(
                                 if (app.fieldOp(.insert, k.textSlice())) continue;
                                 switch (app.input_mode) {
                                     .perm_select => |*ps| {
-                                        if (app.askActive()) {
-                                            const s = &app.ask_session.?;
+                                        if (app.askSession()) |s| {
                                             if (c == 'j') s.moveCursor(1);
                                             if (c == 'k') s.moveCursor(-1);
                                             if (c == 'h') s.prevTab();
                                             if (c == 'l') s.nextTab();
-                                            if (c == ' ') s.toggleCurrent();
+                                            if (c == ' ') s.toggle();
                                         } else {
                                             const max_sel = app.permSelectMaxIndex();
                                             if (c == 'j' and ps.selected < max_sel) ps.selected += 1;
@@ -1138,7 +1131,7 @@ pub fn run(
                             },
                             .arrow_up => switch (app.input_mode) {
                                 .perm_select => {
-                                    if (app.askActive()) app.ask_session.?.moveCursor(-1) else if (app.input_mode.perm_select.selected > 0) {
+                                    if (app.askSession()) |s| s.moveCursor(-1) else if (app.input_mode.perm_select.selected > 0) {
                                         app.input_mode.perm_select.selected -= 1;
                                     }
                                 },
@@ -1149,7 +1142,7 @@ pub fn run(
                             },
                             .arrow_down => switch (app.input_mode) {
                                 .perm_select => {
-                                    if (app.askActive()) app.ask_session.?.moveCursor(1) else {
+                                    if (app.askSession()) |s| s.moveCursor(1) else {
                                         const max_sel = app.permSelectMaxIndex();
                                         if (app.input_mode.perm_select.selected < max_sel) app.input_mode.perm_select.selected += 1;
                                     }
@@ -1161,13 +1154,13 @@ pub fn run(
                             },
                             .arrow_left => switch (app.input_mode) {
                                 .perm_select => {
-                                    if (app.askActive()) app.ask_session.?.prevTab();
+                                    if (app.askSession()) |s| s.prevTab();
                                 },
                                 else => {},
                             },
                             .arrow_right => switch (app.input_mode) {
                                 .perm_select => {
-                                    if (app.askActive()) app.ask_session.?.nextTab();
+                                    if (app.askSession()) |s| s.nextTab();
                                 },
                                 else => {},
                             },
@@ -1201,16 +1194,9 @@ pub fn run(
                                         app.enterPermSelect();
                                         break;
                                     }
-                                    if (app.askActive()) {
-                                        const s = &app.ask_session.?;
-                                        switch (s.resolveMessage(pm.field.slice())) {
-                                            .submitted => {
-                                                if (app.active_permission != null) {
-                                                    app.resolveActiveAsk();
-                                                } else {
-                                                    app.resolveActiveSelectionAnswers();
-                                                }
-                                            },
+                                    if (app.askSession()) |s| {
+                                        switch (s.message(pm.field.slice())) {
+                                            .submitted => app.submitAsk(),
                                             // Back to the picker: the message
                                             // field must not leak its text into
                                             // the next question.
@@ -1224,21 +1210,11 @@ pub fn run(
                                     app.scroll_offset = 0;
                                 },
                                 .perm_select => |*ps| {
-                                    if (app.askActive()) {
-                                        const s = &app.ask_session.?;
-                                        if (s.messageRowActive(s.active)) {
-                                            app.enterPermMessage();
-                                            break;
-                                        }
-                                        switch (s.enterCurrent()) {
-                                            .submitted => {
-                                                if (app.active_permission != null) {
-                                                    app.resolveActiveAsk();
-                                                } else {
-                                                    app.resolveActiveSelectionAnswers();
-                                                }
-                                            },
-                                            else => {},
+                                    if (app.askSession()) |s| {
+                                        switch (s.enter()) {
+                                            .open_message => app.enterPermMessage(),
+                                            .submitted => app.submitAsk(),
+                                            .none, .advance => {},
                                         }
                                         app.dirty = true;
                                         break;
@@ -1792,7 +1768,7 @@ fn resolvePermissionsHeadless(app: *App, io: std.Io) void {
         const next = g.ptr.swapRemove(0);
         if (app.registry.state(next.agent_id) != .active) continue;
         switch (next.payload) {
-            .ask => r.permissions.setAskRecommended(next),
+            .ask => |a| next.state = .{ .answers = r.permissions.recommendedAnswers(a.questions) },
             else => next.state = .approved,
         }
         next.event.set(io);

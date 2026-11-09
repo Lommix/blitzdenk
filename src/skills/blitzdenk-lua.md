@@ -414,8 +414,10 @@ timeline echo).
 
 `blitz.cmd.select(request, cb)` opens the ask widget from a command and
 returns at once. The request is one table with a `questions` array (1-4
-entries). Each question carries `header`, `question`, `options` (1-8
-strings), and optional `multi_select` (default false). The user answers the
+entries). Each question carries `header`, `question`, `options` (1-8 label
+strings), optional `multi_select` (default false), and optional
+`allow_message` (default true; `false` drops the custom-message row for a
+closed choice). The user answers the
 questions one by one; the last answer submits the whole batch. The callback
 then runs as `cb(answers)`: an array with one answer list per question, in
 request order. Each pick is a table `{ text = "...", index = n }` with a
@@ -433,6 +435,7 @@ blitz.add_command("effort", function()
                 header = "Effort",
                 question = "Set reasoning effort for the general agent?",
                 options = { "low", "medium (recommended)", "high" },
+                allow_message = false,
             },
         },
     }, function(answers)
@@ -627,7 +630,9 @@ Return a `BlitzPermissionDecision` table, or `nil` for the normal flow
 - `{ approved = true, answers = { ... } }` — ask payloads only: one pick list
   per question. A pick is `{ index = 2 }` for the 1-based option, or
   `{ text = "..." }` for a custom message. A missing question entry falls
-  back to that question's recommendation. Ignored on other kinds.
+  back to that question's recommendation. An answer that does not fit its
+  question (empty, several picks on single-select, text where no message row
+  exists) denies the batch. Ignored on other kinds.
 
 A malformed table (missing `approved`) denies with a fixed reason. A hook
 error denies with `permission hook error: <msg>`.
@@ -652,7 +657,8 @@ The payload is `BlitzPermissionPayload` in `meta.lua`: `agent_id`, `call_id`,
 `kind` (`call|diff|ask|plan`), `tool`, `tool_input` (the raw JSON arguments of
 the call), the agent block (`agent_name`, `agent_description`, `agent_task`,
 `agent_cwd`), plus the kind fields. Ask payloads carry `questions`: an array
-of `{ header, question, options, multi_select }` tables, in request order.
+of `{ header, question, options, multi_select, allow_message }` tables, in
+request order; `options` holds the option labels.
 `agent_task` is the current task
 description; it is empty for a main agent until a hook sets it with
 `blitz.agent.set_task_description`. The decision shape is

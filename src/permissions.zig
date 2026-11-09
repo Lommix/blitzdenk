@@ -14,24 +14,72 @@ pub const ToolCallPayload = struct {
     description: []const u8,
 };
 
-/// One question of an ask request as the widget, hooks, and headless runs
-/// see it. Options are pre-joined display strings.
+pub const Option = struct {
+    label: []const u8 = "",
+    description: []const u8 = "",
+};
+
+/// One question of an ask request. The defaults let the ask tool parse model
+/// JSON straight into this type; validation names any missing field.
 pub const Question = struct {
-    header: []const u8,
-    question: []const u8,
-    options: []const []const u8,
+    header: []const u8 = "",
+    question: []const u8 = "",
+    options: []const Option = &.{},
     multi_select: bool = false,
+    /// Show the custom-message row. Single-select questions only.
+    allow_message: bool = true,
+
+    pub fn hasMessageRow(self: Question) bool {
+        return !self.multi_select and self.allow_message;
+    }
+
+    /// True when `answer` is a legal resolution of this question: exactly one
+    /// option for single-select, at least one for multi-select, or a custom
+    /// message where the message row exists.
+    pub fn accepts(self: Question, answer: Answer) bool {
+        if (answer.message.len > 0) return answer.mask == 0 and self.hasMessageRow();
+        if (answer.mask == 0) return false;
+        if (self.options.len < MAX_OPTIONS and answer.mask >> @intCast(self.options.len) != 0) return false;
+        return self.multi_select or @popCount(answer.mask) == 1;
+    }
 };
 
-/// One chosen entry of an answer. `index` is the 0-based option index; it is
-/// null when the user typed a custom message, which then lives in `message`.
-pub const Pick = struct {
-    index: ?u8 = null,
+/// One resolved question. Bit i of `mask` marks option i as picked, so
+/// multi-select picks keep display order. A custom message leaves `mask`
+/// zero; its text is allocated from `message_allocator`.
+pub const Answer = struct {
+    mask: u8 = 0,
     message: []const u8 = "",
+
+    pub fn deinit(self: Answer) void {
+        if (self.message.len > 0) message_allocator.free(self.message);
+    }
 };
 
-pub const Answer = []const Pick;
-pub const Answers = []const Answer;
+/// One answer per ask question, in request order. Held by value, so a
+/// settled request needs no storage beyond its custom-message text.
+pub const Answers = struct {
+    items: [MAX_QUESTIONS]Answer = @splat(.{}),
+    len: u8 = 0,
+
+    pub fn slice(self: *const Answers) []const Answer {
+        return self.items[0..self.len];
+    }
+
+    /// Free the custom-message text. The requester calls this once it has
+    /// read the answers.
+    pub fn deinit(self: Answers) void {
+        for (self.items[0..self.len]) |answer| answer.deinit();
+    }
+};
+
+/// Thread-safe allocator for custom-message text: the main thread settles,
+/// the requesting tool thread frees.
+pub const message_allocator = std.heap.smp_allocator;
+
+pub fn optionBit(index: usize) u8 {
+    return @as(u8, 1) << @intCast(index);
+}
 
 /// One ask request: up to four questions.
 pub const AskPayload = struct {
@@ -56,7 +104,7 @@ pub const State = union(enum) {
     denied,
     /// Deny reason for non-ask decisions.
     message: []const u8,
-    /// One pick list per ask question, in request order.
+    /// One answer per ask question, in request order.
     answers: Answers,
 };
 
@@ -78,134 +126,48 @@ pub const Request = struct {
     payload: Payload,
     event: std.Io.Event = .unset,
     ticket: u64 = 0,
-
-    /// In-request storage for ask answers set by hooks, the headless
-    /// resolver, or `setAskAnswers`. `state.answers` points here, so the
-    /// answer outlives the decider without extra allocations. Custom
-    /// message text is page-allocated; message answers are rare enough
-    /// for that.
-    ask_picks: [MAX_QUESTIONS][MAX_OPTIONS]Pick = @splat(@splat(.{})),
-    ask_answer: [MAX_QUESTIONS][]const Pick = @splat(&.{}),
 };
 
-pub fn isRecommended(option: []const u8) bool {
-    return std.mem.indexOf(u8, option, "(recommended)") != null or
-        std.mem.indexOf(u8, option, "(Recommended)") != null;
+fn isRecommended(label: []const u8) bool {
+    return std.mem.indexOf(u8, label, "(recommended)") != null or
+        std.mem.indexOf(u8, label, "(Recommended)") != null;
 }
 
-/// Write the recommended picks of one question into `picks` and return their
-/// count. Single-select picks the first marked option or option one.
-/// Multi-select picks every marked option in display order, or option one
-/// only when none is marked.
-pub fn writeRecommendedAnswer(question: Question, picks: []Pick) usize {
-    if (question.multi_select) {
-        var n: usize = 0;
-        for (question.options, 0..) |opt, i| {
-            if (n >= picks.len) break;
-            if (isRecommended(opt)) {
-                picks[n] = .{ .index = @intCast(i) };
-                n += 1;
-            }
-        }
-        if (n > 0) return n;
-    }
+/// Single-select picks the first marked option, multi-select every marked
+/// option; option one when none is marked.
+pub fn recommendedAnswer(question: Question) Answer {
+    var mask: u8 = 0;
     for (question.options, 0..) |opt, i| {
-        if (isRecommended(opt)) {
-            picks[0] = .{ .index = @intCast(i) };
-            return 1;
-        }
+        if (!isRecommended(opt.label)) continue;
+        mask |= optionBit(i);
+        if (!question.multi_select) break;
     }
-    picks[0] = .{ .index = 0 };
-    return 1;
+    return .{ .mask = if (mask == 0) 1 else mask };
 }
 
-/// Stack-held builder for hook and headless answers. Starts from the
-/// recommended picks; callers replace or append per question.
-pub const AnswerBuilder = struct {
-    questions: []const Question,
-    picks: [MAX_QUESTIONS][MAX_OPTIONS]Pick = @splat(@splat(.{})),
-    lens: [MAX_QUESTIONS]usize = @splat(0),
-    slices: [MAX_QUESTIONS][]const Pick = @splat(&.{}),
-
-    pub fn init(questions: []const Question) AnswerBuilder {
-        var self = AnswerBuilder{ .questions = questions };
-        for (questions, 0..) |q, i| self.lens[i] = writeRecommendedAnswer(q, &self.picks[i]);
-        return self;
-    }
-
-    pub fn clear(self: *AnswerBuilder, qi: usize) void {
-        self.lens[qi] = 0;
-    }
-
-    pub fn add(self: *AnswerBuilder, qi: usize, pick: Pick) bool {
-        if (qi >= self.questions.len) return false;
-        if (self.lens[qi] >= MAX_OPTIONS) return false;
-        self.picks[qi][self.lens[qi]] = pick;
-        self.lens[qi] += 1;
-        return true;
-    }
-
-    pub fn answer(self: *const AnswerBuilder, qi: usize) Answer {
-        return self.picks[qi][0..self.lens[qi]];
-    }
-
-    pub fn bake(self: *AnswerBuilder) Answers {
-        for (0..self.questions.len) |i| self.slices[i] = self.answer(i);
-        return self.slices[0..self.questions.len];
-    }
-};
-
-/// Copy `answers` into the request storage and settle the request with them.
-/// Returns false when the answer does not fit the storage limits.
-pub fn setAskAnswers(req: *Request, answers: Answers) bool {
-    if (answers.len > MAX_QUESTIONS) return false;
-    for (answers, 0..) |answer, qi| {
-        if (answer.len > MAX_OPTIONS) return false;
-        for (answer, 0..) |pick, pi| {
-            var stored = pick;
-            if (pick.index == null and pick.message.len > 0) {
-                stored.message = std.heap.page_allocator.dupe(u8, pick.message) catch return false;
-            }
-            req.ask_picks[qi][pi] = stored;
-        }
-        req.ask_answer[qi] = req.ask_picks[qi][0..answer.len];
-    }
-    req.state = .{ .answers = req.ask_answer[0..answers.len] };
-    return true;
+/// Recommended answers for a whole request. Used by hooks that approve
+/// without explicit answers and by headless runs.
+pub fn recommendedAnswers(questions: []const Question) Answers {
+    var answers: Answers = .{ .len = @intCast(questions.len) };
+    for (questions, 0..) |q, i| answers.items[i] = recommendedAnswer(q);
+    return answers;
 }
 
-/// Settle an ask request with the recommended pick for every question.
-/// Used by hooks that approve without explicit answers and by headless runs.
-pub fn setAskRecommended(req: *Request) void {
-    var builder = AnswerBuilder.init(req.payload.ask.questions);
-    if (!setAskAnswers(req, builder.bake())) req.state = .denied;
-}
-
-/// Deep copy of an answer set: the outer list, every pick list, and custom
-/// message text. Answer slices produced by settlers point into request
-/// frames that die before the caller reads the returned state; consumers
-/// copy through this.
-pub fn dupAnswers(alloc: std.mem.Allocator, answers: Answers) ?Answers {
-    var total: usize = 0;
-    for (answers) |answer| total += answer.len;
-    const picks = alloc.alloc(Pick, total) catch return null;
-    const lists = alloc.alloc(Answer, answers.len) catch {
-        alloc.free(picks);
-        return null;
-    };
-    var off: usize = 0;
-    for (answers, 0..) |answer, i| {
-        for (answer, 0..) |pick, j| {
-            var copy = pick;
-            if (pick.index == null and pick.message.len > 0) {
-                copy.message = alloc.dupe(u8, pick.message) catch return null;
-            }
-            picks[off + j] = copy;
-        }
-        lists[i] = picks[off..][0..answer.len];
-        off += answer.len;
+/// Deep copy of a question list into `alloc`.
+pub fn dupQuestions(alloc: std.mem.Allocator, questions: []const Question) ![]const Question {
+    const copy = try alloc.alloc(Question, questions.len);
+    for (questions, copy) |q, *dst| {
+        const options = try alloc.alloc(Option, q.options.len);
+        for (q.options, options) |opt, *o| o.* = .{
+            .label = try alloc.dupe(u8, opt.label),
+            .description = try alloc.dupe(u8, opt.description),
+        };
+        dst.* = q;
+        dst.header = try alloc.dupe(u8, q.header);
+        dst.question = try alloc.dupe(u8, q.question);
+        dst.options = options;
     }
-    return lists;
+    return copy;
 }
 
 pub const Handler = struct {
@@ -234,25 +196,27 @@ pub fn shouldAutoApprove(mode: ApprovalMode, is_ask: bool, ssh_active: bool) boo
     };
 }
 
-test "dupAnswers deep-copies picks and messages into caller memory" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+test "recommended answers follow the marker convention" {
+    const marked = [_]Option{ .{ .label = "a" }, .{ .label = "b (recommended)" }, .{ .label = "c (Recommended)" } };
+    const plain = [_]Option{ .{ .label = "a" }, .{ .label = "b" } };
+    try std.testing.expectEqual(@as(u8, 0b010), recommendedAnswer(.{ .options = &marked }).mask);
+    try std.testing.expectEqual(@as(u8, 0b110), recommendedAnswer(.{ .options = &marked, .multi_select = true }).mask);
+    try std.testing.expectEqual(@as(u8, 0b001), recommendedAnswer(.{ .options = &plain }).mask);
+    try std.testing.expectEqual(@as(u8, 0b001), recommendedAnswer(.{ .options = &plain, .multi_select = true }).mask);
+}
 
-    var msg_buf = [_]u8{ 'n', 'o', 't', 'e' };
-    var src_picks = [_]Pick{ .{ .index = 0 }, .{ .index = null, .message = &msg_buf } };
-    var src_lists = [_]Answer{ src_picks[0..1], src_picks[1..2] };
-    const copy = dupAnswers(alloc, src_lists[0..2]).?;
+test "question accepts only answers that fit its mode" {
+    const options = [_]Option{ .{ .label = "a" }, .{ .label = "b" } };
+    const single: Question = .{ .header = "h", .question = "q?", .options = &options };
+    const multi: Question = .{ .header = "h", .question = "q?", .options = &options, .multi_select = true };
+    const closed: Question = .{ .header = "h", .question = "q?", .options = &options, .allow_message = false };
 
-    try std.testing.expectEqual(@as(usize, 2), copy.len);
-    try std.testing.expectEqual(@as(?u8, 0), copy[0][0].index);
-    try std.testing.expect(copy[1][0].index == null);
-    try std.testing.expectEqualStrings("note", copy[1][0].message);
-
-    // The copy stays valid after the source storage is rewritten, like a
-    // request frame dying under the returned state.
-    src_picks[0].index = 5;
-    msg_buf[0] = 'x';
-    try std.testing.expectEqual(@as(?u8, 0), copy[0][0].index);
-    try std.testing.expectEqualStrings("note", copy[1][0].message);
+    try std.testing.expect(single.accepts(.{ .mask = 0b10 }));
+    try std.testing.expect(!single.accepts(.{ .mask = 0b11 }));
+    try std.testing.expect(!single.accepts(.{}));
+    try std.testing.expect(!single.accepts(.{ .mask = 0b100 }));
+    try std.testing.expect(single.accepts(.{ .message = "x" }));
+    try std.testing.expect(!closed.accepts(.{ .message = "x" }));
+    try std.testing.expect(multi.accepts(.{ .mask = 0b11 }));
+    try std.testing.expect(!multi.accepts(.{ .message = "x" }));
 }

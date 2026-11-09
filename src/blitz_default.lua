@@ -261,6 +261,7 @@ blitz.add_command("effort", function()
 				header = "Effort",
 				question = "Set reasoning effort for the general agent?",
 				options = { "low", "medium", "high", "xhigh", "max" },
+				allow_message = false,
 			},
 		},
 	}, function(answers)

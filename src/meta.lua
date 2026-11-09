@@ -67,10 +67,12 @@
 ---@field header string
 ---the question shown above the options
 ---@field question string
----1-8 option strings; a custom-message row is appended on single-select questions
+---1-8 option labels
 ---@field options string[]
----let the user toggle several options; needs at least two options and drops the custom-message row; default false
+---let the user toggle several options; needs at least two options and has no custom-message row; default false
 ---@field multi_select? boolean
+---single-select only: show the trailing custom-message row; default true
+---@field allow_message? boolean
 
 ---@class BlitzAskRequest
 ---1-4 independent questions, answered in one widget

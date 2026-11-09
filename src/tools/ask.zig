@@ -1,9 +1,6 @@
 const r = @import("root.zig");
-const root = r.r;
-const std = @import("std");
-
-pub const MAX_OPTIONS = root.ask_session.MAX_OPTIONS;
-pub const MAX_QUESTIONS = root.ask_session.MAX_QUESTIONS;
+const ask_session = r.r.ask_session;
+const permissions = r.r.permissions;
 
 pub const AskTool = r.Tool{
     .def = .{
@@ -61,42 +58,39 @@ pub const AskTool = r.Tool{
     .func = &run,
 };
 
-pub const Args = root.ask_session.Args;
-pub const Option = root.ask_session.ArgOption;
+const Args = struct {
+    questions: []const permissions.Question = &.{},
+};
 
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const args = r.parseArgs(Args, ctx.alloc, call) orelse
         return r.errResult(call, "invalid JSON arguments: expected {questions: [{header, question, options: [{label, description?}], multi_select?}]}");
 
-    if (root.ask_session.validateArgs(args)) |violation| {
-        const rule = root.ask_session.formatViolation(ctx.alloc, violation) orelse
+    if (ask_session.validate(args.questions)) |violation| {
+        const rule = ask_session.formatViolation(ctx.alloc, violation) catch
             return r.errResult(call, "out of memory");
         return r.errResult(call, rule);
     }
-
-    const questions = root.ask_session.payloadQuestions(ctx.alloc, args) orelse
-        return r.errResult(call, "out of memory");
 
     const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var sgr_buf: [r.STATUS_BUF]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&sgr_buf);
 
-    const arg_questions = root.ask_session.argQuestionList(args);
-    if (arg_questions.len == 1) {
+    if (args.questions.len == 1) {
         w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "question ");
-        w.styled(.{ .fg = app.theme.muted }, root.ask_session.argQuestion(arg_questions[0]));
+        w.styled(.{ .fg = app.theme.muted }, args.questions[0].question);
     } else {
         w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "ask ");
-        w.styledPrint(.{ .fg = app.theme.muted }, "{d} questions", .{arg_questions.len});
+        w.styledPrint(.{ .fg = app.theme.muted }, "{d} questions", .{args.questions.len});
     }
 
     r.setToolStatus(ctx, call, w.finish()) catch {};
 
-    const decision = ctx.requestPermission(call, .{ .ask = .{ .questions = questions } });
-    switch (decision) {
+    switch (ctx.requestPermission(call, .{ .ask = .{ .questions = args.questions } })) {
         .answers => |answers| {
-            const text = root.ask_session.formatResult(ctx.alloc, args, answers) orelse
-                return r.errResult(call, "ask answers did not match the questions");
+            defer answers.deinit();
+            const text = ask_session.formatResult(ctx.alloc, args.questions, answers.slice()) catch
+                return r.errResult(call, "out of memory");
             return r.okResult(call, text);
         },
         else => return r.errResult(call, "ask canceled"),

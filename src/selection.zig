@@ -1,39 +1,30 @@
 const std = @import("std");
 const permissions = @import("permissions");
+const ask_session = @import("ask_session.zig");
 
+/// A queued cmd.select request. Owns its questions and the widget session,
+/// so progress survives while a permission takes the screen.
 pub const Selection = struct {
-    ask: permissions.AskPayload,
+    session: ask_session.Session,
     func_ref: c_int,
     arena: std.heap.ArenaAllocator,
 
     pub fn create(
         parent: std.mem.Allocator,
-        ask: permissions.AskPayload,
+        questions: []const permissions.Question,
         func_ref: c_int,
     ) !*Selection {
         const self = try parent.create(Selection);
         errdefer parent.destroy(self);
-        self.* = .{ .ask = undefined, .func_ref = func_ref, .arena = .init(parent) };
+        self.* = .{ .session = undefined, .func_ref = func_ref, .arena = .init(parent) };
         errdefer self.arena.deinit();
-
-        const alloc = self.arena.allocator();
-        const questions = try alloc.alloc(permissions.Question, ask.questions.len);
-        for (ask.questions, 0..) |q, i| {
-            const options = try alloc.alloc([]const u8, q.options.len);
-            for (q.options, 0..) |opt, j| options[j] = try alloc.dupe(u8, opt);
-            questions[i] = .{
-                .header = try alloc.dupe(u8, q.header),
-                .question = try alloc.dupe(u8, q.question),
-                .options = options,
-                .multi_select = q.multi_select,
-            };
-        }
-        self.ask = .{ .questions = questions };
+        self.session = .init(try permissions.dupQuestions(self.arena.allocator(), questions));
         return self;
     }
 
     pub fn destroy(self: *Selection) void {
         const parent = self.arena.child_allocator;
+        self.session.deinit();
         self.arena.deinit();
         parent.destroy(self);
     }
