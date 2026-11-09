@@ -270,7 +270,7 @@ const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "set_child_id", .ty = LuaType{ .raw = "fun(self: BlitzCtx, agent_id: integer)" } },
     .{ .name = "approve", .ty = LuaType{ .raw = "fun(self: BlitzCtx, description: string): integer, string|nil" } },
     .{ .name = "plan", .ty = LuaType{ .raw = "fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil" } },
-    .{ .name = "ask", .ty = LuaType{ .raw = "fun(self: BlitzCtx, header: string, question: string, options: string[]): integer, string|nil" } },
+    .{ .name = "ask", .ty = LuaType{ .raw_refs = .{ .text = "fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil", .refs = &.{ AskRequestDef, AskAnswersOrNilDef } } }, .desc = "Ask the user up to four independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index." },
     .{ .name = "call", .ty = LuaType{ .raw = "fun(self: BlitzCtx, name: string, args: table): string" }, .desc = "Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. Rejects nested codemode." },
     .{ .name = "batch", .ty = LuaType{ .raw = "fun(self: BlitzCtx, requests: table): string[]" }, .desc = "Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order. A failed item does not abort the batch." },
 } } };
@@ -542,12 +542,23 @@ const SpawnAgentArgsDef = LuaType{ .table_def = .{ .name = "BlitzSpawnArgs", .fi
     .{ .name = "clean", .ty = LuaType.boolean, .optional = true, .desc = "bare agent: no system-reminder injections and no AGENTS.md context, so the blitz.hooks.inject hook never runs for it" },
     .{ .name = "on_complete", .ty = LuaType{ .raw = "fun(agent_id: integer, status: integer)" }, .optional = true, .desc = "runs once on the main thread when the spawned agent completes after its children; status is AWAIT_COMPLETE, AWAIT_FAILED or AWAIT_CANCELED. Closing or replacing the agent first fires AWAIT_CANCELED. Read the answer with blitz.agent.result(agent_id). Main vm only, never call blitz.agent.await inside" },
 } } };
-const SelectRequestDef = LuaType{ .table_def = .{ .name = "BlitzSelectRequest", .fields = &.{
+const AskQuestionDef = LuaType{ .table_def = .{ .name = "BlitzAskQuestion", .fields = &.{
     .{ .name = "header", .ty = LuaType.string, .desc = "very short label shown as a chip" },
     .{ .name = "question", .ty = LuaType.string, .desc = "the question shown above the options" },
-    .{ .name = "options", .ty = StringListDef, .desc = "1-8 option strings; a custom message row is appended when allow_message is on" },
-    .{ .name = "allow_message", .ty = LuaType.boolean, .optional = true, .desc = "show the trailing custom message row; default false" },
+    .{ .name = "options", .ty = StringListDef, .desc = "1-8 option strings; a custom-message row is appended on single-select questions" },
+    .{ .name = "multi_select", .ty = LuaType.boolean, .optional = true, .desc = "let the user toggle several options; needs at least two options and drops the custom-message row; default false" },
 } } };
+const AskQuestionListDef = LuaType{ .raw_refs = .{ .text = "BlitzAskQuestion[]", .refs = &.{AskQuestionDef} } };
+const AskRequestDef = LuaType{ .table_def = .{ .name = "BlitzAskRequest", .fields = &.{
+    .{ .name = "questions", .ty = AskQuestionListDef, .desc = "1-4 independent questions, answered in one widget" },
+} } };
+const AskPickDef = LuaType{ .table_def = .{ .name = "BlitzAskPick", .fields = &.{
+    .{ .name = "text", .ty = LuaType.string, .desc = "picked option text, or the custom message" },
+    .{ .name = "index", .ty = LuaType.integer, .optional = true, .desc = "1-based option index; nil on a custom message" },
+} } };
+const AskAnswerListDef = LuaType{ .raw_refs = .{ .text = "BlitzAskPick[]", .refs = &.{AskPickDef} } };
+const AskAnswersDef = LuaType{ .raw_refs = .{ .text = "BlitzAskPick[][]", .refs = &.{ AskAnswerListDef, AskPickDef } } };
+const AskAnswersOrNilDef = LuaType{ .raw_refs = .{ .text = "BlitzAskPick[][]|nil", .refs = &.{ AskAnswerListDef, AskPickDef } } };
 const ShellOptsDef = LuaType{ .table_def = .{ .name = "BlitzShellOpts", .fields = &.{
     .{ .name = "cmd", .ty = LuaType.string, .desc = "the shell command to run" },
     .{ .name = "timeout", .ty = LuaType.number, .optional = true, .desc = "kill the command after this many seconds" },
@@ -1736,9 +1747,9 @@ pub const BlitzHooks = LuaType{
 };
 
 const PermissionDecisionDef = LuaType{ .table_def = .{ .name = "BlitzPermissionDecision", .fields = &.{
-    .{ .name = "approved", .ty = LuaType.boolean, .desc = "false denies, true approves; on ask picks the recommended option" },
+    .{ .name = "approved", .ty = LuaType.boolean, .desc = "false denies, true approves; on ask without answers this picks the recommended options" },
     .{ .name = "msg", .ty = LuaType.string, .optional = true, .desc = "deny reason, reaches the model as tool error" },
-    .{ .name = "select", .ty = LuaType.integer, .optional = true, .desc = "1-based option index, ask payloads only; ignored otherwise" },
+    .{ .name = "answers", .ty = AskAnswersDef, .optional = true, .desc = "ask payloads only: one pick list per question; a pick carries a 1-based index or text as a custom message. A missing question entry falls back to its recommendation" },
 } } };
 
 const permission_payload_fields = [_]LuaType.Field{
@@ -1753,9 +1764,7 @@ const permission_payload_fields = [_]LuaType.Field{
     .{ .name = "agent_cwd", .ty = LuaType.string, .desc = "requesting agent working directory" },
     .{ .name = "description", .ty = LuaType.string, .optional = true, .desc = "kind == call" },
     .{ .name = "path", .ty = LuaType.string, .optional = true, .desc = "kind == diff|plan" },
-    .{ .name = "header", .ty = LuaType.string, .optional = true, .desc = "kind == ask" },
-    .{ .name = "question", .ty = LuaType.string, .optional = true, .desc = "kind == ask" },
-    .{ .name = "options", .ty = StringListDef, .optional = true, .desc = "kind == ask" },
+    .{ .name = "questions", .ty = AskQuestionListDef, .optional = true, .desc = "kind == ask" },
     .{ .name = "plan", .ty = LuaType.string, .optional = true, .desc = "kind == plan, plan text" },
 };
 const PermissionPayloadDef = LuaType{ .table_def = .{ .name = "BlitzPermissionPayload", .fields = &permission_payload_fields } };
@@ -1818,14 +1827,18 @@ fn dupePermPayload(arena: std.mem.Allocator, payload: r.permissions.Payload) !r.
             .after = try arena.dupe(u8, p.after),
         } },
         .ask => |p| blk: {
-            const options = try arena.alloc([]const u8, p.options.len);
-            for (p.options, 0..) |option, i| options[i] = try arena.dupe(u8, option);
-            break :blk .{ .ask = .{
-                .header = try arena.dupe(u8, p.header),
-                .question = try arena.dupe(u8, p.question),
-                .options = options,
-                .allow_message = p.allow_message,
-            } };
+            const questions = try arena.alloc(r.permissions.Question, p.questions.len);
+            for (p.questions, 0..) |q, i| {
+                const options = try arena.alloc([]const u8, q.options.len);
+                for (q.options, 0..) |option, j| options[j] = try arena.dupe(u8, option);
+                questions[i] = .{
+                    .header = try arena.dupe(u8, q.header),
+                    .question = try arena.dupe(u8, q.question),
+                    .options = options,
+                    .multi_select = q.multi_select,
+                };
+            }
+            break :blk .{ .ask = .{ .questions = questions } };
         },
         .plan => |p| .{ .plan = .{
             .path = try arena.dupe(u8, p.path),
@@ -1999,7 +2012,7 @@ const BlitzPermissions = LuaType{ .table_def = .{
                         const g = a.permission_queue.lock(a.io);
                         if (findPendingTicket(a, @intCast(raw_ticket))) |req| {
                             resolved = true;
-                            req.state = if (a.registry.state(req.agent_id) == .active) decision else .denied;
+                            req.state = if (a.registry.state(req.agent_id) == .active) applyPermissionDecision(req, decision) else .denied;
                             for (a.pending_permissions.items, 0..) |pending, index| {
                                 if (pending == req) {
                                     _ = a.pending_permissions.orderedRemove(index);
@@ -2655,11 +2668,11 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
     },
     .{
         .name = "select",
-        .desc = "Open a multiple-choice selection (same widget as the ask tool) and return at once. The callback runs with the picked option text and its 1-based index when the user chooses, with (message, nil) for the custom message row when allow_message is on, and with (nil, nil) when canceled.",
+        .desc = "Open the ask widget with up to four questions and return at once. The callback runs with one answer list per question when every question is resolved, and with nil when canceled. Each answer entry is a pick table with text and a 1-based index; a custom-message pick has no index. Single-select questions keep the custom-message row, multi_select questions toggle several options instead.",
         .ty = LuaType{ .function = .{
             .args = &.{
-                .{ .name = "request", .ty = SelectRequestDef },
-                .{ .name = "func", .ty = LuaType{ .raw = "fun(choice: string?, index: integer?)" } },
+                .{ .name = "request", .ty = AskRequestDef },
+                .{ .name = "func", .ty = LuaType{ .raw_refs = .{ .text = "fun(answers: BlitzAskPick[][]|nil)", .refs = &.{ AskAnswerListDef, AskPickDef } } } },
             },
             .fn_ptr = (struct {
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
@@ -2676,37 +2689,36 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                         _ = c.luaL_error(state, "cmd.select: not available in tool vms");
                         return 0;
                     }
+                    if (c.lua_type(state, 1) != c.LUA_TTABLE) {
+                        _ = c.luaL_error(state, "cmd.select: request table required");
+                        return 0;
+                    }
 
-                    const Request = struct {
-                        header: []const u8,
-                        question: []const u8,
-                        options: [][]const u8,
-                        allow_message: ?bool,
-                    };
-                    const req = switch (readAnyValueAlloc(Request, state, "cmd.select", 1, vm.luaArena())) {
+                    const req = switch (readAnyValueAlloc(r.ask_session.Args, state, "cmd.select", 1, vm.luaArena())) {
                         .ok => |v| v,
                         .err => |msg| {
                             _ = c.luaL_error(state, "%s", msg.ptr);
                             return 0;
                         },
                     };
-                    if (req.options.len == 0) {
-                        _ = c.luaL_error(state, "cmd.select: options must contain at least one entry");
+                    if (r.ask_session.validateArgs(req)) |violation| {
+                        const rule = r.ask_session.formatViolation(vm.luaArena(), violation) orelse {
+                            _ = c.luaL_error(state, "cmd.select: out of memory");
+                            return 0;
+                        };
+                        _ = c.luaL_error(state, "cmd.select: %s", rule.ptr);
                         return 0;
                     }
-                    if (req.options.len > r.tools.ask.MAX_OPTIONS) {
-                        _ = c.luaL_error(state, "cmd.select: too many options (max 8)");
+                    const questions = r.ask_session.payloadQuestions(vm.luaArena(), req) orelse {
+                        _ = c.luaL_error(state, "cmd.select: out of memory");
                         return 0;
-                    }
+                    };
 
                     c.lua_pushvalue(state, 2);
                     const func_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
 
                     const sel = r.selection.Selection.create(a.gpa, .{
-                        .header = req.header,
-                        .question = req.question,
-                        .options = req.options,
-                        .allow_message = req.allow_message orelse false,
+                        .questions = questions,
                     }, func_ref) catch {
                         c.luaL_unref(state, c.LUA_REGISTRYINDEX, func_ref);
                         _ = c.luaL_error(state, "cmd.select: out of memory");
@@ -4249,11 +4261,15 @@ pub const LuaVm = struct {
         }
 
         if (c.lua_type(L, -1) == c.LUA_TNIL) return null;
-        return permissionDecisionFromLua(L, perm.payload) orelse return .{ .message = "permission hook returned an unusable value" };
+        const decision = permissionDecisionFromLua(L, perm.payload) orelse return .{ .message = "permission hook returned an unusable value" };
+        return applyPermissionDecision(perm, decision);
     }
 
-    /// Convert a BlitzPermissionDecision table on top of the stack
-    fn permissionDecisionFromLua(L: *c.lua_State, payload: r.permissions.Payload) ?r.permissions.State {
+    /// Convert a BlitzPermissionDecision table on top of the stack into a
+    /// parsed decision. Ask answers reference the payload questions; custom
+    /// message text is page-allocated because the Lua table may be collected
+    /// once this returns.
+    fn permissionDecisionFromLua(L: *c.lua_State, payload: r.permissions.Payload) ?PermissionDecision {
         if (c.lua_type(L, -1) != c.LUA_TTABLE) return null;
 
         _ = c.lua_getfield(L, -1, "approved");
@@ -4265,27 +4281,19 @@ pub const LuaVm = struct {
         c.lua_pop(L, 1);
 
         if (payload == .ask) {
-            _ = c.lua_getfield(L, -1, "select");
-            if (c.lua_type(L, -1) == c.LUA_TNUMBER) {
-                const one_based = c.lua_tointegerx(L, -1, null);
-                c.lua_pop(L, 1);
-                if (one_based < 1 or one_based > payload.ask.options.len) return .denied;
-                return .{ .choice = @intCast(one_based - 1) };
-            }
-            c.lua_pop(L, 1);
-            if (approved) return r.permissions.recommendedChoice(payload.ask.options);
-            return .denied;
+            const parsed = parseAskDecision(L, payload.ask.questions, approved);
+            return parsed orelse PermissionDecision{ .approved = false };
         }
 
-        if (approved) return .approved;
+        if (approved) return .{ .approved = true };
 
         _ = c.lua_getfield(L, -1, "msg");
         defer c.lua_pop(L, 1);
-        if (c.lua_type(L, -1) != c.LUA_TSTRING) return .denied;
+        if (c.lua_type(L, -1) != c.LUA_TSTRING) return .{ .approved = false };
         var len: usize = 0;
-        const ptr = c.lua_tolstring(L, -1, &len) orelse return .denied;
-        const reason = std.heap.page_allocator.dupe(u8, ptr[0..len]) catch return .denied;
-        return .{ .message = reason };
+        const ptr = c.lua_tolstring(L, -1, &len) orelse return .{ .approved = false };
+        const reason = std.heap.page_allocator.dupe(u8, ptr[0..len]) catch return .{ .approved = false };
+        return .{ .approved = false, .msg = reason };
     }
 
     /// Invoke the permission hook for `perm`. Deny reasons are page-allocated
@@ -4298,9 +4306,15 @@ pub const LuaVm = struct {
         return self.runPermissionHook(perm);
     }
 
-    /// Run a cmd.select callback with (choice, index) or (nil, nil) on cancel.
-    /// Consumes the registry ref.
-    pub fn invokeSelection(self: *LuaVm, io: std.Io, func_ref: c_int, choice: ?[]const u8, index: ?u8) void {
+    /// Run a cmd.select callback with one pick list per question, or nil on
+    /// cancel. Consumes the registry ref.
+    pub fn invokeSelection(
+        self: *LuaVm,
+        io: std.Io,
+        func_ref: c_int,
+        questions: []const r.permissions.Question,
+        answers: ?r.permissions.Answers,
+    ) void {
         self.vm_mu.lockUncancelable(io);
         defer self.vm_mu.unlock(io);
 
@@ -4314,9 +4328,12 @@ pub const LuaVm = struct {
             c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
             return;
         }
-        pushAny(L, choice);
-        pushAny(L, index);
-        const status = c.lua_pcallk(L, 2, 0, 0, 0, null);
+        if (answers) |lists| {
+            pushAnswers(L, questions, lists);
+        } else {
+            c.lua_pushnil(L);
+        }
+        const status = c.lua_pcallk(L, 1, 0, 0, 0, null);
         if (status != 0) self.popError(.action);
         c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
     }
@@ -5352,29 +5369,21 @@ fn luaCtxBatch(L: ?*c.lua_State) callconv(.c) c_int {
 }
 
 /// Block on the perm event, then push (status_int, payload?) onto the Lua
-/// stack. payload is the chosen option string for .choice, the user message
-/// for .message, or nil otherwise. Returns 2 (status, payload).
-fn awaitPermAndPush(state: *c.lua_State, io: std.Io, req: *r.permissions.Request, options: []const []const u8) c_int {
+/// stack. payload is the deny reason for .message, or nil otherwise.
+/// Returns 2 (status, payload).
+fn awaitPermAndPush(state: *c.lua_State, io: std.Io, req: *r.permissions.Request) c_int {
     req.event.wait(io) catch {
         return pushStatusNil(state, REQ_STATUS_DENIED);
     };
 
     switch (req.state) {
-        .pending => return pushStatusNil(state, REQ_STATUS_DENIED),
+        .pending, .denied => return pushStatusNil(state, REQ_STATUS_DENIED),
         .approved => return pushStatusNil(state, REQ_STATUS_APPROVED),
-        .denied => return pushStatusNil(state, REQ_STATUS_DENIED),
-        .choice => |i| {
-            c.lua_pushinteger(state, REQ_STATUS_CHOICE);
-            if (i < options.len) {
-                _ = c.lua_pushlstring(state, options[i].ptr, options[i].len);
-            } else {
-                c.lua_pushinteger(state, @intCast(i));
-            }
-        },
         .message => |m| {
             c.lua_pushinteger(state, REQ_STATUS_MESSAGE);
             _ = c.lua_pushlstring(state, m.ptr, m.len);
         },
+        .answers => return pushStatusNil(state, REQ_STATUS_DENIED),
     }
     return 2;
 }
@@ -5385,40 +5394,51 @@ fn luaAsk(L: ?*c.lua_State) callconv(.c) c_int {
         return pushStatusNil(state, REQ_STATUS_DENIED);
     };
 
-    if (c.lua_type(state, 2) != c.LUA_TSTRING or
-        c.lua_type(state, 3) != c.LUA_TSTRING or
-        c.lua_type(state, 4) != c.LUA_TTABLE)
-    {
-        return pushStatusNil(state, REQ_STATUS_DENIED);
+    if (c.lua_type(state, 2) != c.LUA_TTABLE) {
+        _ = c.luaL_error(state, "ctx.ask: request table required");
+        return 0;
     }
 
-    const header = readAnyValue([]const u8, state, 2).?;
-    const question = readAnyValue([]const u8, state, 3).?;
-
-    // Extract options from table
-    var options = std.ArrayList([]const u8).empty;
-
-    c.lua_pushnil(state); // initial key
-    while (c.lua_next(state, 4) != 0) {
-        defer _ = c.lua_pop(state, 1);
-        if (c.lua_type(state, -1) != c.LUA_TSTRING) continue;
-        options.append(bridge.tool_ctx.alloc, readAnyValue([]const u8, state, -1).?) catch break;
+    const req = switch (readAnyValueAlloc(r.ask_session.Args, state, "ctx.ask", 2, bridge.tool_ctx.alloc)) {
+        .ok => |value| value,
+        .err => |msg| {
+            _ = c.luaL_error(state, "ctx.ask: %s", msg.ptr);
+            return 0;
+        },
+    };
+    if (r.ask_session.validateArgs(req)) |violation| {
+        const rule = r.ask_session.formatViolation(bridge.tool_ctx.alloc, violation) orelse {
+            _ = c.luaL_error(state, "ctx.ask: out of memory");
+            return 0;
+        };
+        _ = c.luaL_error(state, "ctx.ask: %s", rule.ptr);
+        return 0;
     }
+    const questions = r.ask_session.payloadQuestions(bridge.tool_ctx.alloc, req) orelse {
+        _ = c.luaL_error(state, "ctx.ask: out of memory");
+        return 0;
+    };
 
-    var req = r.permissions.Request{
+    var perm = r.permissions.Request{
         .agent_id = bridge.tool_ctx.base.self_id,
         .call_id = bridge.tool_call.id,
         .tool_name = bridge.tool_call.name,
         .tool_input = bridge.tool_call.input,
-        .payload = .{ .ask = .{
-            .header = header,
-            .question = question,
-            .options = options.items,
-        } },
+        .payload = .{ .ask = .{ .questions = questions } },
     };
 
-    bridge.tool_ctx.base.permissions.send(&req);
-    return awaitPermAndPush(state, bridge.tool_ctx.io, &req, options.items);
+    bridge.tool_ctx.base.permissions.send(&perm);
+    perm.event.wait(bridge.tool_ctx.io) catch {
+        return pushStatusNil(state, REQ_STATUS_DENIED);
+    };
+    switch (perm.state) {
+        .answers => |answers| {
+            c.lua_pushinteger(state, REQ_STATUS_CHOICE);
+            pushAnswers(state, questions, answers);
+        },
+        else => return pushStatusNil(state, REQ_STATUS_DENIED),
+    }
+    return 2;
 }
 
 fn luaApprove(L: ?*c.lua_State) callconv(.c) c_int {
@@ -5444,7 +5464,7 @@ fn luaApprove(L: ?*c.lua_State) callconv(.c) c_int {
     };
 
     bridge.tool_ctx.base.permissions.send(&req);
-    return awaitPermAndPush(state, bridge.tool_ctx.io, &req, &.{});
+    return awaitPermAndPush(state, bridge.tool_ctx.io, &req);
 }
 
 fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
@@ -5472,7 +5492,124 @@ fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
     };
 
     bridge.tool_ctx.base.permissions.send(&req);
-    return awaitPermAndPush(state, bridge.tool_ctx.io, &req, &.{});
+    return awaitPermAndPush(state, bridge.tool_ctx.io, &req);
+}
+
+/// A parsed BlitzPermissionDecision. Ask answers start from the recommended
+/// picks; explicit `answers` entries replace them per question.
+const PermissionDecision = struct {
+    approved: bool,
+    msg: ?[]const u8 = null,
+    ask: ?r.permissions.AnswerBuilder = null,
+};
+
+/// Apply a parsed decision to a request and return the resulting state.
+/// Ask answers are copied into the request storage.
+fn applyPermissionDecision(req: *r.permissions.Request, decision: PermissionDecision) r.permissions.State {
+    if (decision.ask) |ask_decision| {
+        if (!decision.approved) return .denied;
+        var builder = ask_decision;
+        if (!r.permissions.setAskAnswers(req, builder.bake())) return .denied;
+        return req.state;
+    }
+    if (decision.approved) return .approved;
+    if (decision.msg) |reason| return .{ .message = reason };
+    return .denied;
+}
+
+/// Parse the `answers` field of an ask decision table on top of the stack.
+/// Missing question entries keep the recommendation; a malformed pick denies
+/// the whole batch. Returns null on a shape error (also denies).
+fn parseAskDecision(L: *c.lua_State, questions: []const r.permissions.Question, approved: bool) ?PermissionDecision {
+    var builder = r.permissions.AnswerBuilder.init(questions);
+    var ok = true;
+
+    _ = c.lua_getfield(L, -1, "answers");
+    defer c.lua_pop(L, 1);
+    if (c.lua_type(L, -1) == c.LUA_TTABLE) {
+        const count = c.lua_rawlen(L, -1);
+        for (0..@min(count, questions.len)) |qi| {
+            _ = c.lua_rawgeti(L, -1, @intCast(qi + 1));
+            defer c.lua_pop(L, 1);
+            if (c.lua_type(L, -1) != c.LUA_TTABLE) continue;
+            builder.clear(qi);
+            const picks = c.lua_rawlen(L, -1);
+            for (0..picks) |pi| {
+                _ = c.lua_rawgeti(L, -1, @intCast(pi + 1));
+                defer c.lua_pop(L, 1);
+                if (c.lua_type(L, -1) != c.LUA_TTABLE) {
+                    ok = false;
+                    break;
+                }
+                const pick = parseAskPick(L, questions[qi]) orelse {
+                    ok = false;
+                    break;
+                };
+                if (!builder.add(qi, pick)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) break;
+        }
+    }
+
+    if (!ok) return null;
+    return .{ .approved = approved, .ask = builder };
+}
+
+/// Parse one pick table on top of the stack. `index` selects the option
+/// (1-based); without an index the `text` is the custom message.
+fn parseAskPick(L: *c.lua_State, question: r.permissions.Question) ?r.permissions.Pick {
+    _ = c.lua_getfield(L, -1, "index");
+    if (c.lua_type(L, -1) == c.LUA_TNUMBER) {
+        const one_based = c.lua_tointegerx(L, -1, null);
+        c.lua_pop(L, 1);
+        if (one_based < 1 or one_based > question.options.len) return null;
+        return .{ .index = @intCast(one_based - 1) };
+    }
+    c.lua_pop(L, 1);
+
+    _ = c.lua_getfield(L, -1, "text");
+    if (c.lua_type(L, -1) != c.LUA_TSTRING) {
+        c.lua_pop(L, 1);
+        return null;
+    }
+    var len: usize = 0;
+    const ptr = c.lua_tolstring(L, -1, &len) orelse {
+        c.lua_pop(L, 1);
+        return null;
+    };
+    const text = std.heap.page_allocator.dupe(u8, ptr[0..len]) catch {
+        c.lua_pop(L, 1);
+        return null;
+    };
+    c.lua_pop(L, 1);
+    return .{ .index = null, .message = text };
+}
+
+/// Push one answer list per question: `BlitzAskPick[][]` on the stack.
+/// Indexed picks resolve their text from `questions`.
+fn pushAnswers(L: *c.lua_State, questions: []const r.permissions.Question, answers: r.permissions.Answers) void {
+    c.lua_createtable(L, @intCast(answers.len), 0);
+    for (answers, 0..) |answer, qi| {
+        c.lua_createtable(L, @intCast(answer.len), 0);
+        for (answer, 0..) |pick, pi| {
+            c.lua_createtable(L, 0, 2);
+            const text: []const u8 = blk: {
+                if (pick.index) |idx| {
+                    if (qi < questions.len and idx < questions[qi].options.len) break :blk questions[qi].options[idx];
+                }
+                break :blk pick.message;
+            };
+            setFieldAny(L, -2, "text", text);
+            if (pick.index) |idx| {
+                setFieldAny(L, -2, "index", @as(u8, idx) + 1);
+            }
+            c.lua_rawseti(L, -2, @intCast(pi + 1));
+        }
+        c.lua_rawseti(L, -2, @intCast(qi + 1));
+    }
 }
 
 /// Push AgentId as the packed integer.
@@ -5510,9 +5647,16 @@ fn setPermissionFields(
         .call => |call| setFieldAny(L, -2, "description", call.description),
         .diff => |diff| setFieldAny(L, -2, "path", diff.path),
         .ask => |ask| {
-            setFieldAny(L, -2, "header", ask.header);
-            setFieldAny(L, -2, "question", ask.question);
-            setFieldAny(L, -2, "options", ask.options);
+            c.lua_createtable(L, @intCast(ask.questions.len), 0);
+            for (ask.questions, 0..) |q, i| {
+                c.lua_createtable(L, 0, 4);
+                setFieldAny(L, -2, "header", q.header);
+                setFieldAny(L, -2, "question", q.question);
+                setFieldAny(L, -2, "options", q.options);
+                setFieldAny(L, -2, "multi_select", q.multi_select);
+                c.lua_rawseti(L, -2, @intCast(i + 1));
+            }
+            setFieldPushed(L, -2, "questions");
         },
         .plan => |plan| {
             setFieldAny(L, -2, "path", plan.path);
@@ -6083,6 +6227,81 @@ test "permission hook approve deny and nil fallback" {
         .payload = .{ .call = .{ .description = "search" } },
     };
     try std.testing.expect(vm.permissionHookDecision(&other_req) == null);
+}
+
+test "permission hook answers ask batches per question" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec(
+        \\blitz.hooks.approve(function(p)
+        \\  if p.kind == "ask" and p.tool == "recommend" then return { approved = true } end
+        \\  if p.kind == "ask" then
+        \\    return { approved = true, answers = { { { index = 2 } }, nil } }
+        \\  end
+        \\  return nil
+        \\end)
+    );
+
+    const questions = [_]r.permissions.Question{
+        .{ .header = "Auth", .question = "Which method?", .options = &.{ "OAuth (recommended)", "API key" } },
+        .{
+            .header = "Regions",
+            .question = "Which regions?",
+            .options = &.{ "eu (recommended)", "us (recommended)", "apac" },
+            .multi_select = true,
+        },
+    };
+
+    var recommended_req = r.permissions.Request{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .tool_name = "recommend",
+        .payload = .{ .ask = .{ .questions = &questions } },
+    };
+    _ = try std.testing.expect(vm.permissionHookDecision(&recommended_req).? == .answers);
+    const recommended = recommended_req.state.answers;
+    try std.testing.expectEqual(@as(usize, 2), recommended.len);
+    try std.testing.expectEqual(@as(?u8, 0), recommended[0][0].index);
+    try std.testing.expectEqual(@as(usize, 2), recommended[1].len);
+    try std.testing.expectEqual(@as(?u8, 0), recommended[1][0].index);
+    try std.testing.expectEqual(@as(?u8, 1), recommended[1][1].index);
+
+    var explicit_req = r.permissions.Request{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .tool_name = "pick",
+        .payload = .{ .ask = .{ .questions = &questions } },
+    };
+    _ = try std.testing.expect(vm.permissionHookDecision(&explicit_req).? == .answers);
+    const explicit = explicit_req.state.answers;
+    try std.testing.expectEqual(@as(?u8, 1), explicit[0][0].index);
+    // The nil entry falls back to the recommendation of question two.
+    try std.testing.expectEqual(@as(usize, 2), explicit[1].len);
+
+    var denied_req = r.permissions.Request{
+        .agent_id = .{ .index = 0, .generation = 0 },
+        .tool_name = "deny",
+        .payload = .{ .ask = .{ .questions = &questions } },
+    };
+    try vm.exec("blitz.hooks.clear()");
+    try vm.exec(
+        \\blitz.hooks.approve(function(p)
+        \\  if p.kind == "ask" then return { approved = false } end
+        \\  return nil
+        \\end)
+    );
+    try std.testing.expectEqual(r.permissions.State.denied, vm.permissionHookDecision(&denied_req).?);
+
+    // A pick table with neither index nor text denies the whole batch.
+    try vm.exec("blitz.hooks.clear()");
+    try vm.exec(
+        \\blitz.hooks.approve(function(p)
+        \\  if p.kind == "ask" then return { approved = true, answers = { { {} } } } end
+        \\  return nil
+        \\end)
+    );
+    try std.testing.expectEqual(r.permissions.State.denied, vm.permissionHookDecision(&denied_req).?);
 }
 
 test "permission hook error fails closed" {

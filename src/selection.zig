@@ -17,14 +17,18 @@ pub const Selection = struct {
         errdefer self.arena.deinit();
 
         const alloc = self.arena.allocator();
-        const options = try alloc.alloc([]const u8, ask.options.len);
-        for (ask.options, 0..) |opt, i| options[i] = try alloc.dupe(u8, opt);
-        self.ask = .{
-            .header = try alloc.dupe(u8, ask.header),
-            .question = try alloc.dupe(u8, ask.question),
-            .options = options,
-            .allow_message = ask.allow_message,
-        };
+        const questions = try alloc.alloc(permissions.Question, ask.questions.len);
+        for (ask.questions, 0..) |q, i| {
+            const options = try alloc.alloc([]const u8, q.options.len);
+            for (q.options, 0..) |opt, j| options[j] = try alloc.dupe(u8, opt);
+            questions[i] = .{
+                .header = try alloc.dupe(u8, q.header),
+                .question = try alloc.dupe(u8, q.question),
+                .options = options,
+                .multi_select = q.multi_select,
+            };
+        }
+        self.ask = .{ .questions = questions };
         return self;
     }
 

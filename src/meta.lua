@@ -62,15 +62,25 @@
 ---Decode standard padded Base64 into a binary-safe Lua string.
 ---@field decode fun(base64: string): string|nil, boolean
 
----@class BlitzSelectRequest
+---@class BlitzAskQuestion
 ---very short label shown as a chip
 ---@field header string
 ---the question shown above the options
 ---@field question string
----1-8 option strings; a custom message row is appended when allow_message is on
+---1-8 option strings; a custom-message row is appended on single-select questions
 ---@field options string[]
----show the trailing custom message row; default false
----@field allow_message? boolean
+---let the user toggle several options; needs at least two options and drops the custom-message row; default false
+---@field multi_select? boolean
+
+---@class BlitzAskRequest
+---1-4 independent questions, answered in one widget
+---@field questions BlitzAskQuestion[]
+
+---@class BlitzAskPick
+---picked option text, or the custom message
+---@field text string
+---1-based option index; nil on a custom message
+---@field index? integer
 
 ---@class BlitzCmd
 ---Reset the active session.
@@ -87,8 +97,8 @@
 ---@field message_timeline fun(role: string, text: string)
 ---Send a user message to the main agent (queued if running, restarted if idle), or start a general agent if none exists.
 ---@field prompt fun(text: string)
----Open a multiple-choice selection (same widget as the ask tool) and return at once. The callback runs with the picked option text and its 1-based index when the user chooses, with (message, nil) for the custom message row when allow_message is on, and with (nil, nil) when canceled.
----@field select fun(request: BlitzSelectRequest, func: fun(choice: string?, index: integer?))
+---Open the ask widget with up to four questions and return at once. The callback runs with one answer list per question when every question is resolved, and with nil when canceled. Each answer entry is a pick table with text and a 1-based index; a custom-message pick has no index. Single-select questions keep the custom-message row, multi_select questions toggle several options instead.
+---@field select fun(request: BlitzAskRequest, func: fun(answers: BlitzAskPick[][]|nil))
 ---Attach a screenshot/image to the current input.
 ---@field attach_screenshot fun(data: string, media_type?: string)
 
@@ -321,21 +331,17 @@
 ---kind == diff|plan
 ---@field path? string
 ---kind == ask
----@field header? string
----kind == ask
----@field question? string
----kind == ask
----@field options? string[]
+---@field questions? BlitzAskQuestion[]
 ---kind == plan, plan text
 ---@field plan? string
 
 ---@class BlitzPermissionDecision
----false denies, true approves; on ask picks the recommended option
+---false denies, true approves; on ask without answers this picks the recommended options
 ---@field approved boolean
 ---deny reason, reaches the model as tool error
 ---@field msg? string
----1-based option index, ask payloads only; ignored otherwise
----@field select? integer
+---ask payloads only: one pick list per question; a pick carries a 1-based index or text as a custom message. A missing question entry falls back to its recommendation
+---@field answers? BlitzAskPick[][]
 
 ---@class BlitzHooks
 ---Register a listener for after the active session is reset. Takes no payload. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
@@ -418,11 +424,7 @@
 ---kind == diff|plan
 ---@field path? string
 ---kind == ask
----@field header? string
----kind == ask
----@field question? string
----kind == ask
----@field options? string[]
+---@field questions? BlitzAskQuestion[]
 ---kind == plan, plan text
 ---@field plan? string
 
@@ -451,7 +453,8 @@
 ---@field set_child_id fun(self: BlitzCtx, agent_id: integer)
 ---@field approve fun(self: BlitzCtx, description: string): integer, string|nil
 ---@field plan fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil
----@field ask fun(self: BlitzCtx, header: string, question: string, options: string[]): integer, string|nil
+---Ask the user up to four independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index.
+---@field ask fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil
 ---Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. Rejects nested codemode.
 ---@field call fun(self: BlitzCtx, name: string, args: table): string
 ---Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order. A failed item does not abort the batch.

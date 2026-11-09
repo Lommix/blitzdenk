@@ -256,12 +256,16 @@ end, "show thinking")
 ---------------------------------------------------------------------------------------------------
 blitz.add_command("effort", function()
 	blitz.cmd.select({
-		header = "Effort",
-		question = "Set reasoning effort for the general agent?",
-		options = { "low", "medium", "high", "xhigh", "max" },
-	}, function(choice)
-		if choice then
-			blitz.set_agent_effort(blitz.AGENT_GENERAL, choice, true)
+		questions = {
+			{
+				header = "Effort",
+				question = "Set reasoning effort for the general agent?",
+				options = { "low", "medium", "high", "xhigh", "max" },
+			},
+		},
+	}, function(answers)
+		if answers then
+			blitz.set_agent_effort(blitz.AGENT_GENERAL, answers[1][1].text, true)
 		end
 	end)
 end, "set effort level")
@@ -289,7 +293,9 @@ Interview the user relentlessly about every aspect of the task until you reach a
 walking down each branch of the design tree and resolving dependencies between decisions one by one.
 
 Rules:
-- Ask ONE question at a time (step by step), using your ask tool with a recommendation for each question.
+- Ask all currently unblocked questions in ONE ask request (up to four per call), each with a recommended
+  answer. Never batch dependent questions: a question whose answer changes what you would ask next waits
+  for its own request.
 - If a question can be answered by exploring the codebase, explore the codebase instead of asking.
 - Keep questions concrete and decision-oriented; always offer a recommended answer.
 - When the user answers, follow up on the next unresolved decision — never skip ahead to a plan.

@@ -1017,6 +1017,17 @@ pub fn run(
                                         break :main_loop;
                                     }
                                     if (app.closeCompletion()) continue;
+                                    // esc cancels only an active ask, not the run.
+                                    if ((app.input_mode == .perm_select or app.input_mode == .perm_message) and app.askActive()) {
+                                        if (app.active_permission != null) {
+                                            app.resolveActivePermission(.denied);
+                                        } else {
+                                            app.resolveActiveSelection(null);
+                                        }
+                                        app.auto_scroll = true;
+                                        app.scroll_offset = 0;
+                                        continue;
+                                    }
                                     if (app.running) {
                                         try app.cmd_queue.append(io, .cancel);
                                     } else {
@@ -1043,14 +1054,16 @@ pub fn run(
                                     continue;
                                 },
                                 .cursor_left => {
-                                    _ = app.fieldOp(.left, "");
-                                    app.input_desired_col = null;
-                                    continue;
+                                    if (app.fieldOp(.left, "")) {
+                                        app.input_desired_col = null;
+                                        continue;
+                                    }
                                 },
                                 .cursor_right => {
-                                    _ = app.fieldOp(.right, "");
-                                    app.input_desired_col = null;
-                                    continue;
+                                    if (app.fieldOp(.right, "")) {
+                                        app.input_desired_col = null;
+                                        continue;
+                                    }
                                 },
                                 .cursor_up => {
                                     if (app.completionIsOpen()) {
@@ -1103,9 +1116,18 @@ pub fn run(
                                 if (app.fieldOp(.insert, k.textSlice())) continue;
                                 switch (app.input_mode) {
                                     .perm_select => |*ps| {
-                                        const max_sel = app.permSelectMaxIndex();
-                                        if (c == 'j' and ps.selected < max_sel) ps.selected += 1;
-                                        if (c == 'k' and ps.selected > 0) ps.selected -= 1;
+                                        if (app.askActive()) {
+                                            const s = &app.ask_session.?;
+                                            if (c == 'j') s.moveCursor(1);
+                                            if (c == 'k') s.moveCursor(-1);
+                                            if (c == 'h') s.prevTab();
+                                            if (c == 'l') s.nextTab();
+                                            if (c == ' ') s.toggleCurrent();
+                                        } else {
+                                            const max_sel = app.permSelectMaxIndex();
+                                            if (c == 'j' and ps.selected < max_sel) ps.selected += 1;
+                                            if (c == 'k' and ps.selected > 0) ps.selected -= 1;
+                                        }
                                     },
                                     .wizard => |*w| {
                                         if (c == 'j') w.moveCursor(1);
@@ -1115,8 +1137,10 @@ pub fn run(
                                 }
                             },
                             .arrow_up => switch (app.input_mode) {
-                                .perm_select => |*ps| {
-                                    if (ps.selected > 0) ps.selected -= 1;
+                                .perm_select => {
+                                    if (app.askActive()) app.ask_session.?.moveCursor(-1) else if (app.input_mode.perm_select.selected > 0) {
+                                        app.input_mode.perm_select.selected -= 1;
+                                    }
                                 },
                                 .wizard => |*w| {
                                     w.moveCursor(-1);
@@ -1124,12 +1148,26 @@ pub fn run(
                                 else => {},
                             },
                             .arrow_down => switch (app.input_mode) {
-                                .perm_select => |*ps| {
-                                    const max_sel = app.permSelectMaxIndex();
-                                    if (ps.selected < max_sel) ps.selected += 1;
+                                .perm_select => {
+                                    if (app.askActive()) app.ask_session.?.moveCursor(1) else {
+                                        const max_sel = app.permSelectMaxIndex();
+                                        if (app.input_mode.perm_select.selected < max_sel) app.input_mode.perm_select.selected += 1;
+                                    }
                                 },
                                 .wizard => |*w| {
                                     w.moveCursor(1);
+                                },
+                                else => {},
+                            },
+                            .arrow_left => switch (app.input_mode) {
+                                .perm_select => {
+                                    if (app.askActive()) app.ask_session.?.prevTab();
+                                },
+                                else => {},
+                            },
+                            .arrow_right => switch (app.input_mode) {
+                                .perm_select => {
+                                    if (app.askActive()) app.ask_session.?.nextTab();
                                 },
                                 else => {},
                             },
@@ -1159,61 +1197,54 @@ pub fn run(
                             },
                             .enter => switch (app.input_mode) {
                                 .perm_message => |*pm| {
-                                    if (app.active_permission == null) {
-                                        if (app.active_selection != null) {
-                                            if (pm.field.isEmpty()) {
-                                                app.enterPermSelect();
-                                                break;
-                                            }
-                                            app.resolveActiveSelection(pm.field.slice(), null);
-                                            break;
-                                        }
-                                    }
-                                    const entry = app.active_permission orelse break;
-
-                                    const is_ask = entry.payload == .ask;
-
                                     if (pm.field.isEmpty()) {
                                         app.enterPermSelect();
                                         break;
                                     }
-                                    const msg = pm.field.slice();
-                                    if (is_ask) {
-                                        app.resolveActivePermission(.{ .message = msg });
-                                    } else {
-                                        app.resolveActivePermission(.denied);
+                                    if (app.askActive()) {
+                                        const s = &app.ask_session.?;
+                                        switch (s.resolveMessage(pm.field.slice())) {
+                                            .submitted => {
+                                                if (app.active_permission != null) {
+                                                    app.resolveActiveAsk();
+                                                } else {
+                                                    app.resolveActiveSelectionAnswers();
+                                                }
+                                            },
+                                            // Back to the picker: the message
+                                            // field must not leak its text into
+                                            // the next question.
+                                            else => app.enterPermSelect(),
+                                        }
+                                        app.dirty = true;
+                                        break;
                                     }
+                                    app.resolveActivePermission(.denied);
                                     app.auto_scroll = true;
                                     app.scroll_offset = 0;
                                 },
                                 .perm_select => |*ps| {
-                                    if (app.active_permission == null) {
-                                        if (app.active_selection) |sel| {
-                                            const sel_opts_len: u8 = @intCast(@min(sel.ask.options.len, tools.ask.MAX_OPTIONS));
-                                            if (sel.ask.allow_message and ps.selected >= sel_opts_len) {
-                                                app.enterPermMessage();
-                                                break;
-                                            }
-                                            app.resolveActiveSelection(sel.ask.options[ps.selected], ps.selected + 1);
-                                            break;
-                                        }
-                                    }
-
-                                    const entry = app.active_permission orelse break;
-                                    if (entry.payload == .ask) {
-                                        const args = entry.payload.ask;
-                                        const opts_len: u8 = @intCast(@min(args.options.len, tools.ask.MAX_OPTIONS));
-
-                                        if (ps.selected >= opts_len) {
+                                    if (app.askActive()) {
+                                        const s = &app.ask_session.?;
+                                        if (s.messageRowActive(s.active)) {
                                             app.enterPermMessage();
                                             break;
                                         }
-
-                                        app.resolveActivePermission(.{ .choice = ps.selected });
-                                        app.auto_scroll = true;
-                                        app.scroll_offset = 0;
+                                        switch (s.enterCurrent()) {
+                                            .submitted => {
+                                                if (app.active_permission != null) {
+                                                    app.resolveActiveAsk();
+                                                } else {
+                                                    app.resolveActiveSelectionAnswers();
+                                                }
+                                            },
+                                            else => {},
+                                        }
+                                        app.dirty = true;
                                         break;
                                     }
+
+                                    if (app.active_permission == null) break;
 
                                     // Generic 3-option (yes / no / enter message)
                                     switch (ps.selected) {
@@ -1760,10 +1791,10 @@ fn resolvePermissionsHeadless(app: *App, io: std.Io) void {
     while (g.ptr.items.len > 0) {
         const next = g.ptr.swapRemove(0);
         if (app.registry.state(next.agent_id) != .active) continue;
-        next.state = switch (next.payload) {
-            .ask => |a| r.permissions.recommendedChoice(a.options),
-            else => .approved,
-        };
+        switch (next.payload) {
+            .ask => r.permissions.setAskRecommended(next),
+            else => next.state = .approved,
+        }
         next.event.set(io);
     }
 }

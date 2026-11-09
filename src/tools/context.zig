@@ -69,7 +69,16 @@ pub const Context = struct {
         self.base.permissions.send(&request);
         request.event.wait(self.io) catch return .denied;
         if (self.isCanceled()) return .denied;
-        return request.state;
+        switch (request.state) {
+            // The answer slices point into `request`, which dies with this
+            // frame; the caller reads the returned state afterwards, so the
+            // answers must move into call-owned memory first.
+            .answers => |answers| {
+                const owned = permissions.dupAnswers(self.alloc, answers) orelse return .denied;
+                return .{ .answers = owned };
+            },
+            else => return request.state,
+        }
     }
 
     pub fn setStatus(self: Context, call_id: []const u8, value: []const u8) void {

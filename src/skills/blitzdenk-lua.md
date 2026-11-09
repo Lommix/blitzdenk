@@ -413,32 +413,63 @@ timeline echo).
 ## Selection
 
 `blitz.cmd.select(request, cb)` opens the ask widget from a command and
-returns at once. The request is one table: `header`, `question`, `options`
-(1-8 strings), optional `allow_message` (default false) to append the
-custom-message row. When the user picks, the callback runs as
-`cb(option_text, index)` with a 1-based index. The custom-message row reports
-`cb(message, nil)` and only exists with `allow_message = true`. A cancel
-(`cancel` command, session reset, Lua reload) reports `cb(nil, nil)`.
+returns at once. The request is one table with a `questions` array (1-4
+entries). Each question carries `header`, `question`, `options` (1-8
+strings), and optional `multi_select` (default false). The user answers the
+questions one by one; the last answer submits the whole batch. The callback
+then runs as `cb(answers)`: an array with one answer list per question, in
+request order. Each pick is a table `{ text = "...", index = n }` with a
+1-based `index` for a listed option and no `index` for the custom-message row
+(single-select questions only). `multi_select` questions toggle options with
+`enter` or `space` and commit on their fixed trailing submit row; they have no
+message row. A cancel (`esc`, `cancel` command, session reset, Lua reload)
+reports `cb(nil)`.
 
 ```lua
 blitz.add_command("effort", function()
     blitz.cmd.select({
-        header = "Effort",
-        question = "Set reasoning effort for the general agent?",
-        options = { "minimal", "low", "medium", "high", "max" },
-    }, function(choice)
-        if choice then
-            blitz.set_agent_effort(blitz.AGENT_GENERAL, choice)
-            blitz.cmd.message_timeline("system", "effort set to " .. choice)
+        questions = {
+            {
+                header = "Effort",
+                question = "Set reasoning effort for the general agent?",
+                options = { "low", "medium (recommended)", "high" },
+            },
+        },
+    }, function(answers)
+        if answers then
+            blitz.set_agent_effort(blitz.AGENT_GENERAL, answers[1][1].text)
+            blitz.cmd.message_timeline("system", "effort set to " .. answers[1][1].text)
         end
     end)
 end, "pick agent reasoning effort")
 ```
 
+`esc` inside a selection cancels only the selection, never an agent run.
 Callbacks run on the main thread, so they may call other `blitz.cmd`
 functions, including another `select`. Permissions from agents take the screen
 first; the selection shows after they resolve. Selections need the TUI; a
 headless run drops them at exit.
+
+## Context ask
+
+`ctx:ask(request)` inside a custom tool uses the same widget and the same
+request table as `blitz.cmd.select`. It blocks until the user resolves every
+question, then returns `blitz.REQ_STATUS_CHOICE` and one answer list per
+question with the same pick shape. A cancel returns `blitz.REQ_STATUS_DENIED`
+and nil. `REQ_STATUS_MESSAGE` is never produced by ask.
+
+`esc` inside an ask (selection or `ctx:ask`) cancels only the ask; for other
+permission types `esc` still stops the whole run.
+
+```lua
+local status, answers = ctx:ask({
+    questions = {
+        { header = "Deploy", question = "Which environment?", options = { "staging", "prod" } },
+    },
+})
+if status ~= blitz.REQ_STATUS_CHOICE then return { msg = "deploy canceled" } end
+local env = answers[1][1].text
+```
 
 ## Keybinds
 
@@ -588,12 +619,15 @@ Return a `BlitzPermissionDecision` table, or `nil` for the normal flow
 (approval mode, then TUI):
 
 - `{ approved = true }` — allow the call. On ask payloads this picks the
-  first option marked `(recommended)` (like the headless runner).
-- `{ approved = false }` — deny
+  recommended options for every question (like the headless runner): the
+  first option marked `(recommended)` for single-select, every marked option
+  for multi-select, option one when none is marked.
+- `{ approved = false }` — deny; on ask payloads the whole batch is denied.
 - `{ approved = false, msg = "..." }` — deny, `msg` reaches the model as tool error
-- `{ approved = false, select = 2 }` — ask payloads only: pick the 1-based
-  option. Ignored on other kinds and when `approved` is true. Out-of-range
-  values deny. On ask, a denial without `select` denies the question.
+- `{ approved = true, answers = { ... } }` — ask payloads only: one pick list
+  per question. A pick is `{ index = 2 }` for the 1-based option, or
+  `{ text = "..." }` for a custom message. A missing question entry falls
+  back to that question's recommendation. Ignored on other kinds.
 
 A malformed table (missing `approved`) denies with a fixed reason. A hook
 error denies with `permission hook error: <msg>`.
@@ -606,6 +640,10 @@ blitz.hooks.approve(function(p)
     if p.tool == "bash" and p.description:find("rm ") then
         return { approved = false, msg = "no destructive commands" }
     end
+    if p.kind == "ask" then
+        -- auto-answer the first question, recommend the rest
+        return { approved = true, answers = { { { index = 1 } } } }
+    end
     return nil
 end)
 ```
@@ -613,7 +651,9 @@ end)
 The payload is `BlitzPermissionPayload` in `meta.lua`: `agent_id`, `call_id`,
 `kind` (`call|diff|ask|plan`), `tool`, `tool_input` (the raw JSON arguments of
 the call), the agent block (`agent_name`, `agent_description`, `agent_task`,
-`agent_cwd`), plus the kind fields. `agent_task` is the current task
+`agent_cwd`), plus the kind fields. Ask payloads carry `questions`: an array
+of `{ header, question, options, multi_select }` tables, in request order.
+`agent_task` is the current task
 description; it is empty for a main agent until a hook sets it with
 `blitz.agent.set_task_description`. The decision shape is
 `BlitzPermissionDecision` in the same file.
@@ -633,7 +673,7 @@ returns `false` for unknown or already-resolved tickets. Snapshots carry
 `ticket`, `agent_id`, `call_id`, `kind`, `tool`, `tool_input`, the agent block,
 and the kind fields, the same shape as the hook payload; `decision` takes the
 same `BlitzPermissionDecision`
-table as the approve hook, including `msg` and ask `select`. Requests whose
+table as the approve hook, including `msg` and ask `answers`. Requests whose
 agent died deny on resolve no matter what the decision says.
 
 `blitz.hooks.permission_requested(fn)` fires for every parked request, before
@@ -649,7 +689,7 @@ emit their own permission events, and a judge that can run bash spawns more
 judges without end. Unresolved tickets fall back to the approval-mode check,
 then the TUI. A snapshot never goes stale, only `resolve` can fail late.
 Headless `--prompt` runs bypass the Lua stage: they auto-resolve requests
-without the event.
+without the event, picking the recommended options for every ask question.
 
 ## Shared state
 

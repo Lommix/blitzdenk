@@ -1,101 +1,104 @@
 const r = @import("root.zig");
+const root = r.r;
 const std = @import("std");
 
-pub const MAX_OPTIONS = 8;
+pub const MAX_OPTIONS = root.ask_session.MAX_OPTIONS;
+pub const MAX_QUESTIONS = root.ask_session.MAX_QUESTIONS;
 
 pub const AskTool = r.Tool{
     .def = .{
         .name = "ask",
         .description =
-        \\Ask the user a multiple-choice question when you cannot resolve an ambiguity on your own.
-        \\Put the recommended option first and suffix its label with "(recommended)".
+        \\Ask the user multiple-choice questions when you cannot resolve ambiguities on your own.
+        \\Batch every currently unblocked, independent question into one call (max 4 questions); never batch
+        \\questions whose answer depends on another question of the same call. Each question needs 1-8
+        \\options with a short label and an optional one-sentence description. Set multi_select = true when several
+        \\options apply together (needs at least 2 options; the user toggles several and cannot type a
+        \\custom message). Put the recommended option first and suffix its label with "(recommended)";
+        \\headless runs take the marked options automatically. Answers come back numbered, one line per
+        \\question, in request order. Pressing esc cancels only the ask, not the agent run.
         \\
         ,
-        .prompt_snippet = "Ask the user a question",
+        .prompt_snippet = "Ask the user up to 4 independent questions in one call",
         .parameters_schema =
         \\{
         \\  "type": "object",
         \\  "properties": {
-        \\      "header": {"type": "string", "description": "Very short label displayed as a chip/tag. Examples: 'Auth method', 'Library', 'Approach'."},
-        \\      "question": {"type": "string", "description": "The complete question to ask the user. Should be clear, specific, and end with a question mark."},
-        \\      "options": {
+        \\      "questions": {
         \\          "type": "array",
+        \\          "minItems": 1,
+        \\          "maxItems": 4,
         \\          "items": {
         \\              "type": "object",
         \\              "properties": {
-        \\                  "label": {"type": "string", "description": "User-facing label (1-5 words)."},
-        \\                  "description": {"type": "string", "description": "One short sentence explaining impact/tradeoff if selected."}
+        \\                  "header": {"type": "string", "description": "Very short label displayed as a chip/tag. Examples: 'Auth method', 'Library', 'Approach'."},
+        \\                  "question": {"type": "string", "description": "The complete question to ask the user. Should be clear, specific, and end with a question mark."},
+        \\                  "options": {
+        \\                      "type": "array",
+        \\                      "minItems": 1,
+        \\                      "maxItems": 8,
+        \\                      "items": {
+        \\                          "type": "object",
+        \\                          "properties": {
+        \\                              "label": {"type": "string", "description": "Required, non-empty user-facing label: 1-5 words, plus an optional '(recommended)' suffix."},
+        \\                              "description": {"type": "string", "description": "One short sentence explaining impact/tradeoff if selected. May be empty."}
+        \\                          },
+        \\                          "required": ["label"],
+        \\                          "additionalProperties": false
+        \\                      }
+        \\                  },
+        \\                  "multi_select": {"type": "boolean", "description": "Let the user toggle several options at once. Requires at least 2 options; no custom-message row. Default false."}
         \\              },
-        \\              "required": ["label", "description"],
+        \\              "required": ["header", "question", "options"],
         \\              "additionalProperties": false
-        \\          },
-        \\          "description": "Provide 1-8 mutually exclusive choices. Do not include an 'Other' option; the UI always appends a custom-message row."
+        \\          }
         \\      }
         \\  },
-        \\  "required": ["header", "question", "options"]
+        \\  "required": ["questions"]
         \\}
         ,
     },
     .func = &run,
 };
 
-pub const Option = struct {
-    label: ?[]const u8 = null,
-    description: ?[]const u8 = null,
-};
-
-pub const Args = struct {
-    header: []const u8,
-    question: []const u8,
-    options: []const Option,
-};
-
-fn optionRow(alloc: std.mem.Allocator, opt: Option) ?[]const u8 {
-    const label = opt.label orelse "";
-    const desc = opt.description orelse "";
-    if (label.len == 0 and desc.len == 0) return null;
-    if (label.len == 0) return desc;
-    if (desc.len == 0) return label;
-    return std.fmt.allocPrint(alloc, "{s} — {s}", .{ label, desc }) catch null;
-}
-
-fn choiceText(opt: Option) []const u8 {
-    const label = opt.label orelse "";
-    if (label.len > 0) return label;
-    return opt.description orelse "";
-}
+pub const Args = root.ask_session.Args;
+pub const Option = root.ask_session.ArgOption;
 
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const args = r.parseArgs(Args, ctx.alloc, call) orelse
-        return r.errResult(call, "invalid JSON arguments: expected {header, question, options} with options as [{label, description}]");
+        return r.errResult(call, "invalid JSON arguments: expected {questions: [{header, question, options: [{label, description?}], multi_select?}]}");
 
-    if (args.options.len == 0) return r.errResult(call, "options must contain at least one entry");
-    if (args.options.len > MAX_OPTIONS) return r.errResult(call, "too many options (max 8)");
-
-    const rows = ctx.alloc.alloc([]const u8, args.options.len) catch
-        return r.errResult(call, "out of memory");
-    for (args.options, 0..) |opt, i| {
-        rows[i] = optionRow(ctx.alloc, opt) orelse
-            return r.errResult(call, "each option needs a label or a description");
+    if (root.ask_session.validateArgs(args)) |violation| {
+        const rule = root.ask_session.formatViolation(ctx.alloc, violation) orelse
+            return r.errResult(call, "out of memory");
+        return r.errResult(call, rule);
     }
+
+    const questions = root.ask_session.payloadQuestions(ctx.alloc, args) orelse
+        return r.errResult(call, "out of memory");
 
     const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var sgr_buf: [r.STATUS_BUF]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&sgr_buf);
 
-    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "question ");
-    w.styled(.{ .fg = app.theme.muted }, args.question);
+    const arg_questions = root.ask_session.argQuestionList(args);
+    if (arg_questions.len == 1) {
+        w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "question ");
+        w.styled(.{ .fg = app.theme.muted }, root.ask_session.argQuestion(arg_questions[0]));
+    } else {
+        w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "ask ");
+        w.styledPrint(.{ .fg = app.theme.muted }, "{d} questions", .{arg_questions.len});
+    }
 
     r.setToolStatus(ctx, call, w.finish()) catch {};
 
-    const decision = ctx.requestPermission(call, .{ .ask = .{
-        .header = args.header,
-        .options = rows,
-        .question = args.question,
-    } });
-    return switch (decision) {
-        .choice => |i| r.okResult(call, choiceText(args.options[i])),
-        .message => |msg| r.okResult(call, msg),
-        else => r.errResult(call, "ask canceled"),
-    };
+    const decision = ctx.requestPermission(call, .{ .ask = .{ .questions = questions } });
+    switch (decision) {
+        .answers => |answers| {
+            const text = root.ask_session.formatResult(ctx.alloc, args, answers) orelse
+                return r.errResult(call, "ask answers did not match the questions");
+            return r.okResult(call, text);
+        },
+        else => return r.errResult(call, "ask canceled"),
+    }
 }

@@ -346,6 +346,11 @@ pub const App = struct {
     //-----------------
     active_permission: ?*r.permissions.Request = null,
     active_selection: ?*r.selection.Selection = null,
+    /// Interactive state for the active ask permission or selection. Synced
+    /// from the active ask payload in tick(); owns tabs, cursors, toggles,
+    /// and resolved answers.
+    ask_session: ?r.ask_session.Session = null,
+    ask_session_src: ?*const anyopaque = null,
     registry: *r.agent_registry.Registry = undefined,
     session_store: ?*r.session_store.Store = null,
     exec_pool: *r.exec.CmdPool = undefined,
@@ -530,6 +535,9 @@ pub const App = struct {
         self.inline_images.deinit(self.gpa);
         self.inline_placements.deinit(self.gpa);
         self.inline_pending_deletes.deinit(self.gpa);
+        if (self.ask_session) |*s| s.deinit();
+        self.ask_session = null;
+        self.ask_session_src = null;
         self.clearSelections(false);
         self.selection_queue.value.deinit(self.gpa);
         self.event_bus.shutdown(self);
@@ -644,21 +652,21 @@ pub const App = struct {
         self.returnToText();
     }
 
-    /// Resolve the active selection: run its Lua callback with the picked
-    /// text and 1-based index (nil/nil on cancel), then free it.
-    pub fn resolveActiveSelection(self: *App, choice: ?[]const u8, index: ?u8) void {
+    /// Resolve the active selection: run its Lua callback with one answer
+    /// list per question (nil on cancel), then free it.
+    pub fn resolveActiveSelection(self: *App, answers: ?r.ask_session.Answers) void {
         const sel = self.active_selection orelse return;
         self.active_selection = null;
         self.auto_scroll = true;
         self.scroll_offset = 0;
         self.dirty = true;
-        self.lua_vm.invokeSelection(self.io, sel.func_ref, choice, index);
+        self.lua_vm.invokeSelection(self.io, sel.func_ref, sel.ask.questions, answers);
         sel.destroy();
         self.returnToText();
     }
 
     /// Cancel active and queued selections. With `run_callbacks` each
-    /// callback reports (nil, nil); otherwise they are dropped silently.
+    /// callback reports nil; otherwise they are dropped silently.
     /// Callbacks run without the queue lock, so they may call cmd.select.
     pub fn clearSelections(self: *App, run_callbacks: bool) void {
         const active = self.active_selection;
@@ -677,13 +685,76 @@ pub const App = struct {
         }
 
         if (active) |sel| {
-            self.lua_vm.invokeSelection(self.io, sel.func_ref, null, null);
+            self.lua_vm.invokeSelection(self.io, sel.func_ref, sel.ask.questions, null);
             sel.destroy();
         }
         for (queued.items) |sel| {
-            self.lua_vm.invokeSelection(self.io, sel.func_ref, null, null);
+            self.lua_vm.invokeSelection(self.io, sel.func_ref, sel.ask.questions, null);
             sel.destroy();
         }
+    }
+
+    /// The ask payload currently on screen, from the active permission or
+    /// the active selection.
+    fn activeAskPayload(self: *App) ?*const anyopaque {
+        if (self.active_permission) |perm| {
+            if (perm.payload == .ask) return perm;
+        }
+        if (self.active_selection) |sel| return sel;
+        return null;
+    }
+
+    /// Bind the interactive ask session to the ask request on screen. The
+    /// session is rebuilt only when a different request becomes active, so
+    /// partial progress survives between frames. Main thread only.
+    pub fn syncAskSession(self: *App) void {
+        const src = self.activeAskPayload();
+        if (self.ask_session_src == src and src != null) return;
+        if (self.ask_session) |*s| s.deinit();
+        self.ask_session = null;
+        self.ask_session_src = src;
+        const payload: ?r.permissions.AskPayload = if (self.active_permission) |perm|
+            (if (perm.payload == .ask) perm.payload.ask else null)
+        else if (self.active_selection) |sel| sel.ask else null;
+        if (payload) |p| {
+            self.ask_session = r.ask_session.Session.init(self.gpa, p.questions) catch null;
+        }
+    }
+
+    /// Settle the active ask permission with the fully resolved session
+    /// answers. The answers are copied into request-owned storage so they
+    /// outlive this session and any arena reset. No-op while a question is
+    /// still open.
+    pub fn resolveActiveAsk(self: *App) void {
+        const perm = self.active_permission orelse return;
+        if (perm.state != .pending) return;
+        const s = &(self.ask_session orelse return);
+        var view: [r.permissions.MAX_QUESTIONS]r.permissions.Answer = undefined;
+        const answers = s.answersView(&view) orelse return;
+        if (!r.permissions.setAskAnswers(perm, answers)) return;
+        // setAskAnswers already wrote perm.state, so settle directly instead
+        // of going through resolveActivePermission, whose pending guard would
+        // drop the resolution and leave the tool waiting forever.
+        const g = self.permission_queue.lock(self.io);
+        defer g.unlock();
+        if (self.active_permission != perm) return;
+        self.active_permission = null;
+        self.enterPermSelect();
+        self.settleActiveLocked(perm, perm.state);
+        self.auto_scroll = true;
+        self.scroll_offset = 0;
+    }
+
+    /// Settle the active selection with the fully resolved session answers.
+    pub fn resolveActiveSelectionAnswers(self: *App) void {
+        const s = &(self.ask_session orelse return);
+        const answers = s.answersOwned(self.sessionAlloc()) orelse return;
+        self.resolveActiveSelection(answers);
+    }
+
+    /// True when the input area currently shows an ask request.
+    pub fn askActive(self: *App) bool {
+        return self.ask_session != null;
     }
 
     /// Highest reachable perm_select row for the active permission or
@@ -692,14 +763,13 @@ pub const App = struct {
     pub fn permSelectMaxIndex(self: *App) u8 {
         if (self.active_permission) |entry| {
             return switch (entry.payload) {
-                .ask => |a| @intCast(@min(a.options.len, r.tools.ask.MAX_OPTIONS)),
+                .ask => if (self.ask_session) |*s| s.activeRowCount() -| 1 else 0,
                 .plan => 3,
                 .call, .diff => 2,
             };
         }
-        if (self.active_selection) |sel| {
-            const opts: u8 = @intCast(@min(sel.ask.options.len, r.tools.ask.MAX_OPTIONS));
-            return if (sel.ask.allow_message) opts else opts -| 1;
+        if (self.active_selection != null) {
+            return if (self.ask_session) |*s| s.activeRowCount() -| 1 else 0;
         }
         return 0;
     }
@@ -1009,6 +1079,7 @@ pub const App = struct {
     }
 
     pub fn tick(self: *App) !void {
+        self.syncAskSession();
         try self.finishMcpLoad(false);
         self.finishMcpAuth();
         self.finishSshConnect();
@@ -2145,7 +2216,7 @@ pub const App = struct {
                 .perm_select => {
                     if (app.active_permission) |entry| {
                         if (entry.payload == .ask) {
-                            break :blk askPermissionInputHeight(entry.payload.ask, main_area.width, main_area.height);
+                            break :blk askPermissionInputHeight(app, main_area.width, main_area.height);
                         }
                         if (entry.payload == .call) {
                             const rows = text_utils.wrappedRowCount(entry.payload.call.description, main_area.width -| 7);
@@ -2153,8 +2224,8 @@ pub const App = struct {
                         }
                         break :blk 9;
                     }
-                    const sel = app.active_selection orelse break :blk 9;
-                    break :blk askPermissionInputHeight(sel.ask, main_area.width, main_area.height);
+                    _ = app.active_selection orelse break :blk 9;
+                    break :blk askPermissionInputHeight(app, main_area.width, main_area.height);
                 },
             }
         };
@@ -2411,6 +2482,13 @@ pub const App = struct {
         self.active_permission = null;
         self.enterPermSelect();
         if (perm.state != .pending) return;
+        self.settleActiveLocked(perm, state);
+    }
+
+    /// Apply a decision to the active request and wake the waiting tool.
+    /// Caller must hold the permission_queue lock and have cleared
+    /// active_permission.
+    fn settleActiveLocked(self: *App, perm: *r.permissions.Request, state: r.permissions.State) void {
         if (self.registry.state(perm.agent_id) == .active) {
             self.settlePermission(perm, state);
         } else {
@@ -5410,13 +5488,13 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
     if (inner.width == 0 or inner.height == 0) return;
 
     const entry = app.active_permission orelse {
-        const sel = app.active_selection orelse return;
-        renderAskWidget(app, sel.ask, inner, buf);
+        _ = app.active_selection orelse return;
+        renderAskWidget(app, inner, buf);
         return;
     };
 
     if (entry.payload == .ask) {
-        renderAskWidget(app, entry.payload.ask, inner, buf);
+        renderAskWidget(app, inner, buf);
         return;
     }
 
@@ -5462,63 +5540,19 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
     }
 }
 
-fn renderAskWidget(app: *App, args: r.permissions.AskPayload, inner: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const opts_len = @min(args.options.len, r.tools.ask.MAX_OPTIONS);
-    const total_rows: usize = opts_len + @intFromBool(args.allow_message); // + "enter message"
-
-    // Clamp selection.
-    const ps = &app.input_mode.perm_select;
-    if (ps.selected >= total_rows) ps.selected = @intCast(total_rows - 1);
-    const cur_sel = currentSelection(app);
-
-    // Line 0+: "[header] question" (wrapped)
-    var header_buf: [256]u8 = undefined;
-    const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ args.header, args.question }) catch args.question;
-    const width = inner.width -| 1;
-
-    var opts_rows: u16 = @intFromBool(args.allow_message); // "enter message"
-    opts_rows +|= wrappedOptionRows(args.options[0..opts_len], width);
-
-    const max_q_rows = inner.height -| opts_rows -| 1;
-    const q_rows = text_utils.renderWrappedText(buf, header_line, inner.x + 1, inner.y, width, max_q_rows, 0, .{ .fg = app.theme.info });
-
-    // Options and "enter message" tail, each wrapped.
-    var y: u16 = inner.y +| 1 +| q_rows;
-    var row: usize = 0;
-    while (row < total_rows and y < inner.y +| inner.height) : (row += 1) {
-        const selected = cur_sel == @as(u8, @intCast(row));
-        const style: r.tui.Style = if (selected) .{ .modifier = .{ .reverse = true } } else .{};
-        const prefix: []const u8 = if (selected) "> " else "  ";
-        const label: []const u8 = if (row < opts_len) args.options[row] else "enter message";
-        var line_buf: [512]u8 = undefined;
-        const line = std.fmt.bufPrint(&line_buf, "{s}{s}", .{ prefix, label }) catch label;
-        const used = text_utils.renderWrappedText(buf, line, inner.x + 1, y, width, inner.y +| inner.height -| y, 2, style);
-        if (used == 0) break;
-        y +|= used;
-    }
+fn renderAskWidget(app: *App, inner: r.tui.Rect, buf: *r.tui.Buffer) void {
+    const s = &(app.ask_session orelse return);
+    r.ask_session.renderSession(s, .{
+        .accent = app.theme.info,
+        .muted = app.theme.muted,
+    }, inner, buf);
 }
 
-fn askPermissionInputHeight(args: r.permissions.AskPayload, area_width: u16, area_height: u16) u16 {
-    const opts_count: usize = @min(args.options.len, r.tools.ask.MAX_OPTIONS);
-    const width = area_width -| 7;
-    var rows: u16 = 0;
-    var header_buf: [256]u8 = undefined;
-    const header_line = std.fmt.bufPrint(&header_buf, "[{s}] {s}", .{ args.header, args.question }) catch args.question;
-    rows +|= text_utils.wrappedRowCount(header_line, width);
-    rows +|= @intFromBool(args.allow_message); // "enter message"
-    rows +|= wrappedOptionRows(args.options[0..opts_count], width);
-    const max_area = area_height -| 1;
-    return @min(rows +| 6, max_area);
-}
-
-fn wrappedOptionRows(options: []const []const u8, width: u16) u16 {
-    var rows: u16 = 0;
-    for (options) |opt| {
-        var opt_buf: [512]u8 = undefined;
-        const opt_line = std.fmt.bufPrint(&opt_buf, "  {s}", .{opt}) catch opt;
-        rows +|= text_utils.wrappedRowCount(opt_line, width -| 2);
+fn askPermissionInputHeight(app: *App, area_width: u16, area_height: u16) u16 {
+    if (app.ask_session) |*s| {
+        return r.ask_session.widgetHeight(s.questions, s.active, area_width, area_height);
     }
-    return rows;
+    return 9;
 }
 
 fn formatTokenCount(dest: []u8, count: u64) []const u8 {
@@ -6161,6 +6195,72 @@ fn finishWaitingTestTurn(registry: *r.agent_registry.Registry, id: r.AgentId) !v
     try std.testing.expect(registry.reap(id));
 }
 
+test "ask permission widget syncs a session and resolves the batch" {
+    var app: App = undefined;
+    app.io = std.testing.io;
+    app.gpa = std.testing.allocator;
+    app.arena_session = .init(std.testing.allocator);
+    defer app.arena_session.deinit();
+    app.active_permission = null;
+    app.active_selection = null;
+    app.selection_queue = .{ .value = .empty };
+    app.permission_queue = .{ .value = .empty };
+    app.pending_permissions = .empty;
+    app.input_mode = .{ .text = .{} };
+    app.ask_session = null;
+    app.ask_session_src = null;
+    app.theme = .default;
+    app.auto_scroll = true;
+    app.scroll_offset = 0;
+    app.dirty = false;
+    var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
+    defer registry.deinit();
+    app.registry = &registry;
+    const agent_id = try activateTestAgent(&registry, "main");
+
+    const questions = [_]r.permissions.Question{
+        .{ .header = "Auth", .question = "Which method?", .options = &.{ "OAuth", "API key" } },
+        .{ .header = "Regions", .question = "Which regions?", .options = &.{ "eu", "us" }, .multi_select = true },
+    };
+    var req = r.permissions.Request{
+        .agent_id = agent_id,
+        .tool_name = "ask",
+        .payload = .{ .ask = .{ .questions = &questions } },
+    };
+    app.pending_permissions.append(std.testing.allocator, &req) catch unreachable;
+    defer app.pending_permissions.deinit(std.testing.allocator);
+    app.active_permission = &req;
+    app.input_mode = .{ .perm_select = .{} };
+
+    app.syncAskSession();
+    try std.testing.expect(app.askActive());
+    const session = &app.ask_session.?;
+    try std.testing.expectEqual(@as(usize, 2), session.questions.len);
+    try std.testing.expectEqual(@as(u8, 2), app.permSelectMaxIndex());
+
+    try std.testing.expectEqual(r.ask_session.ResolveOutcome.advance, session.resolveCurrent());
+    session.toggleCurrent();
+    session.moveCursor(1);
+    session.toggleCurrent();
+    try std.testing.expectEqual(r.ask_session.ResolveOutcome.submitted, session.resolveCurrent());
+
+    app.resolveActiveAsk();
+    try std.testing.expect(app.active_permission == null);
+    try std.testing.expect(req.state == .answers);
+    // The settle must reach the waiting tool thread: the event fires and the
+    // request leaves the pending set.
+    try std.testing.expect(req.event.isSet());
+    try std.testing.expectEqual(@as(usize, 0), app.pending_permissions.items.len);
+    const answers = req.state.answers;
+    try std.testing.expectEqual(@as(usize, 2), answers.len);
+    try std.testing.expectEqual(@as(?u8, 0), answers[0][0].index);
+    try std.testing.expectEqual(@as(usize, 2), answers[1].len);
+    try std.testing.expectEqual(@as(?u8, 1), answers[1][1].index);
+
+    app.syncAskSession();
+    try std.testing.expect(!app.askActive());
+}
+
 test "waiting main agent shows waiting progress and cancel stops the tree" {
     var app: App = undefined;
     app.io = std.testing.io;
@@ -6180,6 +6280,8 @@ test "waiting main agent shows waiting progress and cancel stops the tree" {
     app.pending_permissions = .empty;
     app.active_selection = null;
     app.selection_queue = .{ .value = .empty };
+    app.ask_session = null;
+    app.ask_session_src = null;
     app.input_mode = .{ .text = .{} };
     app.session_run_ns = 0;
     app.session_run_started_ns = 0;

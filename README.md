@@ -23,6 +23,12 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 - Sessions management per project: `blitz continue <?session_id>` resumes, `blitz sessions` list all
 - Render custom widgets from Lua
 
+## About
+
+Blitzdenk is my personal harness following my needs and my vision. The target is to become the neovim
+of harnesses. Durable base with a rich Lua-API to extend in all directions. I want to able to iterate fast,
+change and customize any detail.
+
 ## Defaults
 
 On first install, we include a solid foundation configuration with some popular Commands, sub agent

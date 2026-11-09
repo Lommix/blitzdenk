@@ -15,6 +15,7 @@ pub const exec = @import("exec");
 pub const ssh = @import("ssh.zig");
 pub const artifact = @import("artifact.zig");
 pub const permissions = @import("permissions");
+pub const ask_session = @import("ask_session.zig");
 pub const selection = @import("selection.zig");
 pub const ContextFactory = @import("context_factory.zig");
 pub const skills = @import("skills.zig");
