@@ -93,10 +93,10 @@ pub const Store = struct {
     pub fn bump(self: *Store) void {
         if (self.file) |file| file.close(self.io);
         self.file = null;
-        if (self.file_name) |name| self.gpa.free(name);
-        self.file_name = null;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        if (self.file_name) |name| self.gpa.free(name);
+        self.file_name = null;
         for (self.pending.items) |item| self.gpa.free(item.bytes);
         for (self.batch.items) |item| self.gpa.free(item.bytes);
         self.pending.clearRetainingCapacity();
@@ -194,7 +194,7 @@ pub const Store = struct {
         try out.writer.writeByte('\n');
         try file.writePositionalAll(self.io, out.written(), 0);
         self.file = file;
-        self.file_name = name;
+        self.setFileName(name);
         self.offset = out.written().len;
     }
 
@@ -258,7 +258,7 @@ pub const Store = struct {
         if (loaded.problem != null) try repair(self.gpa, self.io, dir, name, loaded.accepted_bytes);
         try self.create(cwd);
         for (loaded.save.archived_ids) |id| try self.declared.put(self.gpa, id, {});
-        self.file_name = try self.gpa.dupe(u8, name);
+        self.setFileName(try self.gpa.dupe(u8, name));
         self.file = try dir.openFile(self.io, name, .{ .mode = .read_write });
         self.offset = loaded.accepted_bytes;
         self.holds_chat = loaded.holds_chat;
@@ -291,7 +291,16 @@ pub const Store = struct {
     pub fn holdsChat(self: *const Store) bool {
         return self.holds_chat;
     }
+    /// `file_name` changes on the main thread; tool VMs read the id from theirs.
+    fn setFileName(self: *Store, name: []const u8) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.file_name = name;
+    }
+
     pub fn currentId(self: *Store, buf: []u8) ?[]const u8 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const name = self.file_name orelse return null;
         const n = name.len - NAME_EXTENSION.len;
         if (n > buf.len) return null;
@@ -1258,4 +1267,18 @@ test "published messages carry a wall clock stamp" {
     try std.testing.expect(loaded.problem == null);
     try std.testing.expect(loaded.save.chat[0].time_ms > 0);
     try std.testing.expectEqual(@as(usize, 3), loaded.records.len);
+}
+
+test "current id follows the journal lifecycle" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const store = &fixture.store;
+    var buf: [ID_LEN]u8 = undefined;
+    try std.testing.expect(store.currentId(&buf) == null);
+    try fixture.declare(1);
+    try store.flush();
+    try std.testing.expectEqualStrings(store.file_name.?[0..ID_LEN], store.currentId(&buf).?);
+    store.bump();
+    try std.testing.expect(store.currentId(&buf) == null);
 }

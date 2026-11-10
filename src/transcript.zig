@@ -13,6 +13,13 @@ fn nodeLessThan(_: void, a: AgentNode, b: AgentNode) bool {
     return a.agent.id < b.agent.id;
 }
 
+/// Resolves a session id or unique prefix under `base` and loads it.
+pub fn loadSession(arena: std.mem.Allocator, io: std.Io, base: std.Io.Dir, prefix: []const u8) !session_store.Loaded {
+    const id = (try session_store.resolve(arena, io, base, prefix)) orelse return error.SessionNotFound;
+    const name = try session_store.fileName(arena, id);
+    return (try session_store.load(arena, io, base, name)) orelse error.SessionNotFound;
+}
+
 /// Renders a loaded session as one JSON document: a flat agent list, each
 /// agent carrying its full journal history. Compactions and resets appear
 /// as marker entries instead of replacing the messages before them.

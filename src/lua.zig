@@ -675,6 +675,37 @@ pub const Blitz = LuaType{
                     return a.main_agent_id;
                 }
             }).lua_fn, "get_main_agent") } } },
+            .{ .name = "get_session_id", .desc = "Return the id of the recorded session, or nil until its journal holds a first record.", .ty = LuaType{ .function = .{ .ret = &StringOrNilDef, .fn_ptr = LuaFnBind((struct {
+                fn lua_fn(a: *r.app.App) !?[r.session_store.ID_LEN]u8 {
+                    const store = a.session_store orelse return null;
+                    var id: [r.session_store.ID_LEN]u8 = undefined;
+                    _ = store.currentId(&id) orelse return null;
+                    return id;
+                }
+            }).lua_fn, "get_session_id") } } },
+            .{
+                .name = "export_transcript",
+                .desc = "Write a recorded session of this project as a JSON transcript to path, like `blitz eval`. Takes a session id or a unique prefix; a relative path resolves against the launch directory. The journal flushes at checkpoints, so the running step of a live session can be missing.",
+                .ty = LuaType{ .function = .{
+                    .args = &.{ .{ .name = "session_id", .ty = LuaType.string }, .{ .name = "path", .ty = LuaType.string } },
+                    .fn_ptr = LuaFnBind((struct {
+                        fn lua_fn(a: *r.app.App, session_id: []const u8, path: []const u8) !void {
+                            const store = a.session_store orelse return error.SessionNotFound;
+                            var arena = std.heap.ArenaAllocator.init(a.gpa);
+                            defer arena.deinit();
+                            const loaded = try r.transcript.loadSession(arena.allocator(), a.io, store.base, session_id);
+                            if (loaded.problem != null) return error.CorruptJournal;
+                            const file = try std.Io.Dir.cwd().createFile(a.io, path, .{});
+                            defer file.close(a.io);
+                            var buffer: [8192]u8 = undefined;
+                            var out = file.writerStreaming(a.io, &buffer);
+                            try r.transcript.writeJson(arena.allocator(), &loaded, &out.interface);
+                            try out.interface.writeByte('\n');
+                            try out.interface.flush();
+                        }
+                    }).lua_fn, "export_transcript"),
+                } },
+            },
             .{ .name = "list_agents", .desc = "Snapshot every occupied agent slot, running and finished, as a list of BlitzAgentRow.", .ty = LuaType{ .function = .{
                 .ret = &AgentRowListDef,
                 .fn_ptr = LuaFnBind((struct {
@@ -6109,6 +6140,48 @@ fn permissionTestApp() r.app.App {
     app_state.config = .{};
     app_state.main_agent_id = null;
     return app_state;
+}
+
+test "get_session_id and export_transcript round-trip the live journal" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store: r.session_store.Store = .{ .io = std.testing.io, .gpa = std.testing.allocator, .base = .{ .handle = tmp.dir.handle } };
+    defer store.deinit();
+    try store.create("/project");
+    var app_state = permissionTestApp();
+    app_state.session_store = &store;
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+
+    try vm.exec("before = blitz.get_session_id() == nil");
+    _ = c.lua_getglobal(vm.L, "before");
+    try std.testing.expect(c.lua_toboolean(vm.L, -1) != 0);
+    c.lua_pop(vm.L, 1);
+
+    try store.enqueue(.{ .kind = .agent, .agentID = 1, .name = "main", .type_idx = 0, .depth = 0, .cwd = "/project", .background = false, .clean = false, .task_description = "" });
+    try store.publish(1, .append, &.{r.sdk.UserMessage("hello")});
+    try store.flush();
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const out_path = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}/out.json", .{tmp.sub_path});
+    try vm.exec(try std.fmt.allocPrint(arena.allocator(),
+        \\sid = blitz.get_session_id()
+        \\blitz.export_transcript(sid:sub(1, 10), "{s}")
+    , .{out_path}));
+    const sid = try readGlobalString(vm, "sid");
+    defer std.testing.allocator.free(sid);
+    try std.testing.expectEqual(r.session_store.ID_LEN, sid.len);
+
+    const document = try tmp.dir.readFileAlloc(std.testing.io, "out.json", arena.allocator(), .limited(1 << 20));
+    try std.testing.expect(std.mem.endsWith(u8, document, "\n"));
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), document, .{});
+    try std.testing.expectEqualStrings(sid, parsed.object.get("session").?.object.get("id").?.string);
+    const message = parsed.object.get("agents").?.array.items[0].object.get("messages").?.array.items[0];
+    try std.testing.expectEqualStrings("hello", message.object.get("parts").?.array.items[0].object.get("text").?.string);
+
+    try std.testing.expectError(error.LuaExecFailed, vm.exec("blitz.export_transcript('nope', 'x.json')"));
 }
 
 test "permission hook approve deny and nil fallback" {

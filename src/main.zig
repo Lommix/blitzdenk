@@ -20,7 +20,7 @@ const session_store = r.session_store;
 const tui = r.tui;
 const tools = r.tools;
 const config_watch = @import("config_watch.zig");
-const transcript = @import("transcript.zig");
+const transcript = r.transcript;
 
 // ----------------------------------------------------------------
 pub const DEFAULT_CONFIG_PATH = r.defaults.CONFIG_DIR;
@@ -451,15 +451,13 @@ fn evalCli(
         else => return err,
     };
     defer base.close(io);
-    const resolved = session_store.resolve(arena, io, base, prefix) catch |err| switch (err) {
+    const loaded = transcript.loadSession(arena, io, base, prefix) catch |err| switch (err) {
         error.AmbiguousSessionId => failEval("'{s}' matches multiple sessions", .{prefix}),
         error.UnsupportedSessionFormat => failEval("session '{s}' uses an unsupported format", .{prefix}),
+        error.SessionNotFound => failEval("no session matching '{s}'", .{prefix}),
         else => return err,
     };
-    const id = resolved orelse failEval("no session matching '{s}'", .{prefix});
-    const name = try session_store.fileName(arena, id);
-    const loaded = (try session_store.load(arena, io, base, name)) orelse failEval("session '{s}' not found", .{id});
-    if (loaded.problem) |reason| failEval("session '{s}' has a corrupt journal: {s}", .{ id, reason });
+    if (loaded.problem) |reason| failEval("session '{s}' has a corrupt journal: {s}", .{ loaded.header.id, reason });
     var out_buffer: [8192]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(io, &out_buffer);
     try transcript.writeJson(arena, &loaded, &out.interface);

@@ -402,6 +402,21 @@ The TUI owns the connection: `/ssh user@host:~/dir`, `/ssh-<alias>`,
 `git status`, `ssh-add`). Use `ctx.cwd` for tool files, `ctx.local_cwd` only
 with `force_local`.
 
+## Session transcripts
+
+```lua
+local id = blitz.get_session_id()              -- nil before the first record
+if id then blitz.export_transcript(id, "/tmp/session.json") end
+```
+
+The file is one JSON document for `jq`: `.session` plus a flat `.agents[]`
+(tree through `parent_id`). Each agent's `.messages[]` holds the full
+history in order. `role` is `user`, `assistant`, `tool`, `system`, or a
+`compaction`/`reset` marker with `reason` and `history_len`; compaction and
+`history_replace` markers also carry the new `history`. `tool_call` parts
+carry `state` and spawned `children`; `time_ms` is null on old sessions.
+Image data is omitted.
+
 ## Status bar and drawing
 
 ```lua

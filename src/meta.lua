@@ -678,6 +678,10 @@
 ---@field add_tool fun(agent_type: integer, tool_name: string)
 ---Return the main agent, if a session is running.
 ---@field get_main_agent fun(): integer|nil
+---Return the id of the recorded session, or nil until its journal holds a first record.
+---@field get_session_id fun(): string|nil
+---Write a recorded session of this project as a JSON transcript to path, like `blitz eval`. Takes a session id or a unique prefix; a relative path resolves against the launch directory. The journal flushes at checkpoints, so the running step of a live session can be missing.
+---@field export_transcript fun(session_id: string, path: string)
 ---Snapshot every occupied agent slot, running and finished, as a list of BlitzAgentRow.
 ---@field list_agents fun(): BlitzAgentRow[]
 ---Snapshot every configured agent type as a list of BlitzAgentTypeRow, in slot order. Safe in tool vms while the config loads; agent types only change on reload.
