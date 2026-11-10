@@ -20,6 +20,7 @@ const session_store = r.session_store;
 const tui = r.tui;
 const tools = r.tools;
 const config_watch = @import("config_watch.zig");
+const transcript = @import("transcript.zig");
 
 // ----------------------------------------------------------------
 pub const DEFAULT_CONFIG_PATH = r.defaults.CONFIG_DIR;
@@ -28,6 +29,7 @@ const IO_THREAD_STACK_SIZE = 2 * 1024 * 1024;
 
 test {
     std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(transcript);
 }
 
 // TUI owns stderr; Route std.log to debug.log in the cache dir instead. Using a raw POSIX fd with O_APPEND.
@@ -189,7 +191,7 @@ pub fn main(init: std.process.Init) !void {
     else switch (command_result) {
         .err => |txt| {
             std.debug.print("Error: {s}", .{txt});
-            return;
+            std.process.exit(1);
         },
         .cmd => |cmd| cmd,
         .none => CliCommand{ .run = "." },
@@ -281,6 +283,12 @@ pub fn main(init: std.process.Init) !void {
                 id,
                 false,
             );
+        },
+        .eval => |prefix| {
+            evalCli(io, init.arena.allocator(), init.environ_map, prefix) catch |err| {
+                std.debug.print("Error: exporting session '{s}' failed: {s}\n", .{ prefix, @errorName(err) });
+                std.process.exit(1);
+            };
         },
         .update => {
             try updateCli(io, init.gpa, init.environ_map);
@@ -420,6 +428,47 @@ fn cleanupCli(io: std.Io, alloc: std.mem.Allocator, env: *const std.process.Envi
     try cleanupTarget(io, log_path);
     if (with_sessions) try cleanupSessions(io, alloc, cache_dir);
     try cleanupTarget(io, util.TMP_DIR);
+}
+
+fn failEval(comptime fmt: []const u8, args: anytype) noreturn {
+    std.debug.print("Error: " ++ fmt ++ "\n", args);
+    std.process.exit(1);
+}
+
+fn evalCli(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    prefix: []const u8,
+) !void {
+    var cwd_buffer: [std.posix.PATH_MAX]u8 = undefined;
+    const cwd_len = try std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buffer);
+    const cwd = cwd_buffer[0..cwd_len];
+    const project_path = try sessionProjectDir(arena, try util.cacheDir(arena, env), cwd);
+    const base = std.Io.Dir.cwd().openDir(io, project_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => failEval("no sessions found in {s}", .{project_path}),
+        else => return err,
+    };
+    defer base.close(io);
+    const resolved = session_store.resolve(arena, io, base, prefix) catch |err| switch (err) {
+        error.AmbiguousSessionId => failEval("'{s}' matches multiple sessions", .{prefix}),
+        error.UnsupportedSessionFormat => failEval("session '{s}' uses an unsupported format", .{prefix}),
+        else => return err,
+    };
+    const id = resolved orelse failEval("no session matching '{s}'", .{prefix});
+    const name = try session_store.fileName(arena, id);
+    const loaded = (try session_store.load(arena, io, base, name)) orelse failEval("session '{s}' not found", .{id});
+    if (loaded.problem) |reason| failEval("session '{s}' has a corrupt journal: {s}", .{ id, reason });
+    var rendered: std.Io.Writer.Allocating = .init(arena);
+    transcript.writeJson(arena, &loaded.header, &loaded.save, &rendered.writer) catch |err| switch (err) {
+        error.CyclicAgentTree => failEval("session '{s}' has a corrupt agent tree", .{id}),
+        else => return err,
+    };
+    try rendered.writer.writeByte('\n');
+    var out_buffer: [8192]u8 = undefined;
+    var out = std.Io.File.stdout().writerStreaming(io, &out_buffer);
+    try out.interface.writeAll(rendered.written());
+    try out.interface.flush();
 }
 
 fn sessionProjectDir(alloc: std.mem.Allocator, cache_dir: []const u8, project_cwd: []const u8) ![]u8 {
@@ -1983,6 +2032,8 @@ pub const CliCommand = union(enum) {
     cont: ?[]const u8, // resume a session (null = most recent)
     /// list the last sessions recorded for the current directory
     sessions,
+    /// render one recorded session as a compact JSON transcript
+    eval: []const u8,
     help,
     update,
     cleanup,
@@ -2012,6 +2063,11 @@ pub const CliCommand = union(enum) {
             return .{ .cmd = .sessions };
         }
 
+        if (std.mem.eql(u8, head, "eval")) {
+            if (rest.len == 0 or rest[0].len == 0) return .{ .err = "eval requires a session id\n" };
+            return .{ .cmd = .{ .eval = rest[0] } };
+        }
+
         if (std.mem.eql(u8, head, "update")) return .{ .cmd = .update };
 
         if (std.mem.eql(u8, head, "cleanup")) return .{ .cmd = .cleanup };
@@ -2021,3 +2077,21 @@ pub const CliCommand = union(enum) {
         return .{ .cmd = .{ .run = head } };
     }
 };
+
+test "CliCommand parses eval with and without a session id" {
+    const with_id = [_][:0]const u8{ "eval", "20260101-120000-abcd" };
+    const parsed = CliCommand.parse(&with_id);
+    try std.testing.expect(parsed == .cmd);
+    try std.testing.expect(parsed.cmd == .eval);
+    try std.testing.expectEqualStrings("20260101-120000-abcd", parsed.cmd.eval);
+
+    const without_id = [_][:0]const u8{"eval"};
+    const rejected = CliCommand.parse(&without_id);
+    try std.testing.expect(rejected == .err);
+    try std.testing.expectEqualStrings("eval requires a session id\n", rejected.err);
+
+    const empty_id = [_][:0]const u8{ "eval", "" };
+    const rejected_empty = CliCommand.parse(&empty_id);
+    try std.testing.expect(rejected_empty == .err);
+    try std.testing.expectEqualStrings("eval requires a session id\n", rejected_empty.err);
+}
