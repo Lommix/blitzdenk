@@ -7,57 +7,42 @@ metadata:
 
 # Blitzdenk Lua configuration
 
-Workflow customization lives in Lua through the global `blitz` table.
-`~/.config/blitzdenk/blitz.lua` loads at startup. `./blitz.lua` adds
-project-local customization. All Lua files hot reload: edit a tool or command,
-then call it and confirm the behavior in the running session.
+Customization lives in Lua through the global `blitz` table.
+`~/.config/blitzdenk/blitz.lua` loads at startup; `./blitz.lua` adds project
+customization.
 
-## Your own runtime
+## Workflow
 
-Agree the scope with the user before editing: project (`./blitz.lua`) or
-global (`~/.config/blitzdenk/blitz.lua`). Read the target file first.
+1. Agree the scope with the user: project (`./blitz.lua`) or global
+   (`~/.config/blitzdenk/blitz.lua`). Read the target file.
+2. Read the `meta.lua` classes for every call you use
+   (`~/.config/blitzdenk/meta.lua`). It is the source of truth for
+   signatures, fields, defaults, event payloads, and constants. This skill
+   holds only what meta.lua cannot say.
+3. Write the Lua. A save hot reloads within a second; the next step carries
+   `[LUA VM RELOADED]` and a refreshed tool list.
+4. Smoke test in this session: call the new tool yourself, read the result,
+   fix, repeat. Done means you watched it work.
 
-The config is not somebody else's setup. The Lua files you edit are the
-sandbox you run in. A save goes live in this session within a second, and the
-next step carries a `[LUA VM RELOADED]` reminder plus a refreshed tool list.
-
-- A tool you register is your hand. List it in an agent tool set, wait for the
-  reload, then call it yourself.
-- A command or keybind belongs to the user. You cannot type `/name`. To use
-  that behavior yourself, call the same Lua from a tool, hook, or spawned
-  agent.
-
-Smoke test what you build, in the same session. Write the Lua, let the reload
-land, call the new tool, read the result, fix, repeat. Never end a tooling
-task by telling the user to try it, and never move tool logic into a command
-so someone else can exercise it.
-
-## Read meta.lua first
-
-`~/.config/blitzdenk/meta.lua` is the source of truth for every `blitz.*`
-signature, field, and constant. Before writing code, open it and read the
-class for the calls you need. Read it for event tags, tool name constants,
-every `blitz.cmd` function, and all `REQ_STATUS_*`/`AWAIT_*` values.
+The config is your own sandbox. A registered tool is your hand: list it in
+an agent tool set and call it after the reload. Commands and keybinds belong
+to the user; you cannot type `/name`, so exercise that Lua from a tool, hook,
+or spawned agent. Tool logic stays in tools.
 
 ## Runtime model
 
-Lua runs in three contexts.
+- **Main VM**: config load, commands, keybinds, render callbacks, and the
+  prompt, inject, and approve hooks. Keep it free: it reaps state for every
+  agent.
+- **Sandbox VM**: one per tool call and one per emitted event. It replays
+  the config; config mutation (`add_provider`, `register_tool`,
+  `set_agent_model`, ...) is a no-op. Carry data with `blitz.state`.
 
-- Main VM: config load, commands, keybinds, draw render callbacks, and the
-  prompt, inject, and approve hooks. `blitz.input.get` needs the main thread;
-  inject runs off it.
-- Tool VM: one per tool call. It replays the config but cannot mutate it.
-- Listener VM: one per event. It replays the config but cannot mutate it.
-
-Config mutation (`add_provider`, `register_tool`, `set_agent_model`, ...) is a
-no-op in tool and listener VMs. Use `blitz.state.set/get` for data across
-calls.
-
-`blitz.agent.spawn` works in every VM. `blitz.agent.await` runs only in tool
-and listener VMs. In the main VM it returns the status of a finished agent and
-raises `not available in the main vm` for a running one. In the approve hook
-that error denies the request with `permission hook error: ...`. Keep the main
-thread free; it reaps agent state for every agent.
+`blitz.agent.spawn` works everywhere. `blitz.agent.await` belongs in sandbox
+VMs; in the main VM it returns the status of a finished agent and raises
+`not available in the main vm` for a running one (inside the approve hook
+that denies with `permission hook error: ...`). `blitz.input.get` needs the
+main thread; inject runs off it.
 
 ## Providers and models
 
@@ -66,7 +51,6 @@ local novita = blitz.add_provider({
     type = "openai",               -- "openai" | "response" | "anthropic"
     url = "https://api.novita.ai/openai/v1",
     key_envar = "NOVITA_API_KEY",
-    max_tokens = 32000,
     session_key_header = "x-session-id",
 })
 
@@ -74,7 +58,6 @@ local deepseek = blitz.add_model({
     name = "deepseek/deepseek-v4-flash-0731",
     provider = novita,
     vision = false,
-    replay_reasoning = true,
     cost = { input = 0.14, output = 0.28, cache = 0.028 },
 })
 
@@ -82,80 +65,43 @@ blitz.set_agent_model(blitz.AGENT_GENERAL, deepseek)
 blitz.set_agent_effort(blitz.AGENT_GENERAL, "max")
 ```
 
-`add_provider` and `add_model` return integer handles. `vision` gates image
-pasting, image reads in the read tool, and every tool marked `requires_vision`.
-Set `replay_reasoning` on chat models that
-return reasoning but reject replayed history without that field (DeepSeek, GLM).
-Every agent needs a bound model; unbound agents fail to spawn. Bind with
-`blitz.set_agent_model(agent_type, handle)` or `model = handle` in
-`blitz.add_agent`. Set the effort separately with
-`blitz.set_agent_effort(agent_type, effort)`.
+- Every agent type needs a bound model (`set_agent_model` or `model` in
+  `add_agent`); unbound types fail to spawn.
+- `vision` gates image paste, image reads, and `requires_vision` tools.
+- The first-run wizard writes `~/.config/blitzdenk/provider.lua`, imported
+  by `pcall(require, "provider")`. Edit or delete it to change the provider.
 
-After startup config loads, Blitzdenk copies each agent type's model,
-provider settings, and effort into a session contract. Hot reloads preserve
-existing bindings, including for agents spawned later. Newly registered types
-join the contract when configured. A new session captures the latest config
-again.
+**Session contract**: after startup load, each type's model, provider
+settings, and effort freeze into the session contract. Hot reloads keep it,
+also for agents spawned later; new types join when configured; a new session
+captures the latest config. Outside a reload, a change updates future spawns.
+`force = true` rewrites the contract and queues the swap on live agents of
+that type: idle ones adopt at once, a running one finishes its run on the old
+binding. Type getters can lag mid run; `blitz.agent.get_model/get_effort(id)`
+read the live agent.
 
-Outside hot reload, changing a type's model or effort updates future spawns
-in that session. During reload, an explicit force overrides the contract.
-
-The first-run wizard writes `~/.config/blitzdenk/provider.lua` and `blitz.lua`
-imports it with `pcall(require, "provider")`. Edit or delete that file to
-change provider and model.
-
-## Tool sets
-
-`blitz.tools.*` holds the built-in tool name constants.
-Tool names must be nonempty UTF-8 strings.
-
-`set_agent_tools` replaces the whole set, including defaults.
-`blitz.add_tool(agent_type, tool_name)` adds one tool to the current set.
+## Tool sets and environment
 
 ```lua
 local tools = require("tools")
-
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
-    blitz.tools.BASH,
-    blitz.tools.READ,
-    blitz.tools.WRITE,
-    blitz.tools.EDIT,
-    blitz.tools.PATCH,
-    blitz.tools.GLOB,
-    blitz.tools.GREP,
-    blitz.tools.SKILL,
+    blitz.tools.BASH, blitz.tools.READ, blitz.tools.EDIT,
+    blitz.tools.GLOB, blitz.tools.GREP, blitz.tools.SKILL,
     tools.web_fetch,          -- custom tool from require("tools")
 })
-```
-
-## Image reads
-
-The read tool scales images above the configured limit and returns the result
-as PNG. A format the built-in decoder cannot read is returned unscaled, with
-a note in the tool result. The PNG is reduced further when needed to stay
-within the image byte limit.
-
-```lua
 blitz.set_read_image_max(4096, 4096)
-```
-
-## Env capabilities
-
-Rules form the `<env_capabilities>` catalogue. It is injected once per chat as
-a system-reminder. Each rule names a binary; before prompting the binary
-resolves through the exec pool, so the probe runs over SSH when routing is
-active. A routing change re-resolves and re-appends the catalogue to the chat.
-Rules only show for agents that own the bash tool.
-
-```lua
 blitz.set_capabilities({
     { binary = "rg", rule = "Use rg for fast recursive grep searches." },
 })
 ```
 
-## Custom tools
+- Tool names are nonempty UTF-8 strings.
+- The read tool returns scaled images as PNG and shrinks further to fit the
+  byte limit. A format the decoder cannot read goes out unscaled with a note.
+- Capability rules form the `<env_capabilities>` catalogue, injected once
+  per chat as a system-reminder.
 
-`blitz.register_tool` returns the tool name string for tool sets.
+## Custom tools
 
 ```lua
 local my_tool = blitz.register_tool({
@@ -163,47 +109,32 @@ local my_tool = blitz.register_tool({
     description = "Example tool",
     args = {
         text = { type = "string", description = "some text", required = true },
-        n    = { type = "number", description = "optional count" },
+        id   = { type = "number", description = "agent id" },
     },
     func = function(ctx, call)
         ctx:set_status("running my_tool")
-        if call.arguments.text == "" then
-            error("text is required")
-        end
+        local id = tonumber(call.arguments.id)
+        if call.arguments.text == "" then error("text is required") end
         return { msg = "got: " .. call.arguments.text }
+        -- image: img = { media_type = "image/png", data = blitz.base64.encode(raw) }
     end,
 })
 ```
 
-Schema rules:
-
-- Write `args` as a map keyed by argument name. A list of `{ name = ... }`
-  tables publishes an empty schema and the model then guesses argument names.
-- Use `schema` (a JSON Schema string, max 2048 bytes) for arrays, nested
-  objects, and enums. If both are present, `schema` wins.
-- Blitzdenk does not validate arguments against the schema before the call.
-  Validate critical inputs in the function.
-
-Tool function rules:
-
-- Model-emitted numbers can arrive as strings (`{"id":"65537"}`). Call
-  `tonumber()` before any `blitz.agent.*` call that takes an agent id or integer;
-  those bindings reject a non-number with `not a number`.
-- `error("...")` fails the call. Only the message reaches the chat.
-- Tool results and errors use the same cap as `bash` and `read`: the tail is
-  kept, the full text spills to a file, and the result gets a locator you can
-  page with `read`. `ctx:call` and `ctx:batch` results use the same cap, so a
-  capped result is not complete input for parsing or JSON decoding.
-- Return `{ msg = "..." }`. Attach an image with
-  `img = { media_type = "image/png", data = blitz.base64.encode(raw) }`.
-  Set `exit_loop = true` to end the agent loop.
-- Every provider sends `msg` as tool result text. Images follow as user
-  content: a `user` message on `openai`/`response`, an image block in
-  the same user message on `anthropic`. Strict endpoints such as DeepSeek
-  reject images inside tool messages.
-
-For `ctx`, `call`, and result fields, read `BlitzCtx`, `BlitzCall`, and
-`BlitzToolResult` in `meta.lua`.
+- `args` is a map keyed by argument name. A list of `{ name = ... }` tables
+  publishes an empty schema and the model guesses names.
+- `schema` (JSON Schema string, max 2048 bytes) covers arrays, nested
+  objects, and enums; it wins over `args`. Arguments arrive unvalidated:
+  check critical inputs in `func`.
+- Model numbers can arrive as strings (`{"id":"65537"}`). `tonumber()` them
+  before any `blitz.agent.*` call; those reject strings with `not a number`.
+- `error("...")` fails the call; only the message reaches the chat.
+- Results, errors, and `ctx:call`/`ctx:batch` output share the bash/read
+  cap: tail kept, full text spilled to a file with a locator. A capped string
+  is incomplete input for parsing or JSON decoding.
+- `msg` goes out as tool result text. Images follow as user content: a
+  `user` message on `openai`/`response`, an image block on `anthropic`.
+  Strict endpoints (DeepSeek) reject images inside tool messages.
 
 ## Agents
 
@@ -215,79 +146,9 @@ local researcher = blitz.add_agent({
     effort = "low",
     model = deepseek,
     tools = { blitz.tools.READ, blitz.tools.GREP, blitz.tools.GLOB },
+    skills = { only = { "zig", "blitzdenk-lua" }, except = { "deploy" } },
 })
-```
 
-`blitz.add_agent` returns the agent type handle. A tool or listener VM
-replays the config but cannot register agents, so the call looks the name up
-in the live registry and returns the same handle. A module local set at
-config load stays valid in hooks and tools. An unknown name returns 0, which
-spawns `general`.
-
-An agent id is one integer; the agent tool result carries it as
-`agent_id: <int>`.
-
-Agents spawned inside a tool attach to its timeline row automatically.
-Inside codemode, both direct spawns and `ctx:call` or `ctx:batch` calls to
-`agent` attach to the outer codemode row. `ctx:set_child_id(id)` adds an
-existing agent to the same row; repeated ids appear once.
-
-`on_complete` in `blitz.agent.spawn` attaches a one-shot callback to the run.
-It needs the main VM; in a listener, use `blitz.hooks.agent_complete`. It
-fires once on the main thread when the run ends, after its children. Closing
-or replacing the agent before that fires `blitz.AWAIT_CANCELED` instead, and a
-Lua reload drops the callback.
-
-`background = true` detaches the agent from the timeline. The agent never
-becomes the main agent and streams nothing into it. A finished child with a
-parent queues its final answer into the parent chat.
-Combine it with `on_complete` to build a silent subagent: read the answer
-in the callback with `blitz.agent.result(id)`.
-
-`clean = true` in `blitz.agent.spawn`, or `clean` on the `agent` tool, builds a
-bare agent: no AGENTS.md context, and no `<system-reminder>` injection on any
-step, so `blitz.hooks.inject` never runs for it. A finished background child
-still queues its result notice into a clean parent.
-
-`cwd` in `blitz.agent.spawn` sets the working directory of the child. A relative
-path resolves against the parent agent cwd.
-
-`skills` in `blitz.add_agent` controls which skills the type can see and
-load. `skills = false` turns skills off. A table restricts them:
-
-```lua
-skills = { only = { "zig", "blitzdenk-lua" }, except = { "deploy" } }
-```
-
-`only` is an allowlist; an empty list means all. `except` wins. The filter
-applies to the catalogue, the `skill` tool, and `/skill-<name>`.
-
-For an existing type, including `blitz.AGENT_GENERAL`, call
-`blitz.set_agent_skills(agent_type, filter)` with the same boolean or table.
-The change reaches live agents on their next step.
-
-A skill file can narrow itself in its `metadata` block:
-
-```yaml
-metadata:
-  blitzdenk.deny-agents: "code-reviewer, prose-reviewer"
-  blitzdenk.main-agent-only: "true"
-```
-
-`blitzdenk.deny-agents` is a comma-separated agent type name list. It wins over
-`only`. `blitzdenk.main-agent-only` limits the skill to the runtime main
-agent. Unknown agent names are inert. Agent names match exactly; skill names
-in `only` and `except` match case-insensitively. A skill-side list can only
-deny; it cannot grant a skill that the agent filter denied.
-
-The filter controls the catalogue and the skill load paths. An agent with
-`read` or `bash` can still open the skill file directly.
-
-`blitz.list_agent_types()` returns one row per configured type: `agent_type` is
-the handle `blitz.agent.spawn` takes, plus `name`, `description`, and
-`in_agent_tool`. Use it to map type names from tool arguments to handles.
-
-```lua
 blitz.agent.spawn({
     agent_type = researcher,
     prompt = "Find the registry lock order.",
@@ -300,30 +161,42 @@ blitz.agent.spawn({
 })
 ```
 
-## Agent state and history
+- In a sandbox VM `add_agent` looks the name up and returns the live
+  handle, so a module local set at load stays valid in hooks and tools. An
+  unknown name returns 0, which spawns `general`.
+- `blitz.list_agent_types()` maps type names from tool arguments to handles.
+- The agent tool result carries the id as `agent_id: <int>`.
+- **Timeline**: agents spawned inside a tool attach to its row; inside
+  codemode, direct spawns and `ctx:call`/`ctx:batch` calls to `agent` attach
+  to the outer codemode row. `ctx:set_child_id(id)` adds an existing agent
+  (deduped).
+- **Silent subagent**: `background = true` plus `on_complete`. A finished
+  background child queues its answer into its parent, clean parents included.
+- `on_complete` is main VM only; listeners use `blitz.hooks.agent_complete`.
+  A Lua reload drops the callback.
+- `clean = true` (spawn or agent tool): no AGENTS.md, no system-reminder,
+  so the inject hook never runs for it.
 
-Slots are finite (128) and finished agents keep their slot. History stays
-readable, and `blitz.agent.message` on a finished agent starts a new turn that
-continues the same conversation. Free a slot with `blitz.agent.close`.
-`blitz.agent.spawn` without `parent_id` and without `background = true`
-cancels the running main agent and frees its slot; the old conversation stays
-rendered, the new agent replaces it in the timeline.
+**Slots**: 128. Finished agents keep their slot and history;
+`blitz.agent.message` on one continues the conversation. `blitz.agent.close`
+frees it. A spawn with neither `parent_id` nor `background` replaces the main
+agent: the old run cancels and its slot frees, its conversation stays
+rendered. Unknown agent ids raise.
 
-`blitz.list_agents()` returns one `BlitzAgentRow` per occupied slot, running
-and finished. `state` is one display string; `ctx` is the context fill in
-percent. See `BlitzAgentRow` in `meta.lua` for the fields. The task
-description is set at spawn time: the agent tool takes its `description`
-argument, and `blitz.agent.spawn` takes `task = "..."`.
+**History**: `history` and `history_since_checkpoint` rows can be large;
+read them outside render callbacks. The checkpoint moves on a new prompt or a
+queued user message and resets on session load, rewind, and compaction; a
+cancel keeps it. An unfinished tool exchange leaves model history but stays
+visible.
 
-`blitz.agent.set_task_description(agent_id, text)` replaces the task
-description of a live agent, also mid run. `blitz.agent.get_task_description(
-agent_id)` reads it back. A main agent started from a plain prompt has an
-empty task, so fill it from a hook:
+**Task description**: set at spawn (`task`, or `description` on the agent
+tool). A prompted main agent starts empty; fill it from a hook. The `task` on
+the helper is the loop guard; without it the listener spawns helpers for
+helpers.
 
 ```lua
 blitz.hooks.agent_started(function(ev)
-    if not ev.fresh then return end
-    if blitz.agent.get_task_description(ev.id) ~= "" then return end
+    if not ev.fresh or blitz.agent.get_task_description(ev.id) ~= "" then return end
     local prompt = blitz.agent.get_prompt(ev.id)
     if prompt == "" then return end
     local helper = blitz.agent.spawn({
@@ -338,52 +211,26 @@ blitz.hooks.agent_started(function(ev)
 end)
 ```
 
-The `task` argument on the helper spawn is the loop guard: without it the
-listener spawns a helper for the helper. `blitz.agent.get_prompt(agent_id)`
-returns the user prompt that started the current turn. It is set before
-`agent_started` fires and survives a retry or a cancel continuation.
+## Skill filters
 
-```lua
-local agents = blitz.list_agents()
-for _, a in ipairs(agents) do
-    print(string.format("%s %s %d%% %s", a.name, a.state, a.ctx, a.task))
-end
+`skills` in `add_agent`, or `blitz.set_agent_skills(type, filter)` for an
+existing type (live agents pick it up next step). The filter covers the
+catalogue, the `skill` tool, and `/skill-<name>`; an agent with `read` or
+`bash` can still open the file. Skill names match case-insensitively.
+
+A skill file narrows itself in `metadata`:
+
+```yaml
+metadata:
+  blitzdenk.deny-agents: "code-reviewer, prose-reviewer"
+  blitzdenk.main-agent-only: "true"
 ```
 
-`blitz.agent.get_model(agent_id)` returns the model id the live agent runs on
-right now, `blitz.agent.get_effort(agent_id)` its reasoning effort tag. A
-`set_agent_model`/`set_agent_effort` with `force = true` rewrites the session
-contract and queues the swap on live agents of that type: idle agents adopt
-at once, a running agent keeps pumping data on its previous binding until the
-run ends. Type getters and the render can go stale mid run; the live read
-never does. Unknown agent ids raise an error.
+`deny-agents` matches type names exactly and wins over `only`; unknown names
+are inert. `main-agent-only` limits the skill to the runtime main agent. A
+skill-side list only denies.
 
-`blitz.agent.history(agent_id)` returns the agent conversation as rows
-`{ role, text }`. `text` flattens the message parts, inlining tool calls and
-results; reasoning parts are skipped. Rows can be large; read them outside
-render callbacks.
-
-`blitz.agent.history_since_checkpoint(agent_id)` returns the rows from the user
-prompt that started the current turn. The checkpoint moves when a run starts
-with a new prompt or a queued user message. It resets whenever the history is
-replaced or the agent resets: session load, prompt rewind, compaction. A cancel
-keeps the turn checkpoint. Completed exchanges remain available; an unfinished
-tool exchange is removed from model history while its display remains visible.
-Use it in a `blitz.hooks.agent_complete` listener to capture the finished
-turn for a later consumer:
-
-```lua
-blitz.hooks.agent_complete(function(ev)
-    local rows = blitz.agent.history_since_checkpoint(ev.id)
-    local chunk = {}
-    for i, row in ipairs(rows) do
-        chunk[i] = row.role .. ": " .. row.text
-    end
-    blitz.state.set("last_turn", table.concat(chunk, "\n"))
-end)
-```
-
-## Commands
+## Commands and keybinds
 
 ```lua
 blitz.add_command("plan", function(rem)
@@ -394,89 +241,7 @@ blitz.add_command("plan", function(rem)
     })
     blitz.cmd.message_timeline("user", "[PLAN]: " .. rem)
 end, "plan a task without editing")
-```
 
-The callback always receives one string: the remaining input after the
-command name, `""` when none. The optional description shows next to the
-command in the completion popup.
-
-Two tables split the queue API: `blitz.cmd` holds app commands (`BlitzCmd` in
-`meta.lua`) and `blitz.agent` holds agent bindings (`BlitzAgent` in
-`meta.lua`).
-
-`blitz.cmd.prompt(text)` is the "say something" command: it echoes the text
-into the timeline and sends it to the main agent, or starts a fresh general
-agent if none exists. Use it instead of `message_timeline("user", ...)` (display
-only) or `get_main_agent()` + `blitz.agent.message` (queues silently, no
-timeline echo).
-
-## Selection
-
-`blitz.cmd.select(request, cb)` opens the ask widget from a command and
-returns at once. The request is one table with a `questions` array (1-4
-entries). Each question carries `header`, `question`, `options` (1-8 label
-strings), optional `multi_select` (default false), and optional
-`allow_message` (default true; `false` drops the custom-message row for a
-closed choice). The user answers the
-questions one by one; the last answer submits the whole batch. The callback
-then runs as `cb(answers)`: an array with one answer list per question, in
-request order. Each pick is a table `{ text = "...", index = n }` with a
-1-based `index` for a listed option and no `index` for the custom-message row
-(single-select questions only). `multi_select` questions toggle options with
-`enter` or `space` and commit on their fixed trailing submit row; they have no
-message row. A cancel (`esc`, `cancel` command, session reset, Lua reload)
-reports `cb(nil)`.
-
-```lua
-blitz.add_command("effort", function()
-    blitz.cmd.select({
-        questions = {
-            {
-                header = "Effort",
-                question = "Set reasoning effort for the general agent?",
-                options = { "low", "medium (recommended)", "high" },
-                allow_message = false,
-            },
-        },
-    }, function(answers)
-        if answers then
-            blitz.set_agent_effort(blitz.AGENT_GENERAL, answers[1][1].text)
-            blitz.cmd.message_timeline("system", "effort set to " .. answers[1][1].text)
-        end
-    end)
-end, "pick agent reasoning effort")
-```
-
-`esc` inside a selection cancels only the selection, never an agent run.
-Callbacks run on the main thread, so they may call other `blitz.cmd`
-functions, including another `select`. Permissions from agents take the screen
-first; the selection shows after they resolve. Selections need the TUI; a
-headless run drops them at exit.
-
-## Context ask
-
-`ctx:ask(request)` inside a custom tool uses the same widget and the same
-request table as `blitz.cmd.select`. It blocks until the user resolves every
-question, then returns `blitz.REQ_STATUS_CHOICE` and one answer list per
-question with the same pick shape. A cancel returns `blitz.REQ_STATUS_DENIED`
-and nil. `REQ_STATUS_MESSAGE` is never produced by ask.
-
-`esc` inside an ask (selection or `ctx:ask`) cancels only the ask; for other
-permission types `esc` still stops the whole run.
-
-```lua
-local status, answers = ctx:ask({
-    questions = {
-        { header = "Deploy", question = "Which environment?", options = { "staging", "prod" } },
-    },
-})
-if status ~= blitz.REQ_STATUS_CHOICE then return { msg = "deploy canceled" } end
-local env = answers[1][1].text
-```
-
-## Keybinds
-
-```lua
 blitz.bind("<C-t>", function()
     local f = blitz.get_flags()
     f.show_thinking = not f.show_thinking
@@ -484,122 +249,61 @@ blitz.bind("<C-t>", function()
 end, "toggle thinking output")
 ```
 
-The optional description shows next to the keybind in the dashboard. Without
-it the row falls back to `custom`.
+- Descriptions show in the completion popup (commands) and the dashboard
+  (keybinds, fallback `custom`).
+- `blitz.cmd.prompt(text)` says something as the user: timeline echo plus
+  send to the main agent, or a fresh general agent. `message_timeline` only
+  displays; `blitz.agent.message` queues without echo.
+- Flag defaults: `show_thinking` false, other booleans true,
+  `approval_mode = "default"`.
+- A `blitz.bind` on a default key (`<Tab>`, `<C-n>`, `<C-p>`, `<C-y>`) wins;
+  `blitz.cmp.*` reproduces the popup actions.
+- `blitz.input` edits the box before Enter; `blitz.hooks.prompt` rewrites the
+  text on Enter.
 
-`set_flags` changes only the fields you pass. `get_flags` returns all six:
-`show_thinking`, `show_diffs`, `inline_images`, `notify_on_reload`,
-`debug_log`, and `approval_mode` (`"strict"`, `"default"`, or `"yolo"`).
-Defaults: `show_thinking` false; the other four booleans true;
-`approval_mode` default. `show_diffs = false` hides diff blocks.
-`notify_on_reload` shows a popup after a hot reload.
+## Ask widget
 
-The completion popup answers to `blitz.cmp.next`, `blitz.cmp.prev`, and
-`blitz.cmp.accept`. Each queues one action, the same as the default keys
-`<Tab>`/`<C-n>`, `<C-p>`, and `<C-y>`; a call is a no-op when the popup is
-closed. A custom `blitz.bind` on the same key wins over the default.
-
-## Input box
-
-`blitz.input` reads and writes the text input box.
+`blitz.cmd.select(request, cb)` (commands, returns at once) and
+`ctx:ask(request)` (tools, blocks) open the same widget with the same
+`BlitzAskRequest`. The user answers each question; the last answer submits
+the batch.
 
 ```lua
-blitz.bind("<C-g>", function()
-    blitz.input.set("TODO: ")
-end, "start a todo line")
-
-blitz.bind("<C-e>", function()
-    local t = blitz.input.get()
-    blitz.input.set(t .. "\n-- checked by me")
-end, "sign the input")
+local status, answers = ctx:ask({
+    questions = {
+        { header = "Deploy", question = "Which environment?", options = { "staging", "prod" },
+          allow_message = false },
+    },
+})
+if status ~= blitz.REQ_STATUS_CHOICE then return { msg = "deploy canceled" } end
+local env = answers[1][1].text
 ```
 
-- `get()` returns the raw buffer text. A pasted image shows as its embedded
-  URL. It runs on the main thread only, for example in config, commands,
-  keybinds, and the prompt hook. Tool and listener VMs, and off-thread hooks
-  such as inject, raise an error.
-- `set(text)` replaces the text. The cursor moves to the end.
-- `append(text)` inserts text at the cursor, like typed input. It follows the
-  focused field: the prompt, a permission message, an SSH passphrase, or a
-  wizard text field.
-- `history_prev()` and `history_next()` walk the prompt history into the box,
-  like `<S-Up>` and `<S-Down>`. `history_next` past the newest entry clears
-  the box.
-- `set` and `append` queue a command. The change lands on the next main-loop
-  pass. They are safe from config, commands, tools, and listeners.
-- Combine with the prompt hook: `blitz.hooks.prompt` rewrites the text on
-  Enter. `blitz.input` changes the box before Enter.
+- Cancel: `esc`, the `cancel` command, session reset, or Lua reload.
+  `select` reports `cb(nil)`; `ctx:ask` returns `REQ_STATUS_DENIED, nil`.
+  Ask never produces `REQ_STATUS_MESSAGE`.
+- `esc` cancels only the ask; on other permission types it stops the run.
+- `multi_select` toggles with `enter`/`space` and commits on a trailing
+  submit row.
+- `select` callbacks run on the main thread and may chain more `blitz.cmd`
+  calls, another `select` included. Agent permissions take the screen first.
+  Headless runs drop selections at exit.
 
 ## Hooks
 
-Each event is one registration function under `blitz.hooks`. Calling it adds
-a listener; multiple listeners per event run in registration order.
-Listeners live until the config reloads; a Lua reload clears all listeners
-and re-runs your config.
+**Event listeners** (`blitz.hooks.<event>`): each call adds a listener. All
+listeners of one event run in registration order in one sandbox VM on a
+background thread. The event loop never waits; an `await` delays only the
+listeners behind it. A reload clears every listener and re-runs the config.
+Spawning from `agent_created` or `agent_started` retriggers them: guard it.
 
-Every emitted event runs its listeners in one sandbox Lua VM on a
-background thread, like a tool call. The config re-loads into that VM and
-each listener of the event runs in registration order. The event loop does
-not wait for listeners; a `blitz.agent.await` inside one listener delays only
-the listeners behind it.
+**Prompt hook** (`blitz.hooks.prompt`): the rewrite feeds the full pipeline,
+so it can produce a `/command` or skill call; echo, history, and model see
+the new text. `""` drops the input. Errors log and send the input unchanged.
+`blitz.cmd.prompt` and headless `--prompt` bypass it.
 
-A listener that spawns an agent retriggers `agent_created` and
-`agent_started`. Spawning from those two listeners loops without end.
-
-`agent_started` fires on spawn and on every wake-up: a queued message, a
-background agent result, or a new prompt. `ev.fresh` is true only on the
-first run of a new agent; it is false on continuation runs.
-
-```lua
-blitz.hooks.user_message_sent(function(ev)
-    local id = blitz.agent.spawn({
-        agent_type = blitz.AGENT_GENERAL,
-        prompt = "Summarize in one line: " .. ev.text,
-    })
-    if blitz.agent.await(id) == blitz.AWAIT_COMPLETE then
-        blitz.cmd.message_timeline("agent", blitz.agent.result(id))
-    else
-        blitz.cmd.message_timeline("user", "helper agent failed")
-    end
-end)
-```
-
-Every payload is one table with the fields shown in `BlitzHooks` in `meta.lua`;
-`session_reset` and `mcp_tools_reloaded` listeners take no argument.
-
-## Prompt hook
-
-`blitz.hooks.prompt(fn)` installs one hook that runs on typed input when you
-press Enter. It runs before command and skill dispatch, in the main Lua VM on
-the main thread. Return a string to replace the input. Return nil to send the
-input unchanged. Last registration wins; `blitz.hooks.clear()` removes it.
-
-```lua
-blitz.hooks.prompt(function(text)
-    if text == "go" then
-        return "Plan first, then execute: go"
-    end
-end)
-```
-
-The rewrite applies to the full pipeline. A hook can turn plain text into a
-`/command` or a skill call. Timeline echo, history, and the model all see the
-new text. An empty string drops the input. Hook errors are logged and the input
-goes out unchanged. `blitz.cmd.prompt` and headless `--prompt` text bypass the
-hook.
-
-## Inject hook
-
-`blitz.hooks.inject({ main_only = bool, func = fn, digest = bool })` installs
-one listener that runs on each agent step, right before the system reminder is
-built. `func(agent_id, agent_type_id)` returns a string to append to that
-agent's `<system-reminder>` block, or nil to add nothing. `agent_type_id` is
-the type handle from `blitz.list_agent_types()`. It runs in the main VM.
-Errors are logged and the step continues. Each registration adds a listener;
-listeners run in registration order. `digest` suppresses the text while it
-matches the last text that this listener returned. A clean agent builds no
-reminder at all, so the hook never runs for it. The reminder precedes the user
-prompt.
+**Inject hook** (`blitz.hooks.inject`): `agent_type_id` is the type handle.
+Errors log and the step continues. The reminder precedes the user prompt.
 
 ```lua
 blitz.hooks.inject({
@@ -611,248 +315,117 @@ blitz.hooks.inject({
 })
 ```
 
-## Permission hook
+`blitz.hooks.clear()` removes the prompt, inject, and approve hooks.
 
-`blitz.hooks.approve(fn)` installs one hook that decides every tool
-approval before the approval-mode check. It runs in every approval mode and
-can deny what `--approval yolo` would auto-approve. Last registration wins;
-`blitz.hooks.clear()` removes the approve and inject hooks.
+## Permissions
 
-Return a `BlitzPermissionDecision` table, or `nil` for the normal flow
-(approval mode, then TUI):
+Flow: approve hook → park with a ticket + `permission_requested` → approval
+mode → TUI. Both Lua stages run in every mode and can deny what yolo would
+approve.
 
-- `{ approved = true }` — allow the call. On ask payloads this picks the
-  recommended options for every question (like the headless runner): the
-  first option marked `(recommended)` for single-select, every marked option
-  for multi-select, option one when none is marked.
-- `{ approved = false }` — deny; on ask payloads the whole batch is denied.
-- `{ approved = false, msg = "..." }` — deny, `msg` reaches the model as tool error
-- `{ approved = true, answers = { ... } }` — ask payloads only: one pick list
-  per question. A pick is `{ index = 2 }` for the 1-based option, or
-  `{ text = "..." }` for a custom message. A missing question entry falls
-  back to that question's recommendation. An answer that does not fit its
-  question (empty, several picks on single-select, text where no message row
-  exists) denies the batch. Ignored on other kinds.
-
-A malformed table (missing `approved`) denies with a fixed reason. A hook
-error denies with `permission hook error: <msg>`.
+**Approve hook** (`blitz.hooks.approve`, main VM, last wins): return a
+`BlitzPermissionDecision` or nil for the normal flow.
 
 ```lua
 blitz.hooks.approve(function(p)
-    if p.kind == "diff" and p.path:find("^/tmp/") then
-        return { approved = true }
-    end
+    if p.kind == "diff" and p.path:find("^/tmp/") then return { approved = true } end
     if p.tool == "bash" and p.description:find("rm ") then
         return { approved = false, msg = "no destructive commands" }
     end
     if p.kind == "ask" then
-        -- auto-answer the first question, recommend the rest
-        return { approved = true, answers = { { { index = 1 } } } }
+        return { approved = true, answers = { { { index = 1 } } } } -- rest: recommended
     end
-    return nil
 end)
 ```
 
-The payload is `BlitzPermissionPayload` in `meta.lua`: `agent_id`, `call_id`,
-`kind` (`call|diff|ask`), `tool`, `tool_input` (the raw JSON arguments of
-the call), the agent block (`agent_name`, `agent_description`, `agent_task`,
-`agent_cwd`), plus the kind fields. Ask payloads carry `questions`: an array
-of `{ header, question, options, multi_select, allow_message }` tables, in
-request order; `options` holds the option labels.
-`agent_task` is the current task
-description; it is empty for a main agent until a hook sets it with
-`blitz.agent.set_task_description`. The decision shape is
-`BlitzPermissionDecision` in the same file.
+- Recommended pick: first option marked `(recommended)` on single-select,
+  every marked option on multi-select, option one when none is marked.
+- An answer that misfits its question (empty, several picks on
+  single-select, text without a message row) denies the whole batch.
+- A table without `approved` denies with a fixed reason; a hook error
+  denies with `permission hook error: <msg>`.
+- No ticket exists yet: `blitz.permissions.resolve` inside the hook misses.
 
-The hook runs before the ticket exists, so `blitz.permissions.resolve` from
-inside it always misses.
+**Queue**: decide parked tickets any time with `blitz.permissions.*`, from
+commands, keybinds, or listeners. Snapshots never go stale; only `resolve`
+fails late. Requests of dead agents deny regardless. Mode auto-approval and
+the TUI wait for every `permission_requested` listener.
 
-## Permission queue
+**Judge pattern**: the listener spawns a judge agent that decides by calling
+a custom tool which resolves the ticket; no await, no parsing. Give the judge
+read-only tools plus that tool: its own calls emit permission events, so a
+judge with bash spawns judges forever.
 
-Requests that pass the approve hook untouched park in a pending set, in every
-approval mode. Each parked request gets an integer `ticket`, and Lua can inspect
-and decide parked requests at any time from commands, keybinds, or event
-listeners. `blitz.permissions.list_pending()` returns an array of
-`BlitzPermissionSnapshot`, `blitz.permissions.get(ticket)` one snapshot or
-nil, and `blitz.permissions.resolve(ticket, decision)` decides one ticket. It
-returns `false` for unknown or already-resolved tickets. Snapshots carry
-`ticket`, `agent_id`, `call_id`, `kind`, `tool`, `tool_input`, the agent block,
-and the kind fields, the same shape as the hook payload; `decision` takes the
-same `BlitzPermissionDecision`
-table as the approve hook, including `msg` and ask `answers`. Requests whose
-agent died deny on resolve no matter what the decision says.
-
-`blitz.hooks.permission_requested(fn)` fires for every parked request, before
-the approval-mode check: a listener can deny what yolo would auto-approve. The
-event carries the ticket; fetch details with `blitz.permissions.get`.
-`blitz.get_flags().approval_mode` reads the current mode inside a listener.
-Mode auto-approval and the TUI wait until every listener returned, so a
-listener may spawn agents. Spawn a judge agent; the judge decides by calling a
-custom tool that resolves the ticket. No awaiting, no answer parsing.
-
-Give the judge read-only tools plus the review tool. Tool calls from the judge
-emit their own permission events, and a judge that can run bash spawns more
-judges without end. Unresolved tickets fall back to the approval-mode check,
-then the TUI. A snapshot never goes stale, only `resolve` can fail late.
-Headless `--prompt` runs bypass the Lua stage: they auto-resolve requests
-without the event, picking the recommended options for every ask question.
-
-## Shared state
-
-`blitz.state` is a key-value store shared across config, tools, and listeners.
-
-```lua
-blitz.state.set("my_key", { 1, 2, 3 })
-local v = blitz.state.get("my_key")
-```
+Headless `--prompt` skips both Lua stages and auto-resolves, picking
+recommended ask options.
 
 ## MCP
 
 ```lua
-local pw = blitz.mcp.add({
+blitz.mcp.enable(blitz.mcp.add({
     name = "playwright",
     command = "npx",
     args = { "-y", "@playwright/mcp@latest", "--browser=chromium" },
     tools_prefix = "pw_",
-})
-blitz.mcp.enable(pw)
-```
+}))
 
-Remote servers take `url` instead of `command` and speak streamable http.
-`key` or `key_envar` sends a bearer token (`key_envar` wins), `timeout` is
-per-request seconds (0 disables, default 300). Set exactly one of `url` or
-`command`.
-
-```lua
-local ctx = blitz.mcp.add({
-    name = "context7",
-    url = "https://mcp.context7.com/mcp",
-    key_envar = "CONTEXT7_KEY",
-    timeout = 60,
-    tools_prefix = "c7_",
-})
-blitz.mcp.enable(ctx)
-```
-
-### OAuth servers
-
-`oauth = true` opts a `url` server into OAuth. Nothing opens a browser until
-the user runs `/mcp connect <name>`: it authorizes when needed, then enables
-the server and reloads tools (`mcp_tools_reloaded` fires). `/mcp cancel` stops
-a pending authorization. `key_envar` and `key` still win; with a static key
-the flow never runs. Stdio servers ignore `oauth`.
-
-```lua
 local linear = blitz.mcp.add({
     name = "linear",
-    url = "https://mcp.linear.app/mcp",
+    url = "https://mcp.linear.app/mcp",   -- streamable http
     oauth = true,
     tools_prefix = "lin_",
 })
 ```
 
-Dynamic client registration is used when the server offers it. Otherwise set
-`client_id` (and `client_secret` for confidential clients). `scopes` overrides
-the requested scopes. The callback listens on `127.0.0.1:47823` by default
-(`redirect_port`), falling back to a free port when busy.
+Set exactly one of `url` or `command`.
 
-Tokens live in `oauth/tokens.json` in the XDG state directory
-(`$XDG_STATE_HOME/blitzdenk`, default `~/.local/state/blitzdenk`), keyed by
-server url, so renaming a server keeps its login. Access tokens refresh on
-expiry. Deleting a record or the file logs out. A server that
-answers 401 at load is skipped with a notification naming the connect command.
+**OAuth** (`url` servers, no static key): the browser opens only when the
+user runs `/mcp connect <name>`. It authorizes if needed, enables the server,
+and reloads tools (`mcp_tools_reloaded`). `/mcp cancel` stops it. Dynamic
+client registration runs when offered, else set `client_id`. Tokens live in
+`$XDG_STATE_HOME/blitzdenk/oauth/tokens.json` (default
+`~/.local/state/blitzdenk`), keyed by url, so a rename keeps the login.
+Tokens refresh on expiry; deleting a record logs out. A server answering 401
+at load is skipped with a notification naming the connect command.
 
-## SSH mode
+## SSH
 
-While ssh routing is on, every call (bash, read, write, edit,
-patch, search, `blitz.shell`) wraps in `ssh user@host` instead of running
-locally. Auto approval needs `approval_mode = "yolo"`.
+While routing is on, bash, read, write, edit, patch, search, and
+`blitz.shell` wrap in `ssh user@host`. Auto approval needs
+`approval_mode = "yolo"`.
 
-The TUI owns the connection: `/ssh user@host:~/dir` or `/ssh-<alias>` establishes the
-target, `/ssh off` clears it. Lua only flips the routing flag:
+The TUI owns the connection: `/ssh user@host:~/dir`, `/ssh-<alias>`,
+`/ssh off`. Lua flips routing only (`blitz.ssh.enable/disable`).
+`get_state().active` implies a full target.
 
-```lua
-blitz.ssh.enable()
-blitz.ssh.disable()
-```
+`blitz.shell({ cmd = ..., force_local = true })` runs on this machine (local
+`git status`, `ssh-add`). Use `ctx.cwd` for tool files, `ctx.local_cwd` only
+with `force_local`.
 
-`blitz.ssh.get_state()` reads the live state: `{ active, user, host, cwd }`.
-`active` is true while tool calls actually route through ssh, so it implies a
-target and all three fields are set. After `disable` the target fields stay
-but `active` is false. Safe to call from config, tools, and listeners.
+## Status bar and drawing
 
 ```lua
-local s = blitz.ssh.get_state()
-if s.active then
-    blitz.cmd.message_timeline("system", "routing to " .. s.user .. "@" .. s.host)
-end
-```
-
-`blitz.shell` opts carry `force_local`: true runs the command on this machine
-and skips the ssh wrap. Use it for commands that only make sense locally, like
-`git status` before a push or a local `ssh-add` check.
-
-Use `ctx.cwd` for files the tools see. Use `ctx.local_cwd` only with
-`force_local`.
-
-## UI and status
-
-```lua
-blitz.status_bar_render = function()
+blitz.status_bar_render = function()   -- ANSI color tags render
     local use = blitz.token_usage()
-    return "In:" .. use.input
-        .. " | Out:" .. use.output
+    return "In:" .. use.input .. " | Out:" .. use.output
         .. " | Ctx:" .. math.floor(blitz.context_percent()) .. "%"
 end
-```
 
-The status bar renders ANSI color tags.
-
-## Drawing
-
-`blitz.draw` reserves screen regions and paints them from Lua.
-
-```lua
 local sb = blitz.draw.sidebar({
     side = "left",
     width = 24,
-    render = function(w, h, buf)
+    render = function(w, h, buf, frame)
         buf.box(0, 0, w, h, "muted")
         buf.set_color(1, 1, "sessions", "#A50000")
-        buf.set(1, 2, "active")
-    end,
-})
-
-local panel = blitz.draw.panel({
-    height = 8,
-    place = "between",
-    render = function(w, h, buf)
-        buf.fill(0, 0, w, h, "overlay_dark")
-        buf.set(0, 0, "context")
+        local spin = frame % 10 + 1
+        buf.set(1, 2, string.sub("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", spin, spin))
     end,
 })
 ```
 
-A sidebar spans the full terminal height on its side. A panel attaches to the
-input widget and follows it: `place = "between"` (default) sits it directly
-above the input, `place = "below"` directly under it.
-
-Coordinates are widget-relative, (0,0) top-left. Writes outside the widget
-rect clip silently. Colors are `#RRGGBB` hex or theme names (`text`, `muted`,
-`info`, `err`, ...). `set` writes theme text color, `set_color` a given
-foreground, `fill` a solid background, `rect` a one cell background outline,
-`box` a unicode line border.
-
-Render callbacks run on every drawn frame, up to 60fps while agents run or
-before the first prompt is sent. Afterwards the app draws only on input, so
-animations call `blitz.draw.redraw()` to force frames. Keep the callback pure
-drawing: no awaits, no long work, or frames drop.
-
-The callback receives the app frame counter as fourth argument:
-`function(w, h, buf, frame)`. It counts up on every drawn frame and resets on
-session reset. Use it to drive animations, for example
-`string.sub("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", frame % 10 + 1, frame % 10 + 1)`.
-
-Both calls return a handle with `show()`, `hide()`, `remove()` and
-`set_size(cells)`. One sidebar per side: a second `sidebar` call on the same
-side replaces the first and its handle goes dead.
+- Coordinates are widget-relative, (0,0) top-left; out-of-rect writes clip.
+- Frames run up to 60fps while agents run or before the first prompt;
+  afterwards only on input. Animations call `blitz.draw.redraw()`.
+- Keep render pure drawing: no awaits, no long work, or frames drop.
+- `frame` resets on session reset.
+- A second sidebar on the same side kills the first handle.

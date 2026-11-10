@@ -553,7 +553,7 @@ const AskQuestionDef = LuaType{ .table_def = .{ .name = "BlitzAskQuestion", .fie
 } } };
 const AskQuestionListDef = LuaType{ .raw_refs = .{ .text = "BlitzAskQuestion[]", .refs = &.{AskQuestionDef} } };
 const AskRequestDef = LuaType{ .table_def = .{ .name = "BlitzAskRequest", .fields = &.{
-    .{ .name = "questions", .ty = AskQuestionListDef, .desc = "1-4 independent questions, answered in one widget" },
+    .{ .name = "questions", .ty = AskQuestionListDef, .desc = "1-8 independent questions, answered in one widget" },
 } } };
 const AskPickDef = LuaType{ .table_def = .{ .name = "BlitzAskPick", .fields = &.{
     .{ .name = "text", .ty = LuaType.string, .desc = "picked option text, or the custom message" },

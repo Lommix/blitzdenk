@@ -75,7 +75,7 @@
 ---@field allow_message? boolean
 
 ---@class BlitzAskRequest
----1-4 independent questions, answered in one widget
+---1-8 independent questions, answered in one widget
 ---@field questions BlitzAskQuestion[]
 
 ---@class BlitzAskPick
