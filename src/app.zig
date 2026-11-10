@@ -12,6 +12,10 @@ const COMMAND_COMPLETION_ROWS = 64;
 const WIDGET_PAD_X: u16 = 2;
 const COMPOSER_PROMPT: []const u8 = "❯";
 const PASSPHRASE_PROMPT: []const u8 = "❯ Passphrase or password: ";
+const PERM_FIELD_PROMPT: []const u8 = "> ";
+const PERM_FIELD_MAX_ROWS: u16 = 10;
+/// Column of the call/diff message field, under the `>` of the option rows.
+const PERM_FIELD_LABEL_COLS: u16 = 7;
 
 const FieldStyle = struct {
     prompt: []const u8,
@@ -2169,11 +2173,9 @@ pub const App = struct {
 
         const input_height: u16 = blk: {
             switch (app.input_mode) {
-                .text, .perm_message, .passphrase => {
+                .text, .passphrase => {
                     const shown: r.clipboard.Display = switch (app.input_mode) {
                         .text => app.displayInput(frame_alloc),
-                        .perm_message => |pm| r.clipboard.toDisplay(frame_alloc, pm.field.slice(), pm.field.cursor) catch
-                            .{ .text = pm.field.slice(), .cursor = pm.field.cursor },
                         .passphrase => |pp| .{ .text = pp.field.slice(), .cursor = pp.field.cursor },
                         else => .{ .text = "", .cursor = 0 },
                     };
@@ -2184,19 +2186,21 @@ pub const App = struct {
                 },
                 .wizard => break :blk 18,
                 .session_picker => |*picker| break :blk @intCast(@min(6 + @max(picker.rows.len, 1), main_area.height -| 1)),
-                .perm_select => {
+                .perm_select, .perm_message => {
+                    const field_rows = permFieldRows(app, frame_alloc, inputContentWidth(main_area.width) -| 2);
+                    const extra = (field_rows orelse 1) -| 1;
                     if (app.active_permission) |entry| {
                         if (entry.payload == .ask) {
-                            break :blk askPermissionInputHeight(app, main_area.width, main_area.height);
+                            break :blk askPermissionInputHeight(app, main_area.width, main_area.height, field_rows);
                         }
                         if (entry.payload == .call) {
                             const rows = text_utils.wrappedRowCount(entry.payload.call.description, main_area.width -| 7);
-                            break :blk @min(8 +| rows, main_area.height -| 1);
+                            break :blk @min(8 +| rows +| extra, main_area.height -| 1);
                         }
-                        break :blk 9;
+                        break :blk @min(9 +| extra, main_area.height -| 1);
                     }
                     _ = app.active_selection orelse break :blk 9;
-                    break :blk askPermissionInputHeight(app, main_area.width, main_area.height);
+                    break :blk askPermissionInputHeight(app, main_area.width, main_area.height, field_rows);
                 },
             }
         };
@@ -2472,7 +2476,11 @@ pub const App = struct {
     }
 
     pub fn moveCursorVertical(self: *App, delta: i32) bool {
-        const width: usize = inputTextWidth(inputContentWidth(self.widget_frame_input_area.width), modePromptCols(&self.input_mode));
+        const content_width = inputContentWidth(self.widget_frame_input_area.width);
+        const width: usize = switch (self.input_mode) {
+            .perm_message => permFieldTextWidth(self, content_width -| 2),
+            else => inputTextWidth(content_width, modePromptCols(&self.input_mode)),
+        };
         if (width == 0) return false;
 
         var arena = std.heap.ArenaAllocator.init(self.gpa);
@@ -3670,8 +3678,7 @@ fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, prog
     switch (app.input_mode) {
         .text => renderInputContent(app, arena, input_area, buf),
         .passphrase => renderPassphraseInput(app, arena, input_area, buf),
-        .perm_message => renderPermMessageContent(app, arena, input_area, buf),
-        .perm_select => renderPermissionContent(app, input_area, buf),
+        .perm_select, .perm_message => renderPermissionContent(app, arena, input_area, buf),
         .wizard => renderWizardContent(app, arena, input_area, buf),
         .session_picker => renderSessionPickerContent(app, arena, input_area, buf),
     }
@@ -3735,13 +3742,36 @@ fn renderPassphraseInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, 
     }, buf);
 }
 
-fn renderPermMessageContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const pm = &app.input_mode.perm_message;
-    const display: r.clipboard.Display = r.clipboard.toDisplay(arena, pm.field.slice(), pm.field.cursor) catch
+fn permMessageDisplay(app: *App, arena: std.mem.Allocator) ?r.clipboard.Display {
+    const pm = switch (app.input_mode) {
+        .perm_message => |*pm| pm,
+        else => return null,
+    };
+    return r.clipboard.toDisplay(arena, pm.field.slice(), pm.field.cursor) catch
         .{ .text = pm.field.slice(), .cursor = pm.field.cursor };
+}
+
+/// Text columns of the permission message field inside a dialog of
+/// `inner_width`: row indent, the call/diff label column, the prompt.
+fn permFieldTextWidth(app: *App, inner_width: u16) u16 {
+    const label_cols: u16 = if (app.askSession() != null) 0 else PERM_FIELD_LABEL_COLS;
+    return inputTextWidth(inner_width -| 1 -| label_cols, promptCols(PERM_FIELD_PROMPT));
+}
+
+/// Wrapped rows of the open permission message field; null while no field
+/// is open.
+fn permFieldRows(app: *App, arena: std.mem.Allocator, inner_width: u16) ?u16 {
+    const display = permMessageDisplay(app, arena) orelse return null;
+    const counted = r.tui.input_layout.rowCount(arena, display.text, permFieldTextWidth(app, inner_width)) catch 1;
+    return @intCast(std.math.clamp(counted, 1, PERM_FIELD_MAX_ROWS));
+}
+
+/// Draw the open permission message field into its dialog row.
+fn renderPermField(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+    const display = permMessageDisplay(app, arena) orelse return;
     renderFieldWidget(app, arena, display.text, display.cursor, area, .{
-        .prompt = COMPOSER_PROMPT,
-        .prompt_style = .{ .fg = app.theme.muted },
+        .prompt = PERM_FIELD_PROMPT,
+        .prompt_style = .{ .fg = app.theme.text },
         .text = fieldTextStyle(app),
     }, buf);
     if (app.screenshot_buf != null) {
@@ -5446,7 +5476,7 @@ fn currentSelection(app: *App) u8 {
     };
 }
 
-fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn renderPermissionContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     const block: r.tui.Block = .{
         .style = .{ .fg = app.theme.warn },
         .borders = .{ .bottom = true, .left = true, .right = true },
@@ -5456,14 +5486,15 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
     const inner = block.innerArea(area);
     if (inner.width == 0 or inner.height == 0) return;
 
+    const field_rows = permFieldRows(app, arena, inner.width);
     const entry = app.active_permission orelse {
         _ = app.active_selection orelse return;
-        renderAskWidget(app, inner, buf);
+        renderAskWidget(app, arena, inner, field_rows, buf);
         return;
     };
 
     if (entry.payload == .ask) {
-        renderAskWidget(app, inner, buf);
+        renderAskWidget(app, arena, inner, field_rows, buf);
         return;
     }
 
@@ -5496,10 +5527,20 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
     const count: usize = if (is_plan) 4 else 3;
 
     const cur_sel = currentSelection(app);
+    const bottom = inner.y +| inner.height;
     for (0..count) |i| {
         const y = inner.y + header_rows + @as(u16, @intCast(i));
-        if (y >= inner.y +| inner.height) break;
-        const selected = cur_sel == @as(u8, @intCast(i));
+        if (y >= bottom) break;
+        if (field_rows != null and i == count - 1) {
+            renderPermField(app, arena, .{
+                .x = inner.x + 1 + PERM_FIELD_LABEL_COLS,
+                .y = y,
+                .width = inner.width -| 1 -| PERM_FIELD_LABEL_COLS,
+                .height = @min(field_rows.?, bottom -| y),
+            }, buf);
+            break;
+        }
+        const selected = field_rows == null and cur_sel == @as(u8, @intCast(i));
         const style: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .reverse = selected } };
         const label = if (is_plan)
             (if (selected) plan_labels_sel[i] else plan_labels[i])
@@ -5509,18 +5550,19 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
     }
 }
 
-fn renderAskWidget(app: *App, inner: r.tui.Rect, buf: *r.tui.Buffer) void {
+fn renderAskWidget(app: *App, arena: std.mem.Allocator, inner: r.tui.Rect, field_rows: ?u16, buf: *r.tui.Buffer) void {
     const s = app.askSession() orelse return;
-    r.ask_session.render(s, .{
+    const field_area = r.ask_session.render(s, .{
         .accent = app.theme.info,
         .muted = app.theme.muted,
         .text = app.theme.text,
-    }, inner, buf);
+    }, inner, field_rows, buf) orelse return;
+    renderPermField(app, arena, field_area, buf);
 }
 
-fn askPermissionInputHeight(app: *App, area_width: u16, area_height: u16) u16 {
+fn askPermissionInputHeight(app: *App, area_width: u16, area_height: u16, field_rows: ?u16) u16 {
     const s = app.askSession() orelse return 9;
-    return r.ask_session.widgetHeight(s.questions, area_width, area_height);
+    return r.ask_session.widgetHeight(s.questions, area_width, area_height, field_rows);
 }
 
 fn formatTokenCount(dest: []u8, count: u64) []const u8 {

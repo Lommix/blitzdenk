@@ -221,8 +221,9 @@ fn optionRows(q: Question, width: u16) u16 {
 
 /// Input-area height for the ask widget, borders included. Sized for the
 /// tallest question so switching tabs does not resize the widget; reserves
-/// the tab headline row only for multi-question requests.
-pub fn widgetHeight(questions: []const Question, area_width: u16, area_height: u16) u16 {
+/// the tab headline row only for multi-question requests. `field_rows` grows
+/// the message row while the caller's message field is open.
+pub fn widgetHeight(questions: []const Question, area_width: u16, area_height: u16, field_rows: ?u16) u16 {
     const width = area_width -| 7;
     var line_buf: [LINE_MAX]u8 = undefined;
     var rows: u16 = 0;
@@ -230,6 +231,7 @@ pub fn widgetHeight(questions: []const Question, area_width: u16, area_height: u
         rows = @max(rows, text_utils.wrappedRowCount(headerLine(&line_buf, q), width) +| optionRows(q, width));
     }
     rows +|= @intFromBool(questions.len > 1);
+    rows +|= (field_rows orelse 1) -| 1;
     return @min(rows +| 6, area_height -| 1);
 }
 
@@ -239,10 +241,12 @@ pub const Colors = struct {
     text: tui.Color,
 };
 
-pub fn render(session: *const Session, colors: Colors, inner: tui.Rect, buf: *tui.Buffer) void {
+/// Draw the active question. With `field_rows` set, the message row is left
+/// blank for the caller's message field and its area is returned.
+pub fn render(session: *const Session, colors: Colors, inner: tui.Rect, field_rows: ?u16, buf: *tui.Buffer) ?tui.Rect {
     const x = inner.x + 1;
     const width = inner.width -| 1;
-    if (width == 0 or inner.height == 0) return;
+    if (width == 0 or inner.height == 0) return null;
     const bottom = inner.y +| inner.height;
 
     var y = inner.y;
@@ -253,12 +257,15 @@ pub fn render(session: *const Session, colors: Colors, inner: tui.Rect, buf: *tu
 
     const q = session.questions[session.active];
     var line_buf: [LINE_MAX]u8 = undefined;
-    const max_q_rows = bottom -| y -| optionRows(q, width) -| 1;
+    const max_q_rows = bottom -| y -| optionRows(q, width) -| ((field_rows orelse 1) -| 1) -| 1;
     const q_rows = text_utils.renderWrappedText(buf, headerLine(&line_buf, q), x, y, width, max_q_rows, 0, .{ .fg = colors.accent });
 
     y = y +| 1 +| q_rows;
     for (0..rowCount(q)) |row| {
         if (y >= bottom) break;
+        if (field_rows != null and row >= q.options.len and q.hasMessageRow()) {
+            return .{ .x = x, .y = y, .width = width, .height = @min(field_rows.?, bottom -| y) };
+        }
         const selected = session.cursor() == row;
         const style: tui.Style = .{ .fg = colors.text, .modifier = .{ .reverse = selected } };
         const line = rowLine(&line_buf, q, row, selected, session.isChecked(session.active, row));
@@ -266,6 +273,7 @@ pub fn render(session: *const Session, colors: Colors, inner: tui.Rect, buf: *tu
         if (used == 0) break;
         y +|= used;
     }
+    return null;
 }
 
 fn renderTabs(session: *const Session, colors: Colors, x: u16, y: u16, width: u16, buf: *tui.Buffer) void {
@@ -462,7 +470,7 @@ test "render draws tab headline, checkboxes, and the active row" {
     const inner = tui.Rect{ .x = 0, .y = 0, .width = 58, .height = 22 };
     const colors = Colors{ .accent = .{ .rgb = .{ .r = 122, .g = 162, .b = 247 } }, .muted = .{ .rgb = .{ .r = 128, .g = 128, .b = 128 } }, .text = .{ .rgb = .{ .r = 192, .g = 202, .b = 245 } } };
 
-    render(&session, colors, inner, &buf);
+    _ = render(&session, colors, inner, null, &buf);
 
     // Tab headline: three numbers, tab 1 active (inverted).
     try std.testing.expectEqual(@as(u21, '1'), buf.get(1, 0).char);
@@ -487,7 +495,7 @@ test "render draws tab headline, checkboxes, and the active row" {
     session.toggle();
 
     buf.clear();
-    render(&session, colors, inner, &buf);
+    _ = render(&session, colors, inner, null, &buf);
 
     try std.testing.expectEqual(@as(u21, '✓'), buf.get(1, 0).char);
     try std.testing.expectEqual(@as(u21, '1'), buf.get(2, 0).char);
@@ -501,9 +509,36 @@ test "render draws tab headline, checkboxes, and the active row" {
     while (y < 12) : (y += 1) try std.testing.expect(!rowContains(&buf, y, "enter message"));
 }
 
+test "render reserves the message row for an open field" {
+    var session = Session.init(test_questions[0..1]);
+    defer session.deinit();
+    session.moveCursor(2);
+
+    var buf = try tui.Buffer.init(std.testing.allocator, .{ .width = 60, .height = 24 });
+    defer buf.deinit();
+    const colors = Colors{ .accent = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .muted = .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, .text = .{ .rgb = .{ .r = 7, .g = 8, .b = 9 } } };
+    const inner = tui.Rect{ .x = 0, .y = 0, .width = 58, .height = 22 };
+
+    const field = render(&session, colors, inner, 3, &buf).?;
+    try std.testing.expectEqual(tui.Rect{ .x = 1, .y = 4, .width = 57, .height = 3 }, field);
+    try std.testing.expect(rowContains(&buf, 2, "OAuth"));
+    try std.testing.expect(!rowContains(&buf, 4, "enter message"));
+
+    // Multi-select questions have no message row to reserve.
+    var multi = Session.init(test_questions[2..3]);
+    defer multi.deinit();
+    try std.testing.expect(render(&multi, colors, inner, 3, &buf) == null);
+}
+
+test "widgetHeight grows with the open field" {
+    const q = test_questions[0];
+    try std.testing.expectEqual(widgetHeight(&.{q}, 80, 40, null), widgetHeight(&.{q}, 80, 40, 1));
+    try std.testing.expectEqual(widgetHeight(&.{q}, 80, 40, null) + 2, widgetHeight(&.{q}, 80, 40, 3));
+}
+
 test "widgetHeight reserves the tab row only for multi-question requests" {
     const q = test_questions[0];
-    try std.testing.expectEqual(widgetHeight(&.{q}, 80, 40) + 1, widgetHeight(&.{ q, q }, 80, 40));
+    try std.testing.expectEqual(widgetHeight(&.{q}, 80, 40, null) + 1, widgetHeight(&.{ q, q }, 80, 40, null));
 }
 
 test "widgetHeight counts the checkbox width of multi-select rows" {
@@ -514,7 +549,7 @@ test "widgetHeight counts the checkbox width of multi-select rows" {
     const single = [_]Question{.{ .header = "h", .question = "q?", .options = &.{ .{ .label = label }, .{ .label = label } }, .allow_message = false }};
     const multi = [_]Question{.{ .header = "h", .question = "q?", .options = &.{ .{ .label = label }, .{ .label = label } }, .multi_select = true }};
     // multi: two doubled option rows plus the submit row, single: two rows.
-    try std.testing.expectEqual(widgetHeight(&single, 80, 60) + 3, widgetHeight(&multi, 80, 60));
+    try std.testing.expectEqual(widgetHeight(&single, 80, 60, null) + 3, widgetHeight(&multi, 80, 60, null));
 }
 
 test "long lines keep their cursor prefix" {
@@ -536,7 +571,7 @@ test "one-question request renders without a tab headline" {
 
     var buf = try tui.Buffer.init(std.testing.allocator, .{ .width = 60, .height = 24 });
     defer buf.deinit();
-    render(&session, .{ .accent = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .muted = .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, .text = .{ .rgb = .{ .r = 7, .g = 8, .b = 9 } } }, .{ .x = 0, .y = 0, .width = 58, .height = 22 }, &buf);
+    _ = render(&session, .{ .accent = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .muted = .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, .text = .{ .rgb = .{ .r = 7, .g = 8, .b = 9 } } }, .{ .x = 0, .y = 0, .width = 58, .height = 22 }, null, &buf);
     try std.testing.expectEqual(@as(u21, '['), buf.get(1, 0).char);
     try std.testing.expect(rowContains(&buf, 0, "Which method?"));
 }
