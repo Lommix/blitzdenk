@@ -147,7 +147,12 @@ pub const Store = struct {
         if (change == .interrupted_exchange) try self.interruptions.append(self.gpa, id);
         switch (change) {
             .append => {
-                for (wire) |message| try self.enqueueLocked(.{ .kind = .message, .agentID = id, .message = message });
+                const now = wallMillis(self.io);
+                for (wire) |message| {
+                    var stamped = message;
+                    stamped.time_ms = now;
+                    try self.enqueueLocked(.{ .kind = .message, .agentID = id, .message = stamped });
+                }
                 if (self.main == id) for (messages) |message| {
                     if (message.role != .assistant) continue;
                     var display_arena = std.heap.ArenaAllocator.init(self.gpa);
@@ -491,6 +496,8 @@ pub const Loaded = struct {
     problem: ?[]const u8 = null,
     holds_chat: bool = false,
     repairs: []const Record = &.{},
+    /// Every accepted journal record in order, superseded history included.
+    records: []const Record = &.{},
 };
 
 const Exchange = struct {
@@ -751,6 +758,7 @@ pub fn load(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, name: []cons
     var accepted = lines.accepted;
     var replay = Replay{ .alloc = alloc };
     var problem: ?[]const u8 = null;
+    var records: std.ArrayList(Record) = .empty;
     while (try lines.next()) |line| {
         const record = std.json.parseFromSliceLeaky(Record, alloc, line, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch |err| {
             if (err == error.OutOfMemory) return err;
@@ -762,6 +770,7 @@ pub fn load(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, name: []cons
             problem = @errorName(err);
             break;
         };
+        try records.append(alloc, record);
         accepted = lines.accepted;
     }
     if (lines.torn) problem = "UnterminatedRecord";
@@ -802,7 +811,7 @@ pub fn load(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, name: []cons
         agent.metadata.chat = agent.history.items;
         if (replay.main == agent.metadata.id) main_metadata = agent.metadata else try retained.append(alloc, agent.metadata);
     }
-    return .{ .header = header, .accepted_bytes = accepted, .problem = problem, .holds_chat = replay.holds_chat, .repairs = repairs.items, .save = .{
+    return .{ .header = header, .accepted_bytes = accepted, .problem = problem, .holds_chat = replay.holds_chat, .repairs = repairs.items, .records = records.items, .save = .{
         .chat = if (main_metadata) |main| main.chat else &.{},
         .timeline = replay.timeline.items,
         .main_agent = replay.main,
@@ -1234,4 +1243,19 @@ test "journal restores absolute per-agent usage and compaction token state" {
     try std.testing.expect(!rewound.save.main_metadata.?.tokens.context_from_provider);
     try std.testing.expectEqual(@as(u64, 0), rewound.save.main_metadata.?.tokens.context_tokens);
     try std.testing.expectEqualDeep(tokens.usage, rewound.save.main_metadata.?.tokens.usage);
+}
+
+test "published messages carry a wall clock stamp" {
+    var fixture: TestLog = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const store = &fixture.store;
+    try fixture.declare(1);
+    try store.enqueue(.{ .kind = .main_agent, .agentID = 1 });
+    try store.publish(1, .append, &.{sdk.UserMessage("hello")});
+    try store.flush();
+    const loaded = try fixture.read();
+    try std.testing.expect(loaded.problem == null);
+    try std.testing.expect(loaded.save.chat[0].time_ms > 0);
+    try std.testing.expectEqual(@as(usize, 3), loaded.records.len);
 }

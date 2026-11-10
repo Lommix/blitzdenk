@@ -312,6 +312,7 @@ pub fn main(init: std.process.Init) !void {
                 \\prompt "STRING"      run in current cwd with initial input
                 \\continue [ID]        resume a session in cwd (default: most recent)
                 \\sessions             pick a recorded session in cwd to continue
+                \\eval ID              print a recorded session in cwd as JSON
                 \\update               download and replace the running binary
                 \\cleanup              delete tmp artifacts and the debug log
                 \\
@@ -459,15 +460,10 @@ fn evalCli(
     const name = try session_store.fileName(arena, id);
     const loaded = (try session_store.load(arena, io, base, name)) orelse failEval("session '{s}' not found", .{id});
     if (loaded.problem) |reason| failEval("session '{s}' has a corrupt journal: {s}", .{ id, reason });
-    var rendered: std.Io.Writer.Allocating = .init(arena);
-    transcript.writeJson(arena, &loaded.header, &loaded.save, &rendered.writer) catch |err| switch (err) {
-        error.CyclicAgentTree => failEval("session '{s}' has a corrupt agent tree", .{id}),
-        else => return err,
-    };
-    try rendered.writer.writeByte('\n');
     var out_buffer: [8192]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(io, &out_buffer);
-    try out.interface.writeAll(rendered.written());
+    try transcript.writeJson(arena, &loaded, &out.interface);
+    try out.interface.writeByte('\n');
     try out.interface.flush();
 }
 
