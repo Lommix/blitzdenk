@@ -5,6 +5,8 @@ const text_utils = tui.text_utils;
 
 const MAX_QUESTIONS = permissions.MAX_QUESTIONS;
 const MAX_OPTIONS = permissions.MAX_OPTIONS;
+const MAX_QUESTIONS_RULE = std.fmt.comptimePrint("too many questions (max {d})", .{MAX_QUESTIONS});
+const MAX_OPTIONS_RULE = std.fmt.comptimePrint("too many options (max {d})", .{MAX_OPTIONS});
 const Question = permissions.Question;
 const Answer = permissions.Answer;
 const Answers = permissions.Answers;
@@ -19,12 +21,12 @@ pub const Violation = struct {
 
 pub fn validate(questions: []const Question) ?Violation {
     if (questions.len == 0) return .{ .rule = "questions must contain at least one entry" };
-    if (questions.len > MAX_QUESTIONS) return .{ .rule = "too many questions (max 4)" };
+    if (questions.len > MAX_QUESTIONS) return .{ .rule = MAX_QUESTIONS_RULE };
     for (questions, 0..) |q, i| {
         if (q.header.len == 0) return .{ .rule = "each question needs a non-empty header", .question = i };
         if (q.question.len == 0) return .{ .rule = "each question needs a non-empty question text", .question = i };
         if (q.options.len == 0) return .{ .rule = "each question needs at least one option", .question = i };
-        if (q.options.len > MAX_OPTIONS) return .{ .rule = "too many options (max 8)", .question = i };
+        if (q.options.len > MAX_OPTIONS) return .{ .rule = MAX_OPTIONS_RULE, .question = i };
         for (q.options, 0..) |opt, j| {
             if (opt.label.len == 0) return .{ .rule = "each option needs a label", .question = i, .option = j };
         }
@@ -313,7 +315,8 @@ test "validate names each failing rule" {
     try std.testing.expect(validate(&ok) == null);
 
     try expectMessage(alloc, "questions must contain at least one entry", validate(&.{}));
-    try expectMessage(alloc, "too many questions (max 4)", validate(&.{ one, one, one, one, one }));
+    const too_many: [MAX_QUESTIONS + 1]Question = @splat(one);
+    try expectMessage(alloc, "too many questions (max 8)", validate(&too_many));
     try expectMessage(alloc, "question 1: each question needs a non-empty header", validate(&.{.{ .question = "q?", .options = &.{.{ .label = "a" }} }}));
     try expectMessage(alloc, "question 1: each question needs a non-empty question text", validate(&.{.{ .header = "h", .options = &.{.{ .label = "a" }} }}));
     try expectMessage(alloc, "question 1: each question needs at least one option", validate(&.{.{ .header = "h", .question = "q?" }}));

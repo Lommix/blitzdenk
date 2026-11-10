@@ -1,7 +1,7 @@
 const std = @import("std");
 const AgentId = @import("agent-id").AgentId;
 
-pub const MAX_QUESTIONS = 4;
+pub const MAX_QUESTIONS = 8;
 pub const MAX_OPTIONS = 8;
 
 pub const ToolDiff = struct {
@@ -81,7 +81,7 @@ pub fn optionBit(index: usize) u8 {
     return @as(u8, 1) << @intCast(index);
 }
 
-/// One ask request: up to four questions.
+/// One ask request: up to `MAX_QUESTIONS` questions.
 pub const AskPayload = struct {
     questions: []const Question,
 };

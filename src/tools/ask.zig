@@ -1,22 +1,26 @@
+const std = @import("std");
 const r = @import("root.zig");
 const ask_session = r.r.ask_session;
 const permissions = r.r.permissions;
 
+const MAX_QUESTIONS_TEXT = std.fmt.comptimePrint("{d}", .{permissions.MAX_QUESTIONS});
+const MAX_OPTIONS_TEXT = std.fmt.comptimePrint("{d}", .{permissions.MAX_OPTIONS});
+
 pub const AskTool = r.Tool{
     .def = .{
         .name = "ask",
-        .description =
-        \\Ask the user multiple-choice questions when you cannot resolve ambiguities on your own.
-        \\Batch every currently unblocked, independent question into one call (max 4 questions); never batch
-        \\questions whose answer depends on another question of the same call. Each question needs 1-8
-        \\options with a short label and an optional one-sentence description. Set multi_select = true when several
-        \\options apply together (needs at least 2 options; the user toggles several and cannot type a
-        \\custom message). Put the recommended option first and suffix its label with "(recommended)";
-        \\headless runs take the marked options automatically. Answers come back numbered, one line per
-        \\question, in request order. Pressing esc cancels only the ask, not the agent run.
-        \\
-        ,
-        .prompt_snippet = "Ask the user up to 4 independent questions in one call",
+        .description = std.fmt.comptimePrint(
+            \\Ask the user multiple-choice questions when you cannot resolve ambiguities on your own.
+            \\Batch every currently unblocked, independent question into one call (max {d} questions); never batch
+            \\questions whose answer depends on another question of the same call. Each question needs 1-{d}
+            \\options with a short label and an optional one-sentence description. Set multi_select = true when several
+            \\options apply together (needs at least 2 options; the user toggles several and cannot type a
+            \\custom message). Put the recommended option first and suffix its label with "(recommended)";
+            \\headless runs take the marked options automatically. Answers come back numbered, one line per
+            \\question, in request order. Pressing esc cancels only the ask, not the agent run.
+            \\
+        , .{ permissions.MAX_QUESTIONS, permissions.MAX_OPTIONS }),
+        .prompt_snippet = std.fmt.comptimePrint("Ask the user up to {d} independent questions in one call", .{permissions.MAX_QUESTIONS}),
         .parameters_schema =
         \\{
         \\  "type": "object",
@@ -24,35 +28,35 @@ pub const AskTool = r.Tool{
         \\      "questions": {
         \\          "type": "array",
         \\          "minItems": 1,
-        \\          "maxItems": 4,
-        \\          "items": {
-        \\              "type": "object",
-        \\              "properties": {
-        \\                  "header": {"type": "string", "description": "Very short label displayed as a chip/tag. Examples: 'Auth method', 'Library', 'Approach'."},
-        \\                  "question": {"type": "string", "description": "The complete question to ask the user. Should be clear, specific, and end with a question mark."},
-        \\                  "options": {
-        \\                      "type": "array",
-        \\                      "minItems": 1,
-        \\                      "maxItems": 8,
-        \\                      "items": {
-        \\                          "type": "object",
-        \\                          "properties": {
-        \\                              "label": {"type": "string", "description": "Required, non-empty user-facing label: 1-5 words, plus an optional '(recommended)' suffix."},
-        \\                              "description": {"type": "string", "description": "One short sentence explaining impact/tradeoff if selected. May be empty."}
-        \\                          },
-        \\                          "required": ["label"],
-        \\                          "additionalProperties": false
-        \\                      }
-        \\                  },
-        \\                  "multi_select": {"type": "boolean", "description": "Let the user toggle several options at once. Requires at least 2 options; no custom-message row. Default false."}
-        \\              },
-        \\              "required": ["header", "question", "options"],
-        \\              "additionalProperties": false
-        \\          }
-        \\      }
-        \\  },
-        \\  "required": ["questions"]
-        \\}
+        ++ "\n          \"maxItems\": " ++ MAX_QUESTIONS_TEXT ++ ",\n" ++
+            \\          "items": {
+            \\              "type": "object",
+            \\              "properties": {
+            \\                  "header": {"type": "string", "description": "Very short label displayed as a chip/tag. Examples: 'Auth method', 'Library', 'Approach'."},
+            \\                  "question": {"type": "string", "description": "The complete question to ask the user. Should be clear, specific, and end with a question mark."},
+            \\                  "options": {
+            \\                      "type": "array",
+            \\                      "minItems": 1,
+        ++ "\n                      \"maxItems\": " ++ MAX_OPTIONS_TEXT ++ ",\n" ++
+            \\                      "items": {
+            \\                          "type": "object",
+            \\                          "properties": {
+            \\                              "label": {"type": "string", "description": "Required, non-empty user-facing label: 1-5 words, plus an optional '(recommended)' suffix."},
+            \\                              "description": {"type": "string", "description": "One short sentence explaining impact/tradeoff if selected. May be empty."}
+            \\                          },
+            \\                          "required": ["label"],
+            \\                          "additionalProperties": false
+            \\                      }
+            \\                  },
+            \\                  "multi_select": {"type": "boolean", "description": "Let the user toggle several options at once. Requires at least 2 options; no custom-message row. Default false."}
+            \\              },
+            \\              "required": ["header", "question", "options"],
+            \\              "additionalProperties": false
+            \\          }
+            \\      }
+            \\  },
+            \\  "required": ["questions"]
+            \\}
         ,
     },
     .func = &run,

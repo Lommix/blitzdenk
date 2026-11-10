@@ -318,7 +318,7 @@ Interview the user relentlessly about every aspect of the task until you reach a
 walking down each branch of the design tree and resolving dependencies between decisions one by one.
 
 Rules:
-- Ask all currently unblocked questions in ONE ask request (up to four per call), each with a recommended
+- Ask all currently unblocked questions in ONE ask request (up to eight per call), each with a recommended
   answer. Never batch dependent questions: a question whose answer changes what you would ask next waits
   for its own request.
 - If a question can be answered by exploring the codebase, explore the codebase instead of asking.

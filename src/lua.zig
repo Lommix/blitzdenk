@@ -270,7 +270,7 @@ const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "set_child_id", .ty = LuaType{ .raw = "fun(self: BlitzCtx, agent_id: integer)" } },
     .{ .name = "approve", .ty = LuaType{ .raw = "fun(self: BlitzCtx, description: string): integer, string|nil" } },
     .{ .name = "plan", .ty = LuaType{ .raw = "fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil" } },
-    .{ .name = "ask", .ty = LuaType{ .raw_refs = .{ .text = "fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil", .refs = &.{ AskRequestDef, AskAnswersOrNilDef } } }, .desc = "Ask the user up to four independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index." },
+    .{ .name = "ask", .ty = LuaType{ .raw_refs = .{ .text = "fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil", .refs = &.{ AskRequestDef, AskAnswersOrNilDef } } }, .desc = std.fmt.comptimePrint("Ask the user up to {d} independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index.", .{r.permissions.MAX_QUESTIONS}) },
     .{ .name = "call", .ty = LuaType{ .raw = "fun(self: BlitzCtx, name: string, args: table): string" }, .desc = "Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. Rejects nested codemode." },
     .{ .name = "batch", .ty = LuaType{ .raw = "fun(self: BlitzCtx, requests: table): string[]" }, .desc = "Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order. A failed item does not abort the batch." },
 } } };
@@ -2664,7 +2664,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
     },
     .{
         .name = "select",
-        .desc = "Open the ask widget with up to four questions and return at once. The callback runs with one answer list per question when every question is resolved, and with nil when canceled. Each answer entry is a pick table with text and a 1-based index; a custom-message pick has no index. Single-select questions keep the custom-message row, multi_select questions toggle several options instead.",
+        .desc = std.fmt.comptimePrint("Open the ask widget with up to {d} questions and return at once. The callback runs with one answer list per question when every question is resolved, and with nil when canceled. Each answer entry is a pick table with text and a 1-based index; a custom-message pick has no index. Single-select questions keep the custom-message row, multi_select questions toggle several options instead.", .{r.permissions.MAX_QUESTIONS}),
         .ty = LuaType{ .function = .{
             .args = &.{
                 .{ .name = "request", .ty = AskRequestDef },

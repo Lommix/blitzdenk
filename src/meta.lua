@@ -99,7 +99,7 @@
 ---@field message_timeline fun(role: string, text: string)
 ---Send a user message to the main agent (queued if running, restarted if idle), or start a general agent if none exists.
 ---@field prompt fun(text: string)
----Open the ask widget with up to four questions and return at once. The callback runs with one answer list per question when every question is resolved, and with nil when canceled. Each answer entry is a pick table with text and a 1-based index; a custom-message pick has no index. Single-select questions keep the custom-message row, multi_select questions toggle several options instead.
+---Open the ask widget with up to 8 questions and return at once. The callback runs with one answer list per question when every question is resolved, and with nil when canceled. Each answer entry is a pick table with text and a 1-based index; a custom-message pick has no index. Single-select questions keep the custom-message row, multi_select questions toggle several options instead.
 ---@field select fun(request: BlitzAskRequest, func: fun(answers: BlitzAskPick[][]|nil))
 ---Attach a screenshot/image to the current input.
 ---@field attach_screenshot fun(data: string, media_type?: string)
@@ -455,7 +455,7 @@
 ---@field set_child_id fun(self: BlitzCtx, agent_id: integer)
 ---@field approve fun(self: BlitzCtx, description: string): integer, string|nil
 ---@field plan fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil
----Ask the user up to four independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index.
+---Ask the user up to 8 independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index.
 ---@field ask fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil
 ---Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. Rejects nested codemode.
 ---@field call fun(self: BlitzCtx, name: string, args: table): string
