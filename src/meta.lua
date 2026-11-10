@@ -314,7 +314,7 @@
 ---packed AgentId of the requesting agent
 ---@field agent_id integer
 ---@field call_id? string
----call|diff|ask|plan
+---call|diff|ask
 ---@field kind string
 ---tool name
 ---@field tool string
@@ -330,12 +330,10 @@
 ---@field agent_cwd string
 ---kind == call
 ---@field description? string
----kind == diff|plan
+---kind == diff
 ---@field path? string
 ---kind == ask
 ---@field questions? BlitzAskQuestion[]
----kind == plan, plan text
----@field plan? string
 
 ---@class BlitzPermissionDecision
 ---false denies, true approves; on ask without answers this picks the recommended options
@@ -407,7 +405,7 @@
 ---packed AgentId of the requesting agent
 ---@field agent_id integer
 ---@field call_id? string
----call|diff|ask|plan
+---call|diff|ask
 ---@field kind string
 ---tool name
 ---@field tool string
@@ -423,12 +421,10 @@
 ---@field agent_cwd string
 ---kind == call
 ---@field description? string
----kind == diff|plan
+---kind == diff
 ---@field path? string
 ---kind == ask
 ---@field questions? BlitzAskQuestion[]
----kind == plan, plan text
----@field plan? string
 
 ---@class BlitzPermissions
 ---Snapshot every parked approval request as a list of BlitzPermissionSnapshot.
@@ -454,7 +450,6 @@
 ---@field set_status fun(self: BlitzCtx, msg: string)
 ---@field set_child_id fun(self: BlitzCtx, agent_id: integer)
 ---@field approve fun(self: BlitzCtx, description: string): integer, string|nil
----@field plan fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil
 ---Ask the user up to 8 independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index.
 ---@field ask fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil
 ---Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. Rejects nested codemode.

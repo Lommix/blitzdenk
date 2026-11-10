@@ -86,16 +86,10 @@ pub const AskPayload = struct {
     questions: []const Question,
 };
 
-pub const PlanApprovalPayload = struct {
-    path: []const u8,
-    plan_text: []const u8,
-};
-
 pub const Payload = union(enum) {
     call: ToolCallPayload,
     diff: ToolDiff,
     ask: AskPayload,
-    plan: PlanApprovalPayload,
 };
 
 pub const State = union(enum) {

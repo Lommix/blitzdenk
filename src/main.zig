@@ -1205,7 +1205,11 @@ pub fn run(
                                         app.dirty = true;
                                         break;
                                     }
-                                    app.resolveActivePermission(.denied);
+                                    // Page-allocated like hook deny reasons:
+                                    // the tool thread reads it after settle.
+                                    if (std.heap.page_allocator.dupe(u8, pm.field.slice())) |reason| {
+                                        app.resolveActivePermission(.{ .message = reason });
+                                    } else |_| app.resolveActivePermission(.denied);
                                     app.auto_scroll = true;
                                     app.scroll_offset = 0;
                                 },

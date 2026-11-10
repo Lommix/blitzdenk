@@ -593,8 +593,7 @@ pub const App = struct {
         self.mu.lockUncancelable(self.io);
         const mode = self.flags.approval_mode;
         self.mu.unlock(self.io);
-        const is_ask = req.payload == .ask or req.payload == .plan;
-        return r.permissions.shouldAutoApprove(mode, is_ask, self.exec_pool.ssh_active);
+        return r.permissions.shouldAutoApprove(mode, req.payload == .ask, self.exec_pool.ssh_active);
     }
 
     pub fn finishLuaPermission(self: *App, ticket: u64) void {
@@ -739,13 +738,12 @@ pub const App = struct {
         self.scroll_offset = 0;
     }
 
-    /// Highest reachable perm_select row for a non-ask permission: 3 for
-    /// plan, 2 for call/diff. Asks navigate through their session.
+    /// Highest reachable perm_select row for a non-ask permission. Asks
+    /// navigate through their session.
     pub fn permSelectMaxIndex(self: *App) u8 {
         const entry = self.active_permission orelse return 0;
         return switch (entry.payload) {
             .ask => 0,
-            .plan => 3,
             .call, .diff => 2,
         };
     }
@@ -5505,11 +5503,6 @@ fn renderPermissionContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect
             const n = std.fmt.bufPrint(&header_buf, "edit: {s}", .{p.path}) catch "edit";
             break :blk n;
         },
-        .plan => |p| blk: {
-            const plan_trunc = if (p.plan_text.len > 60) p.plan_text[0..60] else p.plan_text;
-            const n = std.fmt.bufPrint(&header_buf, "plan: {s}", .{plan_trunc}) catch "plan";
-            break :blk n;
-        },
         .ask => unreachable,
     };
 
@@ -5520,18 +5513,12 @@ fn renderPermissionContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect
     const labels = [3][]const u8{ "allow?  yes", "        no", "        enter message" };
     const labels_sel = [3][]const u8{ "allow? >yes", "       >no", "       >enter message" };
 
-    const plan_labels = [4][]const u8{ "plan?  approve & clear", "       approve & keep", "       no", "       enter message" };
-    const plan_labels_sel = [4][]const u8{ "plan? >approve & clear", "      >approve & keep", "      >no", "      >enter message" };
-
-    const is_plan = entry.payload == .plan;
-    const count: usize = if (is_plan) 4 else 3;
-
     const cur_sel = currentSelection(app);
     const bottom = inner.y +| inner.height;
-    for (0..count) |i| {
+    for (0..labels.len) |i| {
         const y = inner.y + header_rows + @as(u16, @intCast(i));
         if (y >= bottom) break;
-        if (field_rows != null and i == count - 1) {
+        if (field_rows != null and i == labels.len - 1) {
             renderPermField(app, arena, .{
                 .x = inner.x + 1 + PERM_FIELD_LABEL_COLS,
                 .y = y,
@@ -5542,10 +5529,7 @@ fn renderPermissionContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect
         }
         const selected = field_rows == null and cur_sel == @as(u8, @intCast(i));
         const style: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .reverse = selected } };
-        const label = if (is_plan)
-            (if (selected) plan_labels_sel[i] else plan_labels[i])
-        else
-            (if (selected) labels_sel[i] else labels[i]);
+        const label = if (selected) labels_sel[i] else labels[i];
         buf.setStringMax(inner.x + 1, y, label, style, inner.width -| 1);
     }
 }

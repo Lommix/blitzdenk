@@ -269,7 +269,6 @@ const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "set_status", .ty = LuaType{ .raw = "fun(self: BlitzCtx, msg: string)" }, .desc = "Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines." },
     .{ .name = "set_child_id", .ty = LuaType{ .raw = "fun(self: BlitzCtx, agent_id: integer)" } },
     .{ .name = "approve", .ty = LuaType{ .raw = "fun(self: BlitzCtx, description: string): integer, string|nil" } },
-    .{ .name = "plan", .ty = LuaType{ .raw = "fun(self: BlitzCtx, path: string, plan_text: string): integer, string|nil" } },
     .{ .name = "ask", .ty = LuaType{ .raw_refs = .{ .text = "fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil", .refs = &.{ AskRequestDef, AskAnswersOrNilDef } } }, .desc = std.fmt.comptimePrint("Ask the user up to {d} independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index.", .{r.permissions.MAX_QUESTIONS}) },
     .{ .name = "call", .ty = LuaType{ .raw = "fun(self: BlitzCtx, name: string, args: table): string" }, .desc = "Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. Rejects nested codemode." },
     .{ .name = "batch", .ty = LuaType{ .raw = "fun(self: BlitzCtx, requests: table): string[]" }, .desc = "Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order. A failed item does not abort the batch." },
@@ -1761,7 +1760,7 @@ const PermissionDecisionDef = LuaType{ .table_def = .{ .name = "BlitzPermissionD
 const permission_payload_fields = [_]LuaType.Field{
     .{ .name = "agent_id", .ty = LuaType.integer, .desc = "packed AgentId of the requesting agent" },
     .{ .name = "call_id", .ty = LuaType.string, .optional = true },
-    .{ .name = "kind", .ty = LuaType.string, .desc = "call|diff|ask|plan" },
+    .{ .name = "kind", .ty = LuaType.string, .desc = "call|diff|ask" },
     .{ .name = "tool", .ty = LuaType.string, .desc = "tool name" },
     .{ .name = "tool_input", .ty = LuaType.string, .desc = "raw JSON arguments of the tool call" },
     .{ .name = "agent_name", .ty = LuaType.string, .desc = "requesting agent type name" },
@@ -1769,9 +1768,8 @@ const permission_payload_fields = [_]LuaType.Field{
     .{ .name = "agent_task", .ty = LuaType.string, .desc = "task set at spawn, empty on a prompted main agent" },
     .{ .name = "agent_cwd", .ty = LuaType.string, .desc = "requesting agent working directory" },
     .{ .name = "description", .ty = LuaType.string, .optional = true, .desc = "kind == call" },
-    .{ .name = "path", .ty = LuaType.string, .optional = true, .desc = "kind == diff|plan" },
+    .{ .name = "path", .ty = LuaType.string, .optional = true, .desc = "kind == diff" },
     .{ .name = "questions", .ty = AskQuestionListDef, .optional = true, .desc = "kind == ask" },
-    .{ .name = "plan", .ty = LuaType.string, .optional = true, .desc = "kind == plan, plan text" },
 };
 const PermissionPayloadDef = LuaType{ .table_def = .{ .name = "BlitzPermissionPayload", .fields = &permission_payload_fields } };
 const permission_snapshot_fields = blk: {
@@ -1833,10 +1831,6 @@ fn dupePermPayload(arena: std.mem.Allocator, payload: r.permissions.Payload) !r.
             .after = try arena.dupe(u8, p.after),
         } },
         .ask => |p| .{ .ask = .{ .questions = try r.permissions.dupQuestions(arena, p.questions) } },
-        .plan => |p| .{ .plan = .{
-            .path = try arena.dupe(u8, p.path),
-            .plan_text = try arena.dupe(u8, p.plan_text),
-        } },
     };
 }
 
@@ -5126,7 +5120,6 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
         .{ "set_status", &luaSetStatus },
         .{ "ask", &luaAsk },
         .{ "approve", &luaApprove },
-        .{ "plan", &luaPlan },
         .{ "set_child_id", &luaSetChildId },
         .{ "call", &luaCtxCall },
         .{ "batch", &luaCtxBatch },
@@ -5414,34 +5407,6 @@ fn luaApprove(L: ?*c.lua_State) callconv(.c) c_int {
     return awaitPermAndPush(state, bridge.tool_ctx.io, &req);
 }
 
-fn luaPlan(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const bridge = getBridge(state) orelse {
-        return pushStatusNil(state, REQ_STATUS_DENIED);
-    };
-
-    if (c.lua_type(state, 2) != c.LUA_TSTRING or c.lua_type(state, 3) != c.LUA_TSTRING) {
-        return pushStatusNil(state, REQ_STATUS_DENIED);
-    }
-
-    const path = readAnyValue([]const u8, state, 2).?;
-    const plan_text = readAnyValue([]const u8, state, 3).?;
-
-    var req = r.permissions.Request{
-        .agent_id = bridge.tool_ctx.base.self_id,
-        .call_id = bridge.tool_call.id,
-        .tool_name = bridge.tool_call.name,
-        .tool_input = bridge.tool_call.input,
-        .payload = .{ .plan = .{
-            .path = path,
-            .plan_text = plan_text,
-        } },
-    };
-
-    bridge.tool_ctx.base.permissions.send(&req);
-    return awaitPermAndPush(state, bridge.tool_ctx.io, &req);
-}
-
 /// Lua shape of one ask question: options are plain label strings.
 const LuaAskQuestion = struct {
     header: []const u8,
@@ -5616,10 +5581,6 @@ fn setPermissionFields(
                 c.lua_rawseti(L, -2, @intCast(i + 1));
             }
             setFieldPushed(L, -2, "questions");
-        },
-        .plan => |plan| {
-            setFieldAny(L, -2, "path", plan.path);
-            setFieldAny(L, -2, "plan", plan.plan_text);
         },
     }
 }

@@ -654,7 +654,7 @@ end)
 ```
 
 The payload is `BlitzPermissionPayload` in `meta.lua`: `agent_id`, `call_id`,
-`kind` (`call|diff|ask|plan`), `tool`, `tool_input` (the raw JSON arguments of
+`kind` (`call|diff|ask`), `tool`, `tool_input` (the raw JSON arguments of
 the call), the agent block (`agent_name`, `agent_description`, `agent_task`,
 `agent_cwd`), plus the kind fields. Ask payloads carry `questions`: an array
 of `{ header, question, options, multi_select, allow_message }` tables, in
