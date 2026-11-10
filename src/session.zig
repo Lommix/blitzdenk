@@ -393,6 +393,7 @@ const SessionTestRig = struct {
 
         self.a = undefined;
         self.a.io = io;
+        self.a.mu = .init;
         self.a.gpa = std.testing.allocator;
         self.a.arena_session = .init(std.testing.allocator);
         self.a.arena_streaming_preview = .init(std.testing.allocator);

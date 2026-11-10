@@ -329,7 +329,7 @@ pub fn render(viewer: *Viewer, theme: r.app.Theme, area: r.tui.Rect, buf: *r.tui
     viewer.box_rect = box;
 
     buf.fill(area, .{ .style = .{ .bg = theme.overlay_dark } });
-    drawBorder(buf, box, .{ .fg = theme.muted, .bg = theme.overlay_dark });
+    drawBorder(buf, box, .{ .fg = theme.border, .bg = theme.overlay_dark });
 
     const inner: r.tui.Rect = .{
         .x = box.x + 1,

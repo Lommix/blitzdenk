@@ -84,6 +84,7 @@ pub const Theme = struct {
     bg: r.tui.Color,
     overlay_dark: r.tui.Color,
     overlay: r.tui.Color,
+    border: r.tui.Color,
     muted: r.tui.Color,
     text: r.tui.Color,
     text_hl: r.tui.Color,
@@ -103,6 +104,7 @@ pub const Theme = struct {
         .bg = .{ .rgb = .{ .r = 26, .g = 27, .b = 38 } },
         .overlay_dark = .{ .rgb = .{ .r = 22, .g = 22, .b = 30 } },
         .overlay = .reset,
+        .border = .{ .rgb = .{ .r = 86, .g = 95, .b = 137 } },
         .muted = .{ .rgb = .{ .r = 86, .g = 95, .b = 137 } },
         .text = .{ .rgb = .{ .r = 192, .g = 202, .b = 245 } },
         .text_hl = .white,
@@ -2370,7 +2372,7 @@ pub const App = struct {
                 const end = @min(completions.len, start + visible);
                 for (completions.items[start..end], 0..) |cmp, i| {
                     const sel = start + i == selected;
-                    const cmd_style: r.tui.Style = .{ .modifier = .{ .bold = true, .reverse = sel } };
+                    const cmd_style: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .bold = true, .reverse = sel } };
                     const desc_style: r.tui.Style = if (sel) cmd_style else .{ .fg = app.theme.muted };
                     var line = r.tui.Line{};
                     line.pushText(frame_alloc, cmp.text, cmd_style) catch {};
@@ -3715,6 +3717,7 @@ fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf
     const display = app.displayInput(arena);
     renderFieldWidget(app, arena, display.text, display.cursor, area, .{
         .prompt = COMPOSER_PROMPT,
+        .prompt_style = .{ .fg = app.theme.muted },
         .text = fieldTextStyle(app),
     }, buf);
     if (app.screenshot_buf != null) {
@@ -3738,6 +3741,7 @@ fn renderPermMessageContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rec
         .{ .text = pm.field.slice(), .cursor = pm.field.cursor };
     renderFieldWidget(app, arena, display.text, display.cursor, area, .{
         .prompt = COMPOSER_PROMPT,
+        .prompt_style = .{ .fg = app.theme.muted },
         .text = fieldTextStyle(app),
     }, buf);
     if (app.screenshot_buf != null) {
@@ -3754,8 +3758,8 @@ fn completionAnchor(app: *App, arena: std.mem.Allocator, width: u16) r.tui.input
 
 const WIZARD_HELP_TEXT = "↑/↓ select · enter next · esc abort";
 
-fn wizardSelStyle(selected: bool) r.tui.Style {
-    return if (selected) .{ .modifier = .{ .reverse = true } } else .{};
+fn wizardSelStyle(app: *const App, selected: bool) r.tui.Style {
+    return .{ .fg = app.theme.text, .modifier = .{ .reverse = selected } };
 }
 
 fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
@@ -3780,61 +3784,61 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
 
     switch (w.step) {
         .welcome => {
-            wizardAppendHeading(arena, &para, "Welcome to blitzdenk");
-            wizardAppendHeading(arena, &para, "Pick a model provider to get started, or skip to use the built-in defaults.");
-            wizardAppendHeading(arena, &para, "");
-            wizardAppendOption(arena, &para, "Continue", w.list_selected == 0);
-            wizardAppendOption(arena, &para, "Skip (use defaults)", w.list_selected == 1);
+            wizardAppendHeading(app, arena, &para, "Welcome to blitzdenk");
+            wizardAppendHeading(app, arena, &para, "Pick a model provider to get started, or skip to use the built-in defaults.");
+            wizardAppendHeading(app, arena, &para, "");
+            wizardAppendOption(app, arena, &para, "Continue", w.list_selected == 0);
+            wizardAppendOption(app, arena, &para, "Skip (use defaults)", w.list_selected == 1);
         },
         .provider => {
-            wizardAppendHeading(arena, &para, "Choose a provider:");
+            wizardAppendHeading(app, arena, &para, "Choose a provider:");
             for (r.wizard.catalog, 0..) |entry, i| {
-                wizardAppendOption(arena, &para, entry.name, i == w.list_selected);
+                wizardAppendOption(app, arena, &para, entry.name, i == w.list_selected);
             }
         },
         .provider_type => {
-            wizardAppendHeading(arena, &para, "Custom endpoint — provider type:");
+            wizardAppendHeading(app, arena, &para, "Custom endpoint — provider type:");
             for (r.wizard.provider_types, 0..) |name, i| {
-                wizardAppendOption(arena, &para, name, i == w.list_selected);
+                wizardAppendOption(app, arena, &para, name, i == w.list_selected);
             }
         },
         .url => {
-            wizardAppendHeading(arena, &para, "Endpoint url (enter keeps the shown value):");
+            wizardAppendHeading(app, arena, &para, "Endpoint url (enter keeps the shown value):");
             field = &w.url;
         },
         .key => {
-            wizardAppendHeading(arena, &para, "Paste your api key (stored in provider.lua):");
+            wizardAppendHeading(app, arena, &para, "Paste your api key (stored in provider.lua):");
             field = &w.key;
             field_mask = '*';
         },
         .model => {
             const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
             if (entry.free_text_model_only) {
-                wizardAppendHeading(arena, &para, "Model id:");
+                wizardAppendHeading(app, arena, &para, "Model id:");
                 field = &w.model;
             } else {
-                wizardAppendHeading(arena, &para, "Choose a model or type in the model id string (same thing)");
-                wizardAppendHeading(arena, &para, "");
+                wizardAppendHeading(app, arena, &para, "Choose a model or type in the model id string (same thing)");
+                wizardAppendHeading(app, arena, &para, "");
                 for (entry.models, 0..) |model, i| {
-                    wizardAppendOption(arena, &para, model.name, !w.model_free_text and w.model_curated_index == i);
+                    wizardAppendOption(app, arena, &para, model.name, !w.model_free_text and w.model_curated_index == i);
                 }
-                wizardAppendOption(arena, &para, "Enter model id…", w.model_free_text);
+                wizardAppendOption(app, arena, &para, "Enter model id…", w.model_free_text);
                 if (w.model_free_text) field = &w.model;
             }
         },
         .vision => {
             const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
             const detected = r.wizard.selectModel(entry, w.model.slice()).vision;
-            wizardAppendHeading(arena, &para, "Custom model id — should image input be enabled?");
-            wizardAppendHeading(arena, &para, "Catalogued models skip this; vision follows the catalogue.");
+            wizardAppendHeading(app, arena, &para, "Custom model id — should image input be enabled?");
+            wizardAppendHeading(app, arena, &para, "Catalogued models skip this; vision follows the catalogue.");
             wizardAppendKeyValue(app, arena, &para, "model", w.model.slice());
             wizardAppendKeyValue(app, arena, &para, "catalogue", if (detected) "vision" else "no vision");
-            wizardAppendHeading(arena, &para, "");
-            wizardAppendOption(arena, &para, "Enable vision", w.vision_override == true);
-            wizardAppendOption(arena, &para, "Text only", w.vision_override != true);
+            wizardAppendHeading(app, arena, &para, "");
+            wizardAppendOption(app, arena, &para, "Enable vision", w.vision_override == true);
+            wizardAppendOption(app, arena, &para, "Text only", w.vision_override != true);
         },
         .confirm => {
-            wizardAppendHeading(arena, &para, "Confirm — write provider.lua with these choices?");
+            wizardAppendHeading(app, arena, &para, "Confirm — write provider.lua with these choices?");
             const selection = app.wizardSelection(w);
             const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
             const vision_text = if (selection) |sel| (if (sel.vision) "true" else "false") else "unknown";
@@ -3844,13 +3848,13 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
             wizardAppendKeyValue(app, arena, &para, "key", if (!w.key.isEmpty()) "<set>" else "");
             wizardAppendKeyValue(app, arena, &para, "vision", vision_text);
             wizardAppendKeyValue(app, arena, &para, "model", w.model.slice());
-            wizardAppendHeading(arena, &para, "");
-            wizardAppendOption(arena, &para, "Write provider.lua", w.accept_selected);
-            wizardAppendOption(arena, &para, "Back", !w.accept_selected);
+            wizardAppendHeading(app, arena, &para, "");
+            wizardAppendOption(app, arena, &para, "Write provider.lua", w.accept_selected);
+            wizardAppendOption(app, arena, &para, "Back", !w.accept_selected);
         },
         .done => {
-            wizardAppendHeading(arena, &para, "Setup complete — happy hacking.");
-            wizardAppendHeading(arena, &para, "provider.lua is live; edit it and it hot-reloads like any config lua.");
+            wizardAppendHeading(app, arena, &para, "Setup complete — happy hacking.");
+            wizardAppendHeading(app, arena, &para, "provider.lua is live; edit it and it hot-reloads like any config lua.");
         },
     }
 
@@ -3873,7 +3877,7 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
             .height = field_rows,
         }, .{
             .prompt = modePrompt(&app.input_mode),
-            .text = wizardSelStyle(true),
+            .text = .{ .fg = app.theme.text_hl, .modifier = .{ .reverse = true } },
             .mask = field_mask,
         }, buf);
     }
@@ -3888,9 +3892,9 @@ fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, bu
     }
 }
 
-fn wizardAppendHeading(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8) void {
+fn wizardAppendHeading(app: *const App, arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8) void {
     var line = r.tui.Line{};
-    line.pushText(arena, text, .{}) catch return;
+    line.pushText(arena, text, .{ .fg = app.theme.text }) catch return;
     para.lines.append(arena, line) catch {};
 }
 
@@ -3962,10 +3966,10 @@ fn clipPromptToWidth(arena: std.mem.Allocator, text: []const u8, max: usize) []c
     return std.fmt.allocPrint(arena, "{s}…", .{text[0..cut]}) catch text;
 }
 
-fn wizardAppendOption(arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8, selected: bool) void {
+fn wizardAppendOption(app: *const App, arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8, selected: bool) void {
     var line = r.tui.Line{};
-    line.pushText(arena, if (selected) "❯ " else "  ", wizardSelStyle(selected)) catch return;
-    line.pushText(arena, text, wizardSelStyle(selected)) catch return;
+    line.pushText(arena, if (selected) "❯ " else "  ", wizardSelStyle(app, selected)) catch return;
+    line.pushText(arena, text, wizardSelStyle(app, selected)) catch return;
     para.lines.append(arena, line) catch {};
 }
 
@@ -4007,11 +4011,11 @@ fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rec
             .used => |en| {
                 var para = r.tui.Paragraph{
                     .border = .single,
-                    .style = .{ .fg = app.theme.muted, .bg = app.theme.overlay_dark },
+                    .style = .{ .fg = app.theme.border, .bg = app.theme.overlay_dark },
                     .padding = .{ .left = 1, .right = 1, .top = 0, .bottom = 0 },
                 };
                 var l = r.tui.Line{};
-                l.pushText(arena, en.msg, .{}) catch {};
+                l.pushText(arena, en.msg, .{ .fg = app.theme.text }) catch {};
                 para.lines.append(arena, l) catch {};
 
                 const total_h = para.totalHeight(notif_w);
@@ -4382,8 +4386,8 @@ fn appendToolImage(
     try images.append(arena, .{ .entry = entry, .row = p.lines.items.len, .col = col, .cols = m.cols, .rows = m.rows });
     for (0..m.rows) |row| {
         var line = r.tui.Line{};
-        try line.pushText(arena, rail, .{});
-        try line.pushText(arena, if (row == 0) "  └ " else "    ", .{});
+        try line.pushText(arena, rail, .{ .fg = app.theme.muted });
+        try line.pushText(arena, if (row == 0) "  └ " else "    ", .{ .fg = app.theme.muted });
         try p.lines.append(arena, line);
     }
 }
@@ -4466,7 +4470,7 @@ fn buildTimelineEntryParagraph(
                     .plain_text => |text| {
                         has_text = true;
                         var p = r.tui.Paragraph{};
-                        try p.appendText(arena, text, .{});
+                        try p.appendText(arena, text, .{ .fg = app.theme.text });
                         const h = p.totalHeightLong(inner_w);
                         try out.append(arena, .{ .p = p, .h = h });
                         total.* += h;
@@ -4550,14 +4554,14 @@ fn buildToolGroupParagraph(
                 line.style = entry.lines.items[0].style;
                 for (entry.lines.items[0].spans.items) |span| try line.pushSpan(arena, span);
             } else {
-                try line.pushSpan(arena, .{ .content = call.tool_name });
+                try line.pushSpan(arena, .{ .content = call.tool_name, .style = .{ .fg = app.theme.text_hl, .modifier = .{ .bold = true } } });
             }
 
             if (childCount(entry.*) == 1) {
                 if (onlyChildId(entry.*)) |only| try pushChildActivity(app, arena, &line, only);
             }
         } else {
-            try line.pushSpan(arena, .{ .content = call.tool_name });
+            try line.pushSpan(arena, .{ .content = call.tool_name, .style = .{ .fg = app.theme.text_hl, .modifier = .{ .bold = true } } });
         }
         try p.lines.append(arena, line);
 
@@ -4574,7 +4578,7 @@ fn buildToolGroupParagraph(
             try appendToolImage(app, arena, &p, &images, call.agent_id, call.call_id, image_url, "", inner_w);
 
             var rail_nodes: std.ArrayList(RailNode) = .empty;
-            try appendChildRailBlocks(arena, statuses.ptr, app.registry, entry, &.{}, 0, &rail_nodes);
+            try appendChildRailBlocks(arena, statuses.ptr, app.registry, .{ .fg = app.theme.muted }, entry, &.{}, 0, &rail_nodes);
 
             for (rail_nodes.items) |node| {
                 var nested = r.tui.Line{ .style = node.line.style };
@@ -4631,6 +4635,7 @@ fn appendChildRailBlocks(
     arena: std.mem.Allocator,
     store: *ToolStatusStore,
     registry: *r.agent_registry.Registry,
+    muted_style: r.tui.Style,
     entry: *ToolStatusEntry,
     prefix: []const bool,
     depth: u32,
@@ -4639,13 +4644,13 @@ fn appendChildRailBlocks(
     if (depth >= rail_depth_cap) return;
     const children = entry.child_ids.items;
     if (children.len == 1) {
-        try walkAgentRail(arena, store, registry, children[0], prefix, depth, out);
+        try walkAgentRail(arena, store, registry, muted_style, children[0], prefix, depth, out);
         return;
     }
     for (children, 0..) |child, index| {
         const continues = index + 1 < children.len;
         var anchor = r.tui.Line{};
-        try anchor.pushSpan(arena, .{ .content = try railChildLabel(arena, store, registry, child) });
+        try anchor.pushSpan(arena, .{ .content = try railChildLabel(arena, store, registry, child), .style = muted_style });
         try out.append(arena, .{
             .line = anchor,
             .entry_start = true,
@@ -4655,7 +4660,7 @@ fn appendChildRailBlocks(
             .continues = continues,
         });
         const child_prefix = try extendRailPrefix(arena, prefix, continues);
-        try walkAgentRail(arena, store, registry, child, child_prefix, depth + 1, out);
+        try walkAgentRail(arena, store, registry, muted_style, child, child_prefix, depth + 1, out);
     }
 }
 
@@ -4703,7 +4708,7 @@ fn pushChildActivity(app: *App, arena: std.mem.Allocator, line: *r.tui.Line, chi
             .retrying => "  retrying",
         }, .style = .{ .fg = app.theme.muted } });
         try line.pushSpan(arena, .{ .content = " " });
-        try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count) });
+        try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count), .style = .{ .fg = app.theme.muted } });
     }
     if (child.tokens_per_second > 0) {
         try line.pushSpan(arena, .{ .content = "  " });
@@ -4716,6 +4721,7 @@ fn walkAgentRail(
     arena: std.mem.Allocator,
     store: *ToolStatusStore,
     registry: *r.agent_registry.Registry,
+    muted_style: r.tui.Style,
     agent_id: r.AgentId,
     prefix: []const bool,
     depth: u32,
@@ -4766,9 +4772,9 @@ fn walkAgentRail(
         if (tool_entry.lines.items.len == 0) {
             var anchor = r.tui.Line{};
             if (onlyChildId(tool_entry.*)) |child_id| {
-                try anchor.pushSpan(arena, .{ .content = try railChildLabel(arena, store, registry, child_id) });
+                try anchor.pushSpan(arena, .{ .content = try railChildLabel(arena, store, registry, child_id), .style = muted_style });
             } else {
-                try anchor.pushSpan(arena, .{ .content = candidate.call_id });
+                try anchor.pushSpan(arena, .{ .content = candidate.call_id, .style = muted_style });
             }
             try out.append(arena, .{
                 .line = anchor,
@@ -4780,7 +4786,7 @@ fn walkAgentRail(
                 .continues = continues,
             });
         }
-        try appendChildRailBlocks(arena, store, registry, tool_entry, child_prefix, depth + 1, out);
+        try appendChildRailBlocks(arena, store, registry, muted_style, tool_entry, child_prefix, depth + 1, out);
     }
 }
 
@@ -4830,7 +4836,7 @@ fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: TimelinePart.DiffE
         .border = .single,
         .sides = .left_only,
         .reverse = true,
-        .style = .{ .bg = theme.diff_surface },
+        .style = .{ .fg = theme.border, .bg = theme.diff_surface },
     };
 
     var header_line = r.tui.Line{};
@@ -4875,12 +4881,15 @@ fn markdownTheme(theme: Theme) r.tui.HighlightTheme {
         .quote = .{ .fg = theme.info, .modifier = .{ .italic = true } },
         .hr = .{ .fg = theme.info },
         .plain = .{ .fg = theme.text },
+        .table_border = .{ .fg = theme.border },
+        .table_text = .{ .fg = theme.text },
+        .table_header = .{ .fg = theme.text_hl, .modifier = .{ .bold = true } },
         .mermaid = .{
             .text = .{ .fg = theme.text },
             .strong = .{ .fg = theme.text_hl, .modifier = .{ .bold = true } },
             .muted = .{ .fg = theme.muted },
-            .border = .{ .fg = theme.text_hl },
-            .edge = .{ .fg = theme.text_hl },
+            .border = .{ .fg = theme.border },
+            .edge = .{ .fg = theme.border },
             .accent = .{ .fg = theme.info },
         },
     };
@@ -5491,7 +5500,7 @@ fn renderPermissionContent(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void
         const y = inner.y + header_rows + @as(u16, @intCast(i));
         if (y >= inner.y +| inner.height) break;
         const selected = cur_sel == @as(u8, @intCast(i));
-        const style: r.tui.Style = if (selected) .{ .modifier = .{ .reverse = true } } else .{};
+        const style: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .reverse = selected } };
         const label = if (is_plan)
             (if (selected) plan_labels_sel[i] else plan_labels[i])
         else
@@ -5505,6 +5514,7 @@ fn renderAskWidget(app: *App, inner: r.tui.Rect, buf: *r.tui.Buffer) void {
     r.ask_session.render(s, .{
         .accent = app.theme.info,
         .muted = app.theme.muted,
+        .text = app.theme.text,
     }, inner, buf);
 }
 
@@ -5677,7 +5687,7 @@ test "empty anchored tool entries carry their image call id" {
     try parent.entries.put(arena.allocator(), "empty-image", entry);
 
     var nodes: std.ArrayList(RailNode) = .empty;
-    try walkAgentRail(arena.allocator(), &statuses, &registry, parent_id, &.{}, 0, &nodes);
+    try walkAgentRail(arena.allocator(), &statuses, &registry, .{}, parent_id, &.{}, 0, &nodes);
     try std.testing.expectEqual(@as(usize, 1), nodes.items.len);
     try std.testing.expectEqualStrings("empty-image", nodes.items[0].image_call_id.?);
 }
@@ -5696,7 +5706,7 @@ test "finished image-only tool entries stay in the recursive rail" {
     try agent.entries.put(arena.allocator(), "image-only", entry);
 
     var nodes: std.ArrayList(RailNode) = .empty;
-    try walkAgentRail(arena.allocator(), &statuses, &registry, agent_id, &.{}, 0, &nodes);
+    try walkAgentRail(arena.allocator(), &statuses, &registry, .{}, agent_id, &.{}, 0, &nodes);
     try std.testing.expectEqual(@as(usize, 1), nodes.items.len);
     try std.testing.expectEqualStrings("image-only", nodes.items[0].image_call_id.?);
 }

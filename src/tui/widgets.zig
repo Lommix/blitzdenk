@@ -904,6 +904,12 @@ pub const Paragraph = struct {
 
 pub const TableLineKind = enum { row, separator };
 
+pub const TableStyle = struct {
+    border: Style = .{},
+    text: Style = .{},
+    header: Style = .{ .modifier = .{ .bold = true } },
+};
+
 pub fn tableLineKind(line: *const Line) ?TableLineKind {
     for (line.spans.items) |span| switch (span.kind) {
         .table_row => return .row,
@@ -963,7 +969,7 @@ fn buildParagraphRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: 
             const start = i;
             i += 2;
             while (i < lines.len and tableLineKind(&lines[i]) == .row) : (i += 1) {}
-            try appendTableRows(alloc, lines[start..i], width, out);
+            try appendTableRows(alloc, lines[start..i], width, out, .{});
             continue;
         }
 
@@ -999,7 +1005,7 @@ fn countParagraphRows(lines: []Line, width: u16) usize {
             while (i < lines.len and tableLineKind(&lines[i]) == .row) : (i += 1) {}
             var scratch_buf: [4096]u8 = undefined;
             var scratch = std.heap.BufferFirstAllocator.init(&scratch_buf, std.heap.page_allocator);
-            count += layoutTableRows(scratch.allocator(), lines[start..i], width, null) catch 0;
+            count += layoutTableRows(scratch.allocator(), lines[start..i], width, null, .{}) catch 0;
             continue;
         }
 
@@ -1014,11 +1020,11 @@ fn countParagraphRows(lines: []Line, width: u16) usize {
     return count;
 }
 
-pub fn appendTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: *std.ArrayList(Line)) !void {
-    _ = try layoutTableRows(alloc, lines, width, out);
+pub fn appendTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: *std.ArrayList(Line), style: TableStyle) !void {
+    _ = try layoutTableRows(alloc, lines, width, out, style);
 }
 
-fn layoutTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: ?*std.ArrayList(Line)) !usize {
+fn layoutTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: ?*std.ArrayList(Line), style: TableStyle) !usize {
     if (width == 0 or lines.len < 2) return 0;
 
     const max_cols = 16;
@@ -1048,8 +1054,8 @@ fn layoutTableRows(alloc: std.mem.Allocator, lines: []Line, width: u16, out: ?*s
                 const is_header = row_index == 0;
                 if (out) |rows| {
                     const start = rows.items.len;
-                    try appendFormattedTableRow(alloc, text, col_widths, is_header, rows);
-                    if (is_header) try appendTableRule(alloc, width, rows);
+                    try appendFormattedTableRow(alloc, text, col_widths, is_header, rows, style);
+                    if (is_header) try appendTableRule(alloc, width, rows, style.border);
                     height += rows.items.len - start;
                 } else {
                     var cells = splitTableCells(text);
@@ -1098,9 +1104,8 @@ fn computeTableWidths(width: u16, col_widths: []usize) void {
     }
 }
 
-fn appendFormattedTableRow(alloc: std.mem.Allocator, text: []const u8, col_widths: []const usize, is_header: bool, out: *std.ArrayList(Line)) !void {
-    const border_style: Style = .{ .fg = .bright_cyan };
-    const cell_style: Style = if (is_header) .{ .modifier = .{ .bold = true } } else .{};
+fn appendFormattedTableRow(alloc: std.mem.Allocator, text: []const u8, col_widths: []const usize, is_header: bool, out: *std.ArrayList(Line), style: TableStyle) !void {
+    const cell_style: Style = if (is_header) style.header else style.text;
     var cells = splitTableCells(text);
     var wrapped: [16]std.ArrayList(Line) = @splat(.empty);
     defer for (&wrapped) |*rows| {
@@ -1120,7 +1125,7 @@ fn appendFormattedTableRow(alloc: std.mem.Allocator, text: []const u8, col_width
     for (0..height) |row| {
         var line: Line = .{};
         errdefer line.deinit(alloc);
-        try line.pushText(alloc, "│", border_style);
+        try line.pushText(alloc, "│", style.border);
         for (col_widths, 0..) |col_w, col| {
             try line.pushText(alloc, " ", cell_style);
             var used: usize = 0;
@@ -1131,13 +1136,13 @@ fn appendFormattedTableRow(alloc: std.mem.Allocator, text: []const u8, col_width
             }
             try pushTablePadding(&line, alloc, col_w -| used, cell_style);
             try line.pushText(alloc, " ", cell_style);
-            try line.pushText(alloc, "│", border_style);
+            try line.pushText(alloc, "│", style.border);
         }
         try out.append(alloc, line);
     }
 }
 
-fn appendTableRule(alloc: std.mem.Allocator, width: u16, out: *std.ArrayList(Line)) !void {
+fn appendTableRule(alloc: std.mem.Allocator, width: u16, out: *std.ArrayList(Line), border_style: Style) !void {
     var line: Line = .{};
     const glyph = "─";
     const rule = try alloc.alloc(u8, @as(usize, width) * glyph.len);
@@ -1146,7 +1151,7 @@ fn appendTableRule(alloc: std.mem.Allocator, width: u16, out: *std.ArrayList(Lin
     while (i < width) : (i += 1) {
         @memcpy(rule[i * glyph.len ..][0..glyph.len], glyph);
     }
-    try line.pushSpan(alloc, .{ .content = rule, .style = .{ .fg = .bright_cyan } });
+    try line.pushSpan(alloc, .{ .content = rule, .style = border_style });
     try out.append(alloc, line);
 }
 

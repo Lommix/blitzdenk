@@ -89,6 +89,9 @@ pub const HighlightTheme = struct {
     quote: r.Style = .{ .fg = .bright_cyan, .modifier = .{ .italic = true } },
     hr: r.Style = .{ .fg = .bright_cyan },
     plain: r.Style = .{},
+    table_border: r.Style = .{},
+    table_text: r.Style = .{},
+    table_header: r.Style = .{ .modifier = .{ .bold = true } },
     mermaid: mermaid.Theme = .{},
 };
 
@@ -257,7 +260,11 @@ pub const MarkdownStreamRenderer = struct {
             self.table_lines.clearRetainingCapacity();
         }
         if (self.width > 0 and lines.len >= 2 and r.widgets.tableLineKind(&lines[0]) == .row and r.widgets.tableLineKind(&lines[1]) == .separator) {
-            try r.widgets.appendTableRows(self.alloc, lines, self.width, &self.pending);
+            try r.widgets.appendTableRows(self.alloc, lines, self.width, &self.pending, .{
+                .border = self.theme.table_border,
+                .text = self.theme.table_text,
+                .header = self.theme.table_header,
+            });
             return;
         }
         for (lines) |*ln| {

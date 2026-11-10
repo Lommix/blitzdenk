@@ -234,6 +234,7 @@ pub fn widgetHeight(questions: []const Question, area_width: u16, area_height: u
 pub const Colors = struct {
     accent: tui.Color,
     muted: tui.Color,
+    text: tui.Color,
 };
 
 pub fn render(session: *const Session, colors: Colors, inner: tui.Rect, buf: *tui.Buffer) void {
@@ -257,7 +258,7 @@ pub fn render(session: *const Session, colors: Colors, inner: tui.Rect, buf: *tu
     for (0..rowCount(q)) |row| {
         if (y >= bottom) break;
         const selected = session.cursor() == row;
-        const style: tui.Style = if (selected) .{ .modifier = .{ .reverse = true } } else .{};
+        const style: tui.Style = .{ .fg = colors.text, .modifier = .{ .reverse = selected } };
         const line = rowLine(&line_buf, q, row, selected, session.isChecked(session.active, row));
         const used = text_utils.renderWrappedText(buf, line, x, y, width, bottom -| y, 2, style);
         if (used == 0) break;
@@ -456,7 +457,7 @@ test "render draws tab headline, checkboxes, and the active row" {
     var buf = try tui.Buffer.init(std.testing.allocator, .{ .width = 60, .height = 24 });
     defer buf.deinit();
     const inner = tui.Rect{ .x = 0, .y = 0, .width = 58, .height = 22 };
-    const colors = Colors{ .accent = .{ .rgb = .{ .r = 122, .g = 162, .b = 247 } }, .muted = .{ .rgb = .{ .r = 128, .g = 128, .b = 128 } } };
+    const colors = Colors{ .accent = .{ .rgb = .{ .r = 122, .g = 162, .b = 247 } }, .muted = .{ .rgb = .{ .r = 128, .g = 128, .b = 128 } }, .text = .{ .rgb = .{ .r = 192, .g = 202, .b = 245 } } };
 
     render(&session, colors, inner, &buf);
 
@@ -532,7 +533,7 @@ test "one-question request renders without a tab headline" {
 
     var buf = try tui.Buffer.init(std.testing.allocator, .{ .width = 60, .height = 24 });
     defer buf.deinit();
-    render(&session, .{ .accent = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .muted = .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } } }, .{ .x = 0, .y = 0, .width = 58, .height = 22 }, &buf);
+    render(&session, .{ .accent = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .muted = .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, .text = .{ .rgb = .{ .r = 7, .g = 8, .b = 9 } } }, .{ .x = 0, .y = 0, .width = 58, .height = 22 }, &buf);
     try std.testing.expectEqual(@as(u21, '['), buf.get(1, 0).char);
     try std.testing.expect(rowContains(&buf, 0, "Which method?"));
 }

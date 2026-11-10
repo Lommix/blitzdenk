@@ -406,6 +406,7 @@ const ThemeDef = LuaType{ .table_def = .{ .name = "BlitzTheme", .fields = &.{
     .{ .name = "bg", .ty = LuaType.string, .optional = true },
     .{ .name = "overlay_dark", .ty = LuaType.string, .optional = true },
     .{ .name = "overlay", .ty = LuaType.string, .optional = true },
+    .{ .name = "border", .ty = LuaType.string, .optional = true },
     .{ .name = "muted", .ty = LuaType.string, .optional = true },
     .{ .name = "text", .ty = LuaType.string, .optional = true },
     .{ .name = "text_hl", .ty = LuaType.string, .optional = true },
@@ -426,6 +427,7 @@ const ThemeArg = struct {
     bg: ?[]const u8 = null,
     overlay_dark: ?[]const u8 = null,
     overlay: ?[]const u8 = null,
+    border: ?[]const u8 = null,
     muted: ?[]const u8 = null,
     text: ?[]const u8 = null,
     text_hl: ?[]const u8 = null,
@@ -448,6 +450,7 @@ fn applyTheme(a: *r.app.App, theme: ThemeArg) !void {
     if (theme.bg) |v| t.bg = try C.parseStrHex(v);
     if (theme.overlay_dark) |v| t.overlay_dark = try C.parseStrHex(v);
     if (theme.overlay) |v| t.overlay = try C.parseStrHex(v);
+    if (theme.border) |v| t.border = try C.parseStrHex(v);
     if (theme.muted) |v| t.muted = try C.parseStrHex(v);
     if (theme.text) |v| t.text = try C.parseStrHex(v);
     if (theme.text_hl) |v| t.text_hl = try C.parseStrHex(v);
@@ -1328,6 +1331,7 @@ pub const Blitz = LuaType{
                             bg: [7]u8,
                             overlay_dark: [7]u8,
                             overlay: [7]u8,
+                            border: [7]u8,
                             muted: [7]u8,
                             text: [7]u8,
                             text_hl: [7]u8,
@@ -1351,6 +1355,7 @@ pub const Blitz = LuaType{
                                 .bg = t.bg.toHexStr(),
                                 .overlay_dark = t.overlay_dark.toHexStr(),
                                 .overlay = t.overlay.toHexStr(),
+                                .border = t.border.toHexStr(),
                                 .muted = t.muted.toHexStr(),
                                 .text = t.text.toHexStr(),
                                 .text_hl = t.text_hl.toHexStr(),
@@ -4459,6 +4464,7 @@ pub fn parseWidgetColor(theme: *const app.Theme, str: []const u8) tui.Color {
         .{ "bg", theme.bg },
         .{ "overlay_dark", theme.overlay_dark },
         .{ "overlay", theme.overlay },
+        .{ "border", theme.border },
         .{ "muted", theme.muted },
         .{ "text", theme.text },
         .{ "text_hl", theme.text_hl },

@@ -621,6 +621,7 @@
 ---@field bg? string
 ---@field overlay_dark? string
 ---@field overlay? string
+---@field border? string
 ---@field muted? string
 ---@field text? string
 ---@field text_hl? string
