@@ -2,42 +2,70 @@ const r = @import("root.zig");
 const std = @import("std");
 const exec = @import("exec");
 
-pub const BashTool = r.Tool{
-    .def = .{
-        .name = "bash",
-        .description =
+/// Sync-only bash. Schema and description carry no background or job text.
+pub const BashTool = r.Tool{ .def = bashDef(false), .func = &runSync };
+
+/// Bash with `run_in_background`. Exposed to the model as `bash`, pooled under
+/// its own id so both variants can coexist.
+pub const BashBgTool = r.Tool{ .id = "bash_bg", .def = bashDef(true), .func = &runBg };
+
+/// Tool ids of the background bash set, exposed to Lua as `blitz.toolsets`.
+pub const SET_BASH_BACKGROUND = [_][]const u8{ BashBgTool.id.?, ReadJobTool.def.name, KillJobTool.def.name };
+
+fn bashDef(comptime background: bool) r.context.DefinitionMeta {
+    const description =
         \\Execute a bash command in the current working directory.
-        \\Returns stdout and stderr. Output is truncated to the last 
-        ++ r.DISPLAY_CAP_TEXT ++
-            \\ (whichever is hit first); the captured output is saved to a file whose path is reported when available.
-            \\
-            \\Result markers, one per line: [stderr], (no output), [exit code: N], [killed by signal: SIGTERM], [timed out after Nms; retry with a larger timeout], [stdout truncated: kept the last 
-        ++ OUTPUT_CAP_TEXT ++
-            \\], [stderr truncated: kept the last 
-        ++ OUTPUT_CAP_TEXT ++
-            \\].
-            \\Verify the target path before delete or move commands. Use absolute paths and guard variables (${VAR:?}) in destructive scripts.
-            \\Processes left running with `&` are killed when the command returns. For servers, watchers, and long builds use run_in_background: it returns a job id at once, and you get a reminder when the job exits. Do not poll or sleep while waiting for it. Read its merged stdout and stderr with read_job; some programs buffer output when it is not a terminal (use PYTHONUNBUFFERED=1 or `stdbuf -oL`). Stop a job with kill_job.
-        ,
-        .prompt_snippet = "Execute a bash command",
-        .prompt_guidelines = "Check the [exit code: N] marker; investigate unexpected failures before moving on.",
-        .parameters_schema =
+        \\Returns stdout and stderr. Output is truncated to the last
+    ++ " " ++ r.DISPLAY_CAP_TEXT ++
+        \\ (whichever is hit first); the captured output is saved to a file whose path is reported when available.
+        \\
+        \\Result markers, one per line: [stderr], (no output), [exit code: N], [killed by signal: SIGTERM], [timed out after Nms; retry with a larger timeout], [stdout truncated: kept the last
+    ++ " " ++ OUTPUT_CAP_TEXT ++
+        \\], [stderr truncated: kept the last
+    ++ " " ++ OUTPUT_CAP_TEXT ++
+        \\].
+        \\Verify the target path before delete or move commands. Use absolute paths and guard variables (${VAR:?}) in destructive scripts.
+        \\Processes left running with `&` are killed when the command returns.
+    ;
+    const background_description =
+        \\ For servers, watchers, and long builds use run_in_background: it returns a job id at once, and you get a reminder when the job exits. Do not poll or sleep while waiting for it. Read its merged stdout and stderr with read_job; some programs buffer output when it is not a terminal (use PYTHONUNBUFFERED=1 or `stdbuf -oL`). Stop a job with kill_job.
+    ;
+    const schema_head =
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Bash command to execute"},
         \\  "description": {"type": "string", "description": "Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples: \"ls\" → \"List files in current directory\"; \"git status\" → \"Show working tree status\"; \"npm install\" → \"Install package dependencies\""},
-        \\  "timeout": {"type": "number", "description": "Timeout in seconds (default 60s). Ignored with run_in_background"},
+        \\  "timeout": {"type": "number", "description": "Timeout in seconds (default 60s)
+    ;
+    const background_schema =
+        \\. Ignored with run_in_background"},
         \\  "run_in_background": {"type": "boolean", "description": "Run detached and return at once with a job id"}
+    ;
+    const schema_tail =
+        \\
         \\}, "required": ["command", "description"]}
-        ,
-    },
-    .func = &run,
-};
+    ;
+    return .{
+        .name = "bash",
+        .description = description ++ if (background) background_description else "",
+        .prompt_snippet = "Execute a bash command",
+        .prompt_guidelines = "Check the [exit code: N] marker; investigate unexpected failures before moving on.",
+        .parameters_schema = schema_head ++ (if (background) background_schema else "\"}") ++ schema_tail,
+    };
+}
 
 const MAX_TIMEOUT_SECS = 2_147_483;
 const TIMEOUT_RANGE_TEXT = std.fmt.comptimePrint("(0, {d}]", .{MAX_TIMEOUT_SECS});
 const OUTPUT_CAP_TEXT = std.fmt.comptimePrint("{d}MB", .{exec.MAX_OUTPUT / (1024 * 1024)});
 
-fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+fn runSync(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+    return run(ctx, call, false);
+}
+
+fn runBg(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+    return run(ctx, call, true);
+}
+
+fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall, background: bool) r.r.sdk.ToolOutput {
     const Args = struct {
         command: []const u8,
         description: []const u8,
@@ -53,6 +81,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     };
 
     if (args.command.len == 0) return r.errResult(call, "invalid arguments: \"command\" is required and must be a non-empty string");
+    if (args.run_in_background and !background) return r.errResult(call, "run_in_background is not available; run the command in the foreground");
 
     // Replace full cwd paths with "." for cleaner output (stack buffer)
     var buf: [r.STATUS_BUF]u8 = undefined;
@@ -388,6 +417,22 @@ fn runWithDeadline(
 
 fn timeoutToMs(secs: f64) i64 {
     return @as(i64, @intFromFloat(secs * 1000));
+}
+
+test "bash variants share text and only the background one exposes jobs" {
+    const sync = BashTool.def;
+    const bg = BashBgTool.def;
+    try std.testing.expectEqualStrings(sync.name, bg.name);
+    try std.testing.expect(std.mem.startsWith(u8, bg.description, sync.description));
+    try std.testing.expect(std.mem.indexOf(u8, sync.description, "to the last " ++ r.DISPLAY_CAP_TEXT ++ " (") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sync.description, "[stdout truncated: kept the last " ++ OUTPUT_CAP_TEXT ++ "]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sync.description, "run_in_background") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sync.parameters_schema, "run_in_background") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bg.parameters_schema, "run_in_background") != null);
+    inline for (.{ sync.parameters_schema, bg.parameters_schema }) |schema| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, schema, .{});
+        parsed.deinit();
+    }
 }
 
 test "formatBashResult strips ansi and renders result markers" {

@@ -88,7 +88,7 @@ pub const Command = union(enum) {
 
     pub const AddToolArgs = struct {
         agent_type: r.ContextFactory.AgentType,
-        tool_name: []const u8,
+        tool_names: []const []const u8,
     };
 
     pub const StartArgs = struct {
@@ -385,7 +385,10 @@ pub const Command = union(enum) {
             .add_tool => |arg| {
                 app.lua_vm.vm_mu.lockUncancelable(app.io);
                 defer app.lua_vm.vm_mu.unlock(app.io);
-                app.context_factory.addAgentTool(arg.agent_type, arg.tool_name) catch return;
+                app.context_factory.addAgentTools(arg.agent_type, arg.tool_names) catch |err| {
+                    std.log.scoped(.lua).err("add_tool failed: {s}", .{@errorName(err)});
+                    return;
+                };
                 if (app.main_agent_id) |id| {
                     if (app.registry.get(id)) |agent| {
                         if (agent.task != null) {

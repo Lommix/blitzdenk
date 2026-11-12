@@ -152,6 +152,7 @@ pub const LuaType = union(enum) {
     pub const Value = union(enum) {
         integer: c.lua_Integer,
         string: []const u8,
+        strings: []const []const u8,
     };
 
     pub const Field = struct {
@@ -176,6 +177,8 @@ const JsonDecodeRet = LuaType{ .raw = "any, boolean" };
 const Base64Ret = LuaType{ .raw = "string|nil, boolean" };
 
 const StringListDef = LuaType{ .raw = "string[]" };
+/// Tool names or toolsets, nested lists are flattened.
+const ToolNamesDef = LuaType{ .raw = "(string|string[])[]" };
 const CapabilityRuleListDef = LuaType{ .raw_refs = .{ .text = "BlitzCapabilityRule[]", .refs = &.{CapabilityRuleDef} } };
 const CapabilityRuleDef = LuaType{ .table_def = .{ .name = "BlitzCapabilityRule", .fields = &.{
     .{ .name = "binary", .ty = LuaType.string, .desc = "binary resolved on PATH" },
@@ -489,7 +492,7 @@ const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
     .{ .name = "name", .ty = LuaType.string },
     .{ .name = "description", .ty = LuaType.string },
     .{ .name = "prompt", .ty = LuaType.string },
-    .{ .name = "tools", .ty = StringListDef },
+    .{ .name = "tools", .ty = ToolNamesDef, .desc = "tool names and toolsets" },
     .{ .name = "model", .ty = LuaType.integer, .optional = true, .desc = "model handle from add_model" },
     .{ .name = "effort", .ty = LuaType.string, .optional = true },
     .{ .name = "in_agent_tool", .ty = LuaType.boolean, .optional = true },
@@ -503,6 +506,34 @@ const SkillFilterArg = struct {
 const SkillNameList = struct {
     items: []const []const u8 = &.{},
 };
+/// Tool name, or a list of names and nested lists (toolsets), flattened.
+const ToolNameList = struct {
+    items: []const []const u8 = &.{},
+};
+const MAX_TOOLSET_DEPTH = 8;
+
+fn collectToolNames(state: *c.lua_State, idx: c_int, alloc: Allocator, out: *std.ArrayList([]const u8), depth: u8) ?[]const u8 {
+    switch (c.lua_type(state, idx)) {
+        c.LUA_TSTRING => {
+            var len: usize = 0;
+            const ptr = c.lua_tolstring(state, idx, &len) orelse return "tool name: failed string conversion";
+            const name = alloc.dupe(u8, ptr[0..len]) catch return "oom";
+            out.append(alloc, name) catch return "oom";
+            return null;
+        },
+        c.LUA_TTABLE => {
+            if (depth >= MAX_TOOLSET_DEPTH) return "toolsets nested too deep";
+            const abs = c.lua_absindex(state, idx);
+            for (0..c.lua_rawlen(state, abs)) |i| {
+                _ = c.lua_rawgeti(state, abs, @intCast(i + 1));
+                defer c.lua_pop(state, 1);
+                if (collectToolNames(state, -1, alloc, out, depth + 1)) |msg| return msg;
+            }
+            return null;
+        },
+        else => return "tools must be tool names or lists of tool names",
+    }
+}
 const AppFlagsDef = LuaType{ .table_def = .{ .name = "BlitzAppFlags", .fields = &.{
     .{ .name = "show_thinking", .ty = LuaType.boolean, .optional = true },
     .{ .name = "show_diffs", .ty = LuaType.boolean, .optional = true },
@@ -581,6 +612,7 @@ pub const Blitz = LuaType{
             .{ .name = "input", .ty = BlitzInput },
             .{ .name = "draw", .ty = BlitzDraw },
             .{ .name = "tools", .ty = BlitzToolDef },
+            .{ .name = "toolsets", .ty = BlitzToolsetDef },
             .{ .name = "hooks", .ty = BlitzHooks },
             .{ .name = "permissions", .ty = BlitzPermissions },
             .{ .name = "AGENT_GENERAL", .ty = LuaType.integer, .value = .{ .integer = 0 } },
@@ -654,16 +686,16 @@ pub const Blitz = LuaType{
             },
             .{
                 .name = "add_tool",
-                .desc = "Add a single tool from the tool pool to an agent type's tool set.",
+                .desc = "Add a tool or a toolset from the tool pool to an agent type's tool set.",
                 .ty = LuaType{
                     .function = .{
-                        .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_name", .ty = LuaType.string } },
+                        .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool", .ty = LuaType{ .raw = "string|string[]" } } },
                         .fn_ptr = LuaFnBind((struct {
-                            fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, tool_name: []const u8) !void {
+                            fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type_id: u32, tool: ToolNameList) !void {
                                 if (try isToolVm(state)) return;
                                 try a.cmd_queue.append(a.io, .{ .add_tool = .{
                                     .agent_type = try r.ContextFactory.AgentType.fromLuaInt(agent_type_id),
-                                    .tool_name = tool_name,
+                                    .tool_names = tool.items,
                                 } });
                             }
                         }).lua_fn, "add_tool"),
@@ -958,7 +990,7 @@ pub const Blitz = LuaType{
                                 name: []const u8,
                                 description: []const u8,
                                 prompt: []const u8,
-                                tools: [][]const u8,
+                                tools: ToolNameList,
                                 model: ?u32 = null,
                                 effort: ?[]const u8,
                                 in_agent_tool: ?bool,
@@ -985,7 +1017,7 @@ pub const Blitz = LuaType{
                                         .only = def.skills.only,
                                         .except = def.skills.except,
                                     },
-                                    .tools = def.tools,
+                                    .tools = def.tools.items,
                                     .model = if (def.model) |handle| .{
                                         .model = @fromBackingInt(@intCast(handle)),
                                         .effort = effort,
@@ -1243,13 +1275,14 @@ pub const Blitz = LuaType{
                 .desc =
                 \\Override the tool set for a given agent type. Replaces defaults entirely.
                 \\Names must match built-in tool names or names of tools registered via blitz.register_tool.
+                \\Nested lists are toolsets and get flattened.
                 ,
                 .ty = LuaType{ .function = .{
-                    .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_names", .ty = StringListDef } },
+                    .args = &.{ .{ .name = "agent_type", .ty = LuaType.integer }, .{ .name = "tool_names", .ty = ToolNamesDef } },
                     .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type: r.ContextFactory.AgentType, tool_names: [][]const u8) !void {
+                        fn lua_fn(state: *c.lua_State, a: *r.app.App, agent_type: r.ContextFactory.AgentType, tool_names: ToolNameList) !void {
                             if (try isToolVm(state)) return;
-                            try a.context_factory.setAgentTools(agent_type, tool_names);
+                            try a.context_factory.setAgentTools(agent_type, tool_names.items);
                         }
                     }).lua_fn, "set_agent_tools"),
                 } },
@@ -1584,6 +1617,15 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "GREP", .desc = "read only text serach", .ty = LuaType.string, .value = .{ .string = tl.search.GrepTool.def.name } },
             .{ .name = "START_MCP", .desc = "load a registered mcp tools into session", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },
             .{ .name = "SKILL", .desc = "load a skill's full instructions by name", .ty = LuaType.string, .value = .{ .string = tl.skill.SkillTool.def.name } },
+        },
+    },
+};
+
+pub const BlitzToolsetDef = LuaType{
+    .table_def = .{
+        .name = "BlitzToolsetDef",
+        .fields = &.{
+            .{ .name = "BASH_BACKGROUND", .desc = "bash with run_in_background, plus read_job and kill_job", .ty = StringListDef, .value = .{ .strings = &tl.bash.SET_BASH_BACKGROUND } },
         },
     },
 };
@@ -3300,6 +3342,13 @@ fn pushLuaValue(L: *c.lua_State, comptime value: LuaType.Value) void {
     switch (value) {
         .integer => |n| c.lua_pushinteger(L, n),
         .string => |s| _ = c.lua_pushlstring(L, s.ptr, s.len),
+        .strings => |list| {
+            c.lua_createtable(L, @intCast(list.len), 0);
+            inline for (list, 1..) |s, i| {
+                _ = c.lua_pushlstring(L, s.ptr, s.len);
+                c.lua_rawseti(L, -2, i);
+            }
+        },
     }
 }
 
@@ -3438,6 +3487,13 @@ fn readAnyValueAlloc(
             .only = raw.only.items,
             .except = raw.except.items,
         });
+    }
+
+    if (T == ToolNameList) {
+        const alloc = allocator orelse return .Err(name ++ " require allocator");
+        var out: std.ArrayList([]const u8) = .empty;
+        if (collectToolNames(state, idx, alloc, &out, 0)) |msg| return .Err(msg);
+        return .Ok(.{ .items = out.items });
     }
 
     if (T == SkillNameList) {
@@ -6047,6 +6103,46 @@ test "add_agent in a tool vm returns the registered handle by name" {
     , .{handle});
     defer std.testing.allocator.free(code);
     try tool_vm.exec(code);
+}
+
+test "toolsets flatten into agent tool lists and keep one tool per exposed name" {
+    var app_state = permissionTestApp();
+    const factory = try r.ContextFactory.init(std.testing.allocator, std.testing.io, "/tmp", "/tmp");
+    defer factory.deinit();
+    app_state.context_factory = factory;
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+    try vm.exec(
+        \\blitz.set_agent_tools(blitz.AGENT_GENERAL, {
+        \\    { blitz.toolsets.BASH_BACKGROUND },
+        \\    blitz.tools.READ,
+        \\    blitz.tools.BASH,
+        \\})
+    );
+
+    var set: r.ContextFactory.ToolSet = .{};
+    try factory.build_toolset(.general, &set);
+    const tools = set.slice();
+    try std.testing.expectEqual(@as(usize, 4), tools.len);
+    try std.testing.expectEqualStrings("bash", tools[0].def.name);
+    try std.testing.expect(tools[0].func == tl.bash.BashBgTool.func);
+    try std.testing.expectEqualStrings("read_job", tools[1].def.name);
+    try std.testing.expectEqualStrings("kill_job", tools[2].def.name);
+    try std.testing.expectEqualStrings("read", tools[3].def.name);
+
+    var prompt_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer prompt_arena.deinit();
+    const prompt = try factory.build_system_prompt(prompt_arena.allocator(), .general, false);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prompt, "- bash: "));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prompt, tl.bash.BashTool.def.prompt_guidelines.?));
+
+    try vm.exec(
+        \\assert(blitz.has_tool(blitz.AGENT_GENERAL, "bash_bg"))
+        \\assert(blitz.has_tool(blitz.AGENT_GENERAL, "bash"))
+        \\assert(not pcall(blitz.set_agent_tools, blitz.AGENT_GENERAL, { 1 }))
+    );
 }
 
 test "skill filters combine lua config and skill metadata" {

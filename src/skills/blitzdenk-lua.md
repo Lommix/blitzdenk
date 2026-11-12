@@ -84,10 +84,11 @@ read the live agent.
 
 ```lua
 local tools = require("tools")
+local web = { tools.web_search, tools.web_fetch }  -- custom toolset
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
-    blitz.tools.BASH, blitz.tools.READ, blitz.tools.EDIT,
-    blitz.tools.GLOB, blitz.tools.GREP, blitz.tools.SKILL,
-    tools.web_fetch,          -- custom tool from require("tools")
+    blitz.toolsets.BASH_BACKGROUND, -- bash + read_job + kill_job
+    blitz.tools.READ, blitz.tools.EDIT, blitz.tools.SKILL,
+    web,
 })
 blitz.set_read_image_max(4096, 4096)
 blitz.set_capabilities({
@@ -96,6 +97,13 @@ blitz.set_capabilities({
 ```
 
 - Tool names are nonempty UTF-8 strings.
+- A toolset is a plain list of tool names. `set_agent_tools`, `add_agent`
+  `tools`, and `add_tool` flatten nested lists. Tools sharing a name keep
+  the first entry; `add_tool` replaces it instead, so
+  `add_tool(t, blitz.toolsets.BASH_BACKGROUND)` upgrades a sync bash.
+  `add_tool` applies a toolset all or none.
+- `blitz.tools.BASH` is sync only. Background jobs need
+  `blitz.toolsets.BASH_BACKGROUND`.
 - The read tool returns scaled images as PNG and shrinks further to fit the
   byte limit. A format the decoder cannot read goes out unscaled with a note.
 - Capability rules form the `<env_capabilities>` catalogue, injected once

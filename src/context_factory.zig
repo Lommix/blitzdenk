@@ -49,6 +49,7 @@ pub const general_default_tool_set = .{
     r.tools.write.WriteTool,
     r.tools.edit.EditTool,
     r.tools.bash.BashTool,
+    r.tools.bash.BashBgTool,
     r.tools.bash.KillJobTool,
     r.tools.bash.ReadJobTool,
     r.tools.read.ReadTool,
@@ -778,17 +779,15 @@ pub fn resetDefs(self: *Self) void {
         \\
         ,
         .prompt = @embedFile("prompts/default.md"),
-        .tools = .from(&.{
+        .tools = .from(&([_][]const u8{
             r.tools.write.WriteTool.def.name,
             r.tools.edit.EditTool.def.name,
-            r.tools.bash.BashTool.def.name,
-            r.tools.bash.KillJobTool.def.name,
-            r.tools.bash.ReadJobTool.def.name,
+        } ++ r.tools.bash.SET_BASH_BACKGROUND ++ [_][]const u8{
             r.tools.read.ReadTool.def.name,
             r.tools.ask.AskTool.def.name,
             r.tools.start.StartMcpTool.def.name,
             r.tools.skill.SkillTool.def.name,
-        }),
+        })),
     });
 
     self.rescanSkills(self.cwd);
@@ -797,8 +796,13 @@ pub fn resetDefs(self: *Self) void {
 
 pub fn add(self: *Self, tool: r.tools.Tool, flags: ToolFlags) !void {
     if (tool.def.name.len == 0 or !std.unicode.utf8ValidateSlice(tool.def.name)) return error.InvalidToolName;
+    if (self.findLoaded(tool.key()) != null) {
+        std.log.scoped(.tools).warn("tool id '{s}' is already taken, skipping", .{tool.key()});
+        return;
+    }
     const alloc = self.prompt_arena.allocator();
     var owned = tool;
+    owned.id = if (tool.id) |id| try alloc.dupe(u8, id) else null;
     owned.def.name = try alloc.dupe(u8, tool.def.name);
     owned.def.description = try alloc.dupe(u8, tool.def.description);
     owned.def.parameters_schema = try alloc.dupe(u8, tool.def.parameters_schema);
@@ -825,7 +829,7 @@ pub fn remove(self: *Self, tool_name: []const u8) void {
     for (0..self.loaded_tools.items.len) |i| {
         const idx = self.loaded_tools.items.len - i - 1;
         const en = &self.loaded_tools.items[idx];
-        if (std.mem.eql(u8, en.tool.def.name, tool_name)) {
+        if (std.mem.eql(u8, en.tool.key(), tool_name)) {
             _ = self.loaded_tools.swapRemove(idx);
             return;
         }
@@ -877,16 +881,23 @@ fn refreshAgentToolsInternal(self: *const Self, agent: *r.agent.Agent, base: r.t
 
 fn findLoaded(self: *const Self, name: []const u8) ?r.tools.Tool {
     for (self.loaded_tools.items) |entry| {
-        if (std.mem.eql(u8, entry.tool.def.name, name)) return entry.tool;
+        if (std.mem.eql(u8, entry.tool.key(), name)) return entry.tool;
     }
     return null;
 }
 
+/// The one resolver from an agent's tool list to tools: listed ids first, then
+/// tools added to every agent. Yields one tool per exposed name, first wins.
 const ToolIter = struct {
     factory: *const Self,
     agent_type: AgentType,
+    /// Skip tools added to every agent.
+    listed_only: bool = false,
     i: u32 = 0,
     listed_tools_done: bool = false,
+    seen: [MAX_AGENT_TOOLS][]const u8 = undefined,
+    seen_len: u8 = 0,
+
     pub fn next(self: *ToolIter) ?r.tools.Tool {
         const def = self.factory.getAgent(self.agent_type) orelse return null;
         const tools = &def.tools;
@@ -894,28 +905,33 @@ const ToolIter = struct {
             while (self.i < tools.len) {
                 const idx = self.i;
                 self.i += 1;
-                const name = tools.nameAt(idx);
-                if (self.factory.findLoaded(name)) |tool| return tool;
+                const tool = self.factory.findLoaded(tools.nameAt(idx)) orelse continue;
+                if (self.claim(tool.def.name)) return tool;
             }
             self.listed_tools_done = true;
             self.i = 0;
         }
+        if (self.listed_only) return null;
         while (self.i < self.factory.loaded_tools.items.len) {
             const en = self.factory.loaded_tools.items[self.i];
             self.i += 1;
             if (!en.flags.add_to_agents) continue;
             if (!en.flags.allowed_agents.contains(self.agent_type)) continue;
-            if (contains(tools, en.tool.def.name)) continue;
-            return en.tool;
+            if (self.claim(en.tool.def.name)) return en.tool;
         }
         return null;
     }
 
-    fn contains(tools: *const AgentTools, name: []const u8) bool {
-        for (0..tools.len) |idx| {
-            if (std.mem.eql(u8, tools.nameAt(idx), name)) return true;
+    /// Record an exposed name; false when an earlier tool already took it.
+    fn claim(self: *ToolIter, name: []const u8) bool {
+        for (self.seen[0..self.seen_len]) |taken| {
+            if (std.mem.eql(u8, taken, name)) return false;
         }
-        return false;
+        if (self.seen_len < self.seen.len) {
+            self.seen[self.seen_len] = name;
+            self.seen_len += 1;
+        }
+        return true;
     }
 };
 
@@ -923,10 +939,11 @@ pub fn iter(self: *const Self, agent_type: AgentType) ToolIter {
     return .{ .factory = self, .agent_type = agent_type };
 }
 
+/// Matches the pool id or the exposed name.
 pub fn agentHasTool(self: *const Self, agent_type: AgentType, name: []const u8) bool {
     var it = self.iter(agent_type);
     while (it.next()) |tool| {
-        if (std.mem.eql(u8, tool.def.name, name)) return true;
+        if (std.mem.eql(u8, tool.key(), name) or std.mem.eql(u8, tool.def.name, name)) return true;
     }
     return false;
 }
@@ -969,22 +986,35 @@ pub fn setAgentSkills(self: *Self, agent_type: AgentType, filter: skills_mod.Fil
     self.warnUnknownSkills(def.name, def.skills);
 }
 
-pub fn addAgentTool(self: *Self, agent_type: AgentType, name: []const u8) !void {
-    var tools = &(self.getAgentMut(agent_type) orelse return error.UnknownAgent).tools;
-    if (tools.len >= MAX_AGENT_TOOLS) return error.TooManyTools;
+/// Add tool ids to an agent type, all or none. An id whose tool shares an
+/// exposed name with a listed one takes over that slot, so a toolset can
+/// upgrade a variant in place.
+pub fn addAgentTools(self: *Self, agent_type: AgentType, names: []const []const u8) !void {
+    const tools = &(self.getAgentMut(agent_type) orelse return error.UnknownAgent).tools;
+    var next = tools.*;
+    for (names) |name| try self.putAgentTool(&next, name);
+    tools.* = next;
+}
+
+fn putAgentTool(self: *const Self, tools: *AgentTools, name: []const u8) !void {
     if (name.len > 128) return error.NameTooLong;
-
     for (0..tools.len) |i| {
-        const len = tools.name_lens[i];
-        if (len == 0) continue;
-
-        const existing = tools.names[i][0..len];
-        if (std.mem.eql(u8, existing, name)) return;
+        if (std.mem.eql(u8, tools.nameAt(i), name)) return;
     }
 
-    @memcpy(tools.names[tools.len][0..name.len], name);
-    tools.name_lens[tools.len] = @intCast(name.len);
-    tools.len += 1;
+    const slot = blk: {
+        const tool = self.findLoaded(name) orelse break :blk tools.len;
+        for (0..tools.len) |i| {
+            const prior = self.findLoaded(tools.nameAt(i)) orelse continue;
+            if (std.mem.eql(u8, prior.def.name, tool.def.name)) break :blk i;
+        }
+        break :blk tools.len;
+    };
+    if (slot == MAX_AGENT_TOOLS) return error.TooManyTools;
+
+    @memcpy(tools.names[slot][0..name.len], name);
+    tools.name_lens[slot] = @intCast(name.len);
+    if (slot == tools.len) tools.len += 1;
 }
 
 pub fn resetLoadedTools(self: *Self) !void {
@@ -1019,8 +1049,8 @@ pub fn build_system_prompt(
 
     if (self.agentHasTools(agent_type)) {
         var wrote_tools_header = false;
-        for (0..def.tools.len) |i| {
-            const tool = self.findLoaded(def.tools.nameAt(i)) orelse continue;
+        var listed: ToolIter = .{ .factory = self, .agent_type = agent_type, .listed_only = true };
+        while (listed.next()) |tool| {
             if (tool.def.requires_vision and !vision) continue;
             if (tool.def.prompt_snippet) |snippet| {
                 if (!wrote_tools_header) {
@@ -1036,8 +1066,8 @@ pub fn build_system_prompt(
         }
 
         var wrote_guidelines_header = false;
-        for (0..def.tools.len) |i| {
-            const tool = self.findLoaded(def.tools.nameAt(i)) orelse continue;
+        listed = .{ .factory = self, .agent_type = agent_type, .listed_only = true };
+        while (listed.next()) |tool| {
             if (tool.def.requires_vision and !vision) continue;
             if (tool.def.prompt_guidelines) |guidelines| {
                 if (!wrote_guidelines_header) {
@@ -1321,4 +1351,36 @@ test "reload reclaims binding slots released by renamed agents" {
     try std.testing.expect(factory.sessionBindingFor("beta") != null);
     try std.testing.expectEqualStrings("second", (try fixture.config(beta_again)).model);
     try std.testing.expectEqualStrings("third", (try fixture.config(gamma)).model);
+}
+
+test "tool pool keeps one tool per exposed name and adds toolsets atomically" {
+    const factory = try Self.init(std.testing.allocator, std.testing.io, "/tmp", "/tmp");
+    defer factory.deinit();
+    const bash = r.tools.bash;
+
+    // A taken pool id is skipped, the built-in stays reachable.
+    const pool_len = factory.loaded_tools.items.len;
+    try factory.add(.{ .def = .{ .name = "bash_bg" }, .func = bash.BashTool.func }, .all);
+    try std.testing.expectEqual(pool_len, factory.loaded_tools.items.len);
+
+    // A background toolset upgrades a listed sync bash in place.
+    try factory.setAgentTools(.general, &.{ r.tools.read.ReadTool.def.name, bash.BashTool.def.name });
+    try factory.addAgentTools(.general, &bash.SET_BASH_BACKGROUND);
+    var set: ToolSet = .{};
+    try factory.build_toolset(.general, &set);
+    try std.testing.expectEqual(@as(u32, 4), set.len);
+    try std.testing.expect(set.slice()[1].func == bash.BashBgTool.func);
+
+    // A tool added to every agent cannot duplicate a listed exposed name.
+    try factory.add(.{ .id = "mcp_bash", .def = .{ .name = "bash" }, .func = bash.BashTool.func }, .{ .allowed_agents = .full, .add_to_agents = true });
+    try factory.build_toolset(.general, &set);
+    try std.testing.expectEqual(@as(u32, 4), set.len);
+
+    // A toolset that does not fit leaves the list untouched.
+    var names: [MAX_AGENT_TOOLS - 1][]const u8 = undefined;
+    var bufs: [MAX_AGENT_TOOLS - 1][8]u8 = undefined;
+    for (&names, &bufs, 0..) |*name, *buf, i| name.* = try std.fmt.bufPrint(buf, "t{d}", .{i});
+    try factory.setAgentTools(.general, &names);
+    try std.testing.expectError(error.TooManyTools, factory.addAgentTools(.general, &bash.SET_BASH_BACKGROUND));
+    try std.testing.expectEqual(@as(u8, MAX_AGENT_TOOLS - 1), factory.getAgent(.general).?.tools.len);
 }

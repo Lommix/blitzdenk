@@ -103,8 +103,15 @@ pub const DefinitionMeta = struct {
 };
 
 pub const Definition = struct {
+    /// Pool key when it differs from `def.name`, so variants exposed under one
+    /// name can coexist in the pool.
+    id: ?[]const u8 = null,
     def: DefinitionMeta,
     func: ToolFn,
+
+    pub fn key(self: Definition) []const u8 {
+        return self.id orelse self.def.name;
+    }
 };
 
 const Binding = struct {

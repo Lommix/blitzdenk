@@ -274,6 +274,10 @@
 ---load a skill's full instructions by name
 ---@field SKILL string
 
+---@class BlitzToolsetDef
+---bash with run_in_background, plus read_job and kill_job
+---@field BASH_BACKGROUND string[]
+
 ---@class BlitzAgentCreatedEvent
 ---packed AgentId of the new agent
 ---@field id integer
@@ -585,7 +589,8 @@
 ---@field name string
 ---@field description string
 ---@field prompt string
----@field tools string[]
+---tool names and toolsets
+---@field tools (string|string[])[]
 ---model handle from add_model
 ---@field model? integer
 ---@field effort? string
@@ -664,6 +669,7 @@
 ---@field input BlitzInput
 ---@field draw BlitzDraw
 ---@field tools BlitzToolDef
+---@field toolsets BlitzToolsetDef
 ---@field hooks BlitzHooks
 ---@field permissions BlitzPermissions
 ---@field AGENT_GENERAL integer
@@ -678,8 +684,8 @@
 ---@field AWAIT_INVALID integer
 ---Register a tool.
 ---@field register_tool fun(def: ToolDef): string
----Add a single tool from the tool pool to an agent type's tool set.
----@field add_tool fun(agent_type: integer, tool_name: string)
+---Add a tool or a toolset from the tool pool to an agent type's tool set.
+---@field add_tool fun(agent_type: integer, tool: string|string[])
 ---Return the main agent, if a session is running.
 ---@field get_main_agent fun(): integer|nil
 ---Return the id of the recorded session, or nil until its journal holds a first record.
@@ -728,7 +734,8 @@
 ---@field add_command fun(command: string, func: fun(rem: string), description?: string)
 ---Override the tool set for a given agent type. Replaces defaults entirely.
 ---Names must match built-in tool names or names of tools registered via blitz.register_tool.
----@field set_agent_tools fun(agent_type: integer, tool_names: string[])
+---Nested lists are toolsets and get flattened.
+---@field set_agent_tools fun(agent_type: integer, tool_names: (string|string[])[])
 ---Restrict which skills an agent type can see and load. Pass false to
 ---disable skills, or a table with optional only and except lists.
 ---@field set_agent_skills fun(agent_type: integer, filter: boolean|BlitzSkillFilter)
