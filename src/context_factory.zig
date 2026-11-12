@@ -18,7 +18,7 @@ agents: std.EnumArray(AgentType, ?AgentDef) = .initFill(null),
 available_mcp_names: [MAX_AVAILABLE_SYSTEMS][]const u8 = undefined,
 available_mcp_count: usize = 0,
 capability_rules: []const CapabilityRule = &.{},
-capability_catalog_route: ?u64 = null,
+capability_catalog_ready: bool = false,
 capability_catalog_body: []const u8 = "",
 capability_catalog_mu: std.Io.Mutex = .init,
 capability_arena: std.heap.ArenaAllocator = undefined,
@@ -30,8 +30,6 @@ config_dir: ?std.Io.Dir,
 skill_dir: ?std.Io.Dir,
 skills: skills_mod.SkillRegistry = .{},
 cwd: []const u8 = "",
-ssh_dir: ?std.Io.Dir = null,
-ssh_aliases: std.ArrayList(SshAlias) = .empty,
 flags: Flags = .{},
 general_prompt_size: usize = 0,
 session_arena: std.heap.ArenaAllocator = undefined,
@@ -55,8 +53,6 @@ pub const general_default_tool_set = .{
     r.tools.read.ReadTool,
     r.tools.patch.PatchTool,
     r.tools.ask.AskTool,
-    r.tools.search.GlobTool,
-    r.tools.search.GrepTool,
     r.tools.start.StartMcpTool,
     r.tools.skill.SkillTool,
 };
@@ -184,11 +180,6 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8, cwd: []const
         else => return err,
     };
 
-    const ssh_dir: ?std.Io.Dir = home_dir.openDir(io, ".ssh/", .{}) catch |err| switch (err) {
-        error.FileNotFound => null,
-        else => return err,
-    };
-
     self.* = Self{
         .alloc = alloc,
         .loaded_tools = try buildDefaultTools(alloc),
@@ -199,7 +190,6 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8, cwd: []const
         .skill_dir = skill_dir,
         .config_dir = config_dir,
         .cwd = cwd,
-        .ssh_dir = ssh_dir,
     };
 
     self.resetDefs();
@@ -207,8 +197,8 @@ pub fn init(alloc: std.mem.Allocator, io: std.Io, home: []const u8, cwd: []const
 }
 
 /// Register env rules from Lua. Rules are stored verbatim; their binaries
-/// resolve lazily through the exec pool on the first capability injection, so
-/// the probe follows the active SSH routing. State lives in the capability
+/// resolve lazily through the exec pool on the first capability injection.
+/// State lives in the capability
 /// arena under the catalogue mutex: agent threads render the catalogue while
 /// the reload path replaces the rules, so both share one lock.
 pub fn setCapabilityRules(self: *Self, rules: []const CapabilityRule) !void {
@@ -225,19 +215,16 @@ pub fn setCapabilityRules(self: *Self, rules: []const CapabilityRule) !void {
         };
     }
     self.capability_rules = stored;
-    self.capability_catalog_route = null;
+    self.capability_catalog_ready = false;
 }
 
 /// Probe the registered binaries through the exec pool and cache the rendered
-/// catalogue for the current routing. A routing change (local ↔ SSH, new
-/// target) invalidates the cache, so the next injection re-resolves remotely.
-/// A failed probe stays uncached and retries on the next step.
+/// catalogue. A failed probe stays uncached and retries on the next step.
 pub fn ensureCapabilityCatalog(self: *Self, pool: *r.exec.CmdPool) !void {
     self.capability_catalog_mu.lockUncancelable(self.io);
     defer self.capability_catalog_mu.unlock(self.io);
 
-    const route = pool.routeKey();
-    if (self.capability_catalog_route == route) return;
+    if (self.capability_catalog_ready) return;
 
     const body = renderCapabilityCatalog(
         self.capability_arena.allocator(),
@@ -248,7 +235,7 @@ pub fn ensureCapabilityCatalog(self: *Self, pool: *r.exec.CmdPool) !void {
         else => return err,
     };
     self.capability_catalog_body = body;
-    self.capability_catalog_route = route;
+    self.capability_catalog_ready = true;
 }
 
 /// Returns the rendered catalogue, "" when the probe found no rule binary, or
@@ -595,166 +582,6 @@ fn getAgentMut(self: *Self, agent_type: AgentType) ?*AgentDef {
     return if (self.agents.getPtr(agent_type).*) |*def| def else null;
 }
 
-/// A connectable alias resolved from ~/.ssh/config.
-pub const SshAlias = struct {
-    name: []const u8,
-    user: []const u8,
-    host: []const u8,
-    cwd: []const u8,
-};
-
-const SshKeys = struct {
-    user: ?[]const u8 = null,
-    host_name: ?[]const u8 = null,
-    directory: ?[]const u8 = null,
-};
-
-fn mergeSshKeys(dst: *SshKeys, src: SshKeys) void {
-    if (src.user) |v| dst.user = v;
-    if (src.host_name) |v| dst.host_name = v;
-    if (src.directory) |v| dst.directory = v;
-}
-
-fn freeSshAliases(alloc: std.mem.Allocator, aliases: []SshAlias) void {
-    for (aliases) |a| {
-        alloc.free(a.name);
-        alloc.free(a.user);
-        alloc.free(a.host);
-        alloc.free(a.cwd);
-    }
-}
-
-const SshBlock = struct {
-    name: []const u8,
-    keys: SshKeys,
-};
-
-const SshBlockState = enum { none, default, named, skipped };
-
-/// Parse the contents of ~/.ssh/config into connectable aliases.
-/// Global keys and `Host *` blocks provide defaults, later blocks win.
-/// Named hosts need a resolvable user; wildcard or multi-name hosts are skipped.
-fn parseSshAliases(alloc: std.mem.Allocator, content: []const u8) !std.ArrayList(SshAlias) {
-    var list = std.ArrayList(SshAlias).empty;
-    errdefer {
-        freeSshAliases(alloc, list.items);
-        list.deinit(alloc);
-    }
-
-    var defaults = SshKeys{};
-    var named = std.ArrayList(SshBlock).empty;
-    defer named.deinit(alloc);
-
-    const flush = struct {
-        fn call(
-            blocks: *std.ArrayList(SshBlock),
-            a: std.mem.Allocator,
-            dflts: *SshKeys,
-            state: SshBlockState,
-            name: []const u8,
-            keys: SshKeys,
-        ) !void {
-            switch (state) {
-                .default => mergeSshKeys(dflts, keys),
-                .named => try blocks.append(a, .{ .name = name, .keys = keys }),
-                else => {},
-            }
-        }
-    }.call;
-
-    var state: SshBlockState = .none;
-    var cur_name: []const u8 = undefined;
-    var cur_keys = SshKeys{};
-
-    var it = std.mem.splitScalar(u8, content, '\n');
-    while (it.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0) continue;
-        const hash = std.mem.indexOfScalar(u8, line, '#') orelse line.len;
-        const body = std.mem.trim(u8, line[0..hash], " \t");
-        if (body.len == 0) continue;
-
-        const sep = std.mem.indexOfAny(u8, body, " \t=") orelse continue;
-        const key = body[0..sep];
-        const value = std.mem.trim(u8, body[sep..], " \t=");
-
-        if (std.ascii.eqlIgnoreCase(key, "host")) {
-            try flush(&named, alloc, &defaults, state, cur_name, cur_keys);
-            cur_keys = .{};
-            state = .skipped;
-            if (value.len > 0) {
-                if (std.mem.indexOfAny(u8, value, "*?") != null) {
-                    if (std.mem.eql(u8, value, "*")) state = .default;
-                } else if (std.mem.indexOfAny(u8, value, " \t") == null) {
-                    state = .named;
-                    cur_name = value;
-                }
-            }
-            continue;
-        }
-
-        switch (state) {
-            .none => {
-                if (std.ascii.eqlIgnoreCase(key, "user")) {
-                    if (defaults.user == null) defaults.user = value;
-                } else if (std.ascii.eqlIgnoreCase(key, "hostname")) {
-                    if (defaults.host_name == null) defaults.host_name = value;
-                } else if (std.ascii.eqlIgnoreCase(key, "directory")) {
-                    if (defaults.directory == null) defaults.directory = value;
-                }
-            },
-            .default, .named => {
-                if (std.ascii.eqlIgnoreCase(key, "user")) {
-                    if (cur_keys.user == null) cur_keys.user = value;
-                } else if (std.ascii.eqlIgnoreCase(key, "hostname")) {
-                    if (cur_keys.host_name == null) cur_keys.host_name = value;
-                } else if (std.ascii.eqlIgnoreCase(key, "directory")) {
-                    if (cur_keys.directory == null) cur_keys.directory = value;
-                }
-            },
-            .skipped => {},
-        }
-    }
-    try flush(&named, alloc, &defaults, state, cur_name, cur_keys);
-
-    for (named.items) |b| {
-        const user = b.keys.user orelse defaults.user orelse continue;
-        const host = b.keys.host_name orelse defaults.host_name orelse b.name;
-        const cwd = b.keys.directory orelse defaults.directory orelse "/";
-        const name_d = try alloc.dupe(u8, b.name);
-        errdefer alloc.free(name_d);
-        const user_d = try alloc.dupe(u8, user);
-        errdefer alloc.free(user_d);
-        const host_d = try alloc.dupe(u8, host);
-        errdefer alloc.free(host_d);
-        const cwd_d = try alloc.dupe(u8, cwd);
-        errdefer alloc.free(cwd_d);
-        try list.append(alloc, .{ .name = name_d, .user = user_d, .host = host_d, .cwd = cwd_d });
-    }
-    return list;
-}
-
-/// Load the connectable aliases from ~/.ssh/config into a gpa-backed buffer,
-/// replacing any previous contents. Called on startup and on hot-reload.
-fn loadSshAliases(self: *Self) void {
-    freeSshAliases(self.alloc, self.ssh_aliases.items);
-    self.ssh_aliases.deinit(self.alloc);
-    self.ssh_aliases = .empty;
-
-    const dir = self.ssh_dir orelse return;
-    const content = dir.readFileAlloc(self.io, "config", self.alloc, .limited64(1024 * 1024)) catch return;
-    defer self.alloc.free(content);
-    self.ssh_aliases = parseSshAliases(self.alloc, content) catch return;
-}
-
-/// Look up a connectable alias by its Host name, case-insensitively.
-pub fn findSshAlias(self: *const Self, name: []const u8) ?SshAlias {
-    for (self.ssh_aliases.items) |alias| {
-        if (std.ascii.eqlIgnoreCase(alias.name, name)) return alias;
-    }
-    return null;
-}
-
 pub fn rescanSkills(self: *Self, cwd: []const u8) void {
     self.cwd = cwd;
     self.skills.scan(self.alloc, self.io, self.skill_dir, self.cwd);
@@ -766,7 +593,7 @@ pub fn resetDefs(self: *Self) void {
     self.capability_catalog_mu.lockUncancelable(self.io);
     _ = self.capability_arena.reset(.retain_capacity);
     self.capability_rules = &.{};
-    self.capability_catalog_route = null;
+    self.capability_catalog_ready = false;
     self.capability_catalog_mu.unlock(self.io);
     self.agent_counter = 3;
     self.available_mcp_count = 0;
@@ -791,7 +618,6 @@ pub fn resetDefs(self: *Self) void {
     });
 
     self.rescanSkills(self.cwd);
-    self.loadSshAliases();
 }
 
 pub fn add(self: *Self, tool: r.tools.Tool, flags: ToolFlags) !void {
@@ -1028,8 +854,6 @@ pub fn deinit(self: *Self) void {
     self.session_bindings.deinit(self.alloc);
     self.session_arena.deinit();
     self.skills.deinit(self.alloc);
-    freeSshAliases(self.alloc, self.ssh_aliases.items);
-    self.ssh_aliases.deinit(self.alloc);
     self.prompt_arena.deinit();
     self.alloc.destroy(self);
 }
@@ -1115,12 +939,6 @@ pub fn parsePrefixedCommand(raw: []const u8, prefix: []const u8) ?ParsedCommand 
     return .{ .name = name, .rest = tail };
 }
 
-/// /ssh-<alias> → the alias name, or null.
-pub fn parseSshAliasCommand(raw: []const u8) ?[]const u8 {
-    const parsed = parsePrefixedCommand(raw, "ssh-") orelse return null;
-    return parsed.name;
-}
-
 test "capability catalogue probes binaries through the exec pool" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1150,20 +968,15 @@ test "capability catalogue probes binaries through the exec pool" {
     const section = body[start..];
     try std.testing.expect(std.mem.indexOf(u8, section, "sh: RULE_PRESENT") != null);
     try std.testing.expect(std.mem.indexOf(u8, section, "RULE_MISSING") == null);
-    try std.testing.expectEqual(pool.routeKey(), factory.capability_catalog_route.?);
+    try std.testing.expect(factory.capability_catalog_ready);
 
-    const route_before = pool.routeKey();
     try factory.ensureCapabilityCatalog(&pool);
     try std.testing.expectEqualStrings(body, factory.capability_catalog_body);
 
     try factory.setCapabilityRules(&.{.{ .binary = "definitely_missing_binary_xyz", .rule = "X" }});
     try factory.ensureCapabilityCatalog(&pool);
     try std.testing.expectEqualStrings("", factory.capability_catalog_body);
-    try std.testing.expect(factory.capability_catalog_route != null);
-
-    try pool.setSsh("u", "h", "/", "");
-    defer pool.clearSsh();
-    try std.testing.expect(route_before != pool.routeKey());
+    try std.testing.expect(factory.capability_catalog_ready);
 }
 
 const ModelContractTest = struct {

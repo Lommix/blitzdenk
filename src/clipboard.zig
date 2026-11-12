@@ -104,7 +104,7 @@ pub fn fromDisplayPos(buffer: []const u8, display_pos: usize) usize {
 }
 
 fn readMime(alloc: std.mem.Allocator, pool: *exec.CmdPool, argv: []const []const u8, ext: []const u8) !?ImageData {
-    const res = pool.runAndWaitTimeout(.{ .argv = argv, .force_local = true, .max_output = MAX_CLIP_IMAGE_BYTES }, 1500) catch return null;
+    const res = pool.runAndWaitTimeout(.{ .argv = argv, .max_output = MAX_CLIP_IMAGE_BYTES }, 1500) catch return null;
     defer pool.alloc.free(res.stdout);
     defer pool.alloc.free(res.stderr);
     if (res.ty == .success and !res.stdout_truncated and res.stdout.len > 0 and res.stdout.len <= MAX_CLIP_IMAGE_BYTES) {
@@ -140,7 +140,6 @@ fn readMacClipboard(alloc: std.mem.Allocator, pool: *exec.CmdPool) !?ImageData {
             "-e",
             "close access outFile",
         },
-        .force_local = true,
         .max_output = 4096,
     }, 2000) catch return null;
     defer pool.alloc.free(res.stdout);

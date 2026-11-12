@@ -1,4 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const ct = @import("ctime");
 const r = @import("root.zig");
 
 pub const Callback = *const fn (w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) anyerror!void;
@@ -94,30 +96,15 @@ pub const InjectionsHooks = struct {
 };
 
 fn inject_cwd_information(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
-    const route_key = app.exec_pool.routeKey();
-    if (agent.flags.route_key_seen != route_key) {
-        agent.flags.route_key_seen = route_key;
-        agent.flags.cwd_seen = false;
-        agent.flags.agents_context_files_seen = false;
-    }
     if (agent.flags.cwd_seen) return;
     agent.flags.cwd_seen = true;
 
-    const os_res = app.exec_pool.runAndWait(.{ .argv = &.{ "uname", "-s" } }) catch null;
-    defer if (os_res) |ores| {
-        app.exec_pool.alloc.free(ores.stdout);
-        app.exec_pool.alloc.free(ores.stderr);
+    const cwd = if (agent.cwd.len > 0) agent.cwd else app.cwd;
+    const os_name = switch (builtin.os.tag) {
+        .linux => "Linux",
+        .macos => "Darwin",
+        else => @tagName(builtin.os.tag),
     };
-
-    const cwd = app.exec_pool.effectiveCwd(if (agent.cwd.len > 0) agent.cwd else app.cwd);
-
-    const os_name = if (os_res) |ores|
-        if (ores.ty == .success and ores.stdout.len > 0)
-            std.mem.trimEnd(u8, ores.stdout, "\n")
-        else
-            "unknown"
-    else
-        "unknown";
 
     try w.print("[CWD] {s}\n[OS] {s}\n[TMP TESTING DIR] {s}/{d}/\n", .{ cwd, os_name, r.util.TMP_DIR, std.c.getpid() });
 }
@@ -129,20 +116,14 @@ const ContextFile = struct {
     truncated: bool,
 };
 
-fn readRouteContextFile(app: *r.app.App, alloc: std.mem.Allocator, path: []const u8, force_local: bool) ?ContextFile {
-    var cap_buf: [24]u8 = undefined;
-    const head_arg = std.fmt.bufPrint(&cap_buf, "{d}", .{CONTEXT_FILE_CAP + 1}) catch return null;
-    const res = app.exec_pool.runAndWait(.{
-        .argv = &.{ "head", "-c", head_arg, "--", path },
-        .max_output = CONTEXT_FILE_CAP + 1,
-        .force_local = force_local,
-    }) catch return null;
-    defer app.exec_pool.alloc.free(res.stdout);
-    defer app.exec_pool.alloc.free(res.stderr);
-    if (res.ty != .success or res.stdout.len == 0) return null;
-    const truncated = res.stdout.len > CONTEXT_FILE_CAP;
-    const text = r.util.sanitizeUtf8(alloc, res.stdout[0..@min(res.stdout.len, CONTEXT_FILE_CAP)]) catch return null;
-    return .{ .text = text, .truncated = truncated };
+fn readContextFile(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ?ContextFile {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
+    var buf: [CONTEXT_FILE_CAP + 1]u8 = undefined;
+    const n = file.readPositionalAll(io, &buf, 0) catch return null;
+    if (n == 0) return null;
+    const text = r.util.sanitizeUtf8(alloc, buf[0..@min(n, CONTEXT_FILE_CAP)]) catch return null;
+    return .{ .text = text, .truncated = n > CONTEXT_FILE_CAP };
 }
 
 fn inject_agents_context(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
@@ -153,7 +134,7 @@ fn inject_agents_context(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Age
 
     if (app.lua_config_dir) |dir_path| {
         const path = std.fmt.allocPrint(alloc, "{s}/AGENTS.md", .{std.mem.trimEnd(u8, dir_path, "/")}) catch return;
-        if (readRouteContextFile(app, alloc, path, true)) |file| {
+        if (readContextFile(app.io, alloc, path)) |file| {
             try w.print("<user_instructions>\n{s}", .{file.text});
             if (file.truncated) try w.print("\n[truncated at {d} bytes]", .{CONTEXT_FILE_CAP});
             try w.writeAll("\n</user_instructions>\n");
@@ -161,9 +142,9 @@ fn inject_agents_context(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Age
     }
 
     if (!factory.flags.skip_local_context_file) {
-        const cwd = app.exec_pool.effectiveCwd(if (agent.cwd.len > 0) agent.cwd else app.cwd);
+        const cwd = if (agent.cwd.len > 0) agent.cwd else app.cwd;
         const path = std.fmt.allocPrint(alloc, "{s}/AGENTS.md", .{std.mem.trimEnd(u8, cwd, "/")}) catch return;
-        if (readRouteContextFile(app, alloc, path, false)) |file| {
+        if (readContextFile(app.io, alloc, path)) |file| {
             try w.print("<project_instructions>\n{s}", .{file.text});
             if (file.truncated) try w.print("\n[truncated at {d} bytes]", .{CONTEXT_FILE_CAP});
             try w.writeAll("\n</project_instructions>\n");
@@ -173,14 +154,14 @@ fn inject_agents_context(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Age
     agent.flags.agents_context_files_seen = true;
 }
 
-fn inject_datetime_information(w: *std.Io.Writer, app: *r.app.App, _: *r.agent.Agent) !void {
-    const res = app.exec_pool.runAndWait(.{ .argv = &.{ "date", "+%Y-%m-%d %H:%M:%S %Z" } }) catch return;
-    defer app.exec_pool.alloc.free(res.stdout);
-    defer app.exec_pool.alloc.free(res.stderr);
-    if (res.ty != .success or res.stdout.len == 0) return;
-
-    const datetime = std.mem.trimEnd(u8, res.stdout, "\n");
-    try w.print("[TIME] {s}\n", .{datetime});
+fn inject_datetime_information(w: *std.Io.Writer, _: *r.app.App, _: *r.agent.Agent) !void {
+    var ts: std.posix.timespec = undefined;
+    var tm: ct.struct_tm = undefined;
+    if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) != 0 or ct.localtime_r(&ts.sec, &tm) == null) return;
+    var buf: [64]u8 = undefined;
+    const n = ct.strftime(&buf, buf.len, "%Y-%m-%d %H:%M:%S %Z", &tm);
+    if (n == 0) return;
+    try w.print("[TIME] {s}\n", .{buf[0..n]});
 }
 
 const skill_replacement_line = "The available skill catalog changed. This complete catalog replaces every earlier available-skills list in this session.";
@@ -267,7 +248,7 @@ fn inject_capability_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent
         defer factory.capability_catalog_mu.unlock(factory.io);
         body = factory.capability_catalog_body;
         if (body.len == 0) return;
-        digest = std.hash.Wyhash.hash(factory.capability_catalog_route orelse 0, body);
+        digest = std.hash.Wyhash.hash(0, body);
         if (agent.capability_catalog_digest) |last| {
             if (last == digest) return;
         }

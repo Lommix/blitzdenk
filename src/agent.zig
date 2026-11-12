@@ -67,7 +67,6 @@ pub const InitOptions = struct {
 pub const Flags = struct {
     cwd_seen: bool = false,
     agents_context_files_seen: bool = false,
-    route_key_seen: u64 = 0,
     cancel: bool = false,
     turn_canceled: bool = false,
     overflow_recovery: bool = false,

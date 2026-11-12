@@ -10,7 +10,6 @@ pub const CommandCompletion = struct {
 };
 
 const builtin_command_completions: []const CommandCompletion = &.{
-    .{ .text = "/ssh", .description = "connect user@host:cwd" },
     .{ .text = "/mcp connect", .description = "authorize and enable an MCP server" },
     .{ .text = "/mcp cancel", .description = "cancel MCP authorization" },
 };
@@ -87,20 +86,6 @@ fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []
     }
 }
 
-fn appendSshAliasCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
-    if (count.* >= out.len) return;
-
-    for (app.context_factory.ssh_aliases.items) |alias| {
-        if (count.* >= out.len) return;
-        const formatted = std.fmt.allocPrint(alloc, "/ssh-{s}", .{alias.name}) catch return;
-        if (!completionMatches(formatted, prefix)) continue;
-        if (containsCommandCompletion(out[0..count.*], formatted)) continue;
-
-        out[count.*] = .{ .text = formatted };
-        count.* += 1;
-    }
-}
-
 fn appendMcpServerCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
     if (!std.ascii.startsWithIgnoreCase(prefix, "/mcp connect ")) return;
     if (count.* >= out.len) return;
@@ -135,7 +120,6 @@ pub fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8
     appendMcpServerCompletions(app, alloc, prefix, &matches, &count);
     appendLuaCommandCompletions(app, prefix, &matches, &count);
     appendSkillCommandCompletions(app, alloc, prefix, &matches, &count);
-    appendSshAliasCompletions(app, alloc, prefix, &matches, &count);
 
     var rows = CompletionRows{};
     for (matches[0..count]) |item| {

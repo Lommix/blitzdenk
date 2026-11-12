@@ -215,8 +215,6 @@ fn download(
 
         const res = pool.runAndWaitTimeout(.{
             .argv = argv,
-            .force_local = true,
-            .skip_agent_overlay = true,
             .max_output = MAX_DOWNLOAD_BYTES,
         }, remaining_ms) catch |err| switch (err) {
             error.Canceled => return err,

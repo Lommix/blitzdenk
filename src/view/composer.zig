@@ -10,8 +10,6 @@ pub const WIDGET_PAD_X: u16 = 2;
 
 const COMPOSER_PROMPT: []const u8 = "❯";
 
-const PASSPHRASE_PROMPT: []const u8 = "❯ Passphrase or password: ";
-
 const FieldStyle = struct {
     prompt: []const u8,
     prompt_style: r.tui.Style = .{},
@@ -21,7 +19,6 @@ const FieldStyle = struct {
 
 pub fn modePrompt(mode: *const r.app.InputMode) []const u8 {
     return switch (mode.*) {
-        .passphrase => PASSPHRASE_PROMPT,
         .wizard => "  ",
         else => COMPOSER_PROMPT,
     };
@@ -131,7 +128,6 @@ pub fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, 
 
     switch (app.input_mode) {
         .text => renderInputContent(app, arena, input_area, buf),
-        .passphrase => renderPassphraseInput(app, arena, input_area, buf),
         .perm_select, .perm_message => permission.renderPermissionContent(app, arena, input_area, buf),
         .wizard => wizard.renderWizardContent(app, arena, input_area, buf),
         .session_picker => wizard.renderSessionPickerContent(app, arena, input_area, buf),
@@ -184,16 +180,6 @@ fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf
     if (app.screenshot_buf != null) {
         buf.setString(area.x, area.y, r.tui.icon.eye, .{ .fg = app.theme.ok });
     }
-}
-
-fn renderPassphraseInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const pp = &app.input_mode.passphrase;
-    renderFieldWidget(app, arena, pp.field.slice(), pp.field.cursor, area, .{
-        .prompt = PASSPHRASE_PROMPT,
-        .prompt_style = .{ .fg = app.theme.warn },
-        .text = fieldTextStyle(app),
-        .mask = '*',
-    }, buf);
 }
 
 fn completionAnchor(app: *App, arena: std.mem.Allocator, width: u16) r.tui.input_layout.Pos {

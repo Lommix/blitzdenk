@@ -150,11 +150,11 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
         const cmd_path = commandPath(cmd);
-        const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.routeCwd(), cmd_path }) catch
+        const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, cmd_path }) catch
             return r.errResult(call, "failed to resolve path");
 
         if (cmd == .file_add) {
-            const exists = fileExistsViaExec(ctx, resolved) catch false;
+            const exists = if (std.Io.Dir.cwd().access(ctx.io, resolved, .{})) true else |_| false;
             if (exists) {
                 const msg = std.fmt.allocPrint(
                     alloc,
@@ -204,7 +204,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     for (patch.commands, abs_paths.items, 0..) |cmd, resolved, ci| {
         if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-        const abs_cmd = withResolvedPath(alloc, ctx.base.routeCwd(), cmd, resolved) catch
+        const abs_cmd = withResolvedPath(alloc, ctx.base.cwd, cmd, resolved) catch
             return r.errResult(call, "failed to resolve path");
 
         var diag: ApplyDiagnostics = .{};
@@ -307,23 +307,16 @@ fn buildPreview(
             return .{ .before = null, .after = after };
         },
         .file_delete => {
-            const before = try readFileViaExec(ctx, abs_path, true, null);
+            const before = try readFile(ctx, abs_path, true, null);
             return .{ .before = before, .after = null };
         },
         .file_update => |u| {
-            const before = (try readFileViaExec(ctx, abs_path, false, null)) orelse return ApplyError.FileNotFound;
+            const before = (try readFile(ctx, abs_path, false, null)) orelse return ApplyError.FileNotFound;
             errdefer alloc.free(before);
             const after = try applyHunks(alloc, before, u.hunks, diag);
             return .{ .before = before, .after = after };
         },
     }
-}
-
-fn fileExistsViaExec(ctx: r.ToolContext, path: []const u8) !bool {
-    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "test", "-e", path } }) catch return false;
-    defer ctx.base.exec_pool.alloc.free(res.stdout);
-    defer ctx.base.exec_pool.alloc.free(res.stderr);
-    return res.ty == .success;
 }
 
 fn parseErrorMessage(alloc: std.mem.Allocator, err: ParseError) ![]const u8 {
@@ -347,10 +340,7 @@ fn applyErrorDescription(alloc: std.mem.Allocator, err: ApplyError, diag: *const
         error.AmbiguousContext => try std.fmt.allocPrint(alloc, "hunk context is ambiguous: {s}", .{diag.message}),
         error.FileNotFound => "file not found",
         error.FileTooLarge => "file exceeds the 1 MiB patch limit",
-        error.ExecFailed => if (diag.message.len > 0)
-            try std.fmt.allocPrint(alloc, "command failed: {s}", .{diag.message})
-        else
-            "command failed",
+        error.IoFailed => if (diag.message.len > 0) diag.message else "file operation failed",
         error.InvalidCommand => "invalid command",
         else => try std.fmt.allocPrint(alloc, "{s}", .{@errorName(err)}),
     };
@@ -402,7 +392,7 @@ pub const ApplyError = error{
     AmbiguousContext,
     FileNotFound,
     FileTooLarge,
-    ExecFailed,
+    IoFailed,
     InvalidCommand,
 } || std.mem.Allocator.Error;
 
@@ -1149,7 +1139,7 @@ fn normalizeCommonUnicode(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return out.toOwnedSlice(alloc);
 }
 
-/// Execute one PatchCommand through the exec pool using GNU coreutils.
+/// Execute one PatchCommand against the file system.
 /// On failure, `diag` is populated with details.
 pub fn executeCommand(
     ctx: r.ToolContext,
@@ -1162,82 +1152,63 @@ pub fn executeCommand(
             diag.path = a.path;
             const content = try joinLinesWithTrailingNewline(alloc, a.lines);
             defer alloc.free(content);
-            try writeFileViaExec(ctx, a.path, content, diag);
+            try writeFile(ctx, a.path, content, diag);
         },
         .file_delete => |d| {
             diag.path = d.path;
-            try deleteFileViaExec(ctx, d.path, diag);
+            try deleteFile(ctx, d.path, diag);
         },
         .file_update => |u| {
             diag.path = u.path;
-            const src = (try readFileViaExec(ctx, u.path, false, diag)) orelse return ApplyError.FileNotFound;
+            const src = (try readFile(ctx, u.path, false, diag)) orelse return ApplyError.FileNotFound;
             defer alloc.free(src);
 
             const new_content = try applyHunks(alloc, src, u.hunks, diag);
             defer alloc.free(new_content);
 
             const out_path = u.move_to orelse u.path;
-            try writeFileViaExec(ctx, out_path, new_content, diag);
-            if (u.move_to != null) try deleteFileViaExec(ctx, u.path, diag);
+            try writeFile(ctx, out_path, new_content, diag);
+            if (u.move_to != null) try deleteFile(ctx, u.path, diag);
         },
     }
 }
 
-fn readFileViaExec(
+fn readFile(
     ctx: r.ToolContext,
     path: []const u8,
     missing_ok: bool,
     diag: ?*ApplyDiagnostics,
 ) ApplyError!?[]const u8 {
-    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", path }, .max_output = MAX_FILE_BYTES }) catch {
-        if (diag) |d| d.message = "read command failed to start";
-        return ApplyError.ExecFailed;
+    const text = r.readFileCapped(ctx, path, MAX_FILE_BYTES) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.StreamTooLong => {
+            if (diag) |d| d.message = "file exceeds maximum size";
+            return ApplyError.FileTooLarge;
+        },
+        else => {
+            if (diag) |d| d.message = r.fsFailure(ctx, "failed to read", path, err);
+            return ApplyError.IoFailed;
+        },
     };
-    defer ctx.base.exec_pool.alloc.free(res.stdout);
-    defer ctx.base.exec_pool.alloc.free(res.stderr);
-
-    if (res.ty != .success) {
-        if (missing_ok and std.mem.indexOf(u8, res.stderr, "No such file") != null) return null;
-        if (diag) |d| d.message = r.execFailure(ctx, "failed to read", path, res.stderr);
-        return ApplyError.ExecFailed;
+    if (text == null and !missing_ok) {
+        if (diag) |d| d.message = r.fsFailure(ctx, "failed to read", path, error.FileNotFound);
+        return ApplyError.IoFailed;
     }
-
-    if (res.stdout_truncated or res.stdout.len > MAX_FILE_BYTES) {
-        if (diag) |d| d.message = "file exceeds maximum size";
-        return ApplyError.FileTooLarge;
-    }
-    return try ctx.alloc.dupe(u8, res.stdout);
+    return text;
 }
 
-fn writeFileViaExec(
-    ctx: r.ToolContext,
-    path: []const u8,
-    content: []const u8,
-    diag: *ApplyDiagnostics,
-) ApplyError!void {
-    const res = r.atomicWriteViaExec(ctx, path, content) orelse return ApplyError.ExecFailed;
-    defer ctx.base.exec_pool.alloc.free(res.stdout);
-    defer ctx.base.exec_pool.alloc.free(res.stderr);
-
-    if (res.ty != .success) {
-        diag.message = r.execFailure(ctx, "failed to write", path, res.stderr);
-        return ApplyError.ExecFailed;
-    }
+fn writeFile(ctx: r.ToolContext, path: []const u8, content: []const u8, diag: *ApplyDiagnostics) ApplyError!void {
+    r.atomicWrite(ctx.io, path, content) catch |err| {
+        diag.message = r.fsFailure(ctx, "failed to write", path, err);
+        return ApplyError.IoFailed;
+    };
 }
 
-fn deleteFileViaExec(ctx: r.ToolContext, path: []const u8, diag: *ApplyDiagnostics) ApplyError!void {
-    const res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "rm", path } }) catch return ApplyError.ExecFailed;
-    defer ctx.base.exec_pool.alloc.free(res.stdout);
-    defer ctx.base.exec_pool.alloc.free(res.stderr);
-
-    if (res.ty != .success) {
-        if (std.mem.indexOf(u8, res.stderr, "No such file") != null) {
-            diag.message = "file does not exist";
-        } else {
-            diag.message = r.execFailure(ctx, "failed to delete", path, res.stderr);
-        }
-        return ApplyError.ExecFailed;
-    }
+fn deleteFile(ctx: r.ToolContext, path: []const u8, diag: *ApplyDiagnostics) ApplyError!void {
+    std.Io.Dir.cwd().deleteFile(ctx.io, path) catch |err| {
+        diag.message = if (err == error.FileNotFound) "file does not exist" else r.fsFailure(ctx, "failed to delete", path, err);
+        return ApplyError.IoFailed;
+    };
 }
 
 /// Like joinLines but always end with a newline (file-add lines come from `+` rows).
@@ -1290,4 +1261,32 @@ test "applyHunks @@ anchor disambiguates repeated context" {
     defer alloc.free(out);
 
     try testing.expectEqualStrings("START\nx\ny\nEND\nSTART\nx\nY\nEND\n", out);
+}
+
+test "executeCommand adds, moves, and deletes files on disk" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    const ctx: r.ToolContext = .{ .alloc = alloc, .io = io, .base = undefined };
+    const a = try std.fmt.allocPrint(alloc, "{s}/new/a.txt", .{root});
+    const b = try std.fmt.allocPrint(alloc, "{s}/b.txt", .{root});
+    var diag: ApplyDiagnostics = .{};
+
+    try executeCommand(ctx, .{ .file_add = .{ .path = a, .lines = &.{ "x", "y" } } }, &diag);
+    try testing.expectEqualStrings("x\ny\n", try tmp.dir.readFileAlloc(io, "new/a.txt", alloc, .limited(64)));
+
+    const lines = [_]HunkLine{ .{ .context = "x" }, .{ .delete = "y" }, .{ .add = "Y" } };
+    const hunks = [_]Hunk{.{ .header = null, .lines = &lines, .end_of_file = false }};
+    try executeCommand(ctx, .{ .file_update = .{ .path = a, .move_to = b, .hunks = &hunks } }, &diag);
+    try testing.expectEqualStrings("x\nY\n", try tmp.dir.readFileAlloc(io, "b.txt", alloc, .limited(64)));
+    try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "new/a.txt", .{}));
+
+    try executeCommand(ctx, .{ .file_delete = .{ .path = b } }, &diag);
+    try testing.expectError(ApplyError.IoFailed, executeCommand(ctx, .{ .file_delete = .{ .path = b } }, &diag));
+    try testing.expectEqualStrings("file does not exist", diag.message);
+    try testing.expectError(ApplyError.IoFailed, executeCommand(ctx, .{ .file_update = .{ .path = b, .move_to = null, .hunks = &hunks } }, &diag));
 }

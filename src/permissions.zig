@@ -175,19 +175,14 @@ pub const Handler = struct {
 
 pub const Stage = enum(u8) { pending, in_lua, in_tui };
 
-pub const ApprovalMode = enum(u2) { strict, default, yolo };
+pub const ApprovalMode = enum(u1) { strict, default };
 
 pub fn parseApprovalMode(value: []const u8) ?ApprovalMode {
     return std.meta.stringToEnum(ApprovalMode, value);
 }
 
-pub fn shouldAutoApprove(mode: ApprovalMode, is_ask: bool, ssh_active: bool) bool {
-    if (is_ask) return false;
-    return switch (mode) {
-        .strict => false,
-        .default => !ssh_active,
-        .yolo => true,
-    };
+pub fn shouldAutoApprove(mode: ApprovalMode, is_ask: bool) bool {
+    return !is_ask and mode == .default;
 }
 
 test "recommended answers follow the marker convention" {

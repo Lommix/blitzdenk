@@ -1,5 +1,4 @@
 const std = @import("std");
-const exec = @import("exec");
 const artifact = @import("../artifact.zig");
 
 pub const MAX_DISPLAY_BYTES = 32 * 1024;
@@ -95,15 +94,15 @@ pub fn isOversized(output: []const u8, max_bytes: usize, max_lines: usize) bool 
     return output.len > max_bytes or countLines(output) > max_lines;
 }
 
-pub fn writeSpillFile(pool: *exec.CmdPool, alloc: std.mem.Allocator, tag: []const u8, content: []const u8) ?[]const u8 {
+pub fn writeSpillFile(io: std.Io, alloc: std.mem.Allocator, tag: []const u8, content: []const u8) ?[]const u8 {
     const basename = std.fmt.allocPrint(alloc, "blitz-spill-{s}.txt", .{tag}) catch return null;
     defer alloc.free(basename);
-    return artifact.write(pool, alloc, basename, content) catch null;
+    return artifact.write(io, alloc, basename, content) catch null;
 }
 
-pub fn capOutput(pool: *exec.CmdPool, alloc: std.mem.Allocator, tag: []const u8, output: []const u8) []const u8 {
+pub fn capOutput(io: std.Io, alloc: std.mem.Allocator, tag: []const u8, output: []const u8) []const u8 {
     if (!isOversized(output, MAX_DISPLAY_BYTES, MAX_DISPLAY_LINES)) return output;
-    const spill = writeSpillFile(pool, alloc, tag, output);
+    const spill = writeSpillFile(io, alloc, tag, output);
     defer if (spill) |path| alloc.free(path);
     const capped = truncateOutputToOwnedSpill(alloc, output, MAX_DISPLAY_BYTES, MAX_DISPLAY_LINES, spill);
     if (!isOversized(capped, MAX_DISPLAY_BYTES, MAX_DISPLAY_LINES)) return capped;

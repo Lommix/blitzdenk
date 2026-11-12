@@ -27,14 +27,6 @@ pub const BaseContext = struct {
     display: Display = .{},
     app: ?*anyopaque = null,
     owner: ?Owner = null,
-
-    pub fn routeCwd(self: BaseContext) []const u8 {
-        return self.exec_pool.effectiveCwd(self.cwd);
-    }
-
-    pub fn routeIsRemote(self: BaseContext) bool {
-        return self.exec_pool.ssh_active and self.exec_pool.ssh_target != null;
-    }
 };
 
 pub const Context = struct {
@@ -144,7 +136,7 @@ fn installInternal(agent: *agent_mod.Agent, base: BaseContext, definitions: []co
     if (live) try agent.setToolsLive(tools) else try agent.setTools(tools);
 }
 
-pub fn runWithOwner(tool: sdk.Tool, pool: *exec.CmdPool, alloc: std.mem.Allocator, io: std.Io, call: sdk.ToolCall, owner: Owner) !sdk.ToolOutput {
+pub fn runWithOwner(tool: sdk.Tool, alloc: std.mem.Allocator, io: std.Io, call: sdk.ToolCall, owner: Owner) !sdk.ToolOutput {
     var output = if (tool.execute != trampoline) blk: {
         break :blk try tool.run(alloc, io, call);
     } else blk: {
@@ -153,14 +145,14 @@ pub fn runWithOwner(tool: sdk.Tool, pool: *exec.CmdPool, alloc: std.mem.Allocato
         base.owner = owner;
         break :blk binding.execute(.{ .alloc = alloc, .io = io, .base = base }, call);
     };
-    output.content = display.capOutput(pool, alloc, call.id, output.content);
+    output.content = display.capOutput(io, alloc, call.id, output.content);
     return output;
 }
 
 fn trampoline(ctx: ?*anyopaque, alloc: std.mem.Allocator, io: std.Io, call: sdk.ToolCall) anyerror!sdk.ToolOutput {
     const binding: *Binding = @ptrCast(@alignCast(ctx.?));
     var output = binding.execute(.{ .alloc = alloc, .io = io, .base = binding.base }, call);
-    output.content = display.capOutput(binding.base.exec_pool, alloc, call.id, output.content);
+    output.content = display.capOutput(io, alloc, call.id, output.content);
     return output;
 }
 
@@ -207,11 +199,11 @@ test "SDK tool trampoline preserves call context and output" {
     try std.testing.expectEqualStrings("done", output.content);
     try std.testing.expect(output.exit_loop);
     const owner = Owner{ .agent_id = id, .call_id = "outer" };
-    const owned = try runWithOwner(agent.tools[0], &exec_pool, std.testing.allocator, std.testing.io, .{ .id = "call", .name = "test", .input = "{}" }, owner);
+    const owned = try runWithOwner(agent.tools[0], std.testing.allocator, std.testing.io, .{ .id = "call", .name = "test", .input = "{}" }, owner);
     try std.testing.expectEqualStrings("outer", owned.content);
     const binding: *const Binding = @ptrCast(@alignCast(agent.tools[0].execute_ctx.?));
     try std.testing.expect(binding.base.owner == null);
     var foreign_context: u8 = 98;
-    const foreign = try runWithOwner(.{ .name = "foreign", .execute = Fixture.foreign, .execute_ctx = &foreign_context }, &exec_pool, std.testing.allocator, std.testing.io, .{ .id = "call", .name = "foreign", .input = "{}" }, owner);
+    const foreign = try runWithOwner(.{ .name = "foreign", .execute = Fixture.foreign, .execute_ctx = &foreign_context }, std.testing.allocator, std.testing.io, .{ .id = "call", .name = "foreign", .input = "{}" }, owner);
     try std.testing.expectEqualStrings("foreign", foreign.content);
 }

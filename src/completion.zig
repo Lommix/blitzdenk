@@ -29,8 +29,6 @@ pub const DirEntryList = struct {
 
 pub const CACHE_SLOTS = 8;
 pub const CACHE_TTL_MS: i64 = 2000;
-pub const PROBE_TIMEOUT_MS: i64 = 2000;
-pub const DEBOUNCE_MS: i64 = 150;
 pub const MAX_ENTRIES = 512;
 
 pub const DirCache = struct {
@@ -151,27 +149,21 @@ pub fn splitToken(
     };
 }
 
-pub fn parseLsOutput(alloc: std.mem.Allocator, out: *DirEntryList, stdout: []const u8) !void {
-    var it = std.mem.splitScalar(u8, stdout, '\n');
-    while (it.next()) |raw| {
+/// List `path` into `out`, dirs suffixed with `/`, dot entries only with `include_hidden`.
+pub fn readDir(alloc: std.mem.Allocator, io: std.Io, path: []const u8, include_hidden: bool, out: *DirEntryList) !void {
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
         if (out.entries.items.len >= MAX_ENTRIES) break;
-        var line = raw;
-        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-        if (line.len == 0) continue;
-        var kind: Kind = .file;
-        var name = line;
-        if (line[line.len - 1] == '/') {
-            kind = .dir;
-            name = line[0 .. line.len - 1];
-            if (name.len == 0) continue;
-        }
-        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-        const stored_name = if (kind == .dir)
-            try std.fmt.allocPrint(alloc, "{s}/", .{name})
+        if (!include_hidden and entry.name[0] == '.') continue;
+        const kind: Kind = if (entry.kind == .directory) .dir else .file;
+        const name = if (kind == .dir)
+            try std.fmt.allocPrint(alloc, "{s}/", .{entry.name})
         else
-            try alloc.dupe(u8, name);
-        errdefer alloc.free(stored_name);
-        try out.entries.append(alloc, .{ .name = stored_name, .kind = kind });
+            try alloc.dupe(u8, entry.name);
+        errdefer alloc.free(name);
+        try out.entries.append(alloc, .{ .name = name, .kind = kind });
     }
 }
 
@@ -199,4 +191,28 @@ pub fn kindDescription(kind: Kind) []const u8 {
         .dir => "dir",
         .file => "file",
     };
+}
+
+test "readDir marks directories and hides dot entries unless asked" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "dir", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = ".hidden", .data = "" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    for ([_]bool{ false, true }) |hidden| {
+        var list: DirEntryList = .{};
+        defer list.deinit(testing.allocator);
+        try readDir(testing.allocator, io, root, hidden, &list);
+        sortEntries(list.entries.items);
+        const items = list.entries.items;
+        try testing.expectEqual(@as(usize, if (hidden) 3 else 2), items.len);
+        try testing.expectEqualStrings("dir/", items[0].name);
+        try testing.expectEqual(Kind.dir, items[0].kind);
+        try testing.expectEqualStrings(if (hidden) ".hidden" else "file", items[1].name);
+    }
 }

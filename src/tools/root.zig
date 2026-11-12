@@ -14,7 +14,6 @@ pub const reg = @import("../context_factory.zig");
 pub const patch = @import("patch.zig");
 pub const r = @import("../root.zig");
 pub const tui = r.tui;
-pub const search = @import("search.zig");
 pub const start = @import("start.zig");
 pub const skill = @import("skill.zig");
 
@@ -29,44 +28,47 @@ pub const STATUS_BUF: usize = 512;
 /// Global file mutation lock, it just works!
 pub var file_mutex: std.Io.Mutex = .init;
 
-pub fn isHarnessPath(path: []const u8) bool {
-    var prefix_buf: [80]u8 = undefined;
-    const prefix = std.fmt.bufPrint(&prefix_buf, "{s}/{d}/", .{ r.util.TMP_DIR, std.c.getpid() }) catch return false;
-    return std.mem.startsWith(u8, path, prefix);
+/// Read `path` whole into `ctx.alloc`. Null when it does not exist;
+/// `error.StreamTooLong` when it holds more than `cap` bytes.
+pub fn readFileCapped(ctx: ToolContext, path: []const u8, cap: usize) !?[]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(ctx.io, path, ctx.alloc, .limited(cap + 1)) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => err,
+    };
 }
 
-fn transportLine(line: []const u8) bool {
-    const text = std.mem.trim(u8, line, " \t\r");
-    return std.mem.startsWith(u8, text, "ssh:") or
-        std.mem.startsWith(u8, text, "Warning: Permanently added") or
-        std.mem.startsWith(u8, text, "Warning: Identity file") or
-        std.mem.startsWith(u8, text, "Host key verification failed") or
-        std.mem.startsWith(u8, text, "kex_exchange_identification:") or
-        std.mem.indexOf(u8, text, "Permission denied (publickey") != null;
-}
-
-pub fn filterTransportStderr(ctx: ToolContext, stderr: []const u8) []const u8 {
-    const trimmed = std.mem.trim(u8, stderr, " \t\r\n");
-    if (trimmed.len == 0) return "";
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(ctx.alloc);
-    var lines = std.mem.splitScalar(u8, trimmed, '\n');
-    while (lines.next()) |line| {
-        if (transportLine(line)) continue;
-        if (out.items.len > 0) out.append(ctx.alloc, '\n') catch continue;
-        out.appendSlice(ctx.alloc, std.mem.trim(u8, line, " \t\r")) catch continue;
+/// Replace `path` with `content` through a temp file and rename. Creates
+/// missing parent directories and keeps the mode of an existing file.
+pub fn atomicWrite(io: std.Io, path: []const u8, content: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    var permissions: std.Io.File.Permissions = .default_file;
+    if (cwd.statFile(io, path, .{})) |st| {
+        if (st.kind == .directory) return error.IsDir;
+        permissions = st.permissions;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
     }
-    if (out.items.len == 0) return "";
-    return ctx.alloc.dupe(u8, out.items) catch "";
+    var atomic = try cwd.createFileAtomic(io, path, .{ .permissions = permissions, .make_path = true, .replace = true });
+    defer atomic.deinit(io);
+    try atomic.file.writeStreamingAll(io, content);
+    try atomic.file.setPermissions(io, permissions);
+    try atomic.replace(io);
 }
 
-pub fn failureDetail(ctx: ToolContext, stderr: []const u8) []const u8 {
-    const filtered = filterTransportStderr(ctx, stderr);
-    return if (filtered.len == 0) "command failed" else filtered;
-}
-
-pub fn execFailure(ctx: ToolContext, action: []const u8, path: []const u8, stderr: []const u8) []const u8 {
-    const detail = failureDetail(ctx, stderr);
+pub fn fsFailure(ctx: ToolContext, action: []const u8, path: []const u8, err: anyerror) []const u8 {
+    const detail = switch (err) {
+        error.FileNotFound => "no such file or directory",
+        error.AccessDenied, error.PermissionDenied => "permission denied",
+        error.IsDir => "is a directory",
+        error.NotDir => "not a directory",
+        error.NoSpaceLeft => "no space left on device",
+        error.ReadOnlyFileSystem => "read-only file system",
+        error.FileTooBig, error.StreamTooLong => "file too large",
+        error.NameTooLong => "name too long",
+        error.SymLinkLoop => "too many levels of symbolic links",
+        else => @errorName(err),
+    };
     return std.fmt.allocPrint(ctx.alloc, "{s} {s}: {s}", .{ action, path, detail }) catch action;
 }
 
@@ -183,37 +185,6 @@ pub fn markConfigTouched(ctx: ToolContext, resolved: []const u8) void {
     }
 }
 
-fn shellQuote(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    try out.append(alloc, '\'');
-    for (s) |c| {
-        if (c == '\'') {
-            try out.appendSlice(alloc, "'\\''");
-        } else {
-            try out.append(alloc, c);
-        }
-    }
-    try out.append(alloc, '\'');
-    return out.toOwnedSlice(alloc);
-}
-
-pub fn atomicWriteViaExec(ctx: ToolContext, resolved: []const u8, content: []const u8) ?r.exec.CmdResult {
-    const alloc = ctx.alloc;
-    const dir = std.fs.path.dirname(resolved) orelse ".";
-    const qdir = shellQuote(alloc, dir) catch return null;
-    const qdest = shellQuote(alloc, resolved) catch return null;
-    const qtmp = std.fmt.allocPrint(alloc, "{s}.$$.blitztmp", .{qdest}) catch return null;
-    const command = std.fmt.allocPrint(
-        alloc,
-        "mkdir -p {[qdir]s} && {{ [ ! -d {[qdest]s} ] || {{ echo \"write failed: destination is a directory\" >&2; exit 1; }}; }} && cat > {[qtmp]s} && {{ chmod --reference={[qdest]s} {[qtmp]s} 2>/dev/null; mv -f {[qtmp]s} {[qdest]s}; }}",
-        .{ .qdir = qdir, .qtmp = qtmp, .qdest = qdest },
-    ) catch return null;
-    return ctx.base.exec_pool.runAndWait(.{
-        .argv = &.{ "/bin/sh", "-c", command },
-        .stdin_data = content,
-    }) catch null;
-}
-
 pub fn errResult(_: ToolCall, msg: []const u8) ToolResult {
     return .{
         .content = msg,
@@ -248,3 +219,31 @@ pub const isOversized = display.isOversized;
 pub const writeSpillFile = display.writeSpillFile;
 pub const capOutput = display.capOutput;
 pub const countLines = display.countLines;
+
+test "atomicWrite creates parents, keeps the mode, and rejects directories" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const ctx: ToolContext = .{ .alloc = testing.allocator, .io = io, .base = undefined };
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const nested = try std.fmt.bufPrint(&buf, "{s}/a/b/c.txt", .{root});
+    try atomicWrite(io, nested, "first");
+    const first = (try readFileCapped(ctx, nested, 64)).?;
+    defer testing.allocator.free(first);
+    try testing.expectEqualStrings("first", first);
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "run.sh", .data = "old", .flags = .{ .permissions = .fromMode(0o755) } });
+    var run_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const run = try std.fmt.bufPrint(&run_buf, "{s}/run.sh", .{root});
+    try atomicWrite(io, run, "new");
+    const st = try tmp.dir.statFile(io, "run.sh", .{});
+    try testing.expectEqual(@as(std.posix.mode_t, 0o755), st.permissions.toMode() & 0o777);
+
+    try testing.expectError(error.IsDir, atomicWrite(io, root, "x"));
+    try testing.expectError(error.StreamTooLong, readFileCapped(ctx, run, 2));
+    try testing.expectEqual(null, try readFileCapped(ctx, "/nonexistent/blitz/file", 8));
+}

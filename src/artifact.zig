@@ -1,13 +1,11 @@
 const std = @import("std");
 const util = @import("util.zig");
-const exec = @import("exec");
 
 const MAX_NAME_BYTES = 128;
 const MAX_FILE_BYTES = MAX_NAME_BYTES + 32;
 const MAX_ATTEMPTS = 8;
 
-pub fn write(pool: *exec.CmdPool, alloc: std.mem.Allocator, name: []const u8, content: []const u8) ![]const u8 {
-    const io = pool.io;
+pub fn write(io: std.Io, alloc: std.mem.Allocator, name: []const u8, content: []const u8) ![]const u8 {
     std.Io.Dir.createDirAbsolute(io, util.TMP_DIR, .fromMode(0o700)) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -81,18 +79,9 @@ fn sanitizeName(name: []const u8, buf: *[MAX_NAME_BYTES]u8) []const u8 {
     return out;
 }
 
-fn initPool(env: *std.process.Environ.Map) exec.CmdPool {
-    return exec.CmdPool.init(std.testing.allocator, std.testing.io, env);
-}
-
 test "artifact writes into the process session directory" {
     const testing = std.testing;
-    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
-    defer env.deinit();
-    var pool = initPool(&env);
-    defer pool.deinit();
-
-    const path = try write(&pool, testing.allocator, "test/a.txt", "artifact data\n");
+    const path = try write(testing.io, testing.allocator, "test/a.txt", "artifact data\n");
     defer testing.allocator.free(path);
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, path) catch {};
 
@@ -103,7 +92,7 @@ test "artifact writes into the process session directory" {
     try testing.expect(std.mem.startsWith(u8, base, "test_a-"));
     try testing.expect(std.mem.endsWith(u8, base, ".txt"));
 
-    const py = try write(&pool, testing.allocator, "x.py", "py\n");
+    const py = try write(testing.io, testing.allocator, "x.py", "py\n");
     defer testing.allocator.free(py);
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, py) catch {};
     const py_base = std.fs.path.basename(py);
@@ -113,15 +102,10 @@ test "artifact writes into the process session directory" {
 
 test "artifact writes distinct private files into a private directory" {
     const testing = std.testing;
-    var env = try std.process.Environ.createMap(testing.environ, testing.allocator);
-    defer env.deinit();
-    var pool = initPool(&env);
-    defer pool.deinit();
-
-    const first = try write(&pool, testing.allocator, "dup.txt", "first\n");
+    const first = try write(testing.io, testing.allocator, "dup.txt", "first\n");
     defer testing.allocator.free(first);
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, first) catch {};
-    const second = try write(&pool, testing.allocator, "dup.txt", "second\n");
+    const second = try write(testing.io, testing.allocator, "dup.txt", "second\n");
     defer testing.allocator.free(second);
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, second) catch {};
 

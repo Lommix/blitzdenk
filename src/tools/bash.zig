@@ -148,12 +148,12 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall, background: bool) r.r.sdk.Too
     defer ctx.base.exec_pool.alloc.free(res.stdout);
     defer ctx.base.exec_pool.alloc.free(res.stderr);
 
-    const stderr = r.filterTransportStderr(ctx, res.stderr);
+    const stderr = std.mem.trim(u8, res.stderr, " \t\r\n");
     const full = formatBashResult(ctx.alloc, res.stdout, stderr, res.exit_code, res.signal, res.ty == .timeout, timeout_ms, res.stdout_truncated, res.stderr_truncated) catch
         return r.errResult(call, "oom");
 
     const spill = if (r.isOversized(full, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES))
-        r.writeSpillFile(ctx.base.exec_pool, ctx.alloc, call.id, full)
+        r.writeSpillFile(ctx.io, ctx.alloc, call.id, full)
     else
         null;
     defer if (spill) |s| ctx.alloc.free(s);
@@ -251,7 +251,7 @@ fn readJob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     }
     body.appendSlice(ctx.alloc, "]\n") catch return r.errResult(call, "oom");
     appendClean(ctx.alloc, &body, page.text) catch return r.errResult(call, "oom");
-    return r.okResult(call, r.capOutput(ctx.base.exec_pool, ctx.alloc, call.id, body.items));
+    return r.okResult(call, r.capOutput(ctx.io, ctx.alloc, call.id, body.items));
 }
 
 pub const KillJobTool = r.Tool{

@@ -318,9 +318,8 @@ pub fn main(init: std.process.Init) !void {
                 \\
                 \\Flags:
                 \\  --log              write debug.log in path
-                \\  --approval <mode>  strict|default|yolo (default: default)
+                \\  --approval <mode>  strict|default (default: default)
                 \\  --strict           shortcut for --approval strict
-                \\  --yolo             shortcut for --approval yolo
                 \\  --clean            skip local user context
                 \\  --prompt "STRING"  prefill input in current cwd
                 \\  --headless         with --prompt: run headless, print final message
@@ -921,7 +920,7 @@ pub fn run(
             switch (app.input_mode) {
                 .text => if (app.active_permission != null or app.active_selection != null) app.enterPermSelect(),
                 .perm_select, .perm_message => if (app.active_permission == null and app.active_selection == null) app.returnToText(),
-                .passphrase, .wizard, .session_picker => {},
+                .wizard, .session_picker => {},
             }
 
             reload_tick +%= 1;
@@ -1316,17 +1315,6 @@ pub fn run(
 
                                         if (cmd) |c| {
                                             switch (c) {
-                                                .ssh => |args| {
-                                                    app.startSshConnect(args.user, args.host, args.cwd);
-                                                    app.input.clear();
-                                                },
-                                                .ssh_off => {
-                                                    app.cancelSshConnect();
-                                                    app.exec_pool.clearSsh();
-                                                    app.invalidatePathCompletions();
-                                                    app.notifications.append(gpa, app.nowMillis(), "SSH mode disabled", .{}) catch {};
-                                                    app.input.clear();
-                                                },
                                                 .mcp_connect => |name| {
                                                     app.startMcpConnect(name);
                                                     app.input.clear();
@@ -1342,16 +1330,6 @@ pub fn run(
                                                     app.input.clear();
                                                 },
                                             }
-                                            break;
-                                        }
-
-                                        if (reg.parseSshAliasCommand(input)) |alias| {
-                                            if (app.context_factory.findSshAlias(alias)) |target| {
-                                                app.startSshConnect(target.user, target.host, target.cwd);
-                                            } else {
-                                                app.pushSystemMessage("unknown ssh alias: {s}", .{alias});
-                                            }
-                                            app.input.clear();
                                             break;
                                         }
 
@@ -1437,9 +1415,6 @@ pub fn run(
                                     try app.sendPrompt(io, parts, timeline_text);
                                     app.input.clear();
                                 },
-                                .passphrase => {
-                                    app.startSshUnlock();
-                                },
                                 .wizard => {
                                     handleWizardEnter(&app);
                                 },
@@ -1452,10 +1427,6 @@ pub fn run(
                                         app.input.clear();
                                         app.input_desired_col = null;
                                     }
-                                },
-                                .passphrase => {
-                                    app.notifications.append(gpa, app.nowMillis(), "SSH: passphrase entry canceled", .{}) catch {};
-                                    app.returnToText();
                                 },
                                 else => {},
                             },
@@ -1823,15 +1794,9 @@ fn resolvePermissionsHeadless(app: *App, io: std.Io) void {
 }
 
 pub const AppCommand = union(enum) {
-    /// /ssh user@domain:/path/to/cwd
-    ssh: SshArgs,
-    /// /ssh off  (or bare /ssh)
-    ssh_off,
     mcp_connect: []const u8,
     mcp_cancel,
     mcp_usage,
-
-    pub const SshArgs = struct { user: []const u8, host: []const u8, cwd: []const u8 };
 
     pub fn parse(raw: []const u8) ?AppCommand {
         const input = if (raw.len > 0 and raw[0] == '/') raw[1..] else raw;
@@ -1839,10 +1804,6 @@ pub const AppCommand = union(enum) {
         const verb = it.first();
         const rest = it.rest();
 
-        if (std.mem.eql(u8, verb, "ssh")) {
-            if (rest.len == 0 or std.mem.eql(u8, rest, "off")) return .ssh_off;
-            return parseSsh(rest);
-        }
         if (std.mem.eql(u8, verb, "mcp")) {
             var args = std.mem.tokenizeScalar(u8, rest, ' ');
             const sub = args.next() orelse return .mcp_usage;
@@ -1853,18 +1814,6 @@ pub const AppCommand = union(enum) {
             return .mcp_usage;
         }
         return null;
-    }
-
-    fn parseSsh(arg: []const u8) ?AppCommand {
-        const at = std.mem.indexOfScalar(u8, arg, '@') orelse return null;
-        const after_at = arg[at + 1 ..];
-        const colon = std.mem.indexOfScalar(u8, after_at, ':') orelse return null;
-        const cwd = std.mem.trim(u8, after_at[colon + 1 ..], " \t");
-        return .{ .ssh = .{
-            .user = arg[0..at],
-            .host = after_at[0..colon],
-            .cwd = if (cwd.len == 0) "/" else cwd,
-        } };
     }
 };
 
@@ -1893,7 +1842,7 @@ test "AppCommand parses mcp commands" {
 }
 
 fn approvalFail(val: []const u8) noreturn {
-    std.debug.print("blitz: invalid --approval mode '{s}' (strict|default|yolo)\n", .{val});
+    std.debug.print("blitz: invalid --approval mode '{s}' (strict|default)\n", .{val});
     std.process.exit(2);
 }
 
@@ -1917,12 +1866,6 @@ pub const CliFlags = packed struct {
 
         if (std.mem.eql(u8, tok, "--strict")) {
             self.approval_mode = .strict;
-            self.approval_explicit = true;
-            return true;
-        }
-
-        if (std.mem.eql(u8, tok, "--yolo")) {
-            self.approval_mode = .yolo;
             self.approval_explicit = true;
             return true;
         }

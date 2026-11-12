@@ -58,20 +58,6 @@ pub const CmdResult = struct {
     stdout_truncated: bool = false,
     stderr_truncated: bool = false,
     dropped_lines: usize = 0,
-
-    pub fn toOwned(self: *const CmdResult, alloc: std.mem.Allocator) ![]const u8 {
-        var response = try alloc.alloc(u8, self.stderr.len + self.stdout.len);
-        @memcpy(response[0..self.stdout.len], self.stdout);
-        @memcpy(response[self.stdout.len..], self.stderr);
-        return response;
-    }
-};
-
-pub const SshTarget = struct {
-    user: []const u8,
-    host: []const u8,
-    cwd: []const u8,
-    control: []const u8 = "",
 };
 
 pub const CmdPool = struct {
@@ -82,10 +68,6 @@ pub const CmdPool = struct {
     io: std.Io,
     env: *const std.process.Environ.Map,
     slots: [SLOT_COUNT]CmdSlot = @splat(.{}),
-    ssh_target: ?SshTarget = null,
-    ssh_active: bool = false,
-    agent_pid: ?std.posix.pid_t = null,
-    agent_sock: ?[]const u8 = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, parent_env: *const std.process.Environ.Map) Self {
         return .{ .alloc = alloc, .io = io, .env = parent_env };
@@ -98,172 +80,16 @@ pub const CmdPool = struct {
             slot.stdout.deinit(self.alloc);
             slot.stderr.deinit(self.alloc);
         }
-        self.clearSsh();
-        self.killAgent();
-    }
-
-    pub fn setSsh(self: *Self, user: []const u8, host: []const u8, cwd: []const u8, control: []const u8) !void {
-        const u = try self.alloc.dupe(u8, user);
-        errdefer self.alloc.free(u);
-        const h = try self.alloc.dupe(u8, host);
-        errdefer self.alloc.free(h);
-        const c = try self.alloc.dupe(u8, cwd);
-        errdefer self.alloc.free(c);
-        const ctl: []const u8 = if (control.len > 0) try self.alloc.dupe(u8, control) else "";
-        errdefer if (ctl.len > 0) self.alloc.free(ctl);
-        self.clearSsh();
-        self.ssh_target = .{ .user = u, .host = h, .cwd = c, .control = ctl };
-        self.ssh_active = true;
-    }
-
-    pub fn clearSsh(self: *Self) void {
-        if (self.ssh_target) |t| {
-            self.closeMaster(t);
-            self.alloc.free(t.user);
-            self.alloc.free(t.host);
-            self.alloc.free(t.cwd);
-            if (t.control.len > 0) self.alloc.free(t.control);
-        }
-        self.ssh_target = null;
-        self.ssh_active = false;
-    }
-
-    fn closeMaster(self: *Self, t: SshTarget) void {
-        if (t.control.len == 0) return;
-        const target = std.fmt.allocPrint(self.alloc, "{s}@{s}", .{ t.user, t.host }) catch return;
-        defer self.alloc.free(target);
-        var cp_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cp = std.fmt.bufPrint(&cp_buf, "ControlPath={s}", .{t.control}) catch return;
-        if (self.runAndWaitTimeout(.{
-            .argv = &.{ "ssh", "-o", cp, "-O", "exit", target },
-            .force_local = true,
-        }, 3000)) |res| {
-            self.alloc.free(res.stdout);
-            self.alloc.free(res.stderr);
-            std.Io.Dir.deleteFileAbsolute(self.io, t.control) catch {};
-        } else |_| {}
-    }
-
-    pub fn ensureAgent(self: *Self, inherited_sock: ?[]const u8) ![]const u8 {
-        if (inherited_sock) |s| if (s.len > 0 and socketUsable(s)) return s;
-
-        if (self.agent_sock) |s| if (socketUsable(s)) return s;
-        self.killAgent();
-
-        const res = try self.runAndWaitTimeout(.{
-            .argv = &.{ "ssh-agent", "-s" },
-            .force_local = true,
-            .skip_agent_overlay = true,
-        }, 3000);
-        defer self.alloc.free(res.stdout);
-        defer self.alloc.free(res.stderr);
-
-        if (res.ty != .success) return error.AgentSpawnFailed;
-
-        const parsed = parseAgentOutput(res.stdout) orelse return error.AgentParseFailed;
-        errdefer {
-            std.posix.kill(parsed.pid, std.posix.SIG.TERM) catch {};
-            std.Io.Dir.deleteFileAbsolute(self.io, parsed.sock) catch {};
-        }
-        if (!socketUsable(parsed.sock)) return error.AgentSpawnFailed;
-        const sock_owned = try self.alloc.dupe(u8, parsed.sock);
-        self.agent_sock = sock_owned;
-        self.agent_pid = parsed.pid;
-        return sock_owned;
-    }
-
-    pub fn killAgent(self: *Self) void {
-        const protection = self.io.swapCancelProtection(.blocked);
-        defer _ = self.io.swapCancelProtection(protection);
-        if (self.agent_pid) |pid| {
-            std.posix.kill(pid, std.posix.SIG.TERM) catch {};
-        }
-        if (self.agent_sock) |s| {
-            std.Io.Dir.deleteFileAbsolute(self.io, s) catch {};
-            self.alloc.free(s);
-        }
-        self.agent_pid = null;
-        self.agent_sock = null;
-    }
-
-    fn socketUsable(path: []const u8) bool {
-        var address: std.c.sockaddr.un = .{ .path = @splat(0) };
-        if (path.len == 0 or path.len >= address.path.len or std.mem.indexOfScalar(u8, path, 0) != null) return false;
-        @memcpy(address.path[0..path.len], path);
-        const fd = std.c.socket(std.c.AF.UNIX, std.c.SOCK.STREAM | std.c.SOCK.CLOEXEC | std.c.SOCK.NONBLOCK, 0);
-        if (fd < 0) return false;
-        defer _ = std.c.close(fd);
-        return std.c.connect(fd, @ptrCast(&address), @sizeOf(@TypeOf(address))) == 0;
-    }
-
-    /// Parses ssh-agent -s output. Format (stable across openssh versions):
-    ///   SSH_AUTH_SOCK=/tmp/ssh-XXXX/agent.PID; export SSH_AUTH_SOCK;
-    ///   SSH_AGENT_PID=12345; export SSH_AGENT_PID;
-    ///   echo Agent pid 12345;
-    fn parseAgentOutput(out: []const u8) ?struct { sock: []const u8, pid: std.posix.pid_t } {
-        var sock: ?[]const u8 = null;
-        var pid: ?std.posix.pid_t = null;
-
-        var lines = std.mem.splitScalar(u8, out, '\n');
-        while (lines.next()) |line| {
-            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-            const semi = std.mem.indexOfScalarPos(u8, line, eq + 1, ';') orelse continue;
-            const key = line[0..eq];
-            const val = line[eq + 1 .. semi];
-            if (std.mem.eql(u8, key, "SSH_AUTH_SOCK")) {
-                sock = val;
-            } else if (std.mem.eql(u8, key, "SSH_AGENT_PID")) {
-                pid = std.fmt.parseInt(std.posix.pid_t, val, 10) catch null;
-            }
-        }
-
-        if (sock == null or pid == null or pid.? <= 1) return null;
-        return .{ .sock = sock.?, .pid = pid.? };
-    }
-
-    /// Returns the SSH target cwd when SSH is currently routing tool calls
-    /// remotely; otherwise returns the caller's local fallback. Centralizes
-    /// the routing predicate so callers (agent.zig) stay in one line.
-    pub fn effectiveCwd(self: *const Self, fallback: []const u8) []const u8 {
-        if (self.ssh_active) if (self.ssh_target) |t| return t.cwd;
-        return fallback;
-    }
-
-    /// Stable identity of the current routing environment. Distinct values for
-    /// local mode and each SSH target let callers cache per-environment state
-    /// and detect routing changes.
-    pub fn routeKey(self: *const Self) u64 {
-        if (!self.ssh_active) return 1;
-        const target = self.ssh_target orelse return 1;
-        var hash = std.hash.Wyhash.init(0);
-        hash.update(target.user);
-        hash.update(&.{0});
-        hash.update(target.host);
-        hash.update(&.{0});
-        hash.update(target.cwd);
-        return hash.final();
     }
 
     pub const RunOpts = struct {
         cwd: ?[]const u8 = null,
         argv: []const []const u8,
-        stdin_data: ?[]const u8 = null,
-        /// When set, the SSH-mode argv rewrite is skipped and these env vars
-        /// are passed verbatim to the spawned child (parent env is NOT inherited).
-        /// Used for ssh-add unlock so passphrase env doesn't appear in argv.
-        env_overlay: ?std.process.Environ.Map = null,
-        /// When true, do not route through SSH even when ssh_target+ssh_active.
-        /// Used for the local SSH probe + ssh-add itself.
-        force_local: bool = false,
         /// Spawn the child in a new process group and kill that group during
         /// cleanup. Useful for tools such as Chromium that may leave helpers
         /// holding stdout/stderr pipes open after the main process is killed.
         kill_process_group: bool = false,
         scrub_env: bool = false,
-        /// When true, skip the implicit SSH_AUTH_SOCK overlay even if we own
-        /// an ssh-agent. Used when spawning the ssh-agent itself to avoid
-        /// pointing the new agent at its own (not-yet-existing) socket.
-        skip_agent_overlay: bool = false,
         max_output: ?usize = null,
         /// Long-lived run: stdout and stderr merge into `stdout` in arrival
         /// order, trimmed to `max_output` at line starts, with no drain
@@ -295,21 +121,14 @@ pub const CmdPool = struct {
             slot.in_use.store(false, .release);
         }
 
-        var final_argv: ?[]const []const u8 = try self.maybeWrapSsh(opts.argv, opts.force_local);
+        var final_argv: ?[]const []const u8 = try self.dupeArgv(opts.argv);
         errdefer if (final_argv) |a| self.freeArgv(a);
 
-        // When SSH-wrapped, the parent cwd must not constrain ssh's own resolution.
-        const effective_cwd: ?[]const u8 = if (self.shouldRouteSsh(opts.force_local)) null else opts.cwd;
-
-        const duped_cwd = if (effective_cwd) |c| try self.alloc.dupe(u8, c) else null;
+        const duped_cwd = if (opts.cwd) |c| try self.alloc.dupe(u8, c) else null;
         errdefer if (duped_cwd) |c| self.alloc.free(c);
-
-        const duped_stdin = if (opts.stdin_data) |d| try self.alloc.dupe(u8, d) else null;
-        errdefer if (duped_stdin) |d| self.alloc.free(d);
 
         const env_box = try self.buildEnvBox(opts);
         errdefer if (env_box) |b| {
-            for (b.values()) |v| @memset(@constCast(v), 0);
             b.deinit();
             self.alloc.destroy(b);
         };
@@ -320,26 +139,13 @@ pub const CmdPool = struct {
             break :blk out;
         } else final_argv.?;
 
-        slot.future = std.Io.async(self.io, workerFn, .{ self, slot, spawned_argv, duped_cwd, duped_stdin, env_box, opts.kill_process_group });
+        slot.future = std.Io.async(self.io, workerFn, .{ self, slot, spawned_argv, duped_cwd, env_box, opts.kill_process_group });
 
         return @fromBackingInt(@intCast(idx));
     }
 
-    fn shouldRouteSsh(self: *const Self, force_local: bool) bool {
-        if (force_local) return false;
-        return self.ssh_target != null and self.ssh_active;
-    }
-
     fn buildEnvBox(self: *Self, opts: RunOpts) !?*std.process.Environ.Map {
-        if (opts.env_overlay) |em| {
-            const box = try self.alloc.create(std.process.Environ.Map);
-            box.* = em;
-            if (opts.scrub_env) scrubEnv(box);
-            return box;
-        }
-
-        const sock = if (opts.skip_agent_overlay) null else self.agent_sock;
-        if (!opts.scrub_env and sock == null) return null;
+        if (!opts.scrub_env) return null;
 
         const box = try self.alloc.create(std.process.Environ.Map);
         errdefer self.alloc.destroy(box);
@@ -349,10 +155,9 @@ pub const CmdPool = struct {
         const keys = self.env.keys();
         const vals = self.env.values();
         for (keys, vals) |k, v| {
-            if (opts.scrub_env and stripEnvKey(k)) continue;
+            if (stripEnvKey(k)) continue;
             try box.put(k, v);
         }
-        if (sock) |s| try box.put("SSH_AUTH_SOCK", s);
         return box;
     }
 
@@ -365,47 +170,6 @@ pub const CmdPool = struct {
             std.ascii.findIgnoreCase(key, "AI") != null or
             std.ascii.findIgnoreCase(key, "KEY") != null or
             std.ascii.findIgnoreCase(key, "TOKEN") != null;
-    }
-
-    fn scrubEnv(env: *std.process.Environ.Map) void {
-        var i = env.keys().len;
-        while (i > 0) {
-            i -= 1;
-            const key = env.keys()[i];
-            if (!stripEnvKey(key)) continue;
-            @memset(@constCast(env.values()[i]), 0);
-            _ = env.swapRemove(key);
-        }
-    }
-
-    /// If SSH mode is active, return a freshly-allocated argv that wraps the
-    /// caller's command in `ssh user@host '<remote shell line>'`. Otherwise
-    /// returns a duplicate of the input argv. Caller frees via freeArgv.
-    fn maybeWrapSsh(
-        self: *Self,
-        argv: []const []const u8,
-        force_local: bool,
-    ) ![]const []const u8 {
-        if (!self.shouldRouteSsh(force_local)) return self.dupeArgv(argv);
-
-        const target = self.ssh_target.?;
-        const remote_cmd = try buildRemoteShellLine(self.alloc, target.cwd, argv);
-        errdefer self.alloc.free(remote_cmd);
-
-        const target_str = try std.fmt.allocPrint(self.alloc, "{s}@{s}", .{ target.user, target.host });
-        errdefer self.alloc.free(target_str);
-
-        var cp_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cp = std.fmt.bufPrint(&cp_buf, "ControlPath={s}", .{target.control}) catch "";
-        const wrapped: []const []const u8 = if (cp.len > 0)
-            &.{ "ssh", "-T", "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no", "-o", cp, "-o", "ConnectTimeout=10", target_str, remote_cmd }
-        else
-            &.{ "ssh", "-T", "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no", "-o", "ConnectTimeout=10", target_str, remote_cmd };
-
-        const out = try self.dupeArgv(wrapped);
-        self.alloc.free(target_str);
-        self.alloc.free(remote_cmd);
-        return out;
     }
 
     /// Release a slot owned by the caller (the `runAndWait`/`Handle` holder).
@@ -483,16 +247,12 @@ pub const CmdPool = struct {
         slot: *CmdSlot,
         argv: []const []const u8,
         cwd: ?[]const u8,
-        stdin_data: ?[]const u8,
         env_box: ?*std.process.Environ.Map,
         kill_process_group: bool,
     ) std.Io.Cancelable!void {
         defer self.freeArgv(argv);
         defer if (cwd) |c| self.alloc.free(c);
-        defer if (stdin_data) |d| self.alloc.free(d);
         defer if (env_box) |b| {
-            // Zero values before deinit — they may carry secrets (passphrases).
-            for (b.values()) |v| @memset(@constCast(v), 0);
             b.deinit();
             self.alloc.destroy(b);
         };
@@ -501,7 +261,7 @@ pub const CmdPool = struct {
         var child = std.process.spawn(self.io, .{
             .argv = argv,
             .cwd = if (cwd) |c| .{ .path = c } else .inherit,
-            .stdin = if (stdin_data != null) .pipe else .ignore,
+            .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
             .environ_map = if (env_box) |b| b else null,
@@ -516,14 +276,6 @@ pub const CmdPool = struct {
             self.terminateProcess(pid, kill_process_group);
             child.kill(self.io);
         };
-
-        var stdin_future: ?std.Io.Future(std.Io.Cancelable!void) = null;
-        if (stdin_data) |data| {
-            const stdin = child.stdin.?;
-            child.stdin = null;
-            stdin_future = std.Io.async(self.io, writeStdin, .{ stdin, self.io, data });
-        }
-        defer if (stdin_future) |*future| future.cancel(self.io) catch {};
 
         const term = self.collectOutput(slot, &child, kill_process_group) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
@@ -549,14 +301,6 @@ pub const CmdPool = struct {
                 slot.result_ty = .failed;
             },
         }
-    }
-
-    fn writeStdin(file: std.Io.File, io: std.Io, data: []const u8) std.Io.Cancelable!void {
-        defer file.close(io);
-        std.Io.File.writeStreamingAll(file, io, data) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return,
-        };
     }
 
     const CollectError = std.Io.File.MultiReader.UnendingError ||
@@ -720,50 +464,6 @@ pub const CmdPool = struct {
         return wrapped;
     }
 
-    /// Builds `cd <quoted-ssh-root> && <quoted-argv0> <quoted-argv1> ...`.
-    fn buildRemoteShellLine(
-        alloc: std.mem.Allocator,
-        ssh_root: []const u8,
-        argv: []const []const u8,
-    ) ![]u8 {
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(alloc);
-
-        try out.appendSlice(alloc, "cd ");
-        try appendShellPath(alloc, &out, ssh_root);
-        try out.appendSlice(alloc, " && ");
-        for (argv, 0..) |a, i| {
-            if (i > 0) try out.append(alloc, ' ');
-            try appendShellQuoted(alloc, &out, a);
-        }
-        return out.toOwnedSlice(alloc);
-    }
-
-    fn appendShellPath(alloc: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
-        if (std.mem.eql(u8, s, "~")) {
-            try out.appendSlice(alloc, "\"$HOME\"");
-            return;
-        }
-        if (std.mem.startsWith(u8, s, "~/")) {
-            try out.appendSlice(alloc, "\"$HOME\"/");
-            try appendShellQuoted(alloc, out, s[2..]);
-            return;
-        }
-        try appendShellQuoted(alloc, out, s);
-    }
-
-    fn appendShellQuoted(alloc: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
-        try out.append(alloc, '\'');
-        for (s) |c| {
-            if (c == '\'') {
-                try out.appendSlice(alloc, "'\\''");
-            } else {
-                try out.append(alloc, c);
-            }
-        }
-        try out.append(alloc, '\'');
-    }
-
     /// Run synchronously: spawn, await, copy result into caller-owned buffers.
     /// Caller frees stdout/stderr.
     pub fn runAndWait(self: *Self, opts: RunOpts) !CmdResult {
@@ -812,7 +512,6 @@ test "scrubbed environments exclude credentials and loader variables without cha
     for (stripped) |key| try env.put(key, "secret");
     try env.put("PATH", "/usr/bin:/bin");
     try env.put("HOME", "/tmp");
-    try env.put("SSH_AUTH_SOCK", "/tmp/inherited.sock");
     var pool = CmdPool.init(testing.allocator, testing.io, &env);
     defer pool.deinit();
 
@@ -825,37 +524,22 @@ test "scrubbed environments exclude credentials and loader variables without cha
     }
     try testing.expectEqualStrings("/usr/bin:/bin", box.get("PATH").?);
     try testing.expectEqualStrings("/tmp", box.get("HOME").?);
-    try testing.expectEqualStrings("/tmp/inherited.sock", box.get("SSH_AUTH_SOCK").?);
-    try testing.expectEqual(null, try pool.buildEnvBox(.{ .argv = &.{"ssh"} }));
-
-    pool.agent_sock = try testing.allocator.dupe(u8, "/tmp/owned.sock");
-    const overlaid = (try pool.buildEnvBox(.{ .argv = &.{"env"}, .scrub_env = true })).?;
-    defer testing.allocator.destroy(overlaid);
-    defer overlaid.deinit();
-    try testing.expectEqualStrings("/tmp/owned.sock", overlaid.get("SSH_AUTH_SOCK").?);
-    try testing.expect(!overlaid.contains("OPENAI_API_KEY"));
-
-    const internal = (try pool.buildEnvBox(.{ .argv = &.{"ssh"} })).?;
-    defer testing.allocator.destroy(internal);
-    defer internal.deinit();
-    try testing.expectEqualStrings("secret", internal.get("OPENAI_API_KEY").?);
+    try testing.expectEqual(null, try pool.buildEnvBox(.{ .argv = &.{"env"} }));
 }
 
-test "scrubbing applies to explicit environments and reaches spawned children" {
+test "scrubbing reaches spawned children" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const testing = std.testing;
     var env = std.process.Environ.Map.init(testing.allocator);
     defer env.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+    try env.put("BLITZ_TEST_API_KEY", "secret");
+    try env.put("BLITZ_TEST_TOKEN", "secret");
+    try env.put("DYLD_TEST", "secret");
     var pool = CmdPool.init(testing.allocator, testing.io, &env);
     defer pool.deinit();
-    var overlay = std.process.Environ.Map.init(testing.allocator);
-    try overlay.put("PATH", "/usr/bin:/bin");
-    try overlay.put("BLITZ_TEST_API_KEY", "secret");
-    try overlay.put("BLITZ_TEST_TOKEN", "secret");
-    try overlay.put("DYLD_TEST", "secret");
     const res = try pool.runAndWaitTimeout(.{
         .argv = &.{"/usr/bin/env"},
-        .env_overlay = overlay,
         .scrub_env = true,
     }, 2000);
     defer testing.allocator.free(res.stdout);
@@ -1108,75 +792,6 @@ test "leader exit bounds pipe draining and preserves partial output and exit sta
     try expectProcessStopped(pid);
 }
 
-test "leader exit cancels stdin writes held open by descendants" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
-    var f: ProcessTestFixture = undefined;
-    try f.init();
-    defer f.deinit();
-    const data = try std.testing.allocator.alloc(u8, 128 * 1024);
-    defer std.testing.allocator.free(data);
-    @memset(data, 'x');
-    const start = nowMs(std.testing.io);
-    const result = try f.pool.runAndWaitTimeout(.{
-        .cwd = f.cwd,
-        .argv = &.{ "/bin/sh", "-c", "sleep 300 <&0 >/dev/null 2>&1 & printf '%s' \"$!\" > child; printf complete" },
-        .stdin_data = data,
-        .kill_process_group = true,
-    }, 5000);
-    defer std.testing.allocator.free(result.stdout);
-    defer std.testing.allocator.free(result.stderr);
-    const pid_text = try f.waitFile("child");
-    defer std.testing.allocator.free(pid_text);
-    const pid = try std.fmt.parseInt(std.posix.pid_t, pid_text, 10);
-    defer std.posix.kill(pid, std.posix.SIG.KILL) catch {};
-    try std.testing.expect(nowMs(std.testing.io) - start < 3000);
-    try std.testing.expectEqual(.success, result.ty);
-    try std.testing.expectEqualStrings("complete", result.stdout);
-}
-
-test "SSH socket probes reject files and stale sockets and preserve inherited agents" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
-    var f: ProcessTestFixture = undefined;
-    try f.init();
-    defer f.deinit();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&buf, "{s}/sock", .{f.cwd});
-    try std.testing.expect(!CmdPool.socketUsable(path));
-    const file = try f.tmp.dir.createFile(std.testing.io, "sock", .{});
-    file.close(std.testing.io);
-    try std.testing.expect(!CmdPool.socketUsable(path));
-    try f.tmp.dir.deleteFile(std.testing.io, "sock");
-    const address = try std.Io.net.UnixAddress.init(path);
-    var server = try address.listen(std.testing.io, .{});
-    try std.testing.expect(CmdPool.socketUsable(path));
-    try std.testing.expectEqualStrings(path, try f.pool.ensureAgent(path));
-    f.pool.killAgent();
-    try std.testing.expect(CmdPool.socketUsable(path));
-    server.deinit(std.testing.io);
-    try std.testing.expect(!CmdPool.socketUsable(path));
-    f.pool.agent_sock = try std.testing.allocator.dupe(u8, path);
-    f.pool.killAgent();
-    try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(std.testing.io, "sock", .{}));
-}
-
-test "owned ssh-agent teardown removes its socket" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
-    std.Io.Dir.accessAbsolute(std.testing.io, "/usr/bin/ssh-agent", .{}) catch return error.SkipZigTest;
-    var f: ProcessTestFixture = undefined;
-    try f.init();
-    defer f.deinit();
-    try f.env.put("PATH", "/usr/bin:/bin");
-    const sock = try std.testing.allocator.dupe(u8, try f.pool.ensureAgent(null));
-    defer std.testing.allocator.free(sock);
-    try std.testing.expect(CmdPool.socketUsable(sock));
-    try std.testing.expectEqualStrings(sock, try f.pool.ensureAgent(null));
-    f.pool.killAgent();
-    try std.testing.expect(!CmdPool.socketUsable(sock));
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, sock, .{}));
-    try std.testing.expectEqual(null, f.pool.agent_pid);
-    try std.testing.expectEqual(null, f.pool.agent_sock);
-}
-
 test "output beyond the cap keeps the tail and marks truncation" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     var f: ProcessTestFixture = undefined;
@@ -1200,20 +815,4 @@ test "output beyond the cap keeps the tail and marks truncation" {
     try std.testing.expect(capped.stdout.len <= 64 * 1024);
     try std.testing.expect(capped.stdout_truncated);
     try std.testing.expect(!capped.stderr_truncated);
-}
-
-test "remote shell line expands a leading tilde in the cwd" {
-    const line = try CmdPool.buildRemoteShellLine(std.testing.allocator, "~/project", &.{"ls"});
-    defer std.testing.allocator.free(line);
-    try std.testing.expectEqualStrings("cd \"$HOME\"/'project' && 'ls'", line);
-
-    const home = try CmdPool.buildRemoteShellLine(std.testing.allocator, "~", &.{"ls"});
-    defer std.testing.allocator.free(home);
-    try std.testing.expectEqualStrings("cd \"$HOME\" && 'ls'", home);
-}
-
-test "remote shell line quotes cwd and argv safely" {
-    const line = try CmdPool.buildRemoteShellLine(std.testing.allocator, "/tmp/it's", &.{ "/bin/echo", "hi" });
-    defer std.testing.allocator.free(line);
-    try std.testing.expectEqualStrings("cd '/tmp/it'\\''s' && '/bin/echo' 'hi'", line);
 }

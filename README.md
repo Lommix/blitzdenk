@@ -13,8 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 
 - Tiny system prompt, minimal tool descriptions. Simple is efficient.
 - Durable multi agent sessions. Nothing is ever lost, always recover.
-- All IO goes through GNU core utils (ls, tee, cat, etc.)
-- Optional SSH tunnel layer. Tools run on a remote host.
+- File tools use direct file system calls. No helper processes.
 - MCP and Skill support (including remote mcp with oauth)
 - Multi-provider: any OpenAI or Anthropic chat/response schema supported, including local AI.
 - Image and mermaid diagram render in tui.
@@ -28,20 +27,6 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 Blitzdenk is my personal harness following my needs and my vision. The target is to become the neovim
 of harnesses. Durable base with a rich Lua-API to extend in all directions. I want to able to iterate fast,
 change and customize any detail.
-
-## Defaults
-
-On first install, we include a solid foundation configuration with some popular Commands, sub agent
-tooling and more. You can delete, overwrite or extend anything!
-
-- `/plan <prompt>`: Plan with the agent - based on grill-me skill
-- `/review <?prompt>`: Launch multiple challenger agents to review what was done.
-- `/team <?prompt>`: Multiagent orchestrator mode `Ultramode`
-- `/show <?prompt>`: explain something with mermaid diagrams
-- `/ssh-<myconfig>..`: autocomplete your ssh config entries for quick connection.
-- `/improve <?prompt>`: Review the conversation/task and start improving the harness.
-
-Connect remote without ssh config entries `/ssh user@host:/path/to/cwd`
 
 ## Build
 

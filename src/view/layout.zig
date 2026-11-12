@@ -101,12 +101,8 @@ pub fn anchorWidgetPanels(wl: *const WidgetLayout, footer_y: u16, footer_h: u16,
 /// Footer rows the active input mode needs: content, status row, padding.
 pub fn inputHeight(app: *App, frame_alloc: std.mem.Allocator, main_area: r.tui.Rect) u16 {
     switch (app.input_mode) {
-        .text, .passphrase => {
-            const shown: r.clipboard.Display = switch (app.input_mode) {
-                .text => app.displayInput(frame_alloc),
-                .passphrase => |pp| .{ .text = pp.field.slice(), .cursor = pp.field.cursor },
-                else => .{ .text = "", .cursor = 0 },
-            };
+        .text => {
+            const shown = app.displayInput(frame_alloc);
             const width = composer.inputTextWidth(composer.inputContentWidth(main_area.width), composer.modePromptCols(&app.input_mode));
             const counted = r.tui.input_layout.rowCount(frame_alloc, shown.text, width) catch 1;
             const rows: u16 = @intCast(@min(@max(counted, 1), @as(usize, std.math.maxInt(u16))));

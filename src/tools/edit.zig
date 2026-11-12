@@ -60,7 +60,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
     if (args.old_string.len == 0) return r.errResult(call, "old_string is empty");
 
-    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.routeCwd(), args.file_path }) catch
+    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
 
     if (std.mem.eql(u8, args.old_string, args.new_string)) {
@@ -73,24 +73,10 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     };
     defer r.file_mutex.unlock(ctx.io);
 
-    const read_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved }, .max_output = MAX_EDIT_SIZE }) catch |err|
-        return r.errResult(call, r.execFailure(ctx, "failed to read", resolved, @errorName(err)));
-    defer ctx.base.exec_pool.alloc.free(read_res.stdout);
-    defer ctx.base.exec_pool.alloc.free(read_res.stderr);
-
-    if (read_res.ty != .success) {
-        return r.errResult(call, r.execFailure(ctx, "failed to read", resolved, read_res.stderr));
-    }
-
-    if (read_res.stdout_truncated) {
-        return r.errResult(call, "file exceeds the 4MB edit limit");
-    }
-
-    if (read_res.stdout.len > MAX_EDIT_SIZE) {
-        return r.errResult(call, "file exceeds the 4MB edit limit");
-    }
-
-    const file_content = alloc.dupe(u8, read_res.stdout) catch return r.errResult(call, "oom");
+    const file_content = switch (readForEdit(ctx, resolved, "failed to read")) {
+        .text => |text| text,
+        .err => |msg| return r.errResult(call, msg),
+    };
 
     const replacement = buildReplacement(alloc, file_content, args.old_string, args.new_string, args.replace_all) catch |err| switch (err) {
         error.Ambiguous => {
@@ -135,37 +121,32 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-    const verify_res = ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved }, .max_output = MAX_EDIT_SIZE }) catch |err|
-        return r.errResult(call, r.execFailure(ctx, "failed to re-read", resolved, @errorName(err)));
-    defer ctx.base.exec_pool.alloc.free(verify_res.stdout);
-    defer ctx.base.exec_pool.alloc.free(verify_res.stderr);
-
-    if (verify_res.stdout_truncated) {
-        return r.errResult(call, "file exceeds the 4MB edit limit");
-    }
-
-    if (verify_res.ty != .success) {
-        return r.errResult(call, r.execFailure(ctx, "failed to re-read", resolved, verify_res.stderr));
-    }
-
-    if (!std.mem.eql(u8, verify_res.stdout, file_content)) {
+    const current = switch (readForEdit(ctx, resolved, "failed to re-read")) {
+        .text => |text| text,
+        .err => |msg| return r.errResult(call, msg),
+    };
+    if (!std.mem.eql(u8, current, file_content)) {
         return r.errResult(call, "file changed on disk while the edit was pending; re-read the file and retry");
     }
 
-    const write_res = r.atomicWriteViaExec(ctx, resolved, new_content) orelse
-        return r.errResult(call, "failed to start process");
-    defer ctx.base.exec_pool.alloc.free(write_res.stdout);
-    defer ctx.base.exec_pool.alloc.free(write_res.stderr);
-
-    if (write_res.ty != .success) {
-        return r.errResult(call, r.execFailure(ctx, "failed to write", resolved, write_res.stderr));
-    }
+    r.atomicWrite(ctx.io, resolved, new_content) catch |err|
+        return r.errResult(call, r.fsFailure(ctx, "failed to write", resolved, err));
 
     r.markConfigTouched(ctx, resolved);
 
     r.writeToolChangedStatus(ctx, call, "edit", file_content, new_content, args.file_path);
 
     return r.okResult(call, std.fmt.allocPrint(alloc, "edit applied to {s}", .{args.file_path}) catch "edit applied successfully");
+}
+
+const EditRead = union(enum) { text: []const u8, err: []const u8 };
+
+fn readForEdit(ctx: r.ToolContext, resolved: []const u8, action: []const u8) EditRead {
+    const text = r.readFileCapped(ctx, resolved, MAX_EDIT_SIZE) catch |err| return .{ .err = switch (err) {
+        error.StreamTooLong => "file exceeds the 4MB edit limit",
+        else => r.fsFailure(ctx, action, resolved, err),
+    } };
+    return if (text) |t| .{ .text = t } else .{ .err = r.fsFailure(ctx, action, resolved, error.FileNotFound) };
 }
 
 fn buildReplacement(

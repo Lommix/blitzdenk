@@ -82,8 +82,6 @@ pub const Command = union(enum) {
     custom: CustomCmd,
     attach_screenshot: ScreenshotArgs,
     add_tool: AddToolArgs,
-    ssh_enable,
-    ssh_disable,
     // -------------------------------------------
 
     pub const AddToolArgs = struct {
@@ -232,20 +230,6 @@ pub const Command = union(enum) {
             },
             .cd => |path| {
                 if (path.len == 0) return;
-                if (app.exec_pool.ssh_active and app.exec_pool.ssh_target != null) {
-                    const base = app.exec_pool.effectiveCwd(app.cwd);
-                    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const home = app.path_completion.remote_home orelse "";
-                    const target_path = r.util.expandHomePath(path, home, &path_buf);
-                    if (std.fs.path.resolve(app.appAlloc(), &.{ base, target_path })) |resolved| {
-                        if (app.exec_pool.ssh_target) |*tar| {
-                            const new_remote = app.exec_pool.alloc.dupe(u8, resolved) catch return;
-                            app.exec_pool.alloc.free(tar.cwd);
-                            tar.cwd = new_remote;
-                        }
-                    } else |_| {}
-                    return;
-                }
                 if (std.fs.path.resolve(app.appAlloc(), &.{ app.cwd, path })) |resolved| {
                     app.cwd = resolved;
                     app.context_factory.rescanSkills(resolved);
@@ -372,14 +356,6 @@ pub const Command = union(enum) {
                 const encoded = try alloc.alloc(u8, encoded_len);
                 _ = std.base64.standard.Encoder.encode(encoded, arg.data);
                 app.screenshot_buf = encoded;
-                app.dirty = true;
-            },
-            .ssh_enable => {
-                app.exec_pool.ssh_active = true;
-                app.dirty = true;
-            },
-            .ssh_disable => {
-                app.exec_pool.ssh_active = false;
                 app.dirty = true;
             },
             .add_tool => |arg| {

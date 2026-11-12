@@ -266,7 +266,6 @@ const BlitzDraw = LuaType{ .table_def = .{ .name = "BlitzDraw", .fields = &.{
 const AgentIdDef: LuaType = .integer;
 const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "cwd", .ty = LuaType.string, .desc = "Working directory for tool file operations." },
-    .{ .name = "local_cwd", .ty = LuaType.string, .desc = "Working directory for force_local commands." },
     .{ .name = "agent_id", .ty = AgentIdDef },
     .{ .name = "state", .ty = LuaType.table },
     .{ .name = "set_status", .ty = LuaType{ .raw = "fun(self: BlitzCtx, msg: string)" }, .desc = "Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines." },
@@ -540,7 +539,7 @@ const AppFlagsDef = LuaType{ .table_def = .{ .name = "BlitzAppFlags", .fields = 
     .{ .name = "inline_images", .ty = LuaType.boolean, .optional = true },
     .{ .name = "notify_on_reload", .ty = LuaType.boolean, .optional = true },
     .{ .name = "debug_log", .ty = LuaType.boolean, .optional = true },
-    .{ .name = "approval_mode", .ty = LuaType.string, .optional = true, .desc = "strict|default|yolo" },
+    .{ .name = "approval_mode", .ty = LuaType.string, .optional = true, .desc = "strict|default" },
 } } };
 const FlagsStrings = struct {
     show_thinking: ?bool = null,
@@ -596,14 +595,12 @@ const AskAnswersOrNilDef = LuaType{ .raw_refs = .{ .text = "BlitzAskPick[][]|nil
 const ShellOptsDef = LuaType{ .table_def = .{ .name = "BlitzShellOpts", .fields = &.{
     .{ .name = "cmd", .ty = LuaType.string, .desc = "the shell command to run" },
     .{ .name = "timeout", .ty = LuaType.number, .optional = true, .desc = "kill the command after this many seconds" },
-    .{ .name = "force_local", .ty = LuaType.boolean, .optional = true, .desc = "run on this machine even when SSH routing is active" },
 } } };
 pub const Blitz = LuaType{
     .table_def = .{
         .name = "Blitz",
         .fields = &.{
             .{ .name = "mcp", .ty = BlitzMcp },
-            .{ .name = "ssh", .ty = BlitzSsh },
             .{ .name = "json", .ty = BlitzJson },
             .{ .name = "base64", .ty = BlitzBase64 },
             .{ .name = "cmd", .ty = BlitzCmd },
@@ -1316,8 +1313,7 @@ pub const Blitz = LuaType{
                 \\Register environment capability rules. Each rule names a binary; when it
                 \\resolves through the exec pool, the rule line lands in the injected
                 \\env_capabilities catalogue of agents that own the bash tool. Binaries
-                \\resolve before prompting and follow SSH routing, so the catalogue is
-                \\re-injected whenever the routing changes.
+                \\resolve once before prompting.
                 ,
                 .ty = LuaType{ .function = .{
                     .args = &.{.{ .name = "rules", .ty = CapabilityRuleListDef }},
@@ -1499,16 +1495,12 @@ pub const Blitz = LuaType{
                             _ = c.luaL_checktype(state, 1, c.LUA_TTABLE);
 
                             var timeout_ms: ?i64 = null;
-                            var force_local = false;
                             if (c.lua_getfield(state, 1, "timeout") != c.LUA_TNIL) {
                                 const t = c.lua_tonumberx(state, -1, null);
                                 if (!std.math.isFinite(t) or t <= 0)
                                     return c.luaL_error(state, "shell: opts.timeout must be a positive number");
                                 timeout_ms = @max(1, @as(i64, @intFromFloat(@min(t, 2_147_483.0) * 1000)));
                             }
-                            c.lua_pop(state, 1);
-                            if (c.lua_getfield(state, 1, "force_local") != c.LUA_TNIL)
-                                force_local = c.lua_toboolean(state, -1) != 0;
                             c.lua_pop(state, 1);
 
                             _ = c.lua_getfield(state, 1, "cmd");
@@ -1521,7 +1513,6 @@ pub const Blitz = LuaType{
                             const opts: @TypeOf(a.exec_pool.*).RunOpts = .{
                                 .cwd = cwd,
                                 .argv = &.{ "/bin/sh", "-c", cmd },
-                                .force_local = force_local,
                             };
                             const result = (if (timeout_ms) |ms|
                                 a.exec_pool.runAndWaitTimeout(opts, ms)
@@ -1573,7 +1564,7 @@ pub const Blitz = LuaType{
                             };
                             const name = readAnyArg([]const u8, state, "write_tempfile", 1) orelse return 0;
                             const content = readAnyArg([]const u8, state, "write_tempfile", 2) orelse return 0;
-                            const path = r.artifact.write(a.exec_pool, a.gpa, name, content) catch |err| {
+                            const path = r.artifact.write(a.io, a.gpa, name, content) catch |err| {
                                 _ = c.luaL_error(state, "write_tempfile failed with '%s'", @errorName(err).ptr);
                                 return 0;
                             };
@@ -1613,8 +1604,6 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "EDIT", .desc = "default string replace edit", .ty = LuaType.string, .value = .{ .string = tl.edit.EditTool.def.name } },
             .{ .name = "PATCH", .desc = "patch DSL tool. Replaces edit and write. GPT loves it", .ty = LuaType.string, .value = .{ .string = tl.patch.PatchTool.def.name } },
             .{ .name = "ASK", .desc = "multiple choice questions for the user", .ty = LuaType.string, .value = .{ .string = tl.ask.AskTool.def.name } },
-            .{ .name = "GLOB", .desc = "read only file search", .ty = LuaType.string, .value = .{ .string = tl.search.GlobTool.def.name } },
-            .{ .name = "GREP", .desc = "read only text serach", .ty = LuaType.string, .value = .{ .string = tl.search.GrepTool.def.name } },
             .{ .name = "START_MCP", .desc = "load a registered mcp tools into session", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },
             .{ .name = "SKILL", .desc = "load a skill's full instructions by name", .ty = LuaType.string, .value = .{ .string = tl.skill.SkillTool.def.name } },
         },
@@ -1711,7 +1700,7 @@ pub const BlitzHooks = LuaType{
             .{ .name = "mcp_tools_reloaded", .desc = "Register a listener for after MCP tools are reloaded. Takes no payload. " ++ ListenerVmDesc, .ty = EventFn(.mcp_tools_reloaded, null) },
             .{ .name = "permission_requested", .desc =
             \\Register a listener for every tool approval, before the
-            \\approval-mode check: a listener can deny what yolo would
+            \\approval-mode check: a listener can deny what default mode would
             \\auto-approve. The event carries the ticket; fetch details with
             \\blitz.permissions.get and decide with blitz.permissions.resolve.
             \\blitz.get_flags().approval_mode reads the current mode inside a
@@ -2176,74 +2165,6 @@ const BlitzMcp = LuaType{
     },
 };
 
-const SshState = struct {
-    active: bool,
-    user: ?[]const u8,
-    host: ?[]const u8,
-    cwd: ?[]const u8,
-};
-const BlitzSshStateDef = LuaType{ .table_def = .{ .name = "BlitzSshState", .fields = &.{
-    .{ .name = "active", .ty = LuaType.boolean, .desc = "true while tool calls route through ssh" },
-    .{ .name = "user", .ty = LuaType.string, .optional = true },
-    .{ .name = "host", .ty = LuaType.string, .optional = true },
-    .{ .name = "cwd", .ty = LuaType.string, .optional = true, .desc = "remote working directory" },
-} } };
-
-const BlitzSsh = LuaType{
-    .table_def = .{
-        .name = "BlitzSsh",
-        .fields = &.{
-            .{
-                .name = "enable",
-                .desc =
-                \\Turn ssh routing on. Without a target nothing routes, but auto-approval is still denied.
-                ,
-                .ty = LuaType{ .function = .{
-                    .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(_: *c.lua_State, a: *r.app.App) !void {
-                            try a.cmd_queue.append(a.io, .ssh_enable);
-                        }
-                    }).lua_fn, "ssh.enable"),
-                } },
-            },
-            .{
-                .name = "disable",
-                .desc = "Turn ssh routing off. The target stays for re-enable.",
-                .ty = LuaType{ .function = .{
-                    .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(_: *c.lua_State, a: *r.app.App) !void {
-                            try a.cmd_queue.append(a.io, .ssh_disable);
-                        }
-                    }).lua_fn, "ssh.disable"),
-                } },
-            },
-            .{
-                .name = "get_state",
-                .desc =
-                \\Return the current ssh state. user, host, and cwd are nil without a target;
-                \\the target survives disable.
-                ,
-                .ty = LuaType{ .function = .{
-                    .ret = &BlitzSshStateDef,
-                    .fn_ptr = LuaFnBind((struct {
-                        fn lua_fn(a: *r.app.App) !SshState {
-                            a.mu.lockUncancelable(a.io);
-                            defer a.mu.unlock(a.io);
-                            const target = a.exec_pool.ssh_target;
-                            return .{
-                                .active = target != null and a.exec_pool.ssh_active,
-                                .user = if (target) |t| t.user else null,
-                                .host = if (target) |t| t.host else null,
-                                .cwd = if (target) |t| t.cwd else null,
-                            };
-                        }
-                    }).lua_fn, "ssh.get_state"),
-                } },
-            },
-        },
-    },
-};
-
 const BlitzJson = LuaType{ .table_def = .{ .name = "BlitzJson", .fields = &.{
     .{
         .name = "encode",
@@ -2455,7 +2376,7 @@ const BlitzInput = LuaType{ .table_def = .{ .name = "BlitzInput", .fields = &.{
         .name = "append",
         .desc =
         \\Insert text at the cursor, like typed input. Follows the focused
-        \\field: prompt, permission message, SSH passphrase, or wizard text.
+        \\field: prompt, permission message, or wizard text.
         \\The change is queued and lands on the next main-loop pass. Safe
         \\from config, commands, tools, and listeners.
         ,
@@ -3668,7 +3589,6 @@ fn pushEventPayload(L: *c.lua_State, event: r.events.AppEvent) c_int {
 // ── ToolContext bridge (passed as light userdata during tool calls) ──
 
 const CtxBridge = struct {
-    local_cwd: []const u8,
     cwd: []const u8,
     tool_ctx: ToolContext,
     tool_call: ToolCall,
@@ -4978,7 +4898,7 @@ fn errorBody(msg: []const u8) []const u8 {
 
 fn capLuaToolError(ctx: ToolContext, call: ToolCall, msg: []const u8) ToolResult {
     const sanitized = r.util.sanitizeUtf8(ctx.alloc, msg) catch return failedResult(call, "lua tool error");
-    const capped = r.tools.capOutput(ctx.base.exec_pool, ctx.alloc, call.id, sanitized);
+    const capped = r.tools.capOutput(ctx.io, ctx.alloc, call.id, sanitized);
     if (capped.ptr != sanitized.ptr) ctx.alloc.free(sanitized);
     return failedResult(call, capped);
 }
@@ -5084,8 +5004,7 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
     }
 
     var bridge = CtxBridge{
-        .local_cwd = ctx.base.cwd,
-        .cwd = ctx.alloc.dupe(u8, ctx.base.routeCwd()) catch ctx.base.cwd,
+        .cwd = ctx.base.cwd,
         .tool_ctx = ctx,
         .tool_call = call,
     };
@@ -5148,7 +5067,7 @@ fn interpretReturns(L: *c.lua_State, ctx: ToolContext, call: ToolCall) ToolResul
         c.lua_pop(L, 1);
         return failedResult(call, "oom");
     };
-    const content = r.tools.capOutput(ctx.base.exec_pool, ctx.alloc, call.id, sanitized);
+    const content = r.tools.capOutput(ctx.io, ctx.alloc, call.id, sanitized);
     if (content.ptr != sanitized.ptr) ctx.alloc.free(sanitized);
     c.lua_pop(L, 1);
 
@@ -5197,7 +5116,6 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
     c.lua_newtable(L);
 
     setFieldAny(L, -2, "cwd", bridge.cwd);
-    setFieldAny(L, -2, "local_cwd", bridge.local_cwd);
     setFieldAny(L, -2, "vision", ctxVision(bridge));
 
     setFieldAny(L, -2, "agent_id", bridge.tool_ctx.base.self_id);
@@ -5312,8 +5230,8 @@ fn prepareNestedRun(bridge: *CtxBridge, state: *c.lua_State, name: []const u8, a
     return null;
 }
 
-fn runNestedTool(run: NestedToolRun, pool: *r.exec.CmdPool, alloc: Allocator, io: std.Io) anyerror![]const u8 {
-    const output = r.tools.context.runWithOwner(run.tool, pool, alloc, io, run.call, run.owner) catch |err| {
+fn runNestedTool(run: NestedToolRun, alloc: Allocator, io: std.Io) anyerror![]const u8 {
+    const output = r.tools.context.runWithOwner(run.tool, alloc, io, run.call, run.owner) catch |err| {
         if (err == error.Canceled) return err;
         return std.fmt.allocPrint(alloc, "error: nested tool failed: {s}", .{@errorName(err)}) catch err;
     };
@@ -5337,7 +5255,7 @@ fn luaCtxCall(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "ctx.call: out of memory");
         return 0;
     } orelse return 0;
-    const output = runNestedTool(run, bridge.tool_ctx.base.exec_pool, bridge.tool_ctx.alloc, bridge.tool_ctx.io) catch |err| {
+    const output = runNestedTool(run, bridge.tool_ctx.alloc, bridge.tool_ctx.io) catch |err| {
         _ = c.luaL_error(state, "ctx.call: %s", @errorName(err).ptr);
         return 0;
     };
@@ -5400,7 +5318,7 @@ fn luaCtxBatch(L: ?*c.lua_State) callconv(.c) c_int {
     var awaited: usize = 0;
     while (awaited < count) {
         while (spawned < count and spawned - awaited < parallel) : (spawned += 1) {
-            futures[spawned] = std.Io.async(tool_ctx.io, runNestedTool, .{ runs[spawned], tool_ctx.base.exec_pool, tool_ctx.alloc, tool_ctx.io });
+            futures[spawned] = std.Io.async(tool_ctx.io, runNestedTool, .{ runs[spawned], tool_ctx.alloc, tool_ctx.io });
         }
         results[awaited] = futures[awaited].await(tool_ctx.io) catch |err| {
             for (futures[awaited..spawned]) |*future| {

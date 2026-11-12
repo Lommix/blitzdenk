@@ -74,7 +74,6 @@ pub const InputMode = union(enum) {
     text: Text,
     perm_select: PermSelect,
     perm_message: PermMessage,
-    passphrase: Passphrase,
     wizard: Wizard,
     session_picker: r.session_picker.Picker,
 
@@ -85,13 +84,6 @@ pub const InputMode = union(enum) {
     };
     pub const PermSelect = struct { selected: u8 = 0 };
     pub const PermMessage = struct { field: r.tui.Field(8192) = .{} };
-    pub const Passphrase = struct {
-        field: r.tui.Field(256) = .{},
-        // Buffers backing user/host/cwd are owned by App.passphrase_args_buf.
-        user: []const u8,
-        host: []const u8,
-        cwd: []const u8,
-    };
     pub const Wizard = r.wizard.Wizard;
 };
 
@@ -180,19 +172,6 @@ const Locked = r.agent_state.Locked;
 
 const PathCompletion = struct {
     cache: r.completion.DirCache = .{},
-    probe_handle: ?r.exec.CmdPool.Handle = null,
-    probe_dir: ?[]const u8 = null,
-    probe_include_hidden: bool = false,
-    probe_started_ms: i64 = 0,
-    debounce_ms: i64 = 0,
-    remote_home: ?[]const u8 = null,
-
-    fn cancelProbe(self: *PathCompletion, pool: *r.exec.CmdPool, alloc: std.mem.Allocator) void {
-        if (self.probe_handle) |h| pool.cancel(h);
-        self.probe_handle = null;
-        if (self.probe_dir) |d| alloc.free(d);
-        self.probe_dir = null;
-    }
 };
 
 pub const ToolStatusEntry = struct {
@@ -344,7 +323,6 @@ pub const App = struct {
     step_count: u32 = 0,
     compaction_indicator_active: bool = false,
     compaction_completion_seen_count: usize = 0,
-    passphrase_args_buf: [512]u8 = undefined,
     keymap: r.keys.KeyMap = .{},
     cmd_queue: r.cmd.CommandQueue,
     lua_vm: *r.lua.LuaVm,
@@ -361,7 +339,6 @@ pub const App = struct {
     mcp_reload_pending: bool = false,
     mcp_auth: ?r.oauth.Task = null,
     mcp_auth_url_shown: bool = false,
-    ssh_connect: ?r.ssh.SshConnectTask = null,
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
     injection_hooks: r.inject.InjectionsHooks = .{},
@@ -458,7 +435,6 @@ pub const App = struct {
         if (self.update_check) |*task| task.deinit();
         if (self.mcp_load) |*task| task.deinit();
         if (self.mcp_auth) |*task| task.deinit();
-        if (self.ssh_connect) |*task| task.deinit();
         self.mcp_manager.deinit();
         self.lua_vm.deinit();
         self.lua_state.deinit(self.gpa);
@@ -472,7 +448,6 @@ pub const App = struct {
         for (self.history.items) |e| self.gpa.free(e.text);
         self.history.deinit(self.gpa);
         self.path_completion.cache.clear(self.appAlloc());
-        if (self.path_completion.remote_home) |h| self.appAlloc().free(h);
         self.context_factory.deinit();
         self.arena_streaming_preview.deinit();
         self.arena_streaming_snapshot.deinit();
@@ -499,7 +474,7 @@ pub const App = struct {
         self.mu.lockUncancelable(self.io);
         const mode = self.flags.approval_mode;
         self.mu.unlock(self.io);
-        return r.permissions.shouldAutoApprove(mode, req.payload == .ask, self.exec_pool.ssh_active);
+        return r.permissions.shouldAutoApprove(mode, req.payload == .ask);
     }
 
     pub fn finishLuaPermission(self: *App, ticket: u64) void {
@@ -850,7 +825,6 @@ pub const App = struct {
         if (self.session_store) |store| store.bump();
         if (self.mcp_load) |*task| task.deinit();
         self.mcp_load = null;
-        self.cancelSshConnect();
         self.dropStreamingPreview();
         self.clearPendingDiffs();
         self.cancelPermissions(null);
@@ -902,7 +876,6 @@ pub const App = struct {
     pub fn tick(self: *App) !void {
         try self.finishMcpLoad(false);
         self.finishMcpAuth();
-        self.finishSshConnect();
         self.registry.flush();
         const running_before = self.running;
         for (&self.registry.slots, 0..) |*slot, index| {
@@ -968,7 +941,6 @@ pub const App = struct {
     }
 
     fn probeHome(self: *const App) []const u8 {
-        if (self.exec_pool.ssh_active) return self.path_completion.remote_home orelse "/";
         return self.exec_pool.env.get("HOME") orelse "/";
     }
 
@@ -977,46 +949,13 @@ pub const App = struct {
     }
 
     fn tickPathCompletion(self: *App) void {
-        const pc = &self.path_completion;
-        const parts_opt = if (self.input_mode == .text) self.currentTokenParts() else null;
-        const parts = parts_opt orelse {
-            if (pc.probe_handle != null or pc.debounce_ms != 0) pc.cancelProbe(self.exec_pool, self.appAlloc());
-            return;
-        };
-
-        const now_ms = self.nowMillis();
+        const parts = (if (self.input_mode == .text) self.currentTokenParts() else null) orelse return;
         var probed_dir_buf: [1024]u8 = undefined;
-        const probe_dir = self.resolveProbeDir(parts.prefix, &probed_dir_buf) orelse {
-            if (pc.probe_handle != null or pc.debounce_ms != 0) pc.cancelProbe(self.exec_pool, self.appAlloc());
-            return;
-        };
-
-        if (pc.cache.find(probe_dir)) |hit| {
-            if (hit.fresh(now_ms) and (hit.include_hidden or !parts.include_hidden)) {
-                if (pc.probe_handle != null or pc.debounce_ms != 0) pc.cancelProbe(self.exec_pool, self.appAlloc());
-                return;
-            }
+        const probe_dir = self.resolveProbeDir(parts.prefix, &probed_dir_buf) orelse return;
+        if (self.path_completion.cache.find(probe_dir)) |hit| {
+            if (hit.fresh(self.nowMillis()) and (hit.include_hidden or !parts.include_hidden)) return;
         }
-
-        if (pc.probe_handle) |handle| {
-            const slot = &self.exec_pool.slots[@backingInt(handle)];
-            if (slot.done.load(.acquire)) {
-                self.harvestProbe(handle);
-            } else if (now_ms - pc.probe_started_ms > r.completion.PROBE_TIMEOUT_MS) {
-                self.timeoutProbe(handle);
-            } else {
-                pc.debounce_ms = 0;
-            }
-            return;
-        }
-
-        if (pc.debounce_ms == 0) {
-            pc.debounce_ms = now_ms;
-            return;
-        }
-        if (now_ms - pc.debounce_ms < r.completion.DEBOUNCE_MS) return;
-
-        self.spawnProbe(probe_dir, parts.include_hidden);
+        self.listDir(probe_dir, parts.include_hidden);
     }
 
     const TokenParts = struct {
@@ -1048,94 +987,18 @@ pub const App = struct {
         return std.fmt.bufPrint(buf, "{s}", .{parts.dir}) catch null;
     }
 
-    fn spawnProbe(self: *App, dir: []const u8, include_hidden: bool) void {
-        const pc = &self.path_completion;
-        if (pc.probe_dir) |old| self.appAlloc().free(old);
-
-        const argv: []const []const u8 = if (include_hidden)
-            &.{ "ls", "-1pA", dir }
-        else
-            &.{ "ls", "-1p", dir };
-
-        const handle = self.exec_pool.runWithOpts(.{ .argv = argv, .cwd = self.exec_pool.effectiveCwd(self.cwd) }) catch {
-            pc.debounce_ms = 0;
-            return;
-        };
-
-        pc.probe_handle = handle;
-        pc.probe_dir = self.appAlloc().dupe(u8, dir) catch null;
-        pc.probe_include_hidden = include_hidden;
-        pc.probe_started_ms = self.nowMillis();
-        pc.debounce_ms = 0;
-    }
-
-    fn harvestProbe(self: *App, handle: r.exec.CmdPool.Handle) void {
-        const pc = &self.path_completion;
-        const dir = pc.probe_dir orelse "";
-        const include_hidden = pc.probe_include_hidden;
-        pc.probe_handle = null;
-        pc.probe_dir = null;
-        defer if (dir.len > 0) self.appAlloc().free(dir);
-
-        const res = self.exec_pool.killAndCollect(handle) catch return;
-        defer self.exec_pool.alloc.free(res.stdout);
-        defer self.exec_pool.alloc.free(res.stderr);
-        if (dir.len == 0) return;
-
+    fn listDir(self: *App, dir: []const u8, include_hidden: bool) void {
         const alloc = self.appAlloc();
-        const list = pc.cache.beginInsert(alloc, dir) catch return;
+        const list = self.path_completion.cache.beginInsert(alloc, dir) catch return;
         list.stamp_ms = self.nowMillis();
-        list.valid = true;
         list.include_hidden = include_hidden;
-        if (res.ty != .success or res.stdout_truncated) {
-            list.valid = false;
-            return;
-        }
-        r.completion.parseLsOutput(alloc, list, res.stdout) catch {
-            list.valid = false;
-            return;
-        };
+        const path = std.fs.path.resolve(alloc, &.{ self.cwd, dir }) catch return;
+        defer alloc.free(path);
+        r.completion.readDir(alloc, self.io, path, include_hidden, list) catch return;
+        list.valid = true;
         r.completion.sortEntries(list.entries.items);
-
-        if (self.input_mode == .text and self.pathTokenActive()) {
-            if (self.currentTokenDirMatches(dir)) self.syncCompletion();
-        }
+        self.syncCompletion();
         self.dirty = true;
-    }
-
-    fn currentTokenDirMatches(self: *App, dir: []const u8) bool {
-        var buf: [1024]u8 = undefined;
-        const parts = self.currentTokenParts() orelse return false;
-        const resolved = self.resolveProbeDir(parts.prefix, &buf) orelse return false;
-        return std.mem.eql(u8, resolved, dir);
-    }
-
-    fn timeoutProbe(self: *App, handle: r.exec.CmdPool.Handle) void {
-        const pc = &self.path_completion;
-        const dir = pc.probe_dir orelse return;
-        pc.probe_handle = null;
-        pc.probe_dir = null;
-        defer if (dir.len > 0) self.appAlloc().free(dir);
-
-        const alloc = self.appAlloc();
-        const list = pc.cache.beginInsert(alloc, dir) catch return;
-        list.stamp_ms = self.nowMillis();
-        list.valid = false;
-        self.exec_pool.cancel(handle);
-    }
-
-    pub fn invalidatePathCompletions(self: *App) void {
-        self.path_completion.cache.clear(self.appAlloc());
-        if (self.path_completion.remote_home) |h| {
-            self.appAlloc().free(h);
-            self.path_completion.remote_home = null;
-        }
-        self.path_completion.cancelProbe(self.exec_pool, self.appAlloc());
-    }
-
-    pub fn setRemoteHome(self: *App, home: []const u8) void {
-        if (self.path_completion.remote_home) |h| self.appAlloc().free(h);
-        self.path_completion.remote_home = self.appAlloc().dupe(u8, home) catch null;
     }
 
     pub fn sessionRunSecs(self: *const App) u32 {
@@ -1197,7 +1060,7 @@ pub const App = struct {
         var id_buf: [16]u8 = undefined;
         const spill_id = try std.fmt.bufPrint(&id_buf, "agent-{d}", .{agent_id.pack()});
         const spill = if (r.tools.isOversized(content.items, r.tools.MAX_DISPLAY_BYTES, r.tools.MAX_DISPLAY_LINES))
-            r.tools.writeSpillFile(self.exec_pool, self.gpa, spill_id, content.items)
+            r.tools.writeSpillFile(self.io, self.gpa, spill_id, content.items)
         else
             null;
         defer if (spill) |path| self.gpa.free(path);
@@ -1270,20 +1133,6 @@ pub const App = struct {
 
     pub fn enterPermMessage(self: *App) void {
         self.input_mode = .{ .perm_message = .{} };
-    }
-
-    pub fn enterPassphrase(self: *App, user: []const u8, host: []const u8, cwd: []const u8) void {
-        if (user.len + host.len + cwd.len > self.passphrase_args_buf.len) {
-            std.log.warn("ssh args too long for passphrase buffer ({d} bytes)", .{user.len + host.len + cwd.len});
-            return;
-        }
-        const u = self.passphrase_args_buf[0..user.len];
-        @memcpy(u, user);
-        const h = self.passphrase_args_buf[user.len..][0..host.len];
-        @memcpy(h, host);
-        const c = self.passphrase_args_buf[user.len + host.len ..][0..cwd.len];
-        @memcpy(c, cwd);
-        self.input_mode = .{ .passphrase = .{ .user = u, .host = h, .cwd = c } };
     }
 
     pub fn enterWizard(self: *App) void {
@@ -1380,7 +1229,6 @@ pub const App = struct {
         switch (self.input_mode) {
             .text => applyFieldOp(op, &self.input, bytes),
             .perm_message => |*pm| applyFieldOp(op, &pm.field, bytes),
-            .passphrase => |*pp| applyFieldOp(op, &pp.field, bytes),
             .wizard => |*w| return if (w.activeText()) |f| blk: {
                 applyFieldOp(op, f, bytes);
                 break :blk true;
@@ -1391,10 +1239,6 @@ pub const App = struct {
     }
 
     pub fn returnToText(self: *App) void {
-        // Zero passphrase buffer when leaving the modal so it doesn't linger.
-        if (self.input_mode == .passphrase) {
-            self.input_mode.passphrase.field.wipe();
-        }
         if (self.input_mode == .wizard) {
             self.input_mode.wizard.abortClearSecrets();
         }
@@ -1583,96 +1427,6 @@ pub const App = struct {
                 self.reloadMcpTools() catch {};
             },
             .failed => self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: auth failed: {s}", .{ task.name(), task.err_kind.text() }) catch {},
-        }
-    }
-
-    pub fn cancelSshConnect(self: *App) void {
-        if (self.ssh_connect) |*task| task.deinit();
-        self.ssh_connect = null;
-    }
-
-    pub fn startSshConnect(self: *App, user: []const u8, host: []const u8, cwd: []const u8) void {
-        self.cancelSshConnect();
-        self.exec_pool.clearSsh();
-        if (!self.initSshTask(user, host, cwd, false)) return;
-        self.toastSshConnecting(user, host);
-        self.ssh_connect.?.start();
-        self.dirty = true;
-    }
-
-    pub fn startSshUnlock(self: *App) void {
-        if (self.input_mode != .passphrase) return;
-        const pp = &self.input_mode.passphrase;
-        if (pp.field.isEmpty()) {
-            self.notifications.append(self.gpa, self.nowMillis(), "SSH: empty secret, canceled", .{}) catch {};
-            self.returnToText();
-            return;
-        }
-        self.cancelSshConnect();
-        if (!self.initSshTask(pp.user, pp.host, pp.cwd, true)) {
-            self.returnToText();
-            return;
-        }
-        const task = &self.ssh_connect.?;
-        const pass = pp.field.slice();
-        const n = @min(pass.len, task.pass_buf.len);
-        @memcpy(task.pass_buf[0..n], pass[0..n]);
-        task.pass_len = n;
-        self.returnToText();
-        self.toastSshConnecting(task.user(), task.host());
-        task.start();
-        self.dirty = true;
-    }
-
-    fn toastSshConnecting(self: *App, user: []const u8, host: []const u8) void {
-        self.notifications.append(self.gpa, self.nowMillis(), "SSH: connecting to {s}@{s}", .{ user, host }) catch {};
-    }
-
-    fn initSshTask(self: *App, user: []const u8, host: []const u8, cwd: []const u8, unlock: bool) bool {
-        if (user.len > r.ssh.SshConnectTask.MAX_USER or host.len > r.ssh.SshConnectTask.MAX_HOST or cwd.len > r.ssh.SshConnectTask.MAX_CWD or
-            user.len + host.len + cwd.len > self.passphrase_args_buf.len)
-        {
-            self.notifications.append(self.gpa, self.nowMillis(), "SSH: target too long", .{}) catch {};
-            return false;
-        }
-        self.ssh_connect = .{ .pool = self.exec_pool, .gpa = self.gpa, .unlock = unlock };
-        const task = &self.ssh_connect.?;
-        @memcpy(task.user_buf[0..user.len], user);
-        task.user_len = user.len;
-        @memcpy(task.host_buf[0..host.len], host);
-        task.host_len = host.len;
-        @memcpy(task.cwd_buf[0..cwd.len], cwd);
-        task.cwd_len = cwd.len;
-        return true;
-    }
-
-    fn finishSshConnect(self: *App) void {
-        const task = if (self.ssh_connect) |*task| task else return;
-        if (!task.isFinished()) return;
-        defer {
-            task.deinit();
-            self.ssh_connect = null;
-            self.dirty = true;
-        }
-        switch (task.outcome) {
-            .connected => {
-                var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const cwd = r.util.expandHomePath(task.cwd(), task.home(), &cwd_buf);
-                self.exec_pool.setSsh(task.user(), task.host(), cwd, task.control()) catch {
-                    self.notifications.append(self.gpa, self.nowMillis(), "SSH: failed: failed to allocate target", .{}) catch {};
-                    return;
-                };
-                if (task.home_len > 0) self.setRemoteHome(task.home());
-                self.notifications.append(self.gpa, self.nowMillis(), "SSH mode enabled: {s}@{s}", .{ task.user(), task.host() }) catch {};
-            },
-            .need_pass => {
-                if (self.input_mode == .text) {
-                    self.enterPassphrase(task.user(), task.host(), task.cwd());
-                } else {
-                    self.notifications.append(self.gpa, self.nowMillis(), "SSH: auth refused (retry /ssh for password)", .{}) catch {};
-                }
-            },
-            .failed => self.notifications.append(self.gpa, self.nowMillis(), "SSH: failed: {s}", .{r.ssh.truncateUtf8(task.reason(), 96)}) catch {},
         }
     }
 
@@ -1977,7 +1731,6 @@ pub const App = struct {
         switch (self.input_mode) {
             .text => self.moveMaskedVertical(alloc, &self.input, width, delta),
             .perm_message => |*pm| self.moveMaskedVertical(alloc, &pm.field, width, delta),
-            .passphrase => |*pp| moveFieldVertical(self, alloc, &pp.field, width, delta),
             .wizard => |*w| {
                 const f = w.activeText() orelse return false;
                 moveFieldVertical(self, alloc, f, width, delta);
@@ -2890,7 +2643,6 @@ test "command completion spans spaces in multi word commands" {
     defer lua_vm.deinit();
     app.lua_vm = lua_vm;
     var factory: r.ContextFactory = undefined;
-    factory.ssh_aliases = .empty;
     factory.skills = .{};
     factory.agent_counter = 0;
     app.context_factory = &factory;

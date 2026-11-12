@@ -103,7 +103,6 @@ fn statusBarLine(app: *App, alloc: std.mem.Allocator) !r.tui.Line {
             formatTokenCount(&cache_buf, usage.cache_read_tokens + usage.cache_write_tokens),
             ctx_pct,
             switch (app.flags.approval_mode) {
-                .yolo => "| AUTO APPROVAL",
                 .strict => "| APPROVAL",
                 .default => "",
             },
@@ -255,9 +254,6 @@ pub fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
     var dur_buf: [32]u8 = undefined;
     const dur = formatDuration(&dur_buf, secs);
 
-    const exec_pool = app.exec_pool;
-    const ssh_suffix: []const u8 = if (exec_pool.ssh_active and exec_pool.ssh_target != null) " (SSH ON)" else "";
-
     var l = r.tui.Line{};
     if (state == .active and !waiting) {
         const spinner_str = text_utils.spinnerDots(app.frame_count);
@@ -278,8 +274,6 @@ pub fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
             .calling => "calling",
             .retrying => "retrying",
         };
-
-        l.pushSpanPrint(alloc, "{s}", .{ssh_suffix}, info) catch {};
 
         if (active_agent_count > 1 or job_count > 0) {
             l.pushSpanPrint(alloc, " (", .{}, info) catch {};
@@ -310,10 +304,10 @@ pub fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
         pushRunCounts(&l, alloc, active_agent_count -| @as(u32, if (state == .active) 1 else 0), " agents", job_count, hl, info);
         l.pushSpanPrint(alloc, " (", .{}, info) catch {};
         l.pushSpanPrint(alloc, "{s}", .{dur}, hl) catch {};
-        l.pushSpanPrint(alloc, ") {s}", .{ssh_suffix}, info) catch {};
+        l.pushSpanPrint(alloc, ")", .{}, info) catch {};
     } else {
         const label = if (state == .complete) "Done" else "Failed";
-        l.pushSpanPrint(alloc, "{s} ({s}){s}", .{ label, dur, ssh_suffix }, info) catch {};
+        l.pushSpanPrint(alloc, "{s} ({s})", .{ label, dur }, info) catch {};
     }
     return l;
 }

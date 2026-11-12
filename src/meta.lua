@@ -31,23 +31,6 @@
 ---Enable an MCP server for this session.
 ---@field enable fun(mcp_id: integer)
 
----@class BlitzSshState
----true while tool calls route through ssh
----@field active boolean
----@field user? string
----@field host? string
----remote working directory
----@field cwd? string
-
----@class BlitzSsh
----Turn ssh routing on. Without a target nothing routes, but auto-approval is still denied.
----@field enable fun()
----Turn ssh routing off. The target stays for re-enable.
----@field disable fun()
----Return the current ssh state. user, host, and cwd are nil without a target;
----the target survives disable.
----@field get_state fun(): BlitzSshState
-
 ---@class BlitzJson
 ---Encode a Lua value as JSON.
 ---Supports nil, booleans, numbers, strings, and tables.
@@ -172,7 +155,7 @@
 ---main-loop pass. Safe from config, commands, tools, and listeners.
 ---@field set fun(text: string)
 ---Insert text at the cursor, like typed input. Follows the focused
----field: prompt, permission message, SSH passphrase, or wizard text.
+---field: prompt, permission message, or wizard text.
 ---The change is queued and lands on the next main-loop pass. Safe
 ---from config, commands, tools, and listeners.
 ---@field append fun(text: string)
@@ -265,10 +248,6 @@
 ---@field PATCH string
 ---multiple choice questions for the user
 ---@field ASK string
----read only file search
----@field GLOB string
----read only text serach
----@field GREP string
 ---load a registered mcp tools into session
 ---@field START_MCP string
 ---load a skill's full instructions by name
@@ -373,7 +352,7 @@
 ---Register a listener for after MCP tools are reloaded. Takes no payload. The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field mcp_tools_reloaded fun(func: fun())
 ---Register a listener for every tool approval, before the
----approval-mode check: a listener can deny what yolo would
+---approval-mode check: a listener can deny what default mode would
 ---auto-approve. The event carries the ticket; fetch details with
 ---blitz.permissions.get and decide with blitz.permissions.resolve.
 ---blitz.get_flags().approval_mode reads the current mode inside a
@@ -450,8 +429,6 @@
 ---@class BlitzCtx
 ---Working directory for tool file operations.
 ---@field cwd string
----Working directory for force_local commands.
----@field local_cwd string
 ---@field agent_id integer
 ---@field state table
 ---Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines.
@@ -618,7 +595,7 @@
 ---@field inline_images? boolean
 ---@field notify_on_reload? boolean
 ---@field debug_log? boolean
----strict|default|yolo
+---strict|default
 ---@field approval_mode? string
 
 ---@class BlitzTheme
@@ -646,8 +623,6 @@
 ---@field cmd string
 ---kill the command after this many seconds
 ---@field timeout? number
----run on this machine even when SSH routing is active
----@field force_local? boolean
 
 ---@class BlitzState
 ---Set a value in the shared state. Pass nil to delete the key.
@@ -660,7 +635,6 @@
 
 ---@class Blitz
 ---@field mcp BlitzMcp
----@field ssh BlitzSsh
 ---@field json BlitzJson
 ---@field base64 BlitzBase64
 ---@field cmd BlitzCmd
@@ -742,8 +716,7 @@
 ---Register environment capability rules. Each rule names a binary; when it
 ---resolves through the exec pool, the rule line lands in the injected
 ---env_capabilities catalogue of agents that own the bash tool. Binaries
----resolve before prompting and follow SSH routing, so the catalogue is
----re-injected whenever the routing changes.
+---resolve once before prompting.
 ---@field set_capabilities fun(rules: BlitzCapabilityRule[])
 ---Override the system prompt for a given agent type.
 ---@field set_prompt fun(agent_type: integer, prompt: string)

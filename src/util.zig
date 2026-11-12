@@ -27,14 +27,6 @@ pub fn sanitizeUtf8(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf8(text)});
 }
 
-pub fn expandHomePath(path: []const u8, home: []const u8, buf: []u8) []const u8 {
-    if (home.len == 0 or home[0] != '/') return path;
-    if (std.mem.eql(u8, path, "~")) return home;
-    if (std.mem.startsWith(u8, path, "~/"))
-        return std.fmt.bufPrint(buf, "{s}{s}", .{ home, path[1..] }) catch path;
-    return path;
-}
-
 ///Mostly clones `T`. passthrough for function ptr and anything opaque.
 pub fn deepClone(comptime T: type, value: T, alloc: std.mem.Allocator) !T {
     return switch (@typeInfo(T)) {
@@ -80,14 +72,6 @@ pub fn deepClone(comptime T: type, value: T, alloc: std.mem.Allocator) !T {
 
         else => @compileError("deepClone unsupported type: " ++ @typeName(T)),
     };
-}
-
-test "expand home path" {
-    var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("/home/u", expandHomePath("~", "/home/u", &buf));
-    try std.testing.expectEqualStrings("/home/u/proj", expandHomePath("~/proj", "/home/u", &buf));
-    try std.testing.expectEqualStrings("~user/x", expandHomePath("~user/x", "/home/u", &buf));
-    try std.testing.expectEqualStrings("~/x", expandHomePath("~/x", "", &buf));
 }
 
 test "state dir honors XDG_STATE_HOME and falls back to HOME" {

@@ -41,23 +41,17 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
 
-    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.routeCwd(), args.file_path }) catch
+    const resolved = std.fs.path.resolve(alloc, &.{ ctx.base.cwd, args.file_path }) catch
         return r.errResult(call, "failed to resolve path");
 
     const lock = &r.file_mutex;
     lock.lock(ctx.io) catch return r.errResult(call, "failed to lock file");
     defer lock.unlock(ctx.io);
 
-    var before: ?[]const u8 = null;
-    var has_before = false;
-    if (ctx.base.exec_pool.runAndWait(.{ .argv = &.{ "cat", resolved } })) |probe| {
-        if (probe.ty == .success and probe.stdout.len > 0 and !probe.stdout_truncated) {
-            before = ctx.alloc.dupe(u8, probe.stdout) catch null;
-            has_before = before != null;
-        }
-        ctx.base.exec_pool.alloc.free(probe.stdout);
-        ctx.base.exec_pool.alloc.free(probe.stderr);
-    } else |_| {}
+    const before: ?[]const u8 = if (r.readFileCapped(ctx, resolved, r.r.exec.MAX_OUTPUT) catch null) |text|
+        (if (text.len > 0) text else null)
+    else
+        null;
 
     const decision = ctx.requestPermission(call, .{ .diff = .{
         .before = null,
@@ -80,17 +74,10 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
-    const res = r.atomicWriteViaExec(ctx, resolved, args.content) orelse
-        return r.errResult(call, "failed to start process");
+    r.atomicWrite(ctx.io, resolved, args.content) catch |err|
+        return r.errResult(call, r.fsFailure(ctx, "failed to write", resolved, err));
 
-    defer ctx.base.exec_pool.alloc.free(res.stdout);
-    defer ctx.base.exec_pool.alloc.free(res.stderr);
-
-    if (res.ty != .success) {
-        return r.errResult(call, r.execFailure(ctx, "failed to write", resolved, res.stderr));
-    }
-
-    r.writeToolChangedStatus(ctx, call, "write", if (has_before) before else null, args.content, args.file_path);
+    r.writeToolChangedStatus(ctx, call, "write", before, args.content, args.file_path);
 
     const msg = std.fmt.allocPrint(ctx.alloc, "Successfully wrote {d} bytes to {s}", .{ args.content.len, args.file_path }) catch
         "write failed";

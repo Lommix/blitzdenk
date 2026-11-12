@@ -1,6 +1,6 @@
 ---
 name: blitzdenk-lua
-description: "Blitzdenk Lua config (`blitz.lua`): providers/models, custom tools, agents, commands, keybinds, input, hooks, permissions, MCP, SSH, drawing."
+description: "Blitzdenk Lua config (`blitz.lua`): providers/models, custom tools, agents, commands, keybinds, input, hooks, permissions, MCP, drawing."
 metadata:
   blitzdenk.main-agent-only: "true"
 ---
@@ -153,7 +153,7 @@ local researcher = blitz.add_agent({
     prompt = [[You are a fast read-only research agent. Answer the question. Stop.]],
     effort = "low",
     model = deepseek,
-    tools = { blitz.tools.READ, blitz.tools.GREP, blitz.tools.GLOB },
+    tools = { blitz.tools.READ },
     skills = { only = { "zig", "blitzdenk-lua" }, except = { "deploy" } },
 })
 
@@ -263,7 +263,7 @@ end, "toggle thinking output")
   send to the main agent, or a fresh general agent. `message_timeline` only
   displays; `blitz.agent.message` queues without echo.
 - Flag defaults: `show_thinking` false, other booleans true,
-  `approval_mode = "default"`.
+  `approval_mode = "default"` (auto-approves tool calls; `"strict"` asks).
 - A `blitz.bind` on a default key (`<Tab>`, `<C-n>`, `<C-p>`, `<C-y>`) wins;
   `blitz.cmp.*` reproduces the popup actions.
 - `blitz.input` edits the box before Enter; `blitz.hooks.prompt` rewrites the
@@ -328,8 +328,8 @@ blitz.hooks.inject({
 ## Permissions
 
 Flow: approve hook → park with a ticket + `permission_requested` → approval
-mode → TUI. Both Lua stages run in every mode and can deny what yolo would
-approve.
+mode → TUI. Both Lua stages run in every mode and can deny what default mode
+would approve.
 
 **Approve hook** (`blitz.hooks.approve`, main VM, last wins): return a
 `BlitzPermissionDecision` or nil for the normal flow.
@@ -395,20 +395,6 @@ client registration runs when offered, else set `client_id`. Tokens live in
 `~/.local/state/blitzdenk`), keyed by url, so a rename keeps the login.
 Tokens refresh on expiry; deleting a record logs out. A server answering 401
 at load is skipped with a notification naming the connect command.
-
-## SSH
-
-While routing is on, bash, read, write, edit, patch, search, and
-`blitz.shell` wrap in `ssh user@host`. Auto approval needs
-`approval_mode = "yolo"`.
-
-The TUI owns the connection: `/ssh user@host:~/dir`, `/ssh-<alias>`,
-`/ssh off`. Lua flips routing only (`blitz.ssh.enable/disable`).
-`get_state().active` implies a full target.
-
-`blitz.shell({ cmd = ..., force_local = true })` runs on this machine (local
-`git status`, `ssh-add`). Use `ctx.cwd` for tool files, `ctx.local_cwd` only
-with `force_local`.
 
 ## Session transcripts
 
