@@ -251,6 +251,10 @@
 ---@class BlitzToolDef
 ---execute bash scripts
 ---@field BASH string
+---stop a background bash job
+---@field KILL_JOB string
+---read background bash job output
+---@field READ_JOB string
 ---reading text files and images
 ---@field READ string
 ---write new files

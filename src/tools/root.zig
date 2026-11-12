@@ -99,9 +99,9 @@ pub const DiffStat = struct {
 pub fn diffStat(before: ?[]const u8, after: []const u8, alloc: std.mem.Allocator) ?DiffStat {
     var stat: DiffStat = .{};
     if (before) |old_text| {
-        const old_lines = r.app.splitLinesAlloc(old_text, alloc) orelse return null;
-        const new_lines = r.app.splitLinesAlloc(after, alloc) orelse return null;
-        const ops = r.app.myersDiff(old_lines, new_lines, alloc) orelse return null;
+        const old_lines = r.diff.splitLinesAlloc(old_text, alloc) orelse return null;
+        const new_lines = r.diff.splitLinesAlloc(after, alloc) orelse return null;
+        const ops = r.diff.myersDiff(old_lines, new_lines, alloc) orelse return null;
         for (ops) |op| switch (op) {
             .keep => {},
             .delete => stat.deletions += 1,

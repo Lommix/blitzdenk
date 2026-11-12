@@ -83,7 +83,7 @@ fn runScenario(app: *App, buf: *r.tui.Buffer, previous: *r.tui.Buffer, dirty: bo
     for (0..measured_frames) |_| {
         app.dirty = dirty;
         buf.clear();
-        App.render(app, buf.rect, buf);
+        r.view.render(app, buf.rect, buf);
         app.frame_count +%= 1;
         app.dirty = false;
         @memcpy(previous.cells, buf.cells);
@@ -160,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
     defer buf.deinit();
     var previous = try r.tui.Buffer.init(gpa, buf.rect);
     defer previous.deinit();
-    app.frame_snapshot = &previous;
+    app.view.frame_snapshot = &previous;
 
     printLine(io, "render bench  {d}x{d}  {d} settled entries + 1 running tool block", .{ bench_width, bench_height, settled_entry_count });
 
@@ -188,7 +188,7 @@ pub fn main(init: std.process.Init) !void {
     var glyphs_count: usize = 0;
     for (0..24) |_| {
         buf.clear();
-        App.render(&app, buf.rect, &buf);
+        r.view.render(&app, buf.rect, &buf);
         app.frame_count +%= 1;
         app.dirty = false;
         @memcpy(previous.cells, buf.cells);

@@ -26,7 +26,7 @@ and `osascript` on macOS. XDG variables are unset on macOS; `stateDir` and
 - Run loop: `src/agent.zig`, `src/agent_run.zig`
 - Result injection into the parent: `App.finishBackgroundAgent` in `src/app.zig`
 - Lua surface: `src/lua.zig`, `src/blitz_default.lua`
-- Tui state and render: `src/app.zig`
+- Tui render: `src/view/` (render-only state is `view.State` at `app.view`); input handling still in `src/app.zig`
 
 ## Tool execution and output
 

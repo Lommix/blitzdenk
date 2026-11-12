@@ -167,7 +167,7 @@ pub const Command = union(enum) {
                 app.sdk_run_rendered_steps = 0;
 
                 app.running = app.registry.countActive() > 0;
-                app.auto_scroll = true;
+                app.view.auto_scroll = true;
             },
             .cancel_agent => |id| {
                 if (app.registry.get(id) == null) return;
@@ -185,21 +185,21 @@ pub const Command = union(enum) {
                     try app.registry.retry(id, .{ .max_steps = std.math.maxInt(usize) });
                     _ = app.event_bus.emit(app, .{ .agent_started = .{ .id = id, .fresh = false } });
                     app.running = true;
-                    app.auto_scroll = true;
-                    app.scroll_offset = 0;
+                    app.view.auto_scroll = true;
+                    app.view.scroll_offset = 0;
                 }
             },
             .scroll_up => |delta| {
-                app.auto_scroll = false;
-                app.scroll_offset +|= delta;
+                app.view.auto_scroll = false;
+                app.view.scroll_offset +|= delta;
             },
             .scroll_to => |val| {
-                app.scroll_offset = val;
-                app.auto_scroll = false;
+                app.view.scroll_offset = val;
+                app.view.auto_scroll = false;
             },
             .scroll_down => |delta| {
-                app.scroll_offset -|= delta;
-                if (app.scroll_offset == 0) app.auto_scroll = true;
+                app.view.scroll_offset -|= delta;
+                if (app.view.scroll_offset == 0) app.view.auto_scroll = true;
             },
             .completion_next => app.handleCompletion(.next),
             .completion_prev => app.handleCompletion(.prev),
@@ -217,8 +217,8 @@ pub const Command = union(enum) {
                 try agent.queueMessages(&.{.{ .role = .user, .content = parts }});
 
                 app.running = true;
-                app.auto_scroll = true;
-                app.scroll_offset = 0;
+                app.view.auto_scroll = true;
+                app.view.scroll_offset = 0;
 
                 if (!agent.isBusy()) {
                     if (app.main_agent_id == arg.agent_id) app.sdk_run_rendered_steps = 0;
@@ -265,7 +265,7 @@ pub const Command = union(enum) {
                         .empty => app.pushSystemMessage("nothing to compact", .{}),
                     }
                     app.running = true;
-                    app.auto_scroll = true;
+                    app.view.auto_scroll = true;
                     app.dirty = true;
                 } else {
                     app.pushSystemMessage("no agent to compact", .{});
@@ -300,8 +300,8 @@ pub const Command = union(enum) {
                         }
                         showProviderOnboarding(app, diagnostic);
                         app.running = app.registry.countActive() > 0;
-                        app.auto_scroll = true;
-                        app.scroll_offset = 0;
+                        app.view.auto_scroll = true;
+                        app.view.scroll_offset = 0;
                         app.dirty = true;
                         return;
                     },

@@ -17,6 +17,7 @@ pub const BashTool = r.Tool{
         ++ OUTPUT_CAP_TEXT ++
             \\].
             \\Verify the target path before delete or move commands. Use absolute paths and guard variables (${VAR:?}) in destructive scripts.
+            \\Processes left running with `&` are killed when the command returns. For servers, watchers, and long builds use run_in_background: it returns a job id at once, and you get a reminder when the job exits. Do not poll or sleep while waiting for it. Read its merged stdout and stderr with read_job; some programs buffer output when it is not a terminal (use PYTHONUNBUFFERED=1 or `stdbuf -oL`). Stop a job with kill_job.
         ,
         .prompt_snippet = "Execute a bash command",
         .prompt_guidelines = "Check the [exit code: N] marker; investigate unexpected failures before moving on.",
@@ -24,7 +25,8 @@ pub const BashTool = r.Tool{
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Bash command to execute"},
         \\  "description": {"type": "string", "description": "Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples: \"ls\" → \"List files in current directory\"; \"git status\" → \"Show working tree status\"; \"npm install\" → \"Install package dependencies\""},
-        \\  "timeout": {"type": "number", "description": "Timeout in seconds (default 60s)"}
+        \\  "timeout": {"type": "number", "description": "Timeout in seconds (default 60s). Ignored with run_in_background"},
+        \\  "run_in_background": {"type": "boolean", "description": "Run detached and return at once with a job id"}
         \\}, "required": ["command", "description"]}
         ,
     },
@@ -40,6 +42,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         command: []const u8,
         description: []const u8,
         timeout: ?f64 = null,
+        run_in_background: bool = false,
     };
 
     const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
@@ -95,6 +98,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
+    if (args.run_in_background) return runBackground(ctx, call, app, args.command);
+
     // Foreground with deadline race.
     const timeout_ms: i64 = blk: {
         const t = args.timeout orelse break :blk 60_000;
@@ -127,6 +132,129 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const truncated = r.truncateOutputToOwnedSpill(ctx.alloc, full, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES, spill);
     if (truncated.ptr != full.ptr) ctx.alloc.free(full);
     return r.okResult(call, truncated);
+}
+
+const MAX_JOB_COMMAND_BYTES = 200;
+const DEFAULT_JOB_READ_LINES = 200;
+
+fn runBackground(ctx: r.ToolContext, call: r.r.sdk.ToolCall, app: *r.r.app.App, command: []const u8) r.r.sdk.ToolOutput {
+    const id = app.jobs.start(ctx.base.exec_pool, ctx.base.self_id, command, ctx.base.cwd) catch |err| switch (err) {
+        error.TooManyJobs => return r.errResult(call, std.fmt.comptimePrint("too many running background jobs (max {d}); stop one with kill_job", .{r.r.jobs.MAX_JOBS})),
+        else => return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "failed to start background job: {s}", .{@errorName(err)}) catch "failed to start background job"),
+    };
+    const msg = std.fmt.allocPrint(
+        ctx.alloc,
+        "Started background job {d}. Read its output with read_job; you get a reminder when it exits. Stop it with kill_job.",
+        .{id},
+    ) catch return r.okResult(call, "Started background job.");
+    return r.okResult(call, msg);
+}
+
+fn writeJobState(alloc: std.mem.Allocator, body: *std.ArrayList(u8), exit_code: ?u8, signal: ?u32) !void {
+    if (signal) |sig| {
+        if (signalName(sig)) |name| {
+            try body.print(alloc, "was killed by signal SIG{s}", .{name});
+        } else {
+            try body.print(alloc, "was killed by signal {d}", .{sig});
+        }
+    } else if (exit_code) |code| {
+        try body.print(alloc, "exited with code {d}", .{code});
+    } else {
+        try body.appendSlice(alloc, "ended");
+    }
+}
+
+fn appendClean(alloc: std.mem.Allocator, body: *std.ArrayList(u8), text: []const u8) !void {
+    const clean = try alloc.alloc(u8, text.len);
+    defer alloc.free(clean);
+    try body.appendSlice(alloc, stripAnsi(text, clean));
+}
+
+/// Reminder text for a background job that exited.
+pub fn formatJobNotice(alloc: std.mem.Allocator, done: r.r.jobs.Finished) ![]const u8 {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(alloc);
+
+    try body.print(alloc, "Background job {d} ", .{done.id});
+    try writeJobState(alloc, &body, done.exit_code, done.signal);
+    const command = done.command[0..@min(done.command.len, MAX_JOB_COMMAND_BYTES)];
+    const ellipsis = if (command.len < done.command.len) "..." else "";
+    try body.print(alloc, " after {d}s: `{s}{s}`. Use read_job for more output.\n", .{ @divTrunc(done.elapsed_ms, std.time.ms_per_s), command, ellipsis });
+    try appendClean(alloc, &body, done.tail);
+    return alloc.dupe(u8, body.items);
+}
+
+pub const ReadJobTool = r.Tool{
+    .def = .{
+        .name = "read_job",
+        .description = "Read the merged stdout and stderr of a background bash job, running or exited. Output includes line numbers counted from the job start. Without offset, returns the last `limit` lines. The oldest lines are dropped once a job holds more than " ++ std.fmt.comptimePrint("{d}MB", .{r.r.jobs.LOG_CAP / (1024 * 1024)}) ++ ".",
+        .prompt_snippet = "Read background bash job output",
+        .parameters_schema =
+        \\{"type": "object", "properties": {
+        \\  "job_id": {"type": "integer", "description": "Job id returned by bash"},
+        \\  "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed). Omit to read the tail"},
+        \\  "limit": {"type": "integer", "description": "Maximum number of lines to read (default 200)"}
+        \\}, "required": ["job_id"]}
+        ,
+    },
+    .func = &readJob,
+};
+
+fn readJob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+    const Args = struct { job_id: u32, offset: ?usize = null, limit: ?usize = null };
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
+        .ignore_unknown_fields = true,
+    }) catch return r.errResult(call, "invalid arguments: \"job_id\" is required; offset and limit must be positive integers");
+    if (args.offset == 0 or args.limit == 0) return r.errResult(call, "invalid arguments: offset and limit start at 1");
+    const limit = args.limit orelse DEFAULT_JOB_READ_LINES;
+
+    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    r.setToolStatusPrint(ctx, call, "read job {d}", .{args.job_id});
+    const page = (app.jobs.read(ctx.base.exec_pool, ctx.alloc, args.job_id, args.offset, limit) catch
+        return r.errResult(call, "oom")) orelse
+        return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "no job {d}", .{args.job_id}) catch "no such job");
+
+    var body: std.ArrayList(u8) = .empty;
+    body.print(ctx.alloc, "[job {d} ", .{args.job_id}) catch return r.errResult(call, "oom");
+    switch (page.state) {
+        .running => body.appendSlice(ctx.alloc, "running") catch return r.errResult(call, "oom"),
+        .exited => |e| writeJobState(ctx.alloc, &body, e.exit_code, e.signal) catch return r.errResult(call, "oom"),
+    }
+    body.appendSlice(ctx.alloc, "]\n") catch return r.errResult(call, "oom");
+    appendClean(ctx.alloc, &body, page.text) catch return r.errResult(call, "oom");
+    return r.okResult(call, r.capOutput(ctx.base.exec_pool, ctx.alloc, call.id, body.items));
+}
+
+pub const KillJobTool = r.Tool{
+    .def = .{
+        .name = "kill_job",
+        .description = "Stop a running background bash job. Kills its whole process group and returns its last output lines. The job is then gone; no reminder is sent.",
+        .prompt_snippet = "Stop a background bash job",
+        .parameters_schema =
+        \\{"type": "object", "properties": {
+        \\  "job_id": {"type": "integer", "description": "Job id returned by bash"}
+        \\}, "required": ["job_id"]}
+        ,
+    },
+    .func = &killJob,
+};
+
+fn killJob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+    const Args = struct { job_id: u32 };
+    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
+        .ignore_unknown_fields = true,
+    }) catch return r.errResult(call, "invalid arguments: \"job_id\" is required and must be a positive integer");
+
+    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    r.setToolStatusPrint(ctx, call, "kill job {d}", .{args.job_id});
+    const killed = (app.jobs.kill(ctx.base.exec_pool, ctx.alloc, args.job_id) catch
+        return r.errResult(call, "oom")) orelse
+        return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "no running job {d}", .{args.job_id}) catch "no such job");
+
+    var body: std.ArrayList(u8) = .empty;
+    body.print(ctx.alloc, "Killed job {d}.\n", .{args.job_id}) catch return r.errResult(call, "oom");
+    appendClean(ctx.alloc, &body, killed.tail) catch return r.errResult(call, "oom");
+    return r.okResult(call, body.items);
 }
 
 fn formatBashResult(
@@ -288,4 +416,23 @@ test "formatBashResult strips ansi and renders result markers" {
     const slow = try formatBashResult(alloc, "x", "", 0, null, true, 5_000, false, false);
     defer alloc.free(slow);
     try std.testing.expectEqualStrings("x\n[timed out after 5000ms; retry with a larger timeout]", slow);
+}
+
+test "formatJobNotice reports the exit and a clean tail" {
+    const alloc = std.testing.allocator;
+    const notice = try formatJobNotice(alloc, .{
+        .id = 4,
+        .owner = .{ .index = 0, .generation = 0 },
+        .command = "npm run dev",
+        .exit_code = 1,
+        .signal = null,
+        .elapsed_ms = 41_500,
+        .tail = "[lines 1-1 of 1]\n     1\t\x1b[31mError\x1b[0m: boom\n",
+    });
+    defer alloc.free(notice);
+    try std.testing.expectEqualStrings(
+        "Background job 4 exited with code 1 after 41s: `npm run dev`. Use read_job for more output.\n" ++
+            "[lines 1-1 of 1]\n     1\tError: boom\n",
+        notice,
+    );
 }

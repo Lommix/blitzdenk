@@ -1573,6 +1573,8 @@ pub const BlitzToolDef = LuaType{
         .name = "BlitzToolDef",
         .fields = &.{
             .{ .name = "BASH", .desc = "execute bash scripts", .ty = LuaType.string, .value = .{ .string = tl.bash.BashTool.def.name } },
+            .{ .name = "KILL_JOB", .desc = "stop a background bash job", .ty = LuaType.string, .value = .{ .string = tl.bash.KillJobTool.def.name } },
+            .{ .name = "READ_JOB", .desc = "read background bash job output", .ty = LuaType.string, .value = .{ .string = tl.bash.ReadJobTool.def.name } },
             .{ .name = "READ", .desc = "reading text files and images", .ty = LuaType.string, .value = .{ .string = tl.read.ReadTool.def.name } },
             .{ .name = "WRITE", .desc = "write new files", .ty = LuaType.string, .value = .{ .string = tl.write.WriteTool.def.name } },
             .{ .name = "EDIT", .desc = "default string replace edit", .ty = LuaType.string, .value = .{ .string = tl.edit.EditTool.def.name } },
@@ -4133,7 +4135,7 @@ pub const LuaVm = struct {
     pub fn appendCommandCompletions(
         self: *LuaVm,
         prefix: []const u8,
-        out: []?app.CommandCompletion,
+        out: []?r.view.completion.CommandCompletion,
         count: *usize,
     ) void {
         for (self.command_entries.items) |*entry| {

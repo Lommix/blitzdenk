@@ -37,6 +37,12 @@ pub const CmdSlot = struct {
     stderr_truncated: bool = false,
     cap: usize = MAX_OUTPUT,
     drained: usize = 0,
+    /// Set for `RunOpts.background` runs. Then `stdout` holds the merged
+    /// output and `mu` guards it while the worker appends.
+    background: bool = false,
+    mu: std.Io.Mutex = .init,
+    /// Lines trimmed from the front of a background run's `stdout`.
+    dropped_lines: usize = 0,
 };
 
 pub const CmdResult = struct {
@@ -51,6 +57,7 @@ pub const CmdResult = struct {
     signal: ?u32 = null,
     stdout_truncated: bool = false,
     stderr_truncated: bool = false,
+    dropped_lines: usize = 0,
 
     pub fn toOwned(self: *const CmdResult, alloc: std.mem.Allocator) ![]const u8 {
         var response = try alloc.alloc(u8, self.stderr.len + self.stdout.len);
@@ -258,6 +265,10 @@ pub const CmdPool = struct {
         /// pointing the new agent at its own (not-yet-existing) socket.
         skip_agent_overlay: bool = false,
         max_output: ?usize = null,
+        /// Long-lived run: stdout and stderr merge into `stdout` in arrival
+        /// order, trimmed to `max_output` at line starts, with no drain
+        /// ceiling. Read it while running with `lockOutput`.
+        background: bool = false,
     };
 
     pub fn runWithOpts(self: *Self, opts: RunOpts) !Handle {
@@ -277,6 +288,8 @@ pub const CmdPool = struct {
         slot.stderr_truncated = false;
         slot.cap = @max(opts.max_output orelse MAX_OUTPUT, 1);
         slot.drained = 0;
+        slot.background = opts.background;
+        slot.dropped_lines = 0;
         errdefer {
             slot.owned.store(false, .release);
             slot.in_use.store(false, .release);
@@ -421,6 +434,24 @@ pub const CmdPool = struct {
         self.release(handle);
     }
 
+    pub const OutputView = struct {
+        slot: *CmdSlot,
+        io: std.Io,
+        text: []const u8,
+        dropped_lines: usize,
+
+        pub fn unlock(self: OutputView) void {
+            self.slot.mu.unlock(self.io);
+        }
+    };
+
+    /// Lock a background run's merged output for reading. Call `unlock`.
+    pub fn lockOutput(self: *Self, handle: Handle) OutputView {
+        const slot = &self.slots[@backingInt(handle)];
+        slot.mu.lockUncancelable(self.io);
+        return .{ .slot = slot, .io = self.io, .text = slot.stdout.items, .dropped_lines = slot.dropped_lines };
+    }
+
     /// Cancels a running worker and returns its partial output. Buffers are
     /// stable before reading: the worker is joined (cancelled first when
     /// still running) before duping.
@@ -430,7 +461,7 @@ pub const CmdPool = struct {
         errdefer self.release(handle);
         if (timed_out) slot.future.cancel(self.io) catch {};
         slot.future.await(self.io) catch {};
-        trimToTail(&slot.stdout, slot.cap, slot.cap, &slot.stdout_truncated);
+        if (!slot.background) trimToTail(&slot.stdout, slot.cap, slot.cap, &slot.stdout_truncated);
         trimToTail(&slot.stderr, slot.cap, slot.cap, &slot.stderr_truncated);
         const out = try self.alloc.dupe(u8, slot.stdout.items);
         errdefer self.alloc.free(out);
@@ -440,8 +471,9 @@ pub const CmdPool = struct {
         const signal = slot.signal;
         const stdout_truncated = slot.stdout_truncated;
         const stderr_truncated = slot.stderr_truncated;
+        const dropped_lines = slot.dropped_lines;
         self.release(handle);
-        return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code, .signal = signal, .stdout_truncated = stdout_truncated, .stderr_truncated = stderr_truncated };
+        return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code, .signal = signal, .stdout_truncated = stdout_truncated, .stderr_truncated = stderr_truncated, .dropped_lines = dropped_lines };
     }
 
     // -----------------
@@ -567,7 +599,7 @@ pub const CmdPool = struct {
             };
             try self.appendBuffered(slot, stdout_reader, stderr_reader);
             const ceiling = @max(MAX_DRAIN_BYTES, slot.cap *| 2);
-            if (!ceiling_hit and slot.drained > ceiling) {
+            if (!slot.background and !ceiling_hit and slot.drained > ceiling) {
                 ceiling_hit = true;
                 self.terminateProcess(child.id.?, kill_process_group);
             }
@@ -612,12 +644,34 @@ pub const CmdPool = struct {
         stdout_reader.toss(out.len);
         stderr_reader.toss(err.len);
 
+        if (slot.background) {
+            slot.mu.lockUncancelable(self.io);
+            defer slot.mu.unlock(self.io);
+            try slot.stdout.appendSlice(self.alloc, out);
+            try slot.stdout.appendSlice(self.alloc, err);
+            trimToLines(slot);
+            return;
+        }
+
         try slot.stdout.appendSlice(self.alloc, out);
         try slot.stderr.appendSlice(self.alloc, err);
         slot.drained += out.len + err.len;
 
         trimToTail(&slot.stdout, slot.cap, slot.cap + TRIM_SLACK, &slot.stdout_truncated);
         trimToTail(&slot.stderr, slot.cap, slot.cap + TRIM_SLACK, &slot.stderr_truncated);
+    }
+
+    /// Keep about `slot.cap` bytes of a background run, cut at a line start.
+    fn trimToLines(slot: *CmdSlot) void {
+        const items = slot.stdout.items;
+        if (items.len <= slot.cap + TRIM_SLACK) return;
+        var drop = items.len - slot.cap;
+        if (std.mem.indexOfScalarPos(u8, items, drop, '\n')) |nl| drop = nl + 1;
+        slot.dropped_lines += std.mem.count(u8, items[0..drop], "\n");
+        const n = items.len - drop;
+        std.mem.copyForwards(u8, items[0..n], items[drop..]);
+        slot.stdout.items.len = n;
+        slot.stdout_truncated = true;
     }
 
     fn trimToTail(list: *std.ArrayList(u8), keep: usize, threshold: usize, truncated: *bool) void {

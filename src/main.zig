@@ -509,7 +509,7 @@ fn localTime(buf: []u8, millis: i64) []const u8 {
 
 fn renderPickerScreen(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     _ = app.arena_frame.reset(.free_all);
-    r.app.renderSessionPickerContent(app, app.arena_frame.allocator(), area, buf);
+    r.view.wizard.renderSessionPickerContent(app, app.arena_frame.allocator(), area, buf);
 }
 
 fn sessionsTui(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env: *const std.process.Environ.Map) !void {
@@ -811,8 +811,8 @@ pub fn run(
         if (!app.kitty_graphics) app.kitty_graphics = term.probeKittyGraphics(100);
         term.kitty_graphics = app.kitty_graphics;
         defer term.deinit();
-        app.frame_snapshot = &term.previous;
-        app.frame_snapshot_resize_gen = &term.resize_generation;
+        app.view.frame_snapshot = &term.previous;
+        app.view.frame_snapshot_resize_gen = &term.resize_generation;
 
         var was_running = app.running;
         var error_fade_pending = false;
@@ -832,11 +832,11 @@ pub fn run(
             if (app.inline_images_ready.load(.acquire)) app.dirty = true;
 
             const animated = app.animationActive() or fading_now;
-            app.frame_snapshot_blocked = term.selectionActive();
+            app.view.frame_snapshot_blocked = term.selectionActive();
             if (app.dirty or (animated and now_ns -| last_frame_ns >= 16 * std.time.ns_per_ms)) {
                 last_frame_ns = now_ns;
                 app.cell_px = term.cellPixels();
-                try term.drawWith(&app, App.render);
+                try term.drawWith(&app, r.view.render);
                 syncGraphics(io, &term, &app);
                 app.frame_count +%= 1;
                 app.dirty = false;
@@ -982,7 +982,7 @@ pub fn run(
                         std.log.scoped(.lua).err("hot-reload: failed to apply session bindings: {s}", .{@errorName(err)});
                     };
                     app.lua_vm.readConfigFields();
-                    app.invalidateTimelineRenderCache();
+                    app.view.invalidateRenderCache();
                     if (app.input_mode != .wizard) app.warnUnboundAgentModels();
                     try app.lua_vm.publishAvailableSystems(context_factory);
                     app.dirty = true;
@@ -1253,8 +1253,8 @@ pub fn run(
                                     if (std.heap.page_allocator.dupe(u8, pm.field.slice())) |reason| {
                                         app.resolveActivePermission(.{ .message = reason });
                                     } else |_| app.resolveActivePermission(.denied);
-                                    app.auto_scroll = true;
-                                    app.scroll_offset = 0;
+                                    app.view.auto_scroll = true;
+                                    app.view.scroll_offset = 0;
                                 },
                                 .perm_select => |*ps| {
                                     if (app.askSession()) |s| {
@@ -1279,8 +1279,8 @@ pub fn run(
                                         },
                                         else => {},
                                     }
-                                    app.auto_scroll = true;
-                                    app.scroll_offset = 0;
+                                    app.view.auto_scroll = true;
+                                    app.view.scroll_offset = 0;
                                 },
                                 .text => {
                                     _ = app.closeCompletion();
@@ -1476,7 +1476,7 @@ pub fn run(
                                 .pass => {},
                             }
                         } else {
-                            if (!app.handleScrollbarMouse(m)) {
+                            if (!r.view.timeline.handleScrollbarMouse(&app, m)) {
                                 const res = term.handleMouse(m);
                                 if (res.copied) {
                                     app.notifications.append(gpa, app.nowMillis(), "Copied to clipboard!", .{}) catch {};
@@ -1492,7 +1492,7 @@ pub fn run(
                             }
                             if (m.button == .left and m.action == .release) {
                                 if (mouse_press) |press| {
-                                    if (press.x == m.x and press.y == m.y) {
+                                    if (press.x == m.x and press.y == m.y and !r.view.tool_runs.toggleToolRunAt(&app, m.x, m.y)) {
                                         openImageAt(&app, &term, m.x, m.y);
                                     }
                                 }

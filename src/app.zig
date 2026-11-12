@@ -7,51 +7,6 @@ const ct = @import("ctime");
 
 pub const CONTEXT_LIMIT = 124 * 1024;
 pub const READ_IMAGE_MAX = 2048;
-const COMMAND_COMPLETION_ROWS = 64;
-
-const WIDGET_PAD_X: u16 = 2;
-const COMPOSER_PROMPT: []const u8 = "❯";
-const PASSPHRASE_PROMPT: []const u8 = "❯ Passphrase or password: ";
-const PERM_FIELD_PROMPT: []const u8 = "> ";
-const PERM_FIELD_MAX_ROWS: u16 = 10;
-/// Column of the call/diff message field, under the `>` of the option rows.
-const PERM_FIELD_LABEL_COLS: u16 = 7;
-
-const FieldStyle = struct {
-    prompt: []const u8,
-    prompt_style: r.tui.Style = .{},
-    text: r.tui.Style,
-    mask: ?u8 = null,
-};
-
-fn modePrompt(mode: *const InputMode) []const u8 {
-    return switch (mode.*) {
-        .passphrase => PASSPHRASE_PROMPT,
-        .wizard => "  ",
-        else => COMPOSER_PROMPT,
-    };
-}
-
-fn modePromptCols(mode: *const InputMode) u16 {
-    return promptCols(modePrompt(mode));
-}
-
-fn inputContentWidth(widget_width: u16) u16 {
-    return widget_width -| (WIDGET_PAD_X * 2);
-}
-
-fn inputTextWidth(area_width: u16, prompt_cols: u16) u16 {
-    return area_width -| prompt_cols;
-}
-
-fn promptCols(prompt: []const u8) u16 {
-    return @intCast(@min(textWidthCols(prompt), @as(usize, std.math.maxInt(u16))));
-}
-
-fn fieldTextStyle(app: *App) r.tui.Style {
-    return .{ .fg = app.theme.text_hl };
-}
-
 fn moveFieldVertical(app: *App, alloc: std.mem.Allocator, field: anytype, width: usize, delta: i32) void {
     const target = app.verticalFieldTarget(alloc, .{ .text = field.slice(), .cursor = field.cursor }, width, delta) orelse return;
     field.cursor = target;
@@ -63,17 +18,6 @@ pub fn pathInsideDir(path: []const u8, dir: []const u8) bool {
 }
 
 pub const TimelineRole = enum { system, user, agent };
-
-pub const CommandCompletion = struct {
-    text: []const u8,
-    description: ?[]const u8 = null,
-};
-
-const builtin_command_completions: []const CommandCompletion = &.{
-    .{ .text = "/ssh", .description = "connect user@host:cwd" },
-    .{ .text = "/mcp connect", .description = "authorize and enable an MCP server" },
-    .{ .text = "/mcp cancel", .description = "cancel MCP authorization" },
-};
 
 pub const AppFlags = packed struct {
     show_thinking: bool = false,
@@ -251,7 +195,7 @@ const PathCompletion = struct {
     }
 };
 
-const ToolStatusEntry = struct {
+pub const ToolStatusEntry = struct {
     lines: std.ArrayList(r.tui.Line) = .empty,
     child_ids: std.ArrayList(r.AgentId) = .empty,
     interrupted: bool = false,
@@ -269,12 +213,12 @@ const ToolStatusAgent = struct {
     image_urls: std.array_hash_map.String([]const u8) = .empty,
 };
 
-const ToolStatusStore = struct {
+pub const ToolStatusStore = struct {
     agents: [r.agent_registry.max_agents]ToolStatusAgent = @splat(.{}),
     archived: std.AutoHashMapUnmanaged(u32, ToolStatusAgent) = .empty,
     pending_children: std.AutoHashMapUnmanaged(u32, std.ArrayList(struct { owner: r.AgentId, call_id: []const u8 })) = .empty,
 
-    fn forWrite(self: *ToolStatusStore, alloc: std.mem.Allocator, id: r.AgentId) !*ToolStatusAgent {
+    pub fn forWrite(self: *ToolStatusStore, alloc: std.mem.Allocator, id: r.AgentId) !*ToolStatusAgent {
         const current = &self.agents[id.index];
         if (current.generation == id.generation) return current;
         if (self.archived.getPtr(id.pack())) |archived| return archived;
@@ -336,7 +280,8 @@ pub const App = struct {
     arena_streaming_snapshot: std.heap.ArenaAllocator,
     /// frame render arena
     arena_frame: std.heap.ArenaAllocator,
-    arena_timeline_render: std.heap.ArenaAllocator,
+    /// Render-only state: scroll, timeline caches, frame snapshot, hits.
+    view: r.view.State,
     mu: std.Io.Mutex = .init,
     io: std.Io,
     input: r.tui.Field(8192) = .{},
@@ -359,6 +304,10 @@ pub const App = struct {
     registry: *r.agent_registry.Registry = undefined,
     session_store: ?*r.session_store.Store = null,
     exec_pool: *r.exec.CmdPool = undefined,
+    jobs: r.jobs.Jobs = .{},
+    /// Running background jobs, refreshed each tick. Counts for the session
+    /// timer and progress line, not for `running`.
+    jobs_running: u32 = 0,
     update_check: ?r.update.CheckTask = null,
     update_result_seen: bool = false,
     config: r.config.BlitzdenkCfg = .{},
@@ -367,41 +316,6 @@ pub const App = struct {
     frame_count: usize = 0,
     session_run_ns: i128 = 0,
     session_run_started_ns: i128 = 0,
-    scroll_offset: usize = 0,
-    scroll_total: usize = 0,
-    scroll_total_width: u16 = 0,
-    auto_scroll: bool = true,
-    scrollbar_dragging: bool = false,
-    scrollbar_grab: u16 = 0,
-    scrollbar_drag_max: usize = 0,
-    scrollbar_track: r.tui.Rect = .{},
-    scrollbar_max: usize = 0,
-    scrollbar_reserved: u16 = 0,
-    timeline_heights: std.ArrayList(TimelineEntryHeight) = .empty,
-    timeline_heights_width: u16 = 0,
-    timeline_heights_thinking: bool = false,
-    timeline_heights_diffs: bool = false,
-    timeline_heights_inline: bool = false,
-    timeline_heights_agent: bool = false,
-    timeline_heights_cell_px: r.tui.kitty.CellPixels = .{},
-    timeline_heights_image_gen: u64 = 0,
-    timeline_render_cache: std.ArrayList(?TimelineRenderSlot) = .empty,
-    timeline_render_width: u16 = 0,
-    timeline_render_thinking: bool = false,
-    timeline_render_diffs: bool = false,
-    timeline_render_inline: bool = false,
-    timeline_render_agent_key: ?u32 = null,
-    timeline_render_history_gen: u64 = 0,
-    timeline_render_cell_px: r.tui.kitty.CellPixels = .{},
-    timeline_render_image_gen: u64 = 0,
-    timeline_render_valid: bool = false,
-    frame_snapshot: ?*const r.tui.Buffer = null,
-    frame_snapshot_valid: bool = false,
-    frame_snapshot_blocked: bool = false,
-    frame_snapshot_resize_gen: ?*const u64 = null,
-    frame_snapshot_resize_seen: u64 = 0,
-    frame_snapshot_tools: std.ArrayList(FrameSnapshotTool) = .empty,
-    frame_snapshot_calls: std.ArrayList(TimelinePart.ToolCallEntry) = .empty,
     input_mode: InputMode = .{ .text = .{} },
     context_factory: *r.ContextFactory,
     theme: Theme = .default,
@@ -440,12 +354,6 @@ pub const App = struct {
     lua_status_bar_cache_len: usize = 0,
     widget_error_msgs: [r.lua.MAX_LUA_WIDGETS][r.lua.WIDGET_ERROR_CAP]u8 = @splat(@splat(0)),
     widget_error_lens: [r.lua.MAX_LUA_WIDGETS]usize = @splat(0),
-    widget_layout_cache: WidgetLayout = .{},
-    widget_layout_valid: bool = false,
-    widget_frame_panels: [r.lua.MAX_LUA_WIDGETS]WidgetPanelSlot = @splat(.{}),
-    widget_frame_panels_len: usize = 0,
-    widget_frame_input_area: r.tui.Rect = .{},
-    widget_frame_progress_h: u16 = 0,
     lua_redraw: std.atomic.Value(bool) = .init(false),
     lua_inject_hooks_enabled: std.atomic.Value(bool) = .init(false),
     mcp_manager: r.mcp.Manager,
@@ -488,7 +396,7 @@ pub const App = struct {
             .arena_streaming_preview = .init(gpa),
             .arena_streaming_snapshot = .init(gpa),
             .arena_frame = .init(gpa),
-            .arena_timeline_render = .init(gpa),
+            .view = .{ .arena_timeline_render = .init(gpa) },
             .context_factory = agent_factory,
             .io = io,
             .cwd = cwd,
@@ -535,6 +443,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.jobs.killAll(self.exec_pool);
         if (self.image_viewer) |*viewer| viewer.close(self.gpa);
         self.image_viewer = null;
         self.inline_images.deinit(self.gpa);
@@ -568,10 +477,7 @@ pub const App = struct {
         self.arena_streaming_preview.deinit();
         self.arena_streaming_snapshot.deinit();
         self.arena_frame.deinit();
-        self.arena_timeline_render.deinit();
-        self.timeline_render_cache.deinit(self.gpa);
-        self.frame_snapshot_tools.deinit(self.gpa);
-        self.frame_snapshot_calls.deinit(self.gpa);
+        self.view.deinit(self.gpa);
         self.arena_session.deinit();
         self.arena_app.deinit();
     }
@@ -661,8 +567,8 @@ pub const App = struct {
         defer if (answers) |a| a.deinit();
         const sel = self.active_selection orelse return;
         self.active_selection = null;
-        self.auto_scroll = true;
-        self.scroll_offset = 0;
+        self.view.auto_scroll = true;
+        self.view.scroll_offset = 0;
         self.dirty = true;
         self.lua_vm.invokeSelection(self.io, sel.func_ref, sel.session.questions, answers);
         sel.destroy();
@@ -734,8 +640,8 @@ pub const App = struct {
         } else {
             self.resolveActiveSelection(null);
         }
-        self.auto_scroll = true;
-        self.scroll_offset = 0;
+        self.view.auto_scroll = true;
+        self.view.scroll_offset = 0;
     }
 
     /// Highest reachable perm_select row for a non-ask permission. Asks
@@ -751,12 +657,6 @@ pub const App = struct {
     /// Session-scoped allocator. Wiped on reset.
     pub fn sessionAlloc(self: *App) std.mem.Allocator {
         return self.arena_session.allocator();
-    }
-
-    pub fn invalidateTimelineRenderCache(self: *App) void {
-        self.timeline_render_cache.clearRetainingCapacity();
-        self.timeline_render_valid = false;
-        _ = self.arena_timeline_render.reset(.free_all);
     }
 
     pub fn setToolStatus(
@@ -890,61 +790,6 @@ pub const App = struct {
         for (pending.value.items) |link| self.publishToolStatus(link.owner, link.call_id, guard.ptr);
     }
 
-    pub fn handleScrollbarMouse(self: *App, m: r.tui.Terminal.Mouse) bool {
-        if (m.button != .left) {
-            if (self.scrollbar_dragging and m.action != .move) self.scrollbar_dragging = false;
-            return false;
-        }
-        if (self.scrollbar_track.height == 0) {
-            self.scrollbar_dragging = false;
-            return false;
-        }
-        if (!self.scrollbar_dragging) {
-            if (m.action != .press) return false;
-            if (!self.scrollbar_track.contains(m.x, m.y)) return false;
-            const offset: usize = if (self.auto_scroll) 0 else self.scroll_offset;
-            const met = scrollbarMetrics(self.scrollbar_max, self.scrollbar_track.height, offset);
-            const nob_top = self.scrollbar_track.y + met.nob_top;
-            const on_nob = m.y >= nob_top and m.y < nob_top + met.nob_h;
-            self.scrollbar_grab = if (on_nob) m.y - nob_top else met.nob_h / 2;
-            self.scrollbar_drag_max = self.scrollbar_max;
-            self.scrollbar_dragging = true;
-            if (!on_nob) self.dragScrollbarTo(m.y);
-            return true;
-        }
-        switch (m.action) {
-            .press => {
-                if (!self.scrollbar_track.contains(m.x, m.y)) {
-                    self.scrollbar_dragging = false;
-                    return false;
-                }
-                return true;
-            },
-            .move => {
-                self.dragScrollbarTo(m.y);
-                return true;
-            },
-            .release => {
-                self.scrollbar_dragging = false;
-                return true;
-            },
-        }
-    }
-
-    fn dragScrollbarTo(self: *App, pointer_y: u16) void {
-        const max_offset = self.scrollbar_drag_max;
-        if (max_offset == 0) return;
-        const v: usize = self.scrollbar_track.height;
-        const nob_h: usize = scrollbarNobHeight(max_offset, self.scrollbar_track.height);
-        const span = @max(v -| nob_h, 1);
-        const rel_raw: isize = @as(isize, pointer_y) - @as(isize, self.scrollbar_track.y) - @as(isize, self.scrollbar_grab);
-        const rel: usize = @intCast(@min(@max(rel_raw, 0), @as(isize, @intCast(span))));
-        const offset = max_offset -| (rel * max_offset + span / 2) / span;
-        self.scroll_offset = offset;
-        self.auto_scroll = offset == 0;
-        self.dirty = true;
-    }
-
     /// App-scoped allocator. Survives session resets.
     pub fn appAlloc(self: *App) std.mem.Allocator {
         return self.arena_app.allocator();
@@ -1016,8 +861,8 @@ pub const App = struct {
         self.frame_count = 0;
         self.session_run_ns = 0;
         self.session_run_started_ns = 0;
-        self.scroll_offset = 0;
-        self.auto_scroll = true;
+        self.view.scroll_offset = 0;
+        self.view.auto_scroll = true;
         self.input_mode = .{ .text = .{} };
         self.input.clear();
         self.input_desired_col = null;
@@ -1034,7 +879,9 @@ pub const App = struct {
         self.dirty = true;
         _ = self.arena_session.reset(.free_all);
         self.timeline = .empty;
-        self.invalidateTimelineRenderCache();
+        self.view.tool_runs_expanded = .empty;
+        self.view.clearRunHits(self.gpa);
+        self.view.invalidateRenderCache();
         self.context_factory.resetLoadedTools() catch {};
         self.lua_vm.disableAllMcp();
         self.lua_state.reset(self.io, self.gpa);
@@ -1073,6 +920,10 @@ pub const App = struct {
             // descendant finishes, even when their own turn is already reaped.
             try self.handleReapedAgent(id);
         }
+        try self.tickJobs();
+        const jobs_before = self.jobs_running;
+        self.jobs_running = self.jobs.countRunning(self.io);
+        if (self.jobs_running != jobs_before) self.dirty = true;
         if (self.mainAgent()) |agent| self.sdk_usage = agent.usage;
         self.registry.retryDue();
         self.running = self.registry.countActive() > 0;
@@ -1096,14 +947,14 @@ pub const App = struct {
     }
 
     pub fn animationActive(self: *const App) bool {
-        if (self.running) return true;
+        if (self.running or self.jobs_running > 0) return true;
         if (self.timeline.items.len != 0 or self.isMainAgentCompacting()) return false;
         return self.frame_count < r.dash.welcome_wave_frames;
     }
 
     fn updateSessionTime(self: *App) void {
         const now: i128 = @intCast(std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds);
-        if (self.running) {
+        if (self.running or self.jobs_running > 0) {
             if (self.session_run_started_ns == 0) self.session_run_started_ns = now;
         } else if (self.session_run_started_ns != 0) {
             self.session_run_ns += now - self.session_run_started_ns;
@@ -1121,7 +972,7 @@ pub const App = struct {
         return self.exec_pool.env.get("HOME") orelse "/";
     }
 
-    fn pathTokenActive(self: *const App) bool {
+    pub fn pathTokenActive(self: *const App) bool {
         return self.currentTokenParts() != null;
     }
 
@@ -1174,7 +1025,7 @@ pub const App = struct {
         include_hidden: bool,
     };
 
-    fn currentTokenParts(self: *const App) ?TokenParts {
+    pub fn currentTokenParts(self: *const App) ?TokenParts {
         const tok = r.completion.tokenAt(self.input.slice(), self.input.cursor);
         if (!tok.is_path) return null;
         if (tok.start == 0 and !self.input.isEmpty() and self.input.slice()[0] == '/') {
@@ -1190,7 +1041,7 @@ pub const App = struct {
         };
     }
 
-    fn resolveProbeDir(self: *App, insert_prefix: []const u8, buf: *[1024]u8) ?[]const u8 {
+    pub fn resolveProbeDir(self: *App, insert_prefix: []const u8, buf: *[1024]u8) ?[]const u8 {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const parts = r.completion.splitToken(arena.allocator(), insert_prefix, self.probeHome()) catch return null;
@@ -1287,7 +1138,7 @@ pub const App = struct {
         self.path_completion.remote_home = self.appAlloc().dupe(u8, home) catch null;
     }
 
-    fn sessionRunSecs(self: *const App) u32 {
+    pub fn sessionRunSecs(self: *const App) u32 {
         const now: i128 = @intCast(std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds);
         const live: i128 = if (self.session_run_started_ns != 0) @max(0, now - self.session_run_started_ns) else 0;
         return @intCast(@divTrunc(self.session_run_ns + live, std.time.ns_per_s));
@@ -1357,11 +1208,36 @@ pub const App = struct {
         const notice = try std.fmt.allocPrint(self.gpa, "Agent result done:\n{s}", .{truncated});
         defer self.gpa.free(notice);
 
-        try parent.queueReminder(notice);
-        if (!parent.isBusy()) {
-            try self.registry.run(parent_id, .{ .max_steps = std.math.maxInt(usize) });
-            _ = self.event_bus.emit(self, .{ .agent_started = .{ .id = parent_id, .fresh = false } });
+        try self.remindAndWake(parent_id, parent, notice);
+    }
+
+    /// Queue `notice` as a reminder and start the agent's next turn when idle.
+    fn remindAndWake(self: *App, id: r.AgentId, agent: *r.agent.Agent, notice: []const u8) !void {
+        try agent.queueReminder(notice);
+        if (!agent.isBusy()) {
+            try self.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
+            _ = self.event_bus.emit(self, .{ .agent_started = .{ .id = id, .fresh = false } });
         }
+    }
+
+    fn tickJobs(self: *App) !void {
+        const alloc = self.exec_pool.alloc;
+        var finished: std.ArrayList(r.jobs.Finished) = .empty;
+        defer {
+            for (finished.items) |done| done.deinit(alloc);
+            finished.deinit(alloc);
+        }
+        try self.jobs.tick(self.exec_pool, self, jobOwnerAlive, &finished);
+        for (finished.items) |done| {
+            const agent = self.registry.get(done.owner) orelse continue;
+            const notice = try r.tools.bash.formatJobNotice(self.gpa, done);
+            defer self.gpa.free(notice);
+            try self.remindAndWake(done.owner, agent, notice);
+        }
+    }
+
+    fn jobOwnerAlive(self: *App, id: r.AgentId) bool {
+        return self.registry.get(id) != null;
     }
 
     fn collectBackgroundResult(self: *App, agent: *const r.agent.Agent, content: *std.ArrayList(u8)) !void {
@@ -1425,7 +1301,7 @@ pub const App = struct {
         };
     }
 
-    fn wizardSelection(self: *App, w: *const InputMode.Wizard) ?r.wizard.Selection {
+    pub fn wizardSelection(self: *App, w: *const InputMode.Wizard) ?r.wizard.Selection {
         _ = self;
         return w.selection();
     }
@@ -1545,12 +1421,12 @@ pub const App = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         if (self.pathTokenActive()) {
-            const rows = pathCompletions(self, arena.allocator());
+            const rows = r.view.completion.pathCompletions(self, arena.allocator());
             t.completion_open = rows.len > 0;
         } else {
-            t.completion_query_len = commandCompletionPrefix(self.input.slice(), self.input.cursor).len;
-            const rows = commandCompletions(self, arena.allocator(), self.input.slice(), self.input.cursor);
-            t.completion_open = rows.len > 0 and commandTokenActive(self.input.slice(), self.input.cursor);
+            t.completion_query_len = r.view.completion.commandCompletionPrefix(self.input.slice(), self.input.cursor).len;
+            const rows = r.view.completion.commandCompletions(self, arena.allocator(), self.input.slice(), self.input.cursor);
+            t.completion_open = rows.len > 0 and r.view.completion.commandTokenActive(self.input.slice(), self.input.cursor);
         }
     }
 
@@ -1573,7 +1449,7 @@ pub const App = struct {
         defer arena.deinit();
         const alloc = arena.allocator();
 
-        const rows = activeCompletions(self, alloc, self.input.slice(), self.input.cursor);
+        const rows = r.view.completion.activeCompletions(self, alloc, self.input.slice(), self.input.cursor);
         if (rows.len == 0) {
             t.completion_open = false;
             t.completion_selected = 0;
@@ -1593,7 +1469,7 @@ pub const App = struct {
         }
 
         const chosen = rows.items[t.completion_selected].text;
-        const cur_token = commandCompletionPrefix(self.input.slice(), self.input.cursor);
+        const cur_token = r.view.completion.commandCompletionPrefix(self.input.slice(), self.input.cursor);
         const already = std.ascii.eqlIgnoreCase(cur_token, chosen);
 
         switch (move) {
@@ -1608,7 +1484,7 @@ pub const App = struct {
             },
         }
 
-        insertCompletionToken(self, rows.items[t.completion_selected].text);
+        r.view.completion.insertCompletionToken(self, rows.items[t.completion_selected].text);
 
         if (move == .accept) {
             const accepted = rows.items[t.completion_selected].text;
@@ -2061,393 +1937,6 @@ pub const App = struct {
         return try self.injection_hooks.build(self, agent);
     }
 
-    pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-        refreshLuaStatusBar(app);
-        if (renderFrameSnapshot(app, area, buf)) {
-            underlineImageTokens(buf);
-            if (app.image_viewer) |*viewer| r.image_view.render(viewer, app.theme, area, buf);
-            if (app.frame_snapshot_resize_gen) |gen| app.frame_snapshot_resize_seen = gen.*;
-            return;
-        }
-        refreshLuaWidgets(app, area, buf);
-        renderCore(app, area, buf);
-        drawLuaPanels(app, buf);
-        renderCompletionPopup(app, app.arena_frame.allocator(), app.widget_frame_input_area, app.widget_frame_progress_h, buf);
-        underlineImageTokens(buf);
-        if (app.image_viewer) |*viewer| r.image_view.render(viewer, app.theme, area, buf);
-        if (app.frame_snapshot_resize_gen) |gen| app.frame_snapshot_resize_seen = gen.*;
-    }
-
-    fn renderFrameSnapshot(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) bool {
-        if (!frameSnapshotUsable(app, buf)) return false;
-        const snap = app.frame_snapshot.?;
-
-        @memcpy(buf.cells, snap.cells);
-        refreshLuaWidgets(app, area, buf);
-
-        app.mu.lockUncancelable(app.io);
-        _ = app.arena_frame.reset(.free_all);
-        const frame_alloc = app.arena_frame.allocator();
-        repaintFrameSnapshotTools(app, frame_alloc, buf);
-        if (app.widget_frame_input_area.width > 0 and app.widget_frame_input_area.height > 0) {
-            const progress_line = mainProgressLine(app, frame_alloc);
-            renderInputWidget(app, frame_alloc, app.widget_frame_input_area, app.widget_frame_progress_h, progress_line, buf);
-        }
-        app.mu.unlock(app.io);
-
-        drawLuaPanels(app, buf);
-        return true;
-    }
-
-    fn frameSnapshotUsable(app: *App, buf: *const r.tui.Buffer) bool {
-        if (app.timeline.items.len == 0) return false;
-        if (app.dirty or !app.frame_snapshot_valid or app.frame_snapshot_blocked) return false;
-        const snap = app.frame_snapshot orelse return false;
-        if (snap.rect.width != buf.rect.width or snap.rect.height != buf.rect.height) return false;
-        if (app.frame_snapshot_resize_gen) |gen| {
-            if (gen.* != app.frame_snapshot_resize_seen) return false;
-        }
-        if (app.notifications.hasVisible()) return false;
-        if (app.inline_placements.items.len > 0 and app.frame_snapshot_tools.items.len > 0) return false;
-        const now_ns: i128 = @intCast(std.Io.Clock.Timestamp.now(app.io, .awake).raw.nanoseconds);
-        return !app.lua_vm.errorAlive(now_ns);
-    }
-
-    fn repaintFrameSnapshotTools(app: *App, alloc: std.mem.Allocator, buf: *r.tui.Buffer) void {
-        const calls = app.frame_snapshot_calls.items;
-        for (app.frame_snapshot_tools.items) |tool| {
-            const item = buildToolGroupParagraph(app, alloc, calls[tool.calls_start..][0..tool.calls_len], tool.inner_w) catch {
-                app.frame_snapshot_valid = false;
-                continue;
-            };
-            var p = item.p;
-            p.padding = tool.padding;
-            p.scroll_offset = tool.scroll_offset;
-            p.render(alloc, tool.rect, tool.rect, buf);
-        }
-    }
-
-    fn recordFrameSnapshotTool(app: *App, item: RenderParagraphItem, rect: r.tui.Rect, inner_w: u16) void {
-        const calls = item.live_calls orelse return;
-        const start = app.frame_snapshot_calls.items.len;
-        app.frame_snapshot_calls.appendSlice(app.gpa, calls) catch {
-            app.frame_snapshot_valid = false;
-            return;
-        };
-        app.frame_snapshot_tools.append(app.gpa, .{
-            .calls_start = start,
-            .calls_len = calls.len,
-            .inner_w = inner_w,
-            .padding = item.p.padding,
-            .scroll_offset = item.p.scroll_offset,
-            .rect = rect,
-        }) catch {
-            app.frame_snapshot_valid = false;
-        };
-    }
-
-    fn renderCore(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-        app.mu.lockUncancelable(app.io);
-        defer app.mu.unlock(app.io);
-        if (app.inline_images_ready.swap(false, .acq_rel)) {
-            app.invalidateTimelineRenderCache();
-            app.timeline_heights.clearRetainingCapacity();
-        }
-        _ = app.arena_frame.reset(.free_all);
-        const frame_alloc = app.arena_frame.allocator();
-        app.frame_snapshot_tools.clearRetainingCapacity();
-        app.frame_snapshot_calls.clearRetainingCapacity();
-        app.inline_placements.clearRetainingCapacity();
-        for (app.inline_images.entries.items) |entry| entry.frame_pinned = false;
-        app.inline_images.prune(app.gpa);
-        app.frame_snapshot_valid = true;
-
-        var widget_layout_fallback = WidgetLayout{ .area = area, .main = area };
-        const cache_matches_area = app.widget_layout_valid and
-            app.widget_layout_cache.area.width == area.width and
-            app.widget_layout_cache.area.height == area.height;
-        const wl: *const WidgetLayout = if (cache_matches_area) &app.widget_layout_cache else &widget_layout_fallback;
-        const main_area = wl.main;
-
-        const input_height: u16 = blk: {
-            switch (app.input_mode) {
-                .text, .passphrase => {
-                    const shown: r.clipboard.Display = switch (app.input_mode) {
-                        .text => app.displayInput(frame_alloc),
-                        .passphrase => |pp| .{ .text = pp.field.slice(), .cursor = pp.field.cursor },
-                        else => .{ .text = "", .cursor = 0 },
-                    };
-                    const width = inputTextWidth(inputContentWidth(main_area.width), modePromptCols(&app.input_mode));
-                    const counted = r.tui.input_layout.rowCount(frame_alloc, shown.text, width) catch 1;
-                    const rows: u16 = @intCast(@min(@max(counted, 1), @as(usize, std.math.maxInt(u16))));
-                    break :blk @min(rows +| 3, 23); // input rows + status + 2 padding
-                },
-                .wizard => break :blk 18,
-                .session_picker => |*picker| break :blk @intCast(@min(6 + @max(picker.rows.len, 1), main_area.height -| 1)),
-                .perm_select, .perm_message => {
-                    const field_rows = permFieldRows(app, frame_alloc, inputContentWidth(main_area.width) -| 2);
-                    const extra = (field_rows orelse 1) -| 1;
-                    if (app.active_permission) |entry| {
-                        if (entry.payload == .ask) {
-                            break :blk askPermissionInputHeight(app, main_area.width, main_area.height, field_rows);
-                        }
-                        if (entry.payload == .call) {
-                            const rows = text_utils.wrappedRowCount(entry.payload.call.description, main_area.width -| 7);
-                            break :blk @min(8 +| rows +| extra, main_area.height -| 1);
-                        }
-                        break :blk @min(9 +| extra, main_area.height -| 1);
-                    }
-                    _ = app.active_selection orelse break :blk 9;
-                    break :blk askPermissionInputHeight(app, main_area.width, main_area.height, field_rows);
-                },
-            }
-        };
-
-        // Timeline fills the screen; input + status stick right after the
-        // timeline
-        // content (or to the viewport bottom once it overflows). Each status
-        // line lives inside the input footer: the main-agent status on the top
-        // row, the statusbar on the row above the bottom padding.
-        const _combined_area, _ =
-            r.tui.Col(main_area, .{
-                r.tui.Constr.fill, // timeline + status
-                r.tui.Constr{ .fixed = input_height }, // input + status footer
-            });
-
-        const lua_error_height = luaErrorHeight(app, frame_alloc, _combined_area.width, _combined_area.height) catch 0;
-        const _lua_error_area, const _timeline_status_area =
-            r.tui.Col(_combined_area, .{
-                r.tui.Constr{ .fixed = lua_error_height },
-                r.tui.Constr.fill,
-            });
-
-        const progress_line: ?r.tui.Line = mainProgressLine(app, frame_alloc);
-        const progress_h: u16 = if (progress_line != null) 1 else 0;
-        const footer_h: u16 = input_height +| progress_h;
-        const panels_visible =
-            (_timeline_status_area.height -| progress_h -| wl.panels_total_height) >= WIDGET_MIN_TIMELINE_ROWS and
-            (wl.panels_total_height +| footer_h) <= main_area.height;
-        const between_h: u16 = if (panels_visible) wl.between_total_height else 0;
-        const below_h: u16 = if (panels_visible) wl.below_total_height else 0;
-
-        // Build the content first so the viewport only renders as much as needed.
-        const is_welcome = app.timeline.items.len == 0 and !app.isMainAgentCompacting();
-        var welcome_p: ?r.tui.Paragraph = null;
-        var timeline_stack: ?TimelineStack = null;
-        var content_end_h: usize = 0;
-        const scrollbar_reserved: u16 = app.scrollbar_reserved;
-
-        const timeline_h: u16 = blk: {
-            const viewport_h = _timeline_status_area.height -| progress_h -| between_h;
-            const pinned_h = (main_area.y +| main_area.height) -| footer_h -| below_h -| between_h -| _timeline_status_area.y;
-            break :blk @min(viewport_h, pinned_h);
-        };
-
-        if (is_welcome) {
-            var wp = r.tui.Paragraph{
-                .padding = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
-                .wrap = false,
-            };
-            r.dash.build_info(app, &wp.lines) catch {};
-            content_end_h = wp.totalHeightLong(_timeline_status_area.width);
-            welcome_p = wp;
-        } else {
-            timeline_stack = buildTimelineStack(app, frame_alloc, _timeline_status_area.width -| scrollbar_reserved, timeline_h) catch |err| blk: {
-                log.err("timeline build failed with {any}", .{err});
-                break :blk null;
-            };
-            if (timeline_stack != null and timeline_stack.?.pinned_growth) {
-                const stale = timeline_stack;
-                timeline_stack = buildTimelineStack(app, frame_alloc, _timeline_status_area.width -| scrollbar_reserved, timeline_h) catch stale;
-            }
-            if (timeline_stack) |cs| content_end_h = cs.total -| cs.scroll_offset;
-        }
-        app.scrollbar_track = .{};
-        app.scrollbar_max = 0;
-
-        // Input sits right after the timeline content; once content fills the
-        // viewport it pins to the bottom and stays sticky. The footer includes
-        // the main-agent status row on top of the input widget. Between panels
-        // push the floating footer past the timeline content, below panels reserve
-        // rows under the pinned footer.
-        const max_footer_y: u16 = (main_area.y +| main_area.height) -| footer_h -| below_h;
-        const content_cap: u16 = @intCast(@min(content_end_h, @as(usize, timeline_h)));
-        const footer_y: u16 = @min(
-            _timeline_status_area.y +| content_cap +| between_h,
-            max_footer_y,
-        );
-        const _input_area: r.tui.Rect = .{
-            .x = main_area.x,
-            .y = footer_y,
-            .width = main_area.width,
-            .height = footer_h,
-        };
-
-        app.widget_frame_input_area = _input_area;
-        app.widget_frame_progress_h = progress_h;
-        app.widget_frame_panels_len = 0;
-        if (panels_visible) {
-            anchorWidgetPanels(wl, footer_y, footer_h, &app.widget_frame_panels);
-            app.widget_frame_panels_len = wl.panels_len;
-        }
-
-        // Paint the background only over the used region; the rest stays
-        // terminal default so unused viewport space is not rendered.
-        const used_bottom: u16 = @min(footer_y +| footer_h +| below_h, main_area.y +| main_area.height);
-        buf.fill(.{
-            .x = main_area.x,
-            .y = main_area.y,
-            .width = main_area.width,
-            .height = used_bottom -| main_area.y,
-        }, .{ .style = .{ .bg = app.theme.overlay } });
-
-        renderLuaError(app, frame_alloc, _lua_error_area, buf) catch |err| {
-            log.err("lua error render failed with {any}", .{err});
-        };
-
-        const _timeline_area: r.tui.Rect = .{
-            .x = _timeline_status_area.x,
-            .y = _timeline_status_area.y,
-            .width = _timeline_status_area.width,
-            .height = timeline_h,
-        };
-
-        if (welcome_p) |wp| {
-            const welcome_area: r.tui.Rect = .{
-                .x = _timeline_area.x,
-                .y = _timeline_area.y,
-                .width = _timeline_area.width,
-                .height = content_cap,
-            };
-            wp.renderSimple(frame_alloc, welcome_area, buf);
-        } else if (timeline_stack) |cs| {
-            const content_area: r.tui.Rect = .{
-                .x = _timeline_area.x,
-                .y = _timeline_area.y,
-                .width = _timeline_area.width -| scrollbar_reserved,
-                .height = _timeline_area.height,
-            };
-            renderTimelineStack(app, cs, content_area, buf);
-            app.scrollbar_reserved = if (cs.overflow and _timeline_status_area.width > scrollbar_strip_width) scrollbar_strip_width else 0;
-            if (cs.overflow and scrollbar_reserved == scrollbar_strip_width) {
-                renderTimelineScrollbar(app, cs, content_area, buf);
-            }
-        }
-        for (app.inline_images.entries.items) |entry| {
-            if (!entry.frame_pinned) continue;
-            var placed = false;
-            for (app.inline_placements.items) |placement| {
-                if (placement.entry == entry) {
-                    placed = true;
-                    break;
-                }
-            }
-            if (!placed) entry.frame_pinned = false;
-        }
-
-        // Input/Permission: a single overlay_dark block hosting the main-agent
-        // progress, the input content, and the statusbar.
-        renderInputWidget(app, frame_alloc, _input_area, progress_h, progress_line, buf);
-
-        renderWidgetErrors(app, wl, buf);
-
-        // Notifications
-        renderNotifications(app, frame_alloc, area, buf);
-    }
-
-    fn renderCompletionPopup(app: *App, frame_alloc: std.mem.Allocator, input_area: r.tui.Rect, progress_h: u16, buf: *r.tui.Buffer) void {
-        if (app.input_mode == .text and app.input_mode.text.completion_open) {
-            const completions = activeCompletions(app, frame_alloc, app.input.slice(), app.input.cursor);
-            if (completions.len > 0) {
-                var max_width: usize = 0;
-                for (completions.items[0..completions.len]) |cmp| {
-                    const width = textWidthCols(cmp.text) + 1 + descriptionWidth(cmp.description);
-                    if (width > max_width) max_width = width;
-                }
-
-                var p = r.tui.Paragraph{};
-                p.style.bg = app.theme.overlay;
-
-                const visible = 8;
-                const selected = @min(app.input_mode.text.completion_selected, completions.len - 1);
-                const start = if (selected >= visible) selected + 1 - visible else 0;
-                const end = @min(completions.len, start + visible);
-                for (completions.items[start..end], 0..) |cmp, i| {
-                    const sel = start + i == selected;
-                    const cmd_style: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .bold = true, .reverse = sel } };
-                    const desc_style: r.tui.Style = if (sel) cmd_style else .{ .fg = app.theme.muted };
-                    var line = r.tui.Line{};
-                    line.pushText(frame_alloc, cmp.text, cmd_style) catch {};
-                    if (cmp.description) |desc| {
-                        line.pushText(frame_alloc, " ", desc_style) catch {};
-                        line.pushText(frame_alloc, desc, desc_style) catch {};
-                    }
-                    p.lines.append(frame_alloc, line) catch {};
-                }
-
-                if (p.lines.items.len > 0) {
-                    const cols = modePromptCols(&app.input_mode);
-                    const text_origin: r.tui.Rect = .{
-                        .x = input_area.x +| WIDGET_PAD_X +| cols,
-                        .y = input_area.y +| 1 +| progress_h,
-                        .width = inputTextWidth(inputContentWidth(input_area.width), cols),
-                        .height = 1,
-                    };
-                    const anchor = completionAnchor(app, frame_alloc, text_origin.width);
-
-                    const height: u16 = @intCast(p.lines.items.len);
-                    const completion_area = r.tui.Rect{
-                        .x = text_origin.x +| @as(u16, @intCast(@min(anchor.col, @as(usize, text_origin.width)))),
-                        .y = text_origin.y +| @as(u16, @intCast(@min(anchor.row, @as(usize, std.math.maxInt(u16))))) -| height,
-                        .width = @intCast(@min(max_width, std.math.maxInt(u16))),
-                        .height = height,
-                    };
-                    p.renderSimple(frame_alloc, completion_area, buf);
-                }
-            }
-        }
-    }
-
-    fn underlineImageTokens(buf: *r.tui.Buffer) void {
-        const w = buf.rect.width;
-        const h = buf.rect.height;
-        if (w == 0 or h == 0) return;
-        var token: [512]u8 = undefined;
-        var y: u16 = 0;
-        while (y < h) : (y += 1) {
-            var x: u16 = 0;
-            while (x < w) {
-                const start_cell = buf.get(buf.rect.x + x, buf.rect.y + y);
-                if (start_cell.char == ' ') {
-                    x += 1;
-                    continue;
-                }
-                const token_start = x;
-                var len: usize = 0;
-                while (x < w) : (x += 1) {
-                    const cell = buf.get(buf.rect.x + x, buf.rect.y + y);
-                    if (cell.char == ' ') break;
-                    if (len + 4 > token.len) {
-                        while (x < w and buf.get(buf.rect.x + x, buf.rect.y + y).char != ' ') x += 1;
-                        break;
-                    }
-                    const n = std.unicode.utf8Encode(cell.char, token[len..]) catch {
-                        continue;
-                    };
-                    len += n;
-                }
-                if (len > 4 and r.image_view.hasImageExtension(token[0..len])) {
-                    var ux = token_start;
-                    while (ux < x) : (ux += 1) {
-                        var cell = buf.get(buf.rect.x + ux, buf.rect.y + y);
-                        cell.style.modifier.underline = true;
-                        buf.set(buf.rect.x + ux, buf.rect.y + y, cell);
-                    }
-                }
-            }
-        }
-    }
-
     pub fn resolveActivePermission(self: *App, state: r.permissions.State) void {
         const g = self.permission_queue.lock(self.io);
         defer g.unlock();
@@ -2474,10 +1963,10 @@ pub const App = struct {
     }
 
     pub fn moveCursorVertical(self: *App, delta: i32) bool {
-        const content_width = inputContentWidth(self.widget_frame_input_area.width);
+        const content_width = r.view.composer.inputContentWidth(self.view.widget_frame_input_area.width);
         const width: usize = switch (self.input_mode) {
-            .perm_message => permFieldTextWidth(self, content_width -| 2),
-            else => inputTextWidth(content_width, modePromptCols(&self.input_mode)),
+            .perm_message => r.view.permission.permFieldTextWidth(self, content_width -| 2),
+            else => r.view.composer.inputTextWidth(content_width, r.view.composer.modePromptCols(&self.input_mode)),
         };
         if (width == 0) return false;
 
@@ -2734,8 +2223,8 @@ pub const App = struct {
 
         self.timeline.shrinkRetainingCapacity(start);
         self.preview_reference = null;
-        if (self.timeline_render_cache.items.len > start) {
-            self.timeline_render_cache.shrinkRetainingCapacity(start);
+        if (self.view.entry_cache.items.len > start) {
+            self.view.entry_cache.shrinkRetainingCapacity(start);
         }
         if (text.len > 0) {
             self.input.set(text);
@@ -3109,124 +2598,13 @@ pub const App = struct {
     }
 };
 
-fn pushDiffLine(out: *std.ArrayList(r.tui.DiffLine), alloc: std.mem.Allocator, line: r.tui.DiffLine) void {
-    const owned_content = alloc.dupe(u8, line.content) catch return;
-    out.append(alloc, .{
-        .kind = line.kind,
-        .line_number = line.line_number,
-        .content = owned_content,
-    }) catch return;
-}
-
-pub fn emitDiffLines(out: *std.ArrayList(r.tui.DiffLine), snap: r.permissions.ToolDiff, alloc: std.mem.Allocator) void {
-    if (snap.before) |before| {
-        const old_lines = splitLinesAlloc(before, alloc) orelse return;
-        const new_lines = splitLinesAlloc(snap.after, alloc) orelse return;
-        emitMyersDiff(out, old_lines, new_lines, alloc);
-    } else {
-        var new_iter = std.mem.splitScalar(u8, snap.after, '\n');
-        var ln: u32 = 1;
-        while (new_iter.next()) |line| {
-            pushDiffLine(out, alloc, .{ .kind = .addition, .line_number = ln, .content = line });
-            ln += 1;
-        }
-    }
-}
-
-fn diffTimelinePart(alloc: std.mem.Allocator, diff: r.permissions.ToolDiff) !TimelinePart {
+pub fn diffTimelinePart(alloc: std.mem.Allocator, diff: r.permissions.ToolDiff) !TimelinePart {
     var lines = std.ArrayList(r.tui.DiffLine).empty;
-    emitDiffLines(&lines, diff, alloc);
+    r.diff.emitDiffLines(&lines, diff, alloc);
     return .{ .diff = .{
         .path = try alloc.dupe(u8, diff.path),
         .diff_lines = try lines.toOwnedSlice(alloc),
     } };
-}
-
-/// Myers' O(ND) shortest edit script with context collapsing. Old-file line
-/// numbers are 1-based.
-fn emitMyersDiff(
-    out: *std.ArrayList(r.tui.DiffLine),
-    old_lines: []const []const u8,
-    new_lines: []const []const u8,
-    alloc: std.mem.Allocator,
-) void {
-    const ops = myersDiff(old_lines, new_lines, alloc) orelse {
-        for (old_lines, 0..) |line, i| {
-            pushDiffLine(out, alloc, .{ .kind = .deletion, .line_number = @as(u32, @intCast(i)) + 1, .content = line });
-        }
-        for (new_lines) |line| {
-            pushDiffLine(out, alloc, .{ .kind = .addition, .content = line });
-        }
-        return;
-    };
-
-    if (ops.len == 0) return;
-
-    const ctx_radius = 3;
-
-    const visible = alloc.alloc(bool, ops.len) catch {
-        emitAllOps(out, ops, alloc);
-        return;
-    };
-    @memset(visible, false);
-
-    for (ops, 0..) |op, idx| {
-        if (op != .keep) {
-            const start = if (idx >= ctx_radius) idx - ctx_radius else 0;
-            const end = @min(idx + ctx_radius + 1, ops.len);
-            @memset(visible[start..end], true);
-        }
-    }
-
-    var old_ln: u32 = 0;
-    var in_gap = false;
-    var emitted_any = false;
-    for (ops, 0..) |op, idx| {
-        if (!visible[idx]) {
-            if (op == .keep or op == .delete) old_ln += 1;
-            in_gap = true;
-            continue;
-        }
-
-        if (in_gap and emitted_any) {
-            pushDiffLine(out, alloc, .{ .kind = .header, .content = "..." });
-        }
-        in_gap = false;
-        emitted_any = true;
-
-        switch (op) {
-            .keep => |content| {
-                pushDiffLine(out, alloc, .{ .kind = .context, .line_number = old_ln + 1, .content = content });
-                old_ln += 1;
-            },
-            .delete => |content| {
-                pushDiffLine(out, alloc, .{ .kind = .deletion, .line_number = old_ln + 1, .content = content });
-                old_ln += 1;
-            },
-            .insert => |content| {
-                pushDiffLine(out, alloc, .{ .kind = .addition, .content = content });
-            },
-        }
-    }
-}
-
-fn emitAllOps(out: *std.ArrayList(r.tui.DiffLine), ops: []const DiffOp, alloc: std.mem.Allocator) void {
-    var old_ln: u32 = 0;
-    for (ops) |op| {
-        switch (op) {
-            .keep => |content| {
-                pushDiffLine(out, alloc, .{ .kind = .context, .line_number = old_ln + 1, .content = content });
-                old_ln += 1;
-            },
-            .delete => |content| {
-                pushDiffLine(out, alloc, .{ .kind = .deletion, .line_number = old_ln + 1, .content = content });
-                old_ln += 1;
-            },
-            .insert => |content| {
-                pushDiffLine(out, alloc, .{ .kind = .addition, .content = content });
-            },
-        }
-    }
 }
 
 const RegistryDrainContext = struct {
@@ -3276,7 +2654,7 @@ pub const TimelinePart = union(enum) {
     };
 };
 
-fn timelineEntryUserText(entry: TimelineEntry) ?[]const u8 {
+pub fn timelineEntryUserText(entry: TimelineEntry) ?[]const u8 {
     for (entry.parts) |part| switch (part) {
         .message => |m| return m,
         .plain_text => |t| return t,
@@ -3323,2476 +2701,6 @@ pub fn renderSdkParts(
     };
     if (out.items.len == 0) return null;
     return out.toOwnedSlice(alloc) catch null;
-}
-
-pub fn splitLinesAlloc(text: []const u8, alloc: std.mem.Allocator) ?[]const []const u8 {
-    // Count lines first
-    var count: usize = 0;
-    var iter = std.mem.splitScalar(u8, text, '\n');
-    while (iter.next() != null) count += 1;
-
-    const buf = alloc.alloc([]const u8, count) catch return null;
-    var i: usize = 0;
-    var iter2 = std.mem.splitScalar(u8, text, '\n');
-    while (iter2.next()) |line| {
-        buf[i] = line;
-        i += 1;
-    }
-    return buf[0..i];
-}
-
-// ── Myers Diff ──
-
-pub const DiffOp = union(enum) {
-    keep: []const u8,
-    delete: []const u8,
-    insert: []const u8,
-};
-
-/// Myers O(ND) diff. Returns null on allocation failure.
-pub fn myersDiff(old: []const []const u8, new: []const []const u8, alloc: std.mem.Allocator) ?[]const DiffOp {
-    const n = old.len;
-    const m = new.len;
-    const max_d = n + m;
-    if (max_d == 0) return alloc.alloc(DiffOp, 0) catch null;
-
-    // V array indexed by k in [-max_d..max_d], offset so k=0 is at index max_d
-    const v_size = 2 * max_d + 1;
-
-    // Store V snapshots for each d to reconstruct the path
-    const vs = alloc.alloc([]usize, max_d + 1) catch return null;
-
-    const v_buf = alloc.alloc(usize, v_size) catch return null;
-    // Initialize with 0
-    @memset(v_buf, 0);
-
-    const offset: isize = @intCast(max_d);
-
-    var ses_len: usize = 0;
-
-    outer: for (0..max_d + 1) |d| {
-        const d_i: isize = @intCast(d);
-        var k: isize = -d_i;
-        while (k <= d_i) : (k += 2) {
-            const k_idx: usize = @intCast(k + offset);
-
-            var x: usize = undefined;
-            if (k == -d_i or (k != d_i and v_buf[@intCast(k - 1 + offset)] < v_buf[@intCast(k + 1 + offset)])) {
-                x = v_buf[@intCast(k + 1 + offset)]; // move down (insert)
-            } else {
-                x = v_buf[@intCast(k - 1 + offset)] + 1; // move right (delete)
-            }
-
-            var y: usize = @intCast(@as(isize, @intCast(x)) - k);
-
-            // Follow diagonal (matching lines)
-            while (x < n and y < m and std.mem.eql(u8, old[x], new[y])) {
-                x += 1;
-                y += 1;
-            }
-
-            v_buf[k_idx] = x;
-
-            if (x >= n and y >= m) {
-                ses_len = d;
-                // Snapshot after this step completes
-                vs[d] = alloc.dupe(usize, v_buf) catch return null;
-                break :outer;
-            }
-        }
-        // Snapshot V after processing step d
-        vs[d] = alloc.dupe(usize, v_buf) catch return null;
-    }
-
-    // Backtrack to build edit script
-    const result = alloc.alloc(DiffOp, n + m) catch return null;
-    var result_len: usize = 0;
-
-    var cx: isize = @intCast(n);
-    var cy: isize = @intCast(m);
-
-    var d_i: isize = @intCast(ses_len);
-    while (d_i > 0) : (d_i -= 1) {
-        const d_u: usize = @intCast(d_i);
-        const v_prev = vs[d_u - 1];
-        const ck: isize = cx - cy;
-
-        const is_insert = (ck == -d_i or (ck != d_i and v_prev[@intCast(ck - 1 + offset)] < v_prev[@intCast(ck + 1 + offset)]));
-
-        const prev_k: isize = if (is_insert) ck + 1 else ck - 1;
-        const prev_end_x: isize = @intCast(v_prev[@intCast(prev_k + offset)]);
-        const prev_end_y: isize = prev_end_x - prev_k;
-
-        // After the edit move, we land here and then slide diagonally to (cx, cy)
-        var mid_x: isize = undefined;
-        var mid_y: isize = undefined;
-        if (is_insert) {
-            // Insert: move down from (prev_end_x, prev_end_y) to (prev_end_x, prev_end_y + 1)
-            mid_x = prev_end_x;
-            mid_y = prev_end_y + 1;
-        } else {
-            // Delete: move right from (prev_end_x, prev_end_y) to (prev_end_x + 1, prev_end_y)
-            mid_x = prev_end_x + 1;
-            mid_y = prev_end_y;
-        }
-
-        // Emit diagonal (keep) from (cx, cy) back to (mid_x, mid_y)
-        while (cx > mid_x and cy > mid_y) {
-            cx -= 1;
-            cy -= 1;
-            result[result_len] = .{ .keep = old[@intCast(cx)] };
-            result_len += 1;
-        }
-
-        // Emit the edit
-        if (is_insert) {
-            cy -= 1;
-            result[result_len] = .{ .insert = new[@intCast(cy)] };
-            result_len += 1;
-        } else {
-            cx -= 1;
-            result[result_len] = .{ .delete = old[@intCast(cx)] };
-            result_len += 1;
-        }
-    }
-
-    // Remaining diagonal at d=0
-    while (cx > 0 and cy > 0) {
-        cx -= 1;
-        cy -= 1;
-        result[result_len] = .{ .keep = old[@intCast(cx)] };
-        result_len += 1;
-    }
-
-    // Reverse the result (we built it backwards)
-    const ops = result[0..result_len];
-    std.mem.reverse(DiffOp, ops);
-    return ops;
-}
-
-fn commandCompletionPrefix(input: []const u8, cursor: usize) []const u8 {
-    return input[0..@min(cursor, input.len)];
-}
-
-fn commandQueryPrefix(input: []const u8, cursor: usize, query_len: usize, open: bool) []const u8 {
-    if (open and query_len > 0 and query_len <= input.len) return input[0..query_len];
-    return commandCompletionPrefix(input, cursor);
-}
-
-fn containsCommandCompletion(items: []?CommandCompletion, needle: []const u8) bool {
-    for (items) |item| {
-        const value = item orelse continue;
-        if (std.mem.eql(u8, value.text, needle)) return true;
-    }
-    return false;
-}
-
-fn completionMatches(completion: []const u8, prefix: []const u8) bool {
-    return std.ascii.startsWithIgnoreCase(completion, prefix) and !std.ascii.eqlIgnoreCase(completion, prefix);
-}
-
-fn commandTokenActive(input: []const u8, cursor: usize) bool {
-    if (input.len == 0) return false;
-    const end = @min(@as(usize, cursor), input.len);
-    if (end == 0) return false;
-    return input[0] == '/';
-}
-
-fn textWidthCols(text: []const u8) usize {
-    return std.unicode.utf8CountCodepoints(text) catch text.len;
-}
-
-fn descriptionWidth(description: ?[]const u8) usize {
-    const desc = description orelse return 0;
-    return textWidthCols(desc);
-}
-
-fn appendBuiltinCommandCompletions(prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
-    for (builtin_command_completions) |completion| {
-        if (count.* >= out.len) return;
-        if (!completionMatches(completion.text, prefix)) continue;
-        if (containsCommandCompletion(out[0..count.*], completion.text)) continue;
-
-        out[count.*] = completion;
-        count.* += 1;
-    }
-}
-
-fn appendLuaCommandCompletions(app: *App, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
-    if (count.* >= out.len) return;
-    if (!app.lua_vm.vm_mu.tryLock()) return;
-    defer app.lua_vm.vm_mu.unlock(app.io);
-    app.lua_vm.appendCommandCompletions(prefix, out, count);
-}
-
-fn appendSkillCommandCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
-    if (count.* >= out.len) return;
-    const target = app.mainSkillTarget() orelse return;
-
-    for (app.context_factory.skills.entries.items) |entry| {
-        if (count.* >= out.len) return;
-        if (!entry.meta.user_invocable) continue;
-        if (!r.skills.visibleTo(&entry, target.name, target.is_main, target.filter)) continue;
-        const formatted = std.fmt.allocPrint(alloc, "/skill-{s}", .{entry.meta.name}) catch return;
-        if (!completionMatches(formatted, prefix)) continue;
-        if (containsCommandCompletion(out[0..count.*], formatted)) continue;
-
-        out[count.*] = .{ .text = formatted };
-        count.* += 1;
-    }
-}
-
-fn appendSshAliasCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
-    if (count.* >= out.len) return;
-
-    for (app.context_factory.ssh_aliases.items) |alias| {
-        if (count.* >= out.len) return;
-        const formatted = std.fmt.allocPrint(alloc, "/ssh-{s}", .{alias.name}) catch return;
-        if (!completionMatches(formatted, prefix)) continue;
-        if (containsCommandCompletion(out[0..count.*], formatted)) continue;
-
-        out[count.*] = .{ .text = formatted };
-        count.* += 1;
-    }
-}
-
-fn appendMcpServerCompletions(app: *App, alloc: std.mem.Allocator, prefix: []const u8, out: []?CommandCompletion, count: *usize) void {
-    if (!std.ascii.startsWithIgnoreCase(prefix, "/mcp connect ")) return;
-    if (count.* >= out.len) return;
-    if (!app.lua_vm.vm_mu.tryLock()) return;
-    defer app.lua_vm.vm_mu.unlock(app.io);
-
-    for (app.lua_vm.mcp_entries.items) |entry| {
-        if (count.* >= out.len) return;
-        const formatted = std.fmt.allocPrint(alloc, "/mcp connect {s}", .{entry.name}) catch return;
-        if (!completionMatches(formatted, prefix)) continue;
-        if (containsCommandCompletion(out[0..count.*], formatted)) continue;
-
-        out[count.*] = .{ .text = formatted };
-        count.* += 1;
-    }
-}
-
-const CompletionRows = struct {
-    items: [COMMAND_COMPLETION_ROWS]CommandCompletion = @splat(.{ .text = "" }),
-    len: usize = 0,
-};
-
-fn commandCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: usize) CompletionRows {
-    var matches: [COMMAND_COMPLETION_ROWS]?CommandCompletion = @splat(null);
-    var count: usize = 0;
-
-    const prefix = switch (app.input_mode) {
-        .text => |t| commandQueryPrefix(input, cursor, t.completion_query_len, t.completion_open),
-        else => commandCompletionPrefix(input, cursor),
-    };
-    appendBuiltinCommandCompletions(prefix, &matches, &count);
-    appendMcpServerCompletions(app, alloc, prefix, &matches, &count);
-    appendLuaCommandCompletions(app, prefix, &matches, &count);
-    appendSkillCommandCompletions(app, alloc, prefix, &matches, &count);
-    appendSshAliasCompletions(app, alloc, prefix, &matches, &count);
-
-    var rows = CompletionRows{};
-    for (matches[0..count]) |item| {
-        const value = item orelse continue;
-        if (!completionMatches(value.text, prefix)) continue;
-        rows.items[rows.len] = value;
-        rows.len += 1;
-    }
-    return rows;
-}
-
-fn activeCompletions(app: *App, alloc: std.mem.Allocator, input: []const u8, cursor: usize) CompletionRows {
-    if (app.pathTokenActive()) return pathCompletions(app, alloc);
-    return commandCompletions(app, alloc, input, cursor);
-}
-
-fn pathCompletions(app: *App, alloc: std.mem.Allocator) CompletionRows {
-    var rows = CompletionRows{};
-
-    const parts = app.currentTokenParts() orelse return rows;
-    var dir_buf: [1024]u8 = undefined;
-    const probe_dir = app.resolveProbeDir(parts.prefix, &dir_buf) orelse return rows;
-    const list = app.path_completion.cache.find(probe_dir) orelse return rows;
-    if (!list.valid) return rows;
-
-    for (list.entries.items) |entry| {
-        if (rows.len >= rows.items.len) break;
-        if (parts.filter.len > 0 and !std.ascii.startsWithIgnoreCase(entry.name, parts.filter)) continue;
-        const text = std.fmt.allocPrint(alloc, "{s}{s}", .{ parts.prefix, entry.name }) catch break;
-        rows.items[rows.len] = .{
-            .text = text,
-            .description = r.completion.kindDescription(entry.kind),
-        };
-        rows.len += 1;
-    }
-    return rows;
-}
-
-fn insertCompletionToken(self: *App, entry: []const u8) void {
-    self.input_desired_col = null;
-    if (self.pathTokenActive()) {
-        const tok = r.completion.tokenAt(self.input.slice(), self.input.cursor);
-        self.input.deleteRange(tok.start, tok.end);
-        self.input.cursor = tok.start;
-        self.input.insert(entry);
-        return;
-    }
-    const s = self.input.slice();
-    const end = std.mem.indexOfScalarPos(u8, s, self.input.cursor, ' ') orelse s.len;
-    self.input.deleteRange(0, end);
-    self.input.insert(entry);
-}
-
-fn renderInputWidget(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, progress_h: u16, progress_line: ?r.tui.Line, buf: *r.tui.Buffer) void {
-    buf.fill(area, .{ .style = .{ .bg = app.theme.overlay_dark } });
-
-    // 1-row top/bottom padding, 2-column left/right padding.
-    const content: r.tui.Rect = .{
-        .x = area.x +| WIDGET_PAD_X,
-        .y = area.y +| 1,
-        .width = inputContentWidth(area.width),
-        .height = area.height -| 2,
-    };
-    if (content.width == 0 or content.height == 0) return;
-
-    if (progress_line) |l| {
-        l.render(content.x, content.y, content.width, buf);
-    }
-
-    const input_area: r.tui.Rect = .{
-        .x = content.x,
-        .y = content.y +| progress_h,
-        .width = content.width,
-        .height = content.height -| progress_h -| 1,
-    };
-    const status_area: r.tui.Rect = .{
-        .x = content.x,
-        .y = content.y +| content.height -| 1,
-        .width = content.width,
-        .height = 1,
-    };
-
-    switch (app.input_mode) {
-        .text => renderInputContent(app, arena, input_area, buf),
-        .passphrase => renderPassphraseInput(app, arena, input_area, buf),
-        .perm_select, .perm_message => renderPermissionContent(app, arena, input_area, buf),
-        .wizard => renderWizardContent(app, arena, input_area, buf),
-        .session_picker => renderSessionPickerContent(app, arena, input_area, buf),
-    }
-
-    renderStatusBar(app, status_area, buf);
-}
-
-fn renderFieldWidget(
-    app: *App,
-    arena: std.mem.Allocator,
-    text: []const u8,
-    cursor: usize,
-    area: r.tui.Rect,
-    st: FieldStyle,
-    buf: *r.tui.Buffer,
-) void {
-    const prompt_cols = promptCols(st.prompt);
-    const text_width = inputTextWidth(area.width, prompt_cols);
-    if (area.height == 0 or text_width == 0) return;
-
-    var l = r.tui.input_layout.layout(arena, text, cursor, text_width, st.text, .{ .fg = app.theme.text_hl, .bg = app.theme.muted }, st.mask) catch return;
-    defer l.deinit(arena);
-
-    var para: r.tui.Paragraph = .{
-        .border = .none,
-        .wrap = false,
-        .padding = .{ .left = prompt_cols },
-    };
-    para.lines.appendSlice(arena, l.rows.items) catch return;
-    para.scroll_offset = if (l.cursor.row < area.height) 0 else l.cursor.row - area.height + 1;
-
-    const draw_area: r.tui.Rect = .{
-        .x = area.x,
-        .y = area.y,
-        .width = prompt_cols +| text_width +| 1,
-        .height = area.height,
-    };
-    para.render(arena, draw_area, area, buf);
-    buf.setStringMax(area.x, area.y, st.prompt, st.prompt_style, area.width);
-}
-
-fn renderInputContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const display = app.displayInput(arena);
-    renderFieldWidget(app, arena, display.text, display.cursor, area, .{
-        .prompt = COMPOSER_PROMPT,
-        .prompt_style = .{ .fg = app.theme.muted },
-        .text = fieldTextStyle(app),
-    }, buf);
-    if (app.screenshot_buf != null) {
-        buf.setString(area.x, area.y, r.tui.icon.eye, .{ .fg = app.theme.ok });
-    }
-}
-
-fn renderPassphraseInput(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const pp = &app.input_mode.passphrase;
-    renderFieldWidget(app, arena, pp.field.slice(), pp.field.cursor, area, .{
-        .prompt = PASSPHRASE_PROMPT,
-        .prompt_style = .{ .fg = app.theme.warn },
-        .text = fieldTextStyle(app),
-        .mask = '*',
-    }, buf);
-}
-
-fn permMessageDisplay(app: *App, arena: std.mem.Allocator) ?r.clipboard.Display {
-    const pm = switch (app.input_mode) {
-        .perm_message => |*pm| pm,
-        else => return null,
-    };
-    return r.clipboard.toDisplay(arena, pm.field.slice(), pm.field.cursor) catch
-        .{ .text = pm.field.slice(), .cursor = pm.field.cursor };
-}
-
-/// Text columns of the permission message field inside a dialog of
-/// `inner_width`: row indent, the call/diff label column, the prompt.
-fn permFieldTextWidth(app: *App, inner_width: u16) u16 {
-    const label_cols: u16 = if (app.askSession() != null) 0 else PERM_FIELD_LABEL_COLS;
-    return inputTextWidth(inner_width -| 1 -| label_cols, promptCols(PERM_FIELD_PROMPT));
-}
-
-/// Wrapped rows of the open permission message field; null while no field
-/// is open.
-fn permFieldRows(app: *App, arena: std.mem.Allocator, inner_width: u16) ?u16 {
-    const display = permMessageDisplay(app, arena) orelse return null;
-    const counted = r.tui.input_layout.rowCount(arena, display.text, permFieldTextWidth(app, inner_width)) catch 1;
-    return @intCast(std.math.clamp(counted, 1, PERM_FIELD_MAX_ROWS));
-}
-
-/// Draw the open permission message field into its dialog row.
-fn renderPermField(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const display = permMessageDisplay(app, arena) orelse return;
-    renderFieldWidget(app, arena, display.text, display.cursor, area, .{
-        .prompt = PERM_FIELD_PROMPT,
-        .prompt_style = .{ .fg = app.theme.text },
-        .text = fieldTextStyle(app),
-    }, buf);
-    if (app.screenshot_buf != null) {
-        buf.setString(area.x +| area.width -| 6, area.y, "[IMG]", .{ .fg = app.theme.ok });
-    }
-}
-
-fn completionAnchor(app: *App, arena: std.mem.Allocator, width: u16) r.tui.input_layout.Pos {
-    const display = app.displayInput(arena);
-    var l = r.tui.input_layout.layout(arena, display.text, display.cursor, width, .{}, .{}, null) catch return .{};
-    defer l.deinit(arena);
-    return r.tui.input_layout.visualPos(&l, r.completion.tokenAt(display.text, display.cursor).start);
-}
-
-const WIZARD_HELP_TEXT = "↑/↓ select · enter next · esc abort";
-
-fn wizardSelStyle(app: *const App, selected: bool) r.tui.Style {
-    return .{ .fg = app.theme.text, .modifier = .{ .reverse = selected } };
-}
-
-fn renderWizardContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    buf.fill(area, .{ .style = .{ .bg = app.theme.overlay_dark } });
-    if (area.height == 0) return;
-    const w = &app.input_mode.wizard;
-    var para: r.tui.Paragraph = .{ .border = .none, .padding = .{ .left = 2, .right = 2 } };
-    var err: r.tui.Paragraph = .{ .border = .none, .padding = .{ .left = 2, .right = 2 } };
-    const title_style: r.tui.Style = .{ .fg = app.theme.info, .modifier = .{ .bold = true } };
-    const muted_style: r.tui.Style = .{ .fg = app.theme.muted };
-    const err_style: r.tui.Style = .{ .fg = app.theme.err };
-    var field: ?*r.tui.Field(256) = null;
-    var field_mask: ?u8 = null;
-
-    var l = r.tui.Line{};
-    l.pushText(arena, "Setup — blitzdenk first-run wizard", title_style) catch {};
-    para.lines.append(arena, l) catch {};
-    var help = r.tui.Line{};
-    help.pushText(arena, WIZARD_HELP_TEXT, muted_style) catch {};
-    para.lines.append(arena, help) catch {};
-    para.lines.append(arena, .{}) catch {};
-
-    switch (w.step) {
-        .welcome => {
-            wizardAppendHeading(app, arena, &para, "Welcome to blitzdenk");
-            wizardAppendHeading(app, arena, &para, "Pick a model provider to get started, or skip to use the built-in defaults.");
-            wizardAppendHeading(app, arena, &para, "");
-            wizardAppendOption(app, arena, &para, "Continue", w.list_selected == 0);
-            wizardAppendOption(app, arena, &para, "Skip (use defaults)", w.list_selected == 1);
-        },
-        .provider => {
-            wizardAppendHeading(app, arena, &para, "Choose a provider:");
-            for (r.wizard.catalog, 0..) |entry, i| {
-                wizardAppendOption(app, arena, &para, entry.name, i == w.list_selected);
-            }
-        },
-        .provider_type => {
-            wizardAppendHeading(app, arena, &para, "Custom endpoint — provider type:");
-            for (r.wizard.provider_types, 0..) |name, i| {
-                wizardAppendOption(app, arena, &para, name, i == w.list_selected);
-            }
-        },
-        .url => {
-            wizardAppendHeading(app, arena, &para, "Endpoint url (enter keeps the shown value):");
-            field = &w.url;
-        },
-        .key => {
-            wizardAppendHeading(app, arena, &para, "Paste your api key (stored in provider.lua):");
-            field = &w.key;
-            field_mask = '*';
-        },
-        .model => {
-            const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
-            if (entry.free_text_model_only) {
-                wizardAppendHeading(app, arena, &para, "Model id:");
-                field = &w.model;
-            } else {
-                wizardAppendHeading(app, arena, &para, "Choose a model or type in the model id string (same thing)");
-                wizardAppendHeading(app, arena, &para, "");
-                for (entry.models, 0..) |model, i| {
-                    wizardAppendOption(app, arena, &para, model.name, !w.model_free_text and w.model_curated_index == i);
-                }
-                wizardAppendOption(app, arena, &para, "Enter model id…", w.model_free_text);
-                if (w.model_free_text) field = &w.model;
-            }
-        },
-        .vision => {
-            const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
-            const detected = r.wizard.selectModel(entry, w.model.slice()).vision;
-            wizardAppendHeading(app, arena, &para, "Custom model id — should image input be enabled?");
-            wizardAppendHeading(app, arena, &para, "Catalogued models skip this; vision follows the catalogue.");
-            wizardAppendKeyValue(app, arena, &para, "model", w.model.slice());
-            wizardAppendKeyValue(app, arena, &para, "catalogue", if (detected) "vision" else "no vision");
-            wizardAppendHeading(app, arena, &para, "");
-            wizardAppendOption(app, arena, &para, "Enable vision", w.vision_override == true);
-            wizardAppendOption(app, arena, &para, "Text only", w.vision_override != true);
-        },
-        .confirm => {
-            wizardAppendHeading(app, arena, &para, "Confirm — write provider.lua with these choices?");
-            const selection = app.wizardSelection(w);
-            const entry = r.wizard.catalogEntry(w.provider_index) orelse r.wizard.catalog[0];
-            const vision_text = if (selection) |sel| (if (sel.vision) "true" else "false") else "unknown";
-            wizardAppendKeyValue(app, arena, &para, "schema", w.provider_type_buf[0..w.provider_type_len]);
-            wizardAppendKeyValue(app, arena, &para, "provider", entry.name);
-            wizardAppendKeyValue(app, arena, &para, "url", w.url.slice());
-            wizardAppendKeyValue(app, arena, &para, "key", if (!w.key.isEmpty()) "<set>" else "");
-            wizardAppendKeyValue(app, arena, &para, "vision", vision_text);
-            wizardAppendKeyValue(app, arena, &para, "model", w.model.slice());
-            wizardAppendHeading(app, arena, &para, "");
-            wizardAppendOption(app, arena, &para, "Write provider.lua", w.accept_selected);
-            wizardAppendOption(app, arena, &para, "Back", !w.accept_selected);
-        },
-        .done => {
-            wizardAppendHeading(app, arena, &para, "Setup complete — happy hacking.");
-            wizardAppendHeading(app, arena, &para, "provider.lua is live; edit it and it hot-reloads like any config lua.");
-        },
-    }
-
-    if (w.error_msg) |msg| {
-        var err_line = r.tui.Line{};
-        err_line.pushText(arena, msg, err_style) catch {};
-        err.lines.append(arena, err_line) catch {};
-    }
-    const err_rows: u16 = @min(err.totalHeight(area.width), area.height -| 1);
-    const field_rows: u16 = @intCast(@max(1, @as(usize, area.height) -| para.totalHeightLong(area.width) -| err_rows));
-    const shown_rows: u16 = area.height -| field_rows -| err_rows;
-
-    para.renderSimple(arena, .{ .x = area.x, .y = area.y, .width = area.width, .height = shown_rows }, buf);
-
-    if (field) |f| {
-        renderFieldWidget(app, arena, f.slice(), f.cursor, .{
-            .x = area.x +| WIDGET_PAD_X,
-            .y = area.y +| shown_rows,
-            .width = inputContentWidth(area.width),
-            .height = field_rows,
-        }, .{
-            .prompt = modePrompt(&app.input_mode),
-            .text = .{ .fg = app.theme.text_hl, .modifier = .{ .reverse = true } },
-            .mask = field_mask,
-        }, buf);
-    }
-
-    if (err_rows > 0) {
-        err.renderSimple(arena, .{
-            .x = area.x,
-            .y = area.y +| shown_rows +| field_rows,
-            .width = area.width,
-            .height = err_rows,
-        }, buf);
-    }
-}
-
-fn wizardAppendHeading(app: *const App, arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8) void {
-    var line = r.tui.Line{};
-    line.pushText(arena, text, .{ .fg = app.theme.text }) catch return;
-    para.lines.append(arena, line) catch {};
-}
-
-pub fn renderSessionPickerContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    buf.fill(area, .{ .style = .{ .bg = app.theme.overlay_dark } });
-    const picker = &app.input_mode.session_picker;
-    var para: r.tui.Paragraph = .{ .border = .none, .padding = .{ .left = 2, .right = 2 } };
-
-    var title = r.tui.Line{};
-    title.pushText(arena, "Sessions — continue a recorded session", .{ .fg = app.theme.info, .modifier = .{ .bold = true } }) catch {};
-    para.lines.append(arena, title) catch {};
-
-    var help = r.tui.Line{};
-    help.pushText(arena, "↑/↓ or j/k select · enter continue · esc quit", .{ .fg = app.theme.muted }) catch {};
-    para.lines.append(arena, help) catch {};
-    para.lines.append(arena, .{}) catch {};
-
-    const visible_rows: usize = @max(area.height, 3) - 3;
-    if (visible_rows == 0) {
-        para.renderSimple(arena, area, buf);
-        return;
-    }
-    picker.syncScroll(visible_rows);
-    const start = @min(picker.scroll, picker.rows.len -| visible_rows);
-    const end = @min(start + visible_rows, picker.rows.len);
-    var index: usize = start;
-    while (index < end) : (index += 1) {
-        const row = picker.rows[index];
-        const selected = index == picker.selected;
-        var line = r.tui.Line{};
-        if (r.session_picker.isNewSession(row)) {
-            line.pushText(arena, if (selected) "❯ " else "  ", .{ .modifier = .{ .bold = true } }) catch return;
-            line.pushText(arena, row.prompt, .{ .fg = app.theme.ok, .modifier = .{ .bold = selected } }) catch return;
-            para.lines.append(arena, line) catch {};
-            continue;
-        }
-        line.pushText(arena, if (selected) "❯ " else "  ", .{ .modifier = .{ .bold = true } }) catch return;
-        line.pushText(arena, row.date, .{ .fg = app.theme.role_agent }) catch return;
-        line.pushText(arena, "  ", .{}) catch return;
-        line.pushText(arena, row.id, .{ .fg = app.theme.muted }) catch return;
-        line.pushText(arena, "  ", .{}) catch return;
-        const prompt = if (row.prompt.len > 0) row.prompt else r.session_picker.EMPTY_PROMPT_LABEL;
-        line.pushText(arena, clipPromptToWidth(arena, prompt, pickerMaxPromptWidth(area.width)), if (selected) .{ .fg = app.theme.text_hl, .modifier = .{ .bold = true } } else .{ .fg = app.theme.info }) catch return;
-        para.lines.append(arena, line) catch {};
-    }
-
-    para.renderSimple(arena, area, buf);
-}
-
-fn pickerMaxPromptWidth(area_width: u16) usize {
-    const widget_padding = 4;
-    const para_padding = 4;
-    const prefix = 2 + 16 + 2 + r.session_store.ID_LEN + 2;
-    return @as(usize, area_width) -| (widget_padding + para_padding + prefix);
-}
-
-fn clipPromptToWidth(arena: std.mem.Allocator, text: []const u8, max: usize) []const u8 {
-    const width = textWidthCols(text);
-    if (width <= max) return text;
-    var cut: usize = 0;
-    var cols: usize = 0;
-    const limit = max -| 1;
-    while (cut < text.len and cols < limit) {
-        const seq_len = std.unicode.utf8ByteSequenceLength(text[cut]) catch 1;
-        const end = @min(cut + seq_len, text.len);
-        cols += 1;
-        cut = end;
-    }
-    return std.fmt.allocPrint(arena, "{s}…", .{text[0..cut]}) catch text;
-}
-
-fn wizardAppendOption(app: *const App, arena: std.mem.Allocator, para: *r.tui.Paragraph, text: []const u8, selected: bool) void {
-    var line = r.tui.Line{};
-    line.pushText(arena, if (selected) "❯ " else "  ", wizardSelStyle(app, selected)) catch return;
-    line.pushText(arena, text, wizardSelStyle(app, selected)) catch return;
-    para.lines.append(arena, line) catch {};
-}
-
-fn wizardAppendKeyValue(app: *App, arena: std.mem.Allocator, para: *r.tui.Paragraph, key: []const u8, value: []const u8) void {
-    var line = r.tui.Line{};
-    const padded = std.fmt.allocPrint(arena, "  {s:<10}", .{key}) catch return;
-    line.pushText(arena, padded, .{ .fg = app.theme.muted }) catch return;
-    line.pushText(arena, value, .{ .fg = app.theme.text }) catch return;
-    para.lines.append(arena, line) catch {};
-}
-
-fn notificationTime(sent_ms: i64, out: *[8]u8) []const u8 {
-    const seconds: std.c.time_t = @intCast(@divTrunc(sent_ms, std.time.ms_per_s));
-    var tm: ct.struct_tm = undefined;
-    if (ct.localtime_r(&seconds, &tm) == null) return out[0..0];
-    const hour: u32 = @intCast(tm.tm_hour);
-    const minute: u32 = @intCast(tm.tm_min);
-    const second: u32 = @intCast(tm.tm_sec);
-    return std.fmt.bufPrint(out, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hour, minute, second }) catch out[0..0];
-}
-
-fn renderNotifications(app: *App, arena: std.mem.Allocator, full_area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const notif_w: u16 = @min(full_area.width / 3, 40);
-    if (notif_w < 4) return;
-
-    var skip = app.notifications.visibleCount() -| Notifications.MAX_VISIBLE;
-    var y = full_area.y;
-    const max_y = full_area.y +| full_area.height;
-    var rendered: usize = 0;
-    var iter = app.notifications.iter();
-    while (iter.next()) |entry| {
-        if (rendered >= Notifications.MAX_VISIBLE or y >= max_y) break;
-        if (skip > 0) {
-            skip -= 1;
-            continue;
-        }
-
-        switch (entry.*) {
-            .used => |en| {
-                var para = r.tui.Paragraph{
-                    .border = .single,
-                    .style = .{ .fg = app.theme.border, .bg = app.theme.overlay_dark },
-                    .padding = .{ .left = 1, .right = 1, .top = 0, .bottom = 0 },
-                };
-                var l = r.tui.Line{};
-                l.pushText(arena, en.msg, .{ .fg = app.theme.text }) catch {};
-                para.lines.append(arena, l) catch {};
-
-                const total_h = para.totalHeight(notif_w);
-                if (total_h == 0) continue;
-
-                const slide_t = 1.0 - @min(en.alive / Notifications.SLIDE_SECONDS, 1.0);
-                const slide: u16 = @intFromFloat(slide_t * slide_t * @as(f32, @floatFromInt(notif_w)));
-
-                const area = r.tui.Rect{
-                    .x = full_area.x +| full_area.width -| notif_w +| slide,
-                    .y = y,
-                    .width = notif_w,
-                    .height = @min(total_h, max_y -| y),
-                };
-                para.renderSimple(arena, area, buf);
-
-                if (area.width >= 10) {
-                    var time_buf: [8]u8 = undefined;
-                    const stamp = notificationTime(en.sent_ms, &time_buf);
-                    buf.setStringMax(area.x +| 1, area.y, stamp, .{ .fg = app.theme.info, .bg = app.theme.overlay_dark }, area.width -| 2);
-                }
-
-                y +|= total_h +| 1;
-                rendered += 1;
-            },
-            else => {},
-        }
-    }
-}
-
-fn renderStatusBar(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    if (app.input_mode == .wizard) return;
-    const alloc = app.arena_frame.allocator();
-    var line = statusBarLine(app, alloc) catch return;
-    line.render(area.x, area.y, area.width, buf);
-}
-
-fn statusBarLine(app: *App, alloc: std.mem.Allocator) !r.tui.Line {
-    if (app.lua_status_bar_enabled and app.lua_status_bar_cache_len > 0) {
-        const parsed = try r.tui.Text.fromAnsi(alloc, app.lua_status_bar_cache[0..app.lua_status_bar_cache_len]);
-        if (parsed.lines.items.len > 0) {
-            var line = parsed.lines.items[0];
-            line.style = .{ .fg = app.theme.muted };
-            return line;
-        }
-        return .{};
-    }
-
-    const ctx_pct: u8 = @intFromFloat(@min(app.contextPercent(), 100));
-    var status_buf: [256]u8 = undefined;
-    var in_buf: [16]u8 = undefined;
-    var out_buf: [16]u8 = undefined;
-    var cache_buf: [16]u8 = undefined;
-    const usage = app.registry.usage();
-    const status = std.fmt.bufPrint(
-        &status_buf,
-        "IN:{s} OUT:{s} CACHE:{s} | CTX:{d}% {s}",
-        .{
-            formatTokenCount(&in_buf, usage.input_tokens),
-            formatTokenCount(&out_buf, usage.output_tokens),
-            formatTokenCount(&cache_buf, usage.cache_read_tokens + usage.cache_write_tokens),
-            ctx_pct,
-            switch (app.flags.approval_mode) {
-                .yolo => "| AUTO APPROVAL",
-                .strict => "| APPROVAL",
-                .default => "",
-            },
-        },
-    ) catch " ?? ";
-    return r.tui.Line.new(alloc, "{s}", .{status}, .{ .fg = app.theme.muted });
-}
-
-fn refreshLuaStatusBar(app: *App) void {
-    if (!app.lua_status_bar_enabled) return;
-    if (app.input_mode == .wizard) return;
-    if (app.lua_vm.vm_mu.tryLock()) {
-        defer app.lua_vm.vm_mu.unlock(app.io);
-        if (app.lua_vm.renderStatusBar(&app.lua_status_bar_cache)) |status| {
-            app.lua_status_bar_cache_len = status.len;
-        }
-    }
-}
-
-pub const WIDGET_MIN_MAIN_COLS: u16 = 40;
-pub const WIDGET_MIN_TIMELINE_ROWS: u16 = 6;
-
-pub const WidgetPanelSlot = struct {
-    rect: r.tui.Rect = .{},
-    height: u16 = 0,
-    entry_index: usize = 0,
-    place: r.lua.WidgetPlace = .between,
-};
-
-pub const WidgetLayout = struct {
-    area: r.tui.Rect = .{},
-    left: ?r.tui.Rect = null,
-    right: ?r.tui.Rect = null,
-    left_index: usize = 0,
-    right_index: usize = 0,
-    panels: [r.lua.MAX_LUA_WIDGETS]WidgetPanelSlot = @splat(.{}),
-    panels_len: usize = 0,
-    between_total_height: u16 = 0,
-    below_total_height: u16 = 0,
-    panels_total_height: u16 = 0,
-    main: r.tui.Rect = .{},
-};
-
-pub fn computeWidgetLayout(vm: *r.lua.LuaVm, area: r.tui.Rect) WidgetLayout {
-    var out = WidgetLayout{ .area = area };
-    var left_w: u16 = 0;
-    var right_w: u16 = 0;
-
-    for (vm.widget_entries[0..vm.widget_count], 0..) |*entry, i| {
-        if (!entry.alive or entry.hidden) continue;
-        switch (entry.kind) {
-            .sidebar => {
-                const w = @min(entry.size, area.width);
-                if (entry.side == .left) {
-                    left_w = w;
-                    out.left_index = i;
-                } else {
-                    right_w = w;
-                    out.right_index = i;
-                }
-            },
-            .panel => {
-                const h = @min(entry.size, area.height);
-                if (entry.place == .below) out.below_total_height +|= h else out.between_total_height +|= h;
-            },
-        }
-    }
-
-    if (area.width -| left_w -| right_w < WIDGET_MIN_MAIN_COLS) right_w = 0;
-    if (area.width -| left_w -| right_w < WIDGET_MIN_MAIN_COLS) left_w = 0;
-
-    const main_w = area.width -| left_w -| right_w;
-    if (left_w > 0) out.left = .{ .x = area.x, .y = area.y, .width = left_w, .height = area.height };
-    if (right_w > 0) out.right = .{
-        .x = area.x +| left_w +| main_w,
-        .y = area.y,
-        .width = right_w,
-        .height = area.height,
-    };
-    out.main = .{ .x = area.x +| left_w, .y = area.y, .width = main_w, .height = area.height };
-
-    for (vm.widget_entries[0..vm.widget_count], 0..) |*entry, i| {
-        if (!entry.alive or entry.hidden or entry.kind != .panel) continue;
-        const h = @min(entry.size, area.height);
-        out.panels[out.panels_len] = .{
-            .rect = .{ .x = out.main.x, .y = 0, .width = main_w, .height = h },
-            .height = h,
-            .entry_index = i,
-            .place = entry.place,
-        };
-        out.panels_len += 1;
-    }
-    out.panels_total_height = out.between_total_height +| out.below_total_height;
-    return out;
-}
-
-pub fn anchorWidgetPanels(wl: *const WidgetLayout, footer_y: u16, footer_h: u16, out: *[r.lua.MAX_LUA_WIDGETS]WidgetPanelSlot) void {
-    var between_y = footer_y -| wl.between_total_height;
-    var below_y = footer_y +| footer_h;
-    for (wl.panels[0..wl.panels_len], 0..) |slot, i| {
-        out[i] = slot;
-        if (slot.place == .below) {
-            out[i].rect.y = below_y;
-            below_y +|= slot.height;
-        } else {
-            out[i].rect.y = between_y;
-            between_y +|= slot.height;
-        }
-    }
-}
-
-fn drawLuaWidget(app: *App, vm: *r.lua.LuaVm, entry_index: usize, rect: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const entry = &vm.widget_entries[entry_index];
-    if (!entry.alive or entry.hidden) return;
-    const err_len = r.lua.invokeWidgetRender(vm, entry, rect, buf, &app.theme, app.frame_count, &app.widget_error_msgs[entry_index]);
-    app.widget_error_lens[entry_index] = err_len;
-}
-
-fn refreshLuaWidgets(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const vm = app.lua_vm;
-    if (vm.widget_count == 0) {
-        app.widget_layout_valid = false;
-        return;
-    }
-    for (&app.widget_error_lens) |*l| l.* = 0;
-    if (!vm.vm_mu.tryLock()) return;
-    defer vm.vm_mu.unlock(app.io);
-
-    const wl = computeWidgetLayout(vm, area);
-    app.widget_layout_cache = wl;
-    app.widget_layout_valid = true;
-    const bg_cell = r.tui.Cell{ .style = .{ .bg = app.theme.overlay } };
-
-    if (wl.left) |rect| {
-        buf.fill(rect, bg_cell);
-        drawLuaWidget(app, vm, wl.left_index, rect, buf);
-    }
-    if (wl.right) |rect| {
-        buf.fill(rect, bg_cell);
-        drawLuaWidget(app, vm, wl.right_index, rect, buf);
-    }
-}
-
-fn drawLuaPanels(app: *App, buf: *r.tui.Buffer) void {
-    if (app.widget_frame_panels_len == 0) return;
-    const vm = app.lua_vm;
-    if (!vm.vm_mu.tryLock()) return;
-    defer vm.vm_mu.unlock(app.io);
-    for (app.widget_frame_panels[0..app.widget_frame_panels_len]) |slot| {
-        drawLuaWidget(app, vm, slot.entry_index, slot.rect, buf);
-        drawWidgetError(app, slot.entry_index, slot.rect, buf);
-    }
-}
-
-fn drawWidgetError(app: *App, entry_index: usize, rect: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const err_len = app.widget_error_lens[entry_index];
-    if (err_len == 0) return;
-    const msg = app.widget_error_msgs[entry_index][0..err_len];
-    var line_it = std.mem.splitScalar(u8, msg, '\n');
-    var row: u16 = 0;
-    while (line_it.next()) |line_text| {
-        if (row >= rect.height) break;
-        buf.setStringMax(rect.x, rect.y +| row, line_text, .{ .fg = app.theme.err }, rect.width);
-        row += 1;
-    }
-}
-
-fn renderWidgetErrors(app: *App, wl: *const WidgetLayout, buf: *r.tui.Buffer) void {
-    if (wl.left) |rect| drawWidgetError(app, wl.left_index, rect, buf);
-    if (wl.right) |rect| drawWidgetError(app, wl.right_index, rect, buf);
-}
-
-fn blendTo(from: r.tui.Color, to: r.tui.Color, t: f64) r.tui.Color {
-    if (t >= 1) return to;
-    const a = from.toRgb();
-    const b = to.toRgb();
-    const ch = struct {
-        fn mix(x: u8, y: u8, k: f64) u8 {
-            const xf: f64 = @floatFromInt(x);
-            const yf: f64 = @floatFromInt(y);
-            return @intFromFloat(@round(xf + (yf - xf) * k));
-        }
-    }.mix;
-    return .{ .rgb = .{ .r = ch(a.r, b.r, t), .g = ch(a.g, b.g, t), .b = ch(a.b, b.b, t) } };
-}
-
-fn luaErrorStyle(app: *App, now_ns: i128) r.tui.Style {
-    const remain = app.lua_vm.last_error_until_ns -| now_ns;
-    if (remain >= r.lua.LUA_ERROR_FADE_NS) return .{ .fg = app.theme.on_err, .bg = app.theme.err };
-    const span: f64 = @floatFromInt(r.lua.LUA_ERROR_FADE_NS);
-    const left: f64 = @floatFromInt(@max(remain, 0));
-    const t = 1 - left / span;
-    return .{
-        .fg = blendTo(app.theme.on_err, app.theme.bg, t),
-        .bg = blendTo(app.theme.err, app.theme.bg, t),
-    };
-}
-
-fn luaErrorParagraph(arena: std.mem.Allocator, msg: []const u8, style: r.tui.Style) !r.tui.Paragraph {
-    var p: r.tui.Paragraph = .{ .style = style };
-    try p.appendText(arena, msg, style);
-    return p;
-}
-
-fn luaErrorHeight(app: *App, arena: std.mem.Allocator, width: u16, max_height: u16) !u16 {
-    const now_ns = std.Io.Clock.Timestamp.now(app.io, .awake).raw.nanoseconds;
-    if (!app.lua_vm.errorAlive(now_ns)) return 0;
-    const msg = app.lua_vm.getLastError();
-    if (msg.len == 0 or width == 0 or max_height == 0) return 0;
-
-    var p = try luaErrorParagraph(arena, msg, luaErrorStyle(app, now_ns));
-    return @min(p.totalHeight(width), max_height);
-}
-
-fn renderLuaError(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) !void {
-    if (area.width == 0 or area.height == 0) return;
-    const now_ns = std.Io.Clock.Timestamp.now(app.io, .awake).raw.nanoseconds;
-    if (!app.lua_vm.errorAlive(now_ns)) return;
-    const msg = app.lua_vm.getLastError();
-    if (msg.len == 0) return;
-
-    var p = try luaErrorParagraph(arena, msg, luaErrorStyle(app, now_ns));
-    p.renderSimple(arena, area, buf);
-}
-
-const RenderParagraphItem = struct {
-    p: r.tui.Paragraph,
-    h: usize,
-    is_tool_block: bool = false,
-    live_calls: ?[]const TimelinePart.ToolCallEntry = null,
-    inline_images: []const ToolInlineImage = &.{},
-};
-
-const ToolInlineImage = struct {
-    entry: *r.inline_images.Entry,
-    row: usize,
-    col: u16,
-    cols: u16,
-    rows: u16,
-};
-
-const FrameSnapshotTool = struct {
-    calls_start: usize,
-    calls_len: usize,
-    inner_w: u16,
-    padding: r.tui.Padding,
-    scroll_offset: usize,
-    rect: r.tui.Rect,
-};
-
-/// Zero the facing padding between the last two stack items when both are tool
-/// blocks, keeping `total` in sync. Only tool groups set `is_tool_block`, so
-/// this fires only when a tool group is appended after a tool group.
-fn collapseToolPadding(
-    out: *std.ArrayList(RenderParagraphItem),
-    total: *usize,
-    inner_w: u16,
-) void {
-    if (out.items.len < 2) return;
-    const prev = &out.items[out.items.len - 2];
-    const next = &out.items[out.items.len - 1];
-    if (!prev.is_tool_block or !next.is_tool_block) return;
-
-    const old_prev_h = prev.h;
-    prev.p.padding.top = 0;
-    prev.h = prev.p.totalHeightLong(inner_w);
-    total.* -= old_prev_h - prev.h;
-
-    const old_next_h = next.h;
-    next.p.padding.bottom = 0;
-    next.h = next.p.totalHeightLong(inner_w);
-    total.* -= old_next_h - next.h;
-}
-
-fn appendToolImage(
-    app: *App,
-    arena: std.mem.Allocator,
-    p: *r.tui.Paragraph,
-    images: *std.ArrayList(ToolInlineImage),
-    agent_id: r.AgentId,
-    call_id: []const u8,
-    source_url: ?[]const u8,
-    rail: []const u8,
-    inner_w: u16,
-) !void {
-    if (!app.kitty_graphics or !app.flags.inline_images) return;
-    const entry = app.inline_images.find(agent_id, call_id) orelse blk: {
-        const data_url = source_url orelse return;
-        break :blk app.inline_images.request(app.gpa, agent_id, call_id, data_url, &app.inline_images_ready) orelse return;
-    };
-    if (entry.state.load(.acquire) != .ready) {
-        const data_url = if (entry.data_url.len > 0) entry.data_url else source_url orelse "";
-        if (data_url.len > 0) {
-            _ = app.inline_images.request(app.gpa, agent_id, call_id, data_url, &app.inline_images_ready);
-        }
-    }
-    if (entry.state.load(.acquire) != .ready or entry.img == null) return;
-    const col: u16 = @intCast(textWidthCols(rail) + 4);
-    const available = inner_w -| p.padding.left -| p.padding.right -| col;
-    if (available == 0) return;
-    const m = r.inline_images.Store.metrics(entry, app.cell_px, available);
-    if (m.rows == 0 or m.cols == 0) return;
-    entry.frame_pinned = true;
-    try images.append(arena, .{ .entry = entry, .row = p.lines.items.len, .col = col, .cols = m.cols, .rows = m.rows });
-    for (0..m.rows) |row| {
-        var line = r.tui.Line{};
-        try line.pushText(arena, rail, .{ .fg = app.theme.muted });
-        try line.pushText(arena, if (row == 0) "  └ " else "    ", .{ .fg = app.theme.muted });
-        try p.lines.append(arena, line);
-    }
-}
-
-fn appendToolGroup(
-    arena: std.mem.Allocator,
-    out: *std.ArrayList(RenderParagraphItem),
-    total: *usize,
-    app: *App,
-    calls: *std.ArrayList(TimelinePart.ToolCallEntry),
-    inner_w: u16,
-    live: bool,
-) !void {
-    if (calls.items.len == 0) return;
-    std.mem.reverse(TimelinePart.ToolCallEntry, calls.items);
-    var para = try buildToolGroupParagraph(app, arena, calls.items, inner_w);
-    if (live) para.live_calls = arena.dupe(TimelinePart.ToolCallEntry, calls.items) catch null;
-    try out.append(arena, para);
-    total.* += para.h;
-    collapseToolPadding(out, total, inner_w);
-    calls.clearRetainingCapacity();
-}
-
-fn appendRail(arena: std.mem.Allocator, out: *std.ArrayList(u8), prefix: []const bool, connector: []const u8) !void {
-    try out.append(arena, ' ');
-    for (prefix) |continues| {
-        try out.appendSlice(arena, if (continues) r.tui.icon.box_v else " ");
-        try out.append(arena, ' ');
-    }
-    try out.appendSlice(arena, connector);
-    try out.append(arena, ' ');
-}
-
-/// Build one r.tui.Paragraph per TimelineEntry. Allocations live in `arena`; do not
-/// deinit the result. All paragraphs use `reverse = true` so the timeline-area
-/// caller can stack them bottom-up.
-fn buildTimelineEntryParagraph(
-    arena: std.mem.Allocator,
-    out: *std.ArrayList(RenderParagraphItem),
-    total: *usize,
-    app: *App,
-    entry: TimelineEntry,
-    inner_w: u16,
-    live_tool_blocks: bool,
-) !void {
-    // var buf: [255]u8 = undefined;
-
-    var header_para = r.tui.Paragraph{};
-    var header_line = r.tui.Line{};
-
-    var has_text = false;
-
-    // Header last so it renders on top (stack is bottom-up)
-    var tool_call_list = std.ArrayList(TimelinePart.ToolCallEntry).empty;
-
-    for (0..entry.parts.len) |i| {
-        const part = entry.parts[entry.parts.len - i - 1];
-        switch (part) {
-            .tool_call => |call| try tool_call_list.append(arena, call),
-            else => {
-                try appendToolGroup(arena, out, total, app, &tool_call_list, inner_w, live_tool_blocks);
-                switch (part) {
-                    .thinking => |text| {
-                        if (app.flags.show_thinking) {
-                            var p = r.tui.Paragraph{};
-                            try p.appendText(arena, text, .{ .fg = app.theme.muted });
-                            const h = p.totalHeightLong(inner_w);
-                            try out.append(arena, .{ .p = p, .h = h });
-                            total.* += h;
-                        }
-                    },
-                    .message => |text| {
-                        has_text = true;
-                        var p = r.tui.Paragraph{};
-                        try appendMarkdownText(&p, app.gpa, arena, text, inner_w, app.theme);
-                        const h = p.totalHeightLong(inner_w);
-                        try out.append(arena, .{ .p = p, .h = h });
-                        total.* += h;
-                    },
-                    .plain_text => |text| {
-                        has_text = true;
-                        var p = r.tui.Paragraph{};
-                        try p.appendText(arena, text, .{ .fg = app.theme.text });
-                        const h = p.totalHeightLong(inner_w);
-                        try out.append(arena, .{ .p = p, .h = h });
-                        total.* += h;
-                    },
-                    .diff => |diff| {
-                        if (app.flags.show_diffs) {
-                            const p = buildDiffParagraph(arena, app, diff);
-                            const h = p.totalHeightLong(inner_w);
-                            try out.append(arena, .{ .p = p, .h = h });
-                            total.* += h;
-                        }
-                    },
-                    .tool_call => unreachable,
-                }
-            },
-        }
-    }
-
-    try appendToolGroup(arena, out, total, app, &tool_call_list, inner_w, live_tool_blocks);
-
-    const show_header = entry.role != .agent or has_text;
-    if (show_header) {
-        const role_text: []const u8 = switch (entry.role) {
-            .user => "❯ you:",
-            .agent => "❯ blitz:",
-            .system => "❯ system:",
-        };
-
-        const role_color: r.tui.Color = switch (entry.role) {
-            .user => app.theme.role_user,
-            .agent => app.theme.role_agent,
-            .system => app.theme.role_system,
-        };
-
-        try header_line.pushSpan(arena, .{ .content = role_text, .style = .{ .modifier = .{ .bold = true }, .fg = role_color } });
-        try header_para.lines.append(arena, header_line);
-        try out.append(arena, .{ .p = header_para, .h = 1 });
-        total.* += 1;
-    }
-}
-
-fn buildToolGroupParagraph(
-    app: *App,
-    arena: std.mem.Allocator,
-    calls: []const TimelinePart.ToolCallEntry,
-    inner_w: u16,
-) !RenderParagraphItem {
-    var p = r.tui.Paragraph{ .wrap = false };
-    var images: std.ArrayList(ToolInlineImage) = .empty;
-
-    p.style.bg = app.theme.bg;
-    p.padding = .all(1);
-
-    const statuses = app.tool_status_entries.lock(app.io);
-    defer statuses.unlock();
-
-    for (calls) |call| {
-        const agent = app.registry.get(call.agent_id);
-        var line = r.tui.Line{};
-
-        const status = if (statuses.ptr.getAgent(call.agent_id)) |status_agent| status_agent.entries.getPtr(call.call_id) else null;
-        const history_result = if (agent) |value| findToolHistory(value, call.call_id) else null;
-        const status_image_url = if (status) |entry| if (entry.image_url.len > 0) entry.image_url else null else null;
-        const image_url = if (history_result) |value| value.image_url else status_image_url;
-        const live_result: ?r.sdk.ToolResult = if (history_result) |value| value.result else null;
-        const is_error = if (live_result) |result| result.is_error else if (status) |entry| entry.is_error else null;
-        if (is_error) |failed| {
-            if (failed) {
-                try line.pushSpan(arena, .{ .content = r.tui.icon.fail, .style = .{ .fg = app.theme.err, .modifier = .{ .bold = true } } });
-            } else {
-                try line.pushSpan(arena, .{ .content = r.tui.icon.ok, .style = .{ .fg = app.theme.ok, .modifier = .{ .bold = true } } });
-            }
-        } else {
-            try line.pushSpan(arena, .{ .content = text_utils.spinnerDots(app.frame_count), .style = .{ .fg = app.theme.text } });
-        }
-
-        try line.pushSpan(arena, .{ .content = " " });
-        if (status) |entry| {
-            if (entry.interrupted) try line.pushSpan(arena, .{ .content = "interrupted ", .style = .{ .fg = app.theme.err } });
-            if (entry.lines.items.len > 0) {
-                line.style = entry.lines.items[0].style;
-                for (entry.lines.items[0].spans.items) |span| try line.pushSpan(arena, span);
-            } else {
-                try line.pushSpan(arena, .{ .content = call.tool_name, .style = .{ .fg = app.theme.text_hl, .modifier = .{ .bold = true } } });
-            }
-
-            if (childCount(entry.*) == 1) {
-                if (onlyChildId(entry.*)) |only| try pushChildActivity(app, arena, &line, only);
-            }
-        } else {
-            try line.pushSpan(arena, .{ .content = call.tool_name, .style = .{ .fg = app.theme.text_hl, .modifier = .{ .bold = true } } });
-        }
-        try p.lines.append(arena, line);
-
-        if (status) |entry| {
-            if (entry.lines.items.len > 1) {
-                for (entry.lines.items[1..]) |status_line| {
-                    var extra = r.tui.Line{ .style = status_line.style };
-                    try extra.pushSpan(arena, .{ .content = "  " });
-                    for (status_line.spans.items) |span| try extra.pushSpan(arena, span);
-                    try p.lines.append(arena, extra);
-                }
-            }
-
-            try appendToolImage(app, arena, &p, &images, call.agent_id, call.call_id, image_url, "", inner_w);
-
-            var rail_nodes: std.ArrayList(RailNode) = .empty;
-            try appendChildRailBlocks(arena, statuses.ptr, app.registry, .{ .fg = app.theme.muted }, entry, &.{}, 0, &rail_nodes);
-
-            for (rail_nodes.items) |node| {
-                var nested = r.tui.Line{ .style = node.line.style };
-                const connector = node.connector();
-                var rail: std.ArrayList(u8) = .empty;
-                try appendRail(arena, &rail, node.prefix, connector);
-                try nested.pushSpan(arena, .{ .content = rail.items });
-                for (node.line.spans.items) |span| try nested.pushSpan(arena, span);
-                if (node.entry_start) {
-                    if (node.child_id) |node_child_id| try pushChildActivity(app, arena, &nested, node_child_id);
-                }
-                try p.lines.append(arena, nested);
-                if (node.image_call_id) |call_id| {
-                    var image_rail: std.ArrayList(u8) = .empty;
-                    try appendRail(arena, &image_rail, node.prefix, if (node.continues) r.tui.icon.box_v else " ");
-                    const node_history = if (app.registry.get(node.agent_id)) |node_agent| findToolHistory(node_agent, call_id) else null;
-                    const node_status_image_url = if (statuses.ptr.getAgent(node.agent_id)) |node_status_agent| if (node_status_agent.entries.getPtr(call_id)) |node_entry| if (node_entry.image_url.len > 0) node_entry.image_url else null else null else null;
-                    const node_image_url = if (node_history) |value| value.image_url else node_status_image_url;
-                    try appendToolImage(app, arena, &p, &images, node.agent_id, call_id, node_image_url, image_rail.items, inner_w);
-                }
-            }
-        } else {
-            try appendToolImage(app, arena, &p, &images, call.agent_id, call.call_id, image_url, "", inner_w);
-        }
-    }
-
-    return .{
-        .h = p.totalHeightLong(inner_w),
-        .p = p,
-        .is_tool_block = true,
-        .inline_images = images.items,
-    };
-}
-
-const rail_depth_cap = r.agent_registry.max_agents;
-const rail_recent_entries = 3;
-
-const RailNode = struct {
-    line: r.tui.Line,
-    entry_start: bool,
-    child_id: ?r.AgentId,
-    prefix: []const bool,
-    agent_id: r.AgentId,
-    image_call_id: ?[]const u8 = null,
-    continues: bool = false,
-
-    fn connector(self: RailNode) []const u8 {
-        if (self.entry_start) return if (self.continues) r.tui.icon.box_t_right else r.tui.icon.box_bl;
-        return if (self.continues) r.tui.icon.box_v else " ";
-    }
-};
-
-fn appendChildRailBlocks(
-    arena: std.mem.Allocator,
-    store: *ToolStatusStore,
-    registry: *r.agent_registry.Registry,
-    muted_style: r.tui.Style,
-    entry: *ToolStatusEntry,
-    prefix: []const bool,
-    depth: u32,
-    out: *std.ArrayList(RailNode),
-) anyerror!void {
-    if (depth >= rail_depth_cap) return;
-    const children = entry.child_ids.items;
-    if (children.len == 1) {
-        try walkAgentRail(arena, store, registry, muted_style, children[0], prefix, depth, out);
-        return;
-    }
-    for (children, 0..) |child, index| {
-        const continues = index + 1 < children.len;
-        var anchor = r.tui.Line{};
-        try anchor.pushSpan(arena, .{ .content = try railChildLabel(arena, store, registry, child), .style = muted_style });
-        try out.append(arena, .{
-            .line = anchor,
-            .entry_start = true,
-            .child_id = child,
-            .prefix = prefix,
-            .agent_id = child,
-            .continues = continues,
-        });
-        const child_prefix = try extendRailPrefix(arena, prefix, continues);
-        try walkAgentRail(arena, store, registry, muted_style, child, child_prefix, depth + 1, out);
-    }
-}
-
-fn extendRailPrefix(arena: std.mem.Allocator, prefix: []const bool, continues: bool) ![]const bool {
-    const child_prefix = try arena.alloc(bool, prefix.len + 1);
-    @memcpy(child_prefix[0..prefix.len], prefix);
-    child_prefix[prefix.len] = continues;
-    return child_prefix;
-}
-
-fn childCount(entry: ToolStatusEntry) usize {
-    return entry.child_ids.items.len;
-}
-
-fn onlyChildId(entry: ToolStatusEntry) ?r.AgentId {
-    return if (entry.child_ids.items.len == 1) entry.child_ids.items[0] else null;
-}
-
-fn anyChildLive(registry: *r.agent_registry.Registry, entry: ToolStatusEntry) bool {
-    for (entry.child_ids.items) |child| {
-        if (!registry.subtreeDone(child)) return true;
-    }
-    return false;
-}
-
-fn railChildLabel(arena: std.mem.Allocator, store: *ToolStatusStore, registry: *r.agent_registry.Registry, child_id: r.AgentId) ![]const u8 {
-    const child = registry.get(child_id);
-    const archived = store.getAgent(child_id);
-    const name = if (child) |agent| agent.name else if (archived) |agent| agent.name else "";
-    const task = if (child) |agent| agent.task_description else if (archived) |agent| agent.task_description else "";
-    const label = if (name.len > 0) name else try std.fmt.allocPrint(arena, "agent {d}", .{child_id.pack()});
-    return if (task.len > 0) try std.fmt.allocPrint(arena, "{s} -> {s}", .{ label, task }) else label;
-}
-
-fn pushChildActivity(app: *App, arena: std.mem.Allocator, line: *r.tui.Line, child_id: r.AgentId) !void {
-    const child = app.registry.get(child_id) orelse return;
-    const activity = child.activity;
-    if (activity != .idle) {
-        try line.pushSpan(arena, .{ .content = switch (activity) {
-            .idle => "",
-            .thinking => "  thinking",
-            .processing => "  processing",
-            .writing => "  writing",
-            .calling => "  calling",
-            .retrying => "  retrying",
-        }, .style = .{ .fg = app.theme.muted } });
-        try line.pushSpan(arena, .{ .content = " " });
-        try line.pushSpan(arena, .{ .content = text_utils.spinnerBar(app.frame_count), .style = .{ .fg = app.theme.muted } });
-    }
-    if (child.tokens_per_second > 0) {
-        try line.pushSpan(arena, .{ .content = "  " });
-        line.pushSpanPrint(arena, "{d}", .{@as(u32, @intFromFloat(child.tokens_per_second))}, .{ .fg = app.theme.text, .modifier = .{ .bold = true } }) catch {};
-        line.pushSpanPrint(arena, " T/s", .{}, .{ .fg = app.theme.info }) catch {};
-    }
-}
-
-fn walkAgentRail(
-    arena: std.mem.Allocator,
-    store: *ToolStatusStore,
-    registry: *r.agent_registry.Registry,
-    muted_style: r.tui.Style,
-    agent_id: r.AgentId,
-    prefix: []const bool,
-    depth: u32,
-    out: *std.ArrayList(RailNode),
-) !void {
-    if (depth >= rail_depth_cap) return;
-    if (agent_id.index >= r.agent_registry.max_agents) return;
-    const agent_status = store.getAgent(agent_id) orelse return;
-
-    const Candidate = struct { entry: *ToolStatusEntry, call_id: []const u8, anchored: bool };
-    var candidates: std.ArrayList(Candidate) = .empty;
-    var recent_count: usize = 0;
-    var it = agent_status.entries.iterator();
-    while (it.next()) |kv| {
-        const entry = kv.value_ptr;
-        const anchored = anyChildLive(registry, entry.*);
-        const image_entry = entry.has_image or agent_status.image_calls.contains(kv.key_ptr.*);
-        if (!anchored and entry.lines.items.len == 0 and !image_entry and childCount(entry.*) == 0) continue;
-        if (!anchored) recent_count += 1;
-        try candidates.append(arena, .{ .entry = entry, .call_id = kv.key_ptr.*, .anchored = anchored });
-    }
-    var skip = recent_count -| rail_recent_entries;
-    var visible: std.ArrayList(Candidate) = .empty;
-    for (candidates.items) |candidate| {
-        if (!candidate.anchored and skip > 0) {
-            skip -= 1;
-            continue;
-        }
-        try visible.append(arena, candidate);
-    }
-
-    for (visible.items, 0..) |candidate, vi| {
-        const tool_entry = candidate.entry;
-        const continues = vi + 1 < visible.items.len;
-        const child_prefix = try extendRailPrefix(arena, prefix, continues);
-
-        for (tool_entry.lines.items, 0..) |entry_line, li| {
-            try out.append(arena, .{
-                .line = entry_line,
-                .entry_start = li == 0,
-                .child_id = onlyChildId(tool_entry.*),
-                .prefix = prefix,
-                .agent_id = agent_id,
-                .image_call_id = if (li + 1 == tool_entry.lines.items.len) candidate.call_id else null,
-                .continues = continues,
-            });
-        }
-        if (tool_entry.lines.items.len == 0) {
-            var anchor = r.tui.Line{};
-            if (onlyChildId(tool_entry.*)) |child_id| {
-                try anchor.pushSpan(arena, .{ .content = try railChildLabel(arena, store, registry, child_id), .style = muted_style });
-            } else {
-                try anchor.pushSpan(arena, .{ .content = candidate.call_id, .style = muted_style });
-            }
-            try out.append(arena, .{
-                .line = anchor,
-                .entry_start = true,
-                .child_id = onlyChildId(tool_entry.*),
-                .prefix = prefix,
-                .agent_id = agent_id,
-                .image_call_id = candidate.call_id,
-                .continues = continues,
-            });
-        }
-        try appendChildRailBlocks(arena, store, registry, muted_style, tool_entry, child_prefix, depth + 1, out);
-    }
-}
-
-const ToolHistoryResult = struct {
-    result: r.sdk.ToolResult,
-    image_url: ?[]const u8 = null,
-};
-
-fn findToolHistory(agent: *r.agent.Agent, call_id: []const u8) ?ToolHistoryResult {
-    var i = agent.history().len;
-    while (i > 0) {
-        i -= 1;
-        const msg = agent.history()[i];
-        const parts = msg.parts();
-        for (parts, 0..) |part, part_index| switch (part) {
-            .tool_result => |res| {
-                if (!std.mem.eql(u8, res.id, call_id)) continue;
-                const image = if (part_index + 1 < parts.len) switch (parts[part_index + 1]) {
-                    .image => |img| if (std.mem.startsWith(u8, img.url, "data:")) r.sdk.ToolImage{ .url = img.url, .media_type = img.media_type } else null,
-                    else => null,
-                } else null;
-                return .{
-                    .result = .{
-                        .tool_call_id = res.id,
-                        .tool_name = res.name,
-                        .output = res.output,
-                        .is_error = res.is_error,
-                        .exit_loop = res.exit_loop,
-                        .image = image,
-                    },
-                    .image_url = if (image) |value| value.url else null,
-                };
-            },
-            else => {},
-        };
-    }
-    return null;
-}
-
-fn findToolResult(agent: *r.agent.Agent, call_id: []const u8) ?r.sdk.ToolResult {
-    return if (findToolHistory(agent, call_id)) |history| history.result else null;
-}
-
-fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: TimelinePart.DiffEntry) r.tui.Paragraph {
-    const theme = app.theme;
-    var p: r.tui.Paragraph = .{
-        .border = .single,
-        .sides = .left_only,
-        .reverse = true,
-        .style = .{ .fg = theme.border, .bg = theme.diff_surface },
-    };
-
-    var header_line = r.tui.Line{};
-    header_line.pushSpan(arena, .{ .content = "file: ", .style = .{ .fg = theme.muted, .modifier = .{ .bold = true } } }) catch {};
-    header_line.pushSpan(arena, .{ .content = d.path, .style = .{ .fg = theme.info } }) catch {};
-    p.lines.append(arena, header_line) catch {};
-
-    for (d.diff_lines) |dl| {
-        const dl_info: struct { prefix: []const u8, style: r.tui.Style, bg: r.tui.Color } = switch (dl.kind) {
-            .deletion => .{ .prefix = "- ", .style = .{ .fg = theme.diff_remove }, .bg = theme.diff_surface },
-            .addition => .{ .prefix = "+ ", .style = .{ .fg = theme.diff_add }, .bg = theme.diff_surface },
-            .context => .{ .prefix = "  ", .style = .{ .fg = theme.text }, .bg = theme.diff_surface },
-            .header => .{ .prefix = "@ ", .style = .{ .fg = theme.info, .modifier = .{ .bold = true } }, .bg = .reset },
-        };
-        const num_str = if (dl.line_number) |n|
-            std.fmt.allocPrint(arena, "{d:>4} ", .{n}) catch "     "
-        else
-            "     ";
-
-        var src: r.tui.Line = .{ .style = .{ .bg = dl_info.bg } };
-        src.pushText(arena, num_str, .{ .fg = theme.muted, .bg = dl_info.bg }) catch {};
-        src.pushSpan(arena, .{ .content = dl_info.prefix, .style = dl_info.style }) catch {};
-        src.pushSpan(arena, .{ .content = dl.content, .style = dl_info.style }) catch {};
-        p.lines.append(arena, src) catch break;
-    }
-    return p;
-}
-
-fn markdownTheme(theme: Theme) r.tui.HighlightTheme {
-    return .{
-        .heading = .{ .fg = theme.info, .modifier = .{ .bold = true } },
-        .bold = .{ .fg = theme.text, .modifier = .{ .bold = true } },
-        .italic = .{ .fg = theme.text, .modifier = .{ .italic = true } },
-        .inline_code = .{ .fg = theme.warn },
-        .code_default = .{ .fg = theme.text_hl },
-        .code_keyword = .{ .fg = theme.warn, .modifier = .{ .bold = true } },
-        .code_expression = .{ .fg = theme.info },
-        .code_string = .{ .fg = theme.ok },
-        .code_number = .{ .fg = theme.warn },
-        .code_comment = .{ .fg = theme.muted, .modifier = .{ .italic = true } },
-        .list_marker = .{ .fg = theme.info },
-        .quote = .{ .fg = theme.info, .modifier = .{ .italic = true } },
-        .hr = .{ .fg = theme.info },
-        .plain = .{ .fg = theme.text },
-        .table_border = .{ .fg = theme.border },
-        .table_text = .{ .fg = theme.text },
-        .table_header = .{ .fg = theme.text_hl, .modifier = .{ .bold = true } },
-        .mermaid = .{
-            .text = .{ .fg = theme.text },
-            .strong = .{ .fg = theme.text_hl, .modifier = .{ .bold = true } },
-            .muted = .{ .fg = theme.muted },
-            .border = .{ .fg = theme.border },
-            .edge = .{ .fg = theme.border },
-            .accent = .{ .fg = theme.info },
-        },
-    };
-}
-
-fn appendMarkdownText(p: *r.tui.Paragraph, gpa: std.mem.Allocator, arena: std.mem.Allocator, raw: []const u8, width: u16, theme: Theme) !void {
-    if (raw.len == 0) return;
-    const md_theme = markdownTheme(theme);
-    var renderer = r.tui.MarkdownStreamRenderer.initWithOptions(gpa, arena, width, md_theme, .{});
-    defer renderer.deinit();
-    try renderer.feed(raw);
-    renderer.finish();
-    if (width > 0) p.wrap = false;
-    while (try renderer.next()) |line| {
-        try p.lines.append(arena, line);
-    }
-}
-
-const TimelineStack = struct {
-    items: std.ArrayList(RenderParagraphItem) = .empty,
-    total: usize = 0,
-    full_total: usize = 0,
-    scroll_offset: usize = 0,
-    overflow: bool = false,
-    pinned_growth: bool = false,
-};
-
-const TimelineEntryHeight = struct { h: usize, bottom_tool: bool };
-
-const TimelineRenderSlot = struct {
-    items: []RenderParagraphItem,
-    total: usize,
-};
-
-fn callChildrenReady(app: *App, call: TimelinePart.ToolCallEntry, cacheable: bool) bool {
-    const statuses = app.tool_status_entries.lock(app.io);
-    defer statuses.unlock();
-    const status_agent = statuses.ptr.getAgent(call.agent_id) orelse return true;
-    const entry = status_agent.entries.getPtr(call.call_id) orelse return true;
-    for (entry.child_ids.items) |child| {
-        if (cacheable) {
-            if (app.registry.state(child) != null) return false;
-        } else if (!app.registry.subtreeDone(child)) return false;
-    }
-    return true;
-}
-
-fn timelineEntrySettled(app: *App, entry: TimelineEntry) bool {
-    for (entry.parts) |part| switch (part) {
-        .tool_call => |call| {
-            const agent = app.registry.get(call.agent_id) orelse return false;
-            if (findToolResult(agent, call.call_id) == null) return false;
-            if (!callChildrenReady(app, call, false)) return false;
-        },
-        else => {},
-    };
-    return true;
-}
-
-fn entryRenderCacheable(app: *App, entry: TimelineEntry, inner_w: u16) bool {
-    if (inner_w == 0) return false;
-    for (entry.parts) |part| switch (part) {
-        .tool_call => |call| {
-            const agent = app.registry.get(call.agent_id) orelse return false;
-            if (findToolResult(agent, call.call_id) == null) return false;
-            if (!callChildrenReady(app, call, true)) return false;
-        },
-        else => {},
-    };
-    return true;
-}
-
-fn timelineRenderCacheSync(app: *App, inner_w: u16, agent_key: ?u32, history_gen: u64) void {
-    const key_match = app.timeline_render_valid and
-        app.timeline_render_width == inner_w and
-        app.timeline_render_thinking == app.flags.show_thinking and
-        app.timeline_render_diffs == app.flags.show_diffs and
-        app.timeline_render_inline == app.flags.inline_images and
-        app.timeline_render_agent_key == agent_key and
-        app.timeline_render_history_gen == history_gen and
-        app.timeline_render_image_gen == app.inline_images.eviction_gen and
-        app.timeline_render_cell_px.w == app.cell_px.w and
-        app.timeline_render_cell_px.h == app.cell_px.h;
-    if (key_match) return;
-    app.invalidateTimelineRenderCache();
-    app.timeline_render_valid = true;
-    app.timeline_render_width = inner_w;
-    app.timeline_render_thinking = app.flags.show_thinking;
-    app.timeline_render_diffs = app.flags.show_diffs;
-    app.timeline_render_inline = app.flags.inline_images;
-    app.timeline_render_agent_key = agent_key;
-    app.timeline_render_history_gen = history_gen;
-    app.timeline_render_image_gen = app.inline_images.eviction_gen;
-    app.timeline_render_cell_px = app.cell_px;
-}
-
-fn timelineRenderCacheGet(app: *App, idx: usize) ?TimelineRenderSlot {
-    if (idx >= app.timeline_render_cache.items.len) return null;
-    return app.timeline_render_cache.items[idx];
-}
-
-fn timelineRenderCachePut(app: *App, idx: usize, items: []RenderParagraphItem, inner_w: u16) ?usize {
-    const arena = app.arena_timeline_render.allocator();
-    var total: usize = 0;
-    for (items) |*item| {
-        if (!item.p.prewrap(arena, inner_w)) return null;
-        item.h = item.p.totalHeightLong(inner_w);
-        total += item.h;
-    }
-    while (app.timeline_render_cache.items.len < idx + 1) {
-        app.timeline_render_cache.append(app.gpa, null) catch return null;
-    }
-    app.timeline_render_cache.items[idx] = .{ .items = items, .total = total };
-    return total;
-}
-
-fn appendEntryRenderItems(
-    alloc: std.mem.Allocator,
-    out: *std.ArrayList(RenderParagraphItem),
-    total: *usize,
-    items: []const RenderParagraphItem,
-    inner_w: u16,
-) !void {
-    for (items) |item| {
-        try out.append(alloc, item);
-        total.* += item.h;
-        collapseToolPadding(out, total, inner_w);
-    }
-}
-
-fn timelineEntryHeights(app: *App, alloc: std.mem.Allocator, inner_w: u16) []const TimelineEntryHeight {
-    const maybe_agent: ?*r.agent.Agent = if (app.main_agent_id) |id| app.registry.get(id) else null;
-    const key_match = app.timeline_heights_thinking == app.flags.show_thinking and
-        app.timeline_heights_diffs == app.flags.show_diffs and
-        app.timeline_heights_inline == app.flags.inline_images and
-        app.timeline_heights_agent == (maybe_agent != null) and
-        app.timeline_heights_image_gen == app.inline_images.eviction_gen and
-        app.timeline_heights_cell_px.w == app.cell_px.w and
-        app.timeline_heights_cell_px.h == app.cell_px.h;
-    if (app.timeline_heights_width != inner_w or !key_match or
-        app.timeline_heights.items.len > app.timeline.items.len)
-    {
-        app.timeline_heights.clearRetainingCapacity();
-        app.timeline_heights_width = inner_w;
-        app.timeline_heights_thinking = app.flags.show_thinking;
-        app.timeline_heights_diffs = app.flags.show_diffs;
-        app.timeline_heights_inline = app.flags.inline_images;
-        app.timeline_heights_agent = maybe_agent != null;
-        app.timeline_heights_image_gen = app.inline_images.eviction_gen;
-        app.timeline_heights_cell_px = app.cell_px;
-    }
-
-    while (app.timeline_heights.items.len < app.timeline.items.len) {
-        const idx = app.timeline_heights.items.len;
-        const entry = app.timeline.items[idx];
-        const chain_bottom_tool = app.timeline_heights.items.len > 0 and
-            app.timeline_heights.items[app.timeline_heights.items.len - 1].bottom_tool;
-        if (maybe_agent == null and entry.role != .system) {
-            app.timeline_heights.append(app.appAlloc(), .{ .h = 0, .bottom_tool = chain_bottom_tool }) catch break;
-            continue;
-        }
-        if (!timelineEntrySettled(app, entry)) break;
-
-        var scratch: std.ArrayList(RenderParagraphItem) = .empty;
-        var delta: usize = 0;
-        buildTimelineEntryParagraph(alloc, &scratch, &delta, app, entry, inner_w, false) catch break;
-        const top_tool = scratch.items.len > 0 and scratch.items[scratch.items.len - 1].is_tool_block;
-        if (chain_bottom_tool and top_tool) delta -|= 2;
-        const bottom_tool = scratch.items.len > 0 and scratch.items[0].is_tool_block;
-        app.timeline_heights.append(app.appAlloc(), .{ .h = delta, .bottom_tool = bottom_tool }) catch break;
-    }
-    return app.timeline_heights.items;
-}
-
-fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u16) !TimelineStack {
-    var s = TimelineStack{};
-    const maybe_agent: ?*r.agent.Agent = if (app.main_agent_id) |id| app.registry.get(id) else null;
-    const agent_key: ?u32 = if (maybe_agent != null) app.main_agent_id.?.pack() else null;
-    const history_gen: u64 = if (maybe_agent) |agent| agent.history_gen else 0;
-    timelineRenderCacheSync(app, inner_w, agent_key, history_gen);
-
-    var scroll_offset_usize: usize = if (app.auto_scroll) 0 else app.scroll_offset;
-    const target: usize = @as(usize, inner_h) +| scroll_offset_usize;
-
-    // Failed agent path
-    if (app.main_agent_id) |id| {
-        const slot = &app.registry.slots[id.index];
-        if (slot.state.load(.acquire) == .failed) {
-            const detail = if (slot.agent.?.last_error) |err| @errorName(err) else null;
-
-            var para = r.tui.Paragraph{};
-            try para.appendLineSpan(alloc, &.{
-                .{ .content = "ERROR: ", .style = .{ .fg = app.theme.warn, .modifier = .{ .bold = true } } },
-                .{ .content = "Press Ctrl+R to retry", .style = .{ .fg = app.theme.muted } },
-            });
-
-            if (detail) |txt| {
-                try para.appendText(alloc, txt, .{ .fg = app.theme.warn, .modifier = .{ .italic = true } });
-            }
-            const h = para.totalHeightLong(inner_w);
-            try s.items.append(alloc, .{ .p = para, .h = h });
-            s.total += h;
-        }
-    }
-
-    // build in reverse
-    var i = app.timeline.items.len;
-
-    // TODO: Add propose preview
-    // preview diff
-    if (app.active_permission) |perm| {
-        if (perm.payload == .diff) {
-            var parts = try alloc.alloc(TimelinePart, 1);
-            parts[0] = try diffTimelinePart(alloc, perm.payload.diff);
-            try buildTimelineEntryParagraph(alloc, &s.items, &s.total, app, .{
-                .role = .agent,
-                .parts = parts,
-            }, inner_w, true);
-        }
-    }
-
-    if (app.streaming_entry) |entry| {
-        try buildTimelineEntryParagraph(alloc, &s.items, &s.total, app, entry, inner_w, true);
-    }
-
-    while (i > 0 and s.total < target) {
-        i -= 1;
-        const entry = app.timeline.items[i];
-
-        if (maybe_agent == null and entry.role != .system) continue;
-
-        if (timelineRenderCacheGet(app, i)) |slot| {
-            try appendEntryRenderItems(alloc, &s.items, &s.total, slot.items, inner_w);
-        } else {
-            var scratch: std.ArrayList(RenderParagraphItem) = .empty;
-            var delta: usize = 0;
-            const cacheable = entryRenderCacheable(app, entry, inner_w);
-            const build_alloc = if (cacheable) app.arena_timeline_render.allocator() else alloc;
-            try buildTimelineEntryParagraph(build_alloc, &scratch, &delta, app, entry, inner_w, !cacheable);
-            if (cacheable) _ = timelineRenderCachePut(app, i, scratch.items, inner_w);
-            try appendEntryRenderItems(alloc, &s.items, &s.total, scratch.items, inner_w);
-        }
-    }
-
-    const heights = timelineEntryHeights(app, alloc, inner_w);
-    var hidden: usize = 0;
-    for (heights[0..@min(i, heights.len)]) |eh| hidden += eh.h;
-
-    var fresh_bottom_tool = heights.len > 0 and heights[heights.len - 1].bottom_tool;
-    var j = heights.len;
-    while (j < i) : (j += 1) {
-        const entry = app.timeline.items[j];
-        if (maybe_agent == null and entry.role != .system) continue;
-        var scratch: std.ArrayList(RenderParagraphItem) = .empty;
-        var delta: usize = 0;
-        if (timelineRenderCacheGet(app, j)) |slot| {
-            scratch.appendSlice(alloc, slot.items) catch break;
-            delta = slot.total;
-        } else {
-            const cacheable = entryRenderCacheable(app, entry, inner_w);
-            const build_alloc = if (cacheable) app.arena_timeline_render.allocator() else alloc;
-            buildTimelineEntryParagraph(build_alloc, &scratch, &delta, app, entry, inner_w, !cacheable) catch break;
-            if (cacheable) {
-                if (timelineRenderCachePut(app, j, scratch.items, inner_w)) |cached_total| delta = cached_total;
-            }
-        }
-        const top_tool = scratch.items.len > 0 and scratch.items[scratch.items.len - 1].is_tool_block;
-        if (fresh_bottom_tool and top_tool) delta -|= 2;
-        if (scratch.items.len > 0) {
-            fresh_bottom_tool = scratch.items[0].is_tool_block;
-        }
-        hidden += delta;
-    }
-    s.full_total = s.total +| hidden;
-
-    if (i > 0 and s.items.items.len > 0) {
-        const walked_top_tool = s.items.items[s.items.items.len - 1].is_tool_block;
-        const hidden_bottom_tool = if (i - 1 < heights.len) heights[i - 1].bottom_tool else fresh_bottom_tool;
-        if (walked_top_tool and hidden_bottom_tool) s.full_total -|= 2;
-    }
-
-    const max_scroll: usize = s.full_total -| inner_h;
-    if (app.scroll_total_width != inner_w) {
-        app.scroll_total_width = inner_w;
-    } else if (!app.auto_scroll and !app.scrollbar_dragging) {
-        const growth = s.full_total -| app.scroll_total;
-        if (growth > 0) {
-            app.scroll_offset +|= growth;
-            scroll_offset_usize = app.scroll_offset;
-            s.pinned_growth = true;
-        }
-    }
-    app.scroll_total = s.full_total;
-
-    if (scroll_offset_usize > max_scroll) {
-        scroll_offset_usize = max_scroll;
-        app.scroll_offset = max_scroll;
-        if (max_scroll == 0) app.auto_scroll = true;
-    }
-
-    s.scroll_offset = scroll_offset_usize;
-    s.overflow = s.full_total > inner_h;
-    return s;
-}
-
-fn renderTimelineStack(app: *App, s: TimelineStack, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    if (area.width == 0 or area.height == 0) return;
-
-    const alloc = app.arena_frame.allocator();
-    const inner_w: u16 = area.width;
-    const inner_h: u16 = area.height;
-    const scroll_offset_usize: usize = s.scroll_offset;
-
-    // Render bottom-up. anchor_y is the row JUST BELOW the next paragraph's
-    // bottom border. When the stack does not fill the area, anchor below the
-    // last visible row instead of the area bottom — keeps short timelines top-aligned
-    // and lets paragraphs grow downward until they hit the input.
-    const viewport_top: i128 = area.y;
-    const viewport_bottom: i128 = @as(i128, area.y) + @as(i128, inner_h);
-    const fill_bottom: usize = @min(s.total, @as(usize, inner_h));
-    var anchor_y: i128 = @as(i128, area.y) + @as(i128, @intCast(fill_bottom)) + @as(i128, @intCast(scroll_offset_usize));
-
-    for (s.items.items) |e| {
-        const item_bottom = anchor_y;
-        const item_top = item_bottom - @as(i128, @intCast(e.h));
-        defer anchor_y = item_top;
-
-        if (item_bottom <= viewport_top) break;
-        if (item_top >= viewport_bottom) continue;
-
-        const visible_top = @max(item_top, viewport_top);
-        const visible_bottom = @min(item_bottom, viewport_bottom);
-        if (visible_top >= visible_bottom) continue;
-
-        var p = e.p;
-        if (p.reverse) {
-            p.scroll_offset = @intCast(item_bottom - visible_bottom);
-        } else if (e.is_tool_block) {
-            const skip: usize = @intCast(visible_top - item_top);
-            p.scroll_offset +|= skip -| p.padding.top;
-            p.padding.top -|= @intCast(@min(skip, p.padding.top));
-            const cut_bottom: usize = @intCast(item_bottom - visible_bottom);
-            p.padding.bottom -|= @intCast(@min(cut_bottom, p.padding.bottom));
-        } else {
-            p.scroll_offset +|= @intCast(visible_top - item_top);
-        }
-
-        const sub: r.tui.Rect = .{
-            .x = area.x,
-            .y = @intCast(visible_top),
-            .width = inner_w,
-            .height = @intCast(visible_bottom - visible_top),
-        };
-        if (e.live_calls != null) {
-            var recorded = e;
-            recorded.p = p;
-            app.recordFrameSnapshotTool(recorded, sub, inner_w);
-        }
-        recordToolInlinePlacements(app, e.inline_images, p, sub);
-        p.render(alloc, sub, area, buf);
-    }
-}
-
-fn recordToolInlinePlacements(app: *App, images: []const ToolInlineImage, p: r.tui.Paragraph, area: r.tui.Rect) void {
-    const content_top: i128 = @as(i128, area.y) + p.padding.top;
-    const content_bottom: i128 = @as(i128, area.y) + area.height - p.padding.bottom;
-    for (images) |img| {
-        const top = content_top + @as(i128, @intCast(img.row)) - @as(i128, @intCast(p.scroll_offset));
-        const bottom = top + img.rows;
-        const visible_top = @max(top, content_top);
-        const visible_bottom = @min(bottom, content_bottom);
-        if (visible_top >= visible_bottom) continue;
-        recordInlinePlacement(app, img.entry, img.cols, area.x +| p.padding.left +| img.col, img.rows, top, visible_top, visible_bottom);
-    }
-}
-
-fn recordInlinePlacement(
-    app: *App,
-    entry: *r.inline_images.Entry,
-    cols: u16,
-    x: u16,
-    full_rows: usize,
-    item_top: i128,
-    visible_top: i128,
-    visible_bottom: i128,
-) void {
-    if (entry.state.load(.acquire) != .ready) return;
-    const img = entry.img orelse return;
-    if (cols == 0 or full_rows == 0 or img.width == 0 or img.height == 0) return;
-    const skip: u64 = @intCast(@max(0, visible_top - item_top));
-    const vis: u64 = @intCast(@max(0, visible_bottom - visible_top));
-    if (vis == 0 or skip >= full_rows) return;
-    const src_y: u32 = @intCast(@as(u64, img.height) * skip / full_rows);
-    var src_h: u32 = @intCast(@as(u64, img.height) * vis / full_rows);
-    src_h = @max(1, @min(src_h, img.height - src_y));
-    app.inline_placements.append(app.gpa, .{
-        .entry = entry,
-        .rect = .{
-            .x = x,
-            .y = @intCast(@max(0, visible_top)),
-            .width = cols,
-            .height = @intCast(@min(vis, std.math.maxInt(u16))),
-        },
-        .src = .{ .x = 0, .y = src_y, .w = img.width, .h = src_h },
-    }) catch {};
-}
-
-const scrollbar_strip_width: u16 = 3;
-
-const ScrollbarMetrics = struct { nob_top: u16, nob_h: u16 };
-
-fn scrollbarNobHeight(max_offset: usize, viewport: u16) u16 {
-    const v: usize = viewport;
-    if (v == 0) return 0;
-    const total = v +| max_offset;
-    return @intCast(@min(v, @max(@as(usize, 1), v * v / total)));
-}
-
-fn scrollbarMetrics(max_offset: usize, viewport: u16, offset: usize) ScrollbarMetrics {
-    const v: usize = viewport;
-    if (v == 0 or max_offset == 0) return .{ .nob_top = 0, .nob_h = 0 };
-    const nob_h: usize = scrollbarNobHeight(max_offset, viewport);
-    const span = v - nob_h;
-    const off = @min(offset, max_offset);
-    const nob_top = (max_offset - off) * span / max_offset;
-    return .{ .nob_top = @intCast(nob_top), .nob_h = @intCast(nob_h) };
-}
-
-fn renderTimelineScrollbar(app: *App, cs: TimelineStack, content_area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const viewport: usize = content_area.height;
-    if (content_area.width == 0 or viewport == 0 or !cs.overflow) return;
-    const live_max = cs.full_total -| viewport;
-    const max_offset: usize = if (app.scrollbar_dragging) app.scrollbar_drag_max else live_max;
-    const met = scrollbarMetrics(max_offset, content_area.height, cs.scroll_offset);
-
-    const track_x = content_area.x + content_area.width + 1;
-    const track_style: r.tui.Style = .{ .fg = app.theme.muted, .modifier = .{ .dim = true } };
-    var row: u16 = 0;
-    while (row < content_area.height) : (row += 1) {
-        buf.set(track_x, content_area.y + row, .{ .char = '│', .style = track_style });
-    }
-    const nob_style: r.tui.Style = .{ .fg = app.theme.info, .modifier = .{ .bold = true } };
-    var nob_row: u16 = 0;
-    while (nob_row < met.nob_h) : (nob_row += 1) {
-        buf.set(track_x, content_area.y + met.nob_top + nob_row, .{ .char = '█', .style = nob_style });
-    }
-
-    app.scrollbar_track = .{
-        .x = content_area.x + content_area.width,
-        .y = content_area.y,
-        .width = scrollbar_strip_width,
-        .height = content_area.height,
-    };
-    app.scrollbar_max = live_max;
-}
-
-fn mainProgressLine(app: *App, alloc: std.mem.Allocator) ?r.tui.Line {
-    const aid = app.main_agent_id orelse return null;
-    const slot = &app.registry.slots[aid.index];
-    const state = slot.state.load(.acquire);
-    if (state != .active and state != .complete and state != .failed) return null;
-
-    const agent = if (slot.agent) |*value| value else return null;
-    const active_agent_count = app.registry.countActive();
-    const waiting = !agent.isBusy() and active_agent_count > 0;
-    const secs = app.sessionRunSecs();
-
-    const hl: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .bold = true } };
-    const info: r.tui.Style = .{ .fg = app.theme.info };
-
-    var dur_buf: [32]u8 = undefined;
-    const dur = formatDuration(&dur_buf, secs);
-
-    const exec_pool = app.exec_pool;
-    const ssh_suffix: []const u8 = if (exec_pool.ssh_active and exec_pool.ssh_target != null) " (SSH ON)" else "";
-
-    var l = r.tui.Line{};
-    if (state == .active and !waiting) {
-        const spinner_str = text_utils.spinnerDots(app.frame_count);
-        if (agent.status == .compacting) {
-            l.pushSpanPrint(alloc, "{s} compacting", .{spinner_str}, info) catch {};
-            return l;
-        }
-
-        l.pushSpanPrint(alloc, "{s} (", .{spinner_str}, info) catch {};
-        l.pushSpanPrint(alloc, "{s}", .{dur}, hl) catch {};
-        l.pushSpanPrint(alloc, ")", .{}, info) catch {};
-
-        const state_str: []const u8 = switch (agent.activity) {
-            .idle => "",
-            .processing => "processing",
-            .thinking => "thinking",
-            .writing => "writing",
-            .calling => "calling",
-            .retrying => "retrying",
-        };
-
-        l.pushSpanPrint(alloc, "{s}", .{ssh_suffix}, info) catch {};
-
-        if (active_agent_count > 1) {
-            l.pushSpanPrint(alloc, " (", .{}, info) catch {};
-            l.pushSpanPrint(alloc, "{d}", .{active_agent_count -| 1}, hl) catch {};
-            l.pushSpanPrint(alloc, " background agents)", .{}, info) catch {};
-        }
-
-        if (agent.tokens_per_second > 0) {
-            l.pushSpanPrint(alloc, " ", .{}, info) catch {};
-            pushGradientWave(&l, alloc, "consuming tokens", app.theme.text_hl, app.theme.info, app.frame_count);
-            l.pushSpanPrint(alloc, " at ", .{}, info) catch {};
-            l.pushSpanPrint(alloc, "{d} t/s", .{@as(u32, @intFromFloat(agent.tokens_per_second))}, hl) catch {};
-            if (state_str.len > 0) {
-                l.pushSpanPrint(alloc, " while ", .{}, info) catch {};
-            }
-        } else if (state_str.len > 0) {
-            l.pushSpanPrint(alloc, " ", .{}, info) catch {};
-        }
-
-        if (agent.activity == .processing) {
-            pushGradientWave(&l, alloc, state_str, app.theme.text_hl, app.theme.info, app.frame_count);
-        } else if (state_str.len > 0) {
-            l.pushSpanPrint(alloc, "{s}", .{state_str}, hl) catch {};
-        }
-    } else if (waiting and (state == .active or state == .complete)) {
-        pushGradientWave(&l, alloc, "waiting", app.theme.text_hl, app.theme.info, app.frame_count);
-        l.pushSpanPrint(alloc, " for ", .{}, info) catch {};
-        l.pushSpanPrint(alloc, "{d}", .{active_agent_count -| @as(u32, if (state == .active) 1 else 0)}, hl) catch {};
-        l.pushSpanPrint(alloc, " agents (", .{}, info) catch {};
-        l.pushSpanPrint(alloc, "{s}", .{dur}, hl) catch {};
-        l.pushSpanPrint(alloc, ") {s}", .{ssh_suffix}, info) catch {};
-    } else {
-        const label = if (state == .complete) "Done" else "Failed";
-        l.pushSpanPrint(alloc, "{s} ({s}){s}", .{ label, dur, ssh_suffix }, info) catch {};
-    }
-    return l;
-}
-
-fn pushGradientWave(line: *r.tui.Line, alloc: std.mem.Allocator, text: []const u8, from_color: r.tui.Color, to_color: r.tui.Color, frame_count: usize) void {
-    var wave = text_utils.gradientWave(text, from_color, to_color, frame_count);
-    while (wave.next()) |chunk| {
-        line.pushSpan(alloc, .{ .content = chunk.text, .style = .{ .fg = chunk.color, .modifier = .{ .bold = true } } }) catch {};
-    }
-}
-
-fn formatDuration(buf: []u8, secs: u32) []const u8 {
-    if (secs >= 60)
-        return std.fmt.bufPrint(buf, "{d}m {d}s", .{ secs / 60, secs % 60 }) catch "…";
-    return std.fmt.bufPrint(buf, "{d}s", .{secs}) catch "…";
-}
-
-fn currentSelection(app: *App) u8 {
-    return switch (app.input_mode) {
-        .perm_select => |ps| ps.selected,
-        else => 0,
-    };
-}
-
-fn renderPermissionContent(app: *App, arena: std.mem.Allocator, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const block: r.tui.Block = .{
-        .style = .{ .fg = app.theme.warn },
-        .borders = .{ .bottom = true, .left = true, .right = true },
-    };
-
-    block.render(area, buf);
-    const inner = block.innerArea(area);
-    if (inner.width == 0 or inner.height == 0) return;
-
-    const field_rows = permFieldRows(app, arena, inner.width);
-    const entry = app.active_permission orelse {
-        _ = app.active_selection orelse return;
-        renderAskWidget(app, arena, inner, field_rows, buf);
-        return;
-    };
-
-    if (entry.payload == .ask) {
-        renderAskWidget(app, arena, inner, field_rows, buf);
-        return;
-    }
-
-    var header_buf: [256]u8 = undefined;
-    const header_line: []const u8 = switch (entry.payload) {
-        .call => |p| p.description,
-        .diff => |p| blk: {
-            const n = std.fmt.bufPrint(&header_buf, "edit: {s}", .{p.path}) catch "edit";
-            break :blk n;
-        },
-        .ask => unreachable,
-    };
-
-    const width = inner.width -| 1;
-    const header_rows = text_utils.wrappedRowCount(header_line, width);
-    _ = text_utils.renderWrappedText(buf, header_line, inner.x + 1, inner.y, width, header_rows, 0, .{ .fg = app.theme.warn });
-
-    const labels = [3][]const u8{ "allow?  yes", "        no", "        enter message" };
-    const labels_sel = [3][]const u8{ "allow? >yes", "       >no", "       >enter message" };
-
-    const cur_sel = currentSelection(app);
-    const bottom = inner.y +| inner.height;
-    for (0..labels.len) |i| {
-        const y = inner.y + header_rows + @as(u16, @intCast(i));
-        if (y >= bottom) break;
-        if (field_rows != null and i == labels.len - 1) {
-            renderPermField(app, arena, .{
-                .x = inner.x + 1 + PERM_FIELD_LABEL_COLS,
-                .y = y,
-                .width = inner.width -| 1 -| PERM_FIELD_LABEL_COLS,
-                .height = @min(field_rows.?, bottom -| y),
-            }, buf);
-            break;
-        }
-        const selected = field_rows == null and cur_sel == @as(u8, @intCast(i));
-        const style: r.tui.Style = .{ .fg = app.theme.text, .modifier = .{ .reverse = selected } };
-        const label = if (selected) labels_sel[i] else labels[i];
-        buf.setStringMax(inner.x + 1, y, label, style, inner.width -| 1);
-    }
-}
-
-fn renderAskWidget(app: *App, arena: std.mem.Allocator, inner: r.tui.Rect, field_rows: ?u16, buf: *r.tui.Buffer) void {
-    const s = app.askSession() orelse return;
-    const field_area = r.ask_session.render(s, .{
-        .accent = app.theme.info,
-        .muted = app.theme.muted,
-        .text = app.theme.text,
-    }, inner, field_rows, buf) orelse return;
-    renderPermField(app, arena, field_area, buf);
-}
-
-fn askPermissionInputHeight(app: *App, area_width: u16, area_height: u16, field_rows: ?u16) u16 {
-    const s = app.askSession() orelse return 9;
-    return r.ask_session.widgetHeight(s.questions, area_width, area_height, field_rows);
-}
-
-fn formatTokenCount(dest: []u8, count: u64) []const u8 {
-    if (count < 1000) {
-        return std.fmt.bufPrint(dest, "{d}", .{count}) catch "0";
-    } else if (count < 1_000_000) {
-        const k = @as(f64, @floatFromInt(count)) / 1000.0;
-        return std.fmt.bufPrint(dest, "{d:.1}k", .{k}) catch "0k";
-    } else {
-        const m = @as(f64, @floatFromInt(count)) / 1_000_000.0;
-        return std.fmt.bufPrint(dest, "{d:.1}M", .{m}) catch "0M";
-    }
-}
-
-test "tool images follow their calls, crop to the viewport, and follow recursive rail visibility" {
-    const gpa = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    var registry = r.agent_registry.Registry.init(gpa, std.testing.io);
-    defer registry.deinit();
-    var app: App = undefined;
-    app.io = std.testing.io;
-    app.gpa = gpa;
-    app.registry = &registry;
-    app.session_store = null;
-    app.theme = .default;
-    app.flags = .{};
-    app.frame_count = 0;
-    app.kitty_graphics = true;
-    app.cell_px = .{ .w = 10, .h = 20 };
-    app.tool_status_entries = .{};
-    app.inline_images = .{};
-    app.inline_placements = .empty;
-    defer app.inline_placements.deinit(gpa);
-    app.arena_frame = .init(gpa);
-    defer app.arena_frame.deinit();
-    const parent_id = r.AgentId{ .index = 0, .generation = 0 };
-    const child_id = r.AgentId{ .index = 1, .generation = 0 };
-    const grandchild_id = r.AgentId{ .index = 2, .generation = 0 };
-    var pixels: [0]u8 = .{};
-    var image = r.inline_images.Entry{
-        .agent_id = parent_id,
-        .call_id = "screenshot",
-        .kitty_id = 1,
-        .img = .{ .width = 80, .height = 80, .pixels = &pixels },
-        .state = .init(.ready),
-    };
-    try app.inline_images.entries.append(alloc, &image);
-    const calls = [_]TimelinePart.ToolCallEntry{
-        .{ .agent_id = parent_id, .call_id = "screenshot", .tool_name = "browser_screenshot" },
-        .{ .agent_id = parent_id, .call_id = "next", .tool_name = "bash" },
-    };
-    const item = try buildToolGroupParagraph(&app, alloc, &calls, 40);
-    try std.testing.expectEqual(@as(usize, 1), item.inline_images.len);
-    try std.testing.expectEqual(@as(usize, 1), item.inline_images[0].row);
-    try std.testing.expectEqual(@as(usize, 8), item.h);
-    var stack = TimelineStack{ .total = item.h };
-    try stack.items.append(alloc, item);
-    var buf = try r.tui.Buffer.init(gpa, .{ .width = 80, .height = 30 });
-    defer buf.deinit();
-    const area = r.tui.Rect{ .x = 10, .y = 3, .width = 40, .height = 20 };
-    renderTimelineStack(&app, stack, area, &buf);
-    try std.testing.expectEqual(@as(u21, '└'), buf.get(13, 5).char);
-    try std.testing.expectEqual(@as(u21, 'b'), buf.get(13, 9).char);
-    try std.testing.expectEqual(@as(usize, 1), app.inline_placements.items.len);
-    try std.testing.expectEqual(r.tui.Rect{ .x = 15, .y = 5, .width = 8, .height = 4 }, app.inline_placements.items[0].rect);
-
-    app.inline_placements.clearRetainingCapacity();
-    renderTimelineStack(&app, stack, .{ .x = 10, .y = 3, .width = 40, .height = 3 }, &buf);
-    try std.testing.expectEqual(@as(usize, 1), app.inline_placements.items.len);
-    try std.testing.expectEqual(r.tui.Rect{ .x = 15, .y = 3, .width = 8, .height = 1 }, app.inline_placements.items[0].rect);
-    try std.testing.expectEqual(@as(u32, 60), app.inline_placements.items[0].src.y);
-    try std.testing.expectEqual(@as(u32, 20), app.inline_placements.items[0].src.h);
-
-    app.inline_placements.clearRetainingCapacity();
-    stack.scroll_offset = 5;
-    renderTimelineStack(&app, stack, .{ .x = 10, .y = 3, .width = 40, .height = 3 }, &buf);
-    try std.testing.expectEqual(r.tui.Rect{ .x = 15, .y = 5, .width = 8, .height = 1 }, app.inline_placements.items[0].rect);
-    try std.testing.expectEqual(@as(u32, 0), app.inline_placements.items[0].src.y);
-    try std.testing.expectEqual(@as(u32, 20), app.inline_placements.items[0].src.h);
-
-    var nested_pixels: [0]u8 = .{};
-    var nested_image = r.inline_images.Entry{
-        .agent_id = grandchild_id,
-        .call_id = "screenshot",
-        .kitty_id = 2,
-        .img = .{ .width = 80, .height = 80, .pixels = &nested_pixels },
-        .state = .init(.ready),
-    };
-    try app.inline_images.entries.append(alloc, &nested_image);
-    const statuses = &app.tool_status_entries.value;
-    const parent = try statuses.forWrite(alloc, parent_id);
-    var launch_entry = ToolStatusEntry{};
-    try launch_entry.child_ids.append(alloc, child_id);
-    try parent.entries.put(alloc, "launch", launch_entry);
-    const child = try statuses.forWrite(alloc, child_id);
-    var child_entry = ToolStatusEntry{};
-    try child_entry.child_ids.append(alloc, grandchild_id);
-    try child_entry.lines.append(alloc, try r.tui.Line.new(alloc, "spawn", .{}, .{}));
-    try child.entries.put(alloc, "spawn", child_entry);
-    const grandchild = try statuses.forWrite(alloc, grandchild_id);
-    for ([_][]const u8{ "screenshot", "after1", "after2" }) |call_id| {
-        var entry = ToolStatusEntry{};
-        try entry.lines.append(alloc, try r.tui.Line.new(alloc, "{s}", .{call_id}, .{}));
-        try grandchild.entries.put(alloc, call_id, entry);
-    }
-    const launch = [_]TimelinePart.ToolCallEntry{.{ .agent_id = parent_id, .call_id = "launch", .tool_name = "start" }};
-    const nested = try buildToolGroupParagraph(&app, alloc, &launch, 40);
-    try std.testing.expectEqual(@as(usize, 1), nested.inline_images.len);
-    try std.testing.expectEqual(@as(u16, 9), nested.inline_images[0].col);
-    stack = .{ .total = nested.h };
-    try stack.items.append(alloc, nested);
-    app.inline_placements.clearRetainingCapacity();
-    buf.clear();
-    renderTimelineStack(&app, stack, area, &buf);
-    const nested_placement = app.inline_placements.items[0];
-    try std.testing.expectEqual(@as(u16, 20), nested_placement.rect.x);
-    try std.testing.expectEqual(@as(u21, '└'), buf.get(18, nested_placement.rect.y).char);
-    try std.testing.expectEqual(@as(u21, '│'), buf.get(14, nested_placement.rect.y).char);
-
-    var after = ToolStatusEntry{};
-    try after.lines.append(alloc, try r.tui.Line.new(alloc, "after3", .{}, .{}));
-    try grandchild.entries.put(alloc, "after3", after);
-    const expired = try buildToolGroupParagraph(&app, alloc, &launch, 40);
-    try std.testing.expectEqual(@as(usize, 0), expired.inline_images.len);
-    stack = .{ .total = expired.h };
-    try stack.items.append(alloc, expired);
-    app.inline_placements.clearRetainingCapacity();
-    renderTimelineStack(&app, stack, area, &buf);
-    try std.testing.expectEqual(@as(usize, 0), app.inline_placements.items.len);
-
-    const narrow = try buildToolGroupParagraph(&app, alloc, &calls, 6);
-    try std.testing.expectEqual(@as(usize, 0), narrow.inline_images.len);
-    app.flags.inline_images = false;
-    const disabled = try buildToolGroupParagraph(&app, alloc, &calls, 40);
-    try std.testing.expectEqual(@as(usize, 0), disabled.inline_images.len);
-}
-
-test "long image token scan advances" {
-    var buf = try r.tui.Buffer.init(std.testing.allocator, .{ .width = 600, .height = 1 });
-    defer buf.deinit();
-    var text: [600]u8 = undefined;
-    @memset(&text, 'a');
-    @memcpy(text[596..], ".png");
-    buf.setString(0, 0, &text, .{});
-    App.underlineImageTokens(&buf);
-    try std.testing.expect(!buf.get(0, 0).style.modifier.underline);
-}
-
-test "empty anchored tool entries carry their image call id" {
-    const alloc = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    var registry = r.agent_registry.Registry.init(alloc, std.testing.io);
-    defer registry.deinit();
-    var statuses = ToolStatusStore{};
-    const parent_id = r.AgentId{ .index = 0, .generation = 0 };
-    const child_id = r.AgentId{ .index = 1, .generation = 0 };
-    registry.slots[child_id.index].state.store(.reserved, .release);
-    const parent = try statuses.forWrite(arena.allocator(), parent_id);
-    var entry = ToolStatusEntry{};
-    try entry.child_ids.append(arena.allocator(), child_id);
-    try parent.entries.put(arena.allocator(), "empty-image", entry);
-
-    var nodes: std.ArrayList(RailNode) = .empty;
-    try walkAgentRail(arena.allocator(), &statuses, &registry, .{}, parent_id, &.{}, 0, &nodes);
-    try std.testing.expectEqual(@as(usize, 1), nodes.items.len);
-    try std.testing.expectEqualStrings("empty-image", nodes.items[0].image_call_id.?);
-}
-
-test "finished image-only tool entries stay in the recursive rail" {
-    const alloc = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    var registry = r.agent_registry.Registry.init(alloc, std.testing.io);
-    defer registry.deinit();
-    var statuses = ToolStatusStore{};
-    const agent_id = r.AgentId{ .index = 1, .generation = 0 };
-    registry.slots[agent_id.index].state.store(.complete, .release);
-    const agent = try statuses.forWrite(arena.allocator(), agent_id);
-    const entry = ToolStatusEntry{ .has_image = true };
-    try agent.entries.put(arena.allocator(), "image-only", entry);
-
-    var nodes: std.ArrayList(RailNode) = .empty;
-    try walkAgentRail(arena.allocator(), &statuses, &registry, .{}, agent_id, &.{}, 0, &nodes);
-    try std.testing.expectEqual(@as(usize, 1), nodes.items.len);
-    try std.testing.expectEqualStrings("image-only", nodes.items[0].image_call_id.?);
-}
-
-test "archived tool status rehydrates an evicted image source" {
-    const gpa = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    var registry = r.agent_registry.Registry.init(gpa, std.testing.io);
-    defer registry.deinit();
-    var app: App = undefined;
-    app.io = std.testing.io;
-    app.gpa = gpa;
-    app.registry = &registry;
-    app.session_store = null;
-    app.theme = .default;
-    app.flags = .{};
-    app.frame_count = 0;
-    app.kitty_graphics = true;
-    app.cell_px = .{ .w = 10, .h = 20 };
-    app.tool_status_entries = .{};
-    app.inline_images = .{};
-    app.arena_session = .init(gpa);
-    defer app.arena_session.deinit();
-    defer app.inline_images.deinit(gpa);
-
-    const agent_id = r.AgentId{ .index = 1, .generation = 0 };
-    const call_id = "archived-image";
-    const source = "data:image/png;base64,source";
-    try app.markToolImageUrl(agent_id, call_id, source);
-    try app.setToolStatus(agent_id, call_id, "");
-    const calls = [_]TimelinePart.ToolCallEntry{.{ .agent_id = agent_id, .call_id = call_id, .tool_name = "screenshot" }};
-    _ = try buildToolGroupParagraph(&app, arena.allocator(), &calls, 40);
-
-    const entry = app.inline_images.find(agent_id, call_id) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings(source, entry.data_url);
-}
-
-test "widget layout reserves sidebars and hides them on narrow terminals" {
-    const vm = try r.lua.LuaVm.init(std.testing.allocator);
-    defer vm.deinit();
-    vm.widget_entries[0] = .{ .kind = .sidebar, .side = .left, .size = 10 };
-    vm.widget_entries[1] = .{ .kind = .sidebar, .side = .right, .size = 6 };
-    vm.widget_count = 2;
-
-    const wide = computeWidgetLayout(vm, .{ .width = 100, .height = 30 });
-    try std.testing.expectEqual(@as(u16, 10), wide.left.?.width);
-    try std.testing.expectEqual(@as(u16, 6), wide.right.?.width);
-    try std.testing.expectEqual(@as(u16, 100 - 10 - 6), wide.main.width);
-    try std.testing.expectEqual(@as(u16, 10), wide.main.x);
-
-    const narrow = computeWidgetLayout(vm, .{ .width = 50, .height = 30 });
-    try std.testing.expect(narrow.left != null);
-    try std.testing.expectEqual(@as(?r.tui.Rect, null), narrow.right);
-    try std.testing.expectEqual(@as(u16, 50 - 10), narrow.main.width);
-
-    const tiny = computeWidgetLayout(vm, .{ .width = 44, .height = 30 });
-    try std.testing.expectEqual(@as(?r.tui.Rect, null), tiny.left);
-    try std.testing.expectEqual(@as(?r.tui.Rect, null), tiny.right);
-    try std.testing.expectEqual(@as(u16, 44), tiny.main.width);
 }
 
 test "finished retained agents survive reaping and take queued messages" {
@@ -5959,7 +2867,7 @@ test "path completion probes dirs and lists entries" {
 
     var frame = std.heap.ArenaAllocator.init(testing.allocator);
     defer frame.deinit();
-    const rows = pathCompletions(&f.app, frame.allocator());
+    const rows = r.view.completion.pathCompletions(&f.app, frame.allocator());
     try testing.expect(rows.len >= 2);
 
     var saw_dir = false;
@@ -6001,7 +2909,7 @@ test "command completion spans spaces in multi word commands" {
     try testing.expect(app.completionIsOpen());
     var frame = std.heap.ArenaAllocator.init(testing.allocator);
     defer frame.deinit();
-    const rows = commandCompletions(&app, frame.allocator(), app.input.slice(), app.input.cursor);
+    const rows = r.view.completion.commandCompletions(&app, frame.allocator(), app.input.slice(), app.input.cursor);
     try testing.expectEqual(@as(usize, 1), rows.len);
     try testing.expectEqualStrings("/mcp connect", rows.items[0].text);
 
@@ -6026,14 +2934,14 @@ test "command completion spans spaces in multi word commands" {
 
     app.input.set("/mcp ");
     app.input.cursor = app.input.len;
-    const mcp_rows = commandCompletions(&app, frame.allocator(), app.input.slice(), app.input.cursor);
+    const mcp_rows = r.view.completion.commandCompletions(&app, frame.allocator(), app.input.slice(), app.input.cursor);
     try testing.expectEqual(@as(usize, 2), mcp_rows.len);
 
     app.input.set("/mcp connect ");
     app.input.cursor = app.input.len;
     app.syncCompletion();
     try testing.expect(app.completionIsOpen());
-    const server_rows = commandCompletions(&app, frame.allocator(), app.input.slice(), app.input.cursor);
+    const server_rows = r.view.completion.commandCompletions(&app, frame.allocator(), app.input.slice(), app.input.cursor);
     try testing.expectEqual(@as(usize, 2), server_rows.len);
 
     app.input.set("/mcp connect gi");
@@ -6201,8 +3109,8 @@ fn askTestApp(app: *App, registry: *r.agent_registry.Registry) void {
     app.ask_session = null;
     app.ask_session_ticket = 0;
     app.theme = .default;
-    app.auto_scroll = true;
-    app.scroll_offset = 0;
+    app.view.auto_scroll = true;
+    app.view.scroll_offset = 0;
     app.dirty = false;
     app.registry = registry;
 }
@@ -6300,6 +3208,7 @@ test "waiting main agent shows waiting progress and cancel stops the tree" {
     app.session_run_ns = 0;
     app.session_run_started_ns = 0;
     app.frame_count = 0;
+    app.jobs_running = 0;
     app.theme = .default;
     var registry = r.agent_registry.Registry.init(std.testing.allocator, std.testing.io);
     defer registry.deinit();
@@ -6319,7 +3228,7 @@ test "waiting main agent shows waiting progress and cancel stops the tree" {
     var pool = r.exec.CmdPool.init(std.testing.allocator, std.testing.io, &env);
     defer pool.deinit();
     app.exec_pool = &pool;
-    const line = mainProgressLine(&app, app.sessionAlloc()).?;
+    const line = r.view.chrome.mainProgressLine(&app, app.sessionAlloc()).?;
     const text = try lineText(app.sessionAlloc(), line);
     try std.testing.expect(std.mem.startsWith(u8, text, "waiting for 1 agents ("));
     var command: r.cmd.Command = .cancel;
@@ -6327,89 +3236,4 @@ test "waiting main agent shows waiting progress and cancel stops the tree" {
     try std.testing.expectEqual(r.agent.Status.canceled, registry.get(parent_id).?.status);
     try std.testing.expectEqual(r.agent.Status.canceled, child.status);
     try std.testing.expectEqual(@as(u32, 0), registry.countActive());
-}
-
-test "sibling agent rails preserve ancestry through multiline tools images and empty agents" {
-    const gpa = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-    var registry = r.agent_registry.Registry.init(gpa, std.testing.io);
-    defer registry.deinit();
-    var app: App = undefined;
-    app.io = std.testing.io;
-    app.gpa = gpa;
-    app.registry = &registry;
-    app.session_store = null;
-    app.journal_restoring = false;
-    app.arena_session = .init(gpa);
-    defer app.arena_session.deinit();
-    app.tool_status_entries = .{};
-    app.theme = .default;
-    app.frame_count = 0;
-    app.flags = .{};
-    app.kitty_graphics = true;
-    app.cell_px = .{ .w = 10, .h = 20 };
-    app.inline_images = .{};
-    const parent = registry.reserve(null).?;
-    var children: [4]r.AgentId = undefined;
-    for (&children, [_][]const u8{ "alpha", "beta", "gamma", "delta" }) |*child, name| {
-        child.* = registry.reserve(parent).?;
-        try app.rememberAgentMetadata(child.*, name, "");
-        try app.addToolChild(parent, "launch", child.*);
-    }
-    const grandchild = registry.reserve(children[0]).?;
-    try app.setToolStatus(parent, "launch", "codemode");
-    try app.setToolResult(parent, "launch", false);
-    try app.setToolStatus(children[0], "first", "first\nmore");
-    try app.setToolStatus(children[0], "spawn", "spawn");
-    try app.addToolChild(children[0], "spawn", grandchild);
-    try app.setToolStatus(grandchild, "work", "grandchild work");
-    try app.setToolStatus(children[2], "image", "screenshot");
-    try app.setToolStatus(children[3], "tail", "tail\ncontinued");
-    var pixels: [0]u8 = .{};
-    var image = r.inline_images.Entry{
-        .agent_id = children[2],
-        .call_id = "image",
-        .kitty_id = 1,
-        .img = .{ .width = 80, .height = 80, .pixels = &pixels },
-        .state = .init(.ready),
-    };
-    try app.inline_images.entries.append(alloc, &image);
-    const calls = [_]TimelinePart.ToolCallEntry{.{ .agent_id = parent, .call_id = "launch", .tool_name = "codemode" }};
-    const item = try buildToolGroupParagraph(&app, alloc, &calls, 80);
-    const expected = [_][]const u8{
-        " ├ alpha",
-        " │ ├ first",
-        " │ │ more",
-        " │ └ spawn",
-        " │   └ grandchild work",
-        " ├ beta",
-        " ├ gamma",
-        " │ └ screenshot",
-        " │     └ ",
-        " │       ",
-        " │       ",
-        " │       ",
-        " └ delta",
-        "   └ tail",
-        "     continued",
-    };
-    try std.testing.expectEqual(expected.len + 1, item.p.lines.items.len);
-    for (item.p.lines.items[1..], expected) |line, wanted| {
-        var actual: std.ArrayList(u8) = .empty;
-        for (line.spans.items) |span| try actual.appendSlice(alloc, span.content);
-        try std.testing.expectEqualStrings(wanted, actual.items);
-    }
-    try std.testing.expectEqual(@as(usize, 1), item.inline_images.len);
-    try std.testing.expectEqual(@as(usize, 9), item.inline_images[0].row);
-    try std.testing.expectEqual(@as(u16, 9), item.inline_images[0].col);
-    try std.testing.expect(!callChildrenReady(&app, calls[0], false));
-    try std.testing.expect(!callChildrenReady(&app, calls[0], true));
-    for (children) |child| registry.releaseReservation(child);
-    registry.releaseReservation(grandchild);
-    try std.testing.expect(callChildrenReady(&app, calls[0], false));
-    try std.testing.expect(callChildrenReady(&app, calls[0], true));
-    const restored = try buildToolGroupParagraph(&app, alloc, &calls, 80);
-    try std.testing.expectEqual(item.p.lines.items.len, restored.p.lines.items.len);
 }

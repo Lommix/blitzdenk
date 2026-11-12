@@ -253,6 +253,8 @@ blitz.hooks.inject({
 ---------------------------------------------------------------------------------------------------
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.BASH,
+	blitz.tools.KILL_JOB,
+	blitz.tools.READ_JOB,
 	blitz.tools.READ,
 	blitz.tools.EDIT,
 	blitz.tools.WRITE,

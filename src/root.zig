@@ -14,6 +14,7 @@ pub const compact = @import("compact.zig");
 pub const exec = @import("exec");
 pub const ssh = @import("ssh.zig");
 pub const artifact = @import("artifact.zig");
+pub const jobs = @import("jobs.zig");
 pub const permissions = @import("permissions");
 pub const ask_session = @import("ask_session.zig");
 pub const selection = @import("selection.zig");
@@ -43,6 +44,8 @@ pub const c = @import("c");
 pub const inject = @import("inject.zig");
 pub const dash = @import("dashboard.zig");
 pub const wizard = @import("wizard.zig");
+pub const view = @import("view/root.zig");
+pub const diff = @import("diff.zig");
 pub const completion = @import("completion.zig");
 
 test {
