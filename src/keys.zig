@@ -177,23 +177,23 @@ fn parseKeyName(name: []const u8) ?tui.Terminal.KeyCode {
         return .{ .char = c };
     }
 
-    if (eqlIgnoreCase(name, "esc") or eqlIgnoreCase(name, "escape")) return .esc;
-    if (eqlIgnoreCase(name, "enter") or eqlIgnoreCase(name, "return") or eqlIgnoreCase(name, "cr")) return .enter;
-    if (eqlIgnoreCase(name, "tab")) return .tab;
-    if (eqlIgnoreCase(name, "bs") or eqlIgnoreCase(name, "backspace")) return .backspace;
-    if (eqlIgnoreCase(name, "space")) return .{ .char = ' ' };
-    if (eqlIgnoreCase(name, "up")) return .arrow_up;
-    if (eqlIgnoreCase(name, "down")) return .arrow_down;
-    if (eqlIgnoreCase(name, "left")) return .arrow_left;
-    if (eqlIgnoreCase(name, "right")) return .arrow_right;
-    if (eqlIgnoreCase(name, "home")) return .home;
-    if (eqlIgnoreCase(name, "end")) return .end;
-    if (eqlIgnoreCase(name, "pageup") or eqlIgnoreCase(name, "pgup")) return .page_up;
-    if (eqlIgnoreCase(name, "pagedown") or eqlIgnoreCase(name, "pgdn")) return .page_down;
-    if (eqlIgnoreCase(name, "insert") or eqlIgnoreCase(name, "ins")) return .insert;
-    if (eqlIgnoreCase(name, "delete") or eqlIgnoreCase(name, "del")) return .delete;
-    if (eqlIgnoreCase(name, "lt")) return .{ .char = '<' };
-    if (eqlIgnoreCase(name, "gt")) return .{ .char = '>' };
+    if (std.ascii.eqlIgnoreCase(name, "esc") or std.ascii.eqlIgnoreCase(name, "escape")) return .esc;
+    if (std.ascii.eqlIgnoreCase(name, "enter") or std.ascii.eqlIgnoreCase(name, "return") or std.ascii.eqlIgnoreCase(name, "cr")) return .enter;
+    if (std.ascii.eqlIgnoreCase(name, "tab")) return .tab;
+    if (std.ascii.eqlIgnoreCase(name, "bs") or std.ascii.eqlIgnoreCase(name, "backspace")) return .backspace;
+    if (std.ascii.eqlIgnoreCase(name, "space")) return .{ .char = ' ' };
+    if (std.ascii.eqlIgnoreCase(name, "up")) return .arrow_up;
+    if (std.ascii.eqlIgnoreCase(name, "down")) return .arrow_down;
+    if (std.ascii.eqlIgnoreCase(name, "left")) return .arrow_left;
+    if (std.ascii.eqlIgnoreCase(name, "right")) return .arrow_right;
+    if (std.ascii.eqlIgnoreCase(name, "home")) return .home;
+    if (std.ascii.eqlIgnoreCase(name, "end")) return .end;
+    if (std.ascii.eqlIgnoreCase(name, "pageup") or std.ascii.eqlIgnoreCase(name, "pgup")) return .page_up;
+    if (std.ascii.eqlIgnoreCase(name, "pagedown") or std.ascii.eqlIgnoreCase(name, "pgdn")) return .page_down;
+    if (std.ascii.eqlIgnoreCase(name, "insert") or std.ascii.eqlIgnoreCase(name, "ins")) return .insert;
+    if (std.ascii.eqlIgnoreCase(name, "delete") or std.ascii.eqlIgnoreCase(name, "del")) return .delete;
+    if (std.ascii.eqlIgnoreCase(name, "lt")) return .{ .char = '<' };
+    if (std.ascii.eqlIgnoreCase(name, "gt")) return .{ .char = '>' };
 
     if ((name[0] == 'F' or name[0] == 'f') and name.len <= 3) {
         const n = std.fmt.parseInt(u8, name[1..], 10) catch return null;
@@ -215,14 +215,4 @@ fn parseKeyName(name: []const u8) ?tui.Terminal.KeyCode {
     }
 
     return null;
-}
-
-fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        const xl = if (x >= 'A' and x <= 'Z') x + ('a' - 'A') else x;
-        const yl = if (y >= 'A' and y <= 'Z') y + ('a' - 'A') else y;
-        if (xl != yl) return false;
-    }
-    return true;
 }

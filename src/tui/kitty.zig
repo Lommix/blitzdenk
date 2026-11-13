@@ -67,10 +67,6 @@ pub fn transmitRgba(writer: *std.Io.Writer, id: u32, rgba: []const u8, width: u3
     }
 }
 
-pub fn place(writer: *std.Io.Writer, id: u32, placement: Placement) !void {
-    try placeWithId(writer, id, 0, placement);
-}
-
 pub fn placeWithId(writer: *std.Io.Writer, id: u32, placement_id: u32, placement: Placement) !void {
     try writer.print("\x1b[{d};{d}H", .{ @as(u32, placement.row) + 1, @as(u32, placement.col) + 1 });
     try writer.print(apc_start ++ "a=p,i={d},p={d},q=2,x={d},y={d},w={d},h={d},c={d},r={d},C=1" ++ apc_end, .{

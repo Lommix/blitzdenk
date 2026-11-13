@@ -58,19 +58,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         .after = args.content,
         .path = args.file_path,
     } });
-    switch (decision) {
-        .approved => {},
-        .denied => return r.errResult(call, "User declined write. Change the approach or ask the user before retrying."),
-        .message => |txt| {
-            const wrapped = std.fmt.allocPrint(
-                ctx.alloc,
-                "User declined write and left feedback: {s}\nChange the approach or ask the user before retrying.",
-                .{txt},
-            ) catch txt;
-            return r.errResult(call, wrapped);
-        },
-        else => return r.errResult(call, "permission unresolved"),
-    }
+    if (r.permissionDenied(ctx, call, decision, "write", "write")) |res| return res;
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 

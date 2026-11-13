@@ -306,6 +306,4 @@ fn parseHttpStatus(stderr: []const u8) ?u16 {
     return status;
 }
 
-fn nowMs(io: std.Io) i64 {
-    return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
-}
+const nowMs = r.util.nowMs;

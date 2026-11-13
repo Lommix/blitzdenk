@@ -7,6 +7,7 @@ const skills_mod = @import("skills.zig");
 
 const CONFIG_DIR = @import("main.zig").DEFAULT_CONFIG_PATH;
 pub const MAX_AGENT_TOOLS = 64;
+pub const MAX_TOOL_NAME_LEN = 128;
 const MAX_AVAILABLE_SYSTEMS = 32;
 
 // -------------------------------------------------------------------------------
@@ -97,7 +98,7 @@ pub const ToolSet = struct {
 const ToolEntry = struct { tool: r.tools.Tool, flags: ToolFlags };
 
 pub const AgentTools = struct {
-    names: [MAX_AGENT_TOOLS][255]u8 = undefined,
+    names: [MAX_AGENT_TOOLS][MAX_TOOL_NAME_LEN]u8 = undefined,
     name_lens: [MAX_AGENT_TOOLS]u8 = @splat(0),
     len: u8 = 0,
 
@@ -110,7 +111,7 @@ pub const AgentTools = struct {
 
         var tools: AgentTools = .{};
         inline for (names) |name| {
-            if (name.len > 128) @compileError("default agent tool name too long");
+            if (name.len > MAX_TOOL_NAME_LEN) @compileError("default agent tool name too long");
             @memcpy(tools.names[tools.len][0..name.len], name);
             tools.name_lens[tools.len] = name.len;
             tools.len += 1;
@@ -141,16 +142,6 @@ pub const AgentConfigDiagnostic = union(enum) {
 pub const AgentConfigResult = union(enum) {
     config: r.models.Config,
     diagnostic: AgentConfigDiagnostic,
-};
-
-pub const NewAgentDef = struct {
-    name: []const u8,
-    description: []const u8,
-    prompt: []const u8,
-    in_agent_tool: bool = true,
-    skills: skills_mod.Filter = .{},
-    tools: []const []const u8 = &.{},
-    model: ?AgentModelConfig = null,
 };
 
 pub const Flags = packed struct(u8) {
@@ -502,10 +493,10 @@ fn warnUnknownSkills(self: *const Self, agent_name: []const u8, filter: skills_m
     }
 }
 
-pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: NewAgentDef) !AgentType {
+pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: AgentDef, tool_names: []const []const u8) !AgentType {
     if (self.findAgentType(def.name) != null) return error.DuplicateAgentName;
-    if (def.tools.len > MAX_AGENT_TOOLS) return error.TooManyTools;
-    for (def.tools) |name| if (name.len > 128) return error.NameTooLong;
+    if (tool_names.len > MAX_AGENT_TOOLS) return error.TooManyTools;
+    for (tool_names) |name| if (name.len > MAX_TOOL_NAME_LEN) return error.NameTooLong;
     self.warnUnknownSkills(def.name, def.skills);
 
     const idx: AgentType = if (self.sessionBindingFor(def.name)) |binding|
@@ -544,7 +535,7 @@ pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: NewAgentDef
             };
         } else null,
     });
-    try self.setAgentTools(idx, def.tools);
+    try self.setAgentTools(idx, tool_names);
     if (self.session_active and !self.config_reload_in_progress and self.sessionBindingFor(def.name) == null) {
         try self.captureSessionBinding(cfg, idx);
     }
@@ -794,7 +785,7 @@ pub fn setAgentTools(self: *Self, agent_type: AgentType, names: []const []const 
     if (names.len > MAX_AGENT_TOOLS) return error.TooManyTools;
     tools.len = 0;
     for (names) |name| {
-        if (name.len > 128) return error.NameTooLong;
+        if (name.len > MAX_TOOL_NAME_LEN) return error.NameTooLong;
         @memcpy(tools.names[tools.len][0..name.len], name);
         tools.name_lens[tools.len] = @intCast(name.len);
         tools.len += 1;
@@ -823,7 +814,7 @@ pub fn addAgentTools(self: *Self, agent_type: AgentType, names: []const []const 
 }
 
 fn putAgentTool(self: *const Self, tools: *AgentTools, name: []const u8) !void {
-    if (name.len > 128) return error.NameTooLong;
+    if (name.len > MAX_TOOL_NAME_LEN) return error.NameTooLong;
     for (0..tools.len) |i| {
         if (std.mem.eql(u8, tools.nameAt(i), name)) return;
     }
@@ -1044,7 +1035,7 @@ test "session model contract owns configuration through reload and refreshes on 
     const first = try fixture.model("first", "https://first.invalid");
     try factory.setAgentModel(&fixture.cfg, .general, first, false);
     try factory.setAgentEffort(.general, .high, false);
-    const worker = try factory.addAgent(&fixture.cfg, .{ .name = "worker", .description = "", .prompt = "", .model = .{ .model = first, .effort = .max } });
+    const worker = try factory.addAgent(&fixture.cfg, .{ .name = "worker", .description = "", .prompt = "", .model = .{ .model = first, .effort = .max } }, &.{});
     try factory.startSession(&fixture.cfg);
     var live = try r.agent.Agent.init(std.testing.allocator, std.testing.io, try fixture.config(worker), .{});
     defer live.deinit();
@@ -1059,8 +1050,8 @@ test "session model contract owns configuration through reload and refreshes on 
     const second = try fixture.model("second", "https://second.invalid");
     try factory.setAgentModel(&fixture.cfg, .general, second, false);
     try factory.setAgentEffort(.general, .low, false);
-    const newcomer = try factory.addAgent(&fixture.cfg, .{ .name = "newcomer", .description = "", .prompt = "", .model = .{ .model = second } });
-    const reordered = try factory.addAgent(&fixture.cfg, .{ .name = "worker", .description = "", .prompt = "", .model = .{ .model = second, .effort = .low } });
+    const newcomer = try factory.addAgent(&fixture.cfg, .{ .name = "newcomer", .description = "", .prompt = "", .model = .{ .model = second } }, &.{});
+    const reordered = try factory.addAgent(&fixture.cfg, .{ .name = "worker", .description = "", .prompt = "", .model = .{ .model = second, .effort = .low } }, &.{});
     try factory.applySessionBindings(&fixture.cfg, true);
     factory.config_reload_in_progress = false;
 
@@ -1111,7 +1102,7 @@ test "runtime model changes and forced reloads update the session contract" {
     factory.config_reload_in_progress = false;
     try std.testing.expectEqualStrings("first", (try fixture.config(.general)).model);
     try std.testing.expectEqual(r.config.ReasoningEffort.low, factory.agentEffort(.general).?);
-    const late = try factory.addAgent(&fixture.cfg, .{ .name = "late", .description = "", .prompt = "", .model = .{ .model = second } });
+    const late = try factory.addAgent(&fixture.cfg, .{ .name = "late", .description = "", .prompt = "", .model = .{ .model = second } }, &.{});
     const late_binding = factory.sessionBindingFor("late") orelse return error.TestExpectedBinding;
     try std.testing.expectEqual(late, late_binding.agent_type);
     try std.testing.expectEqual(r.config.ReasoningEffort.medium, late_binding.effort);
@@ -1126,7 +1117,7 @@ test "reload reclaims binding slots released by renamed agents" {
     defer fixture.deinit();
     const factory = &fixture.factory;
     const first = try fixture.model("first", "https://first.invalid");
-    const alpha = try factory.addAgent(&fixture.cfg, .{ .name = "alpha", .description = "", .prompt = "", .model = .{ .model = first } });
+    const alpha = try factory.addAgent(&fixture.cfg, .{ .name = "alpha", .description = "", .prompt = "", .model = .{ .model = first } }, &.{});
     try factory.startSession(&fixture.cfg);
     try std.testing.expectEqual(@as(u6, 3), @backingInt(alpha));
     const initial = try fixture.config(alpha);
@@ -1140,7 +1131,7 @@ test "reload reclaims binding slots released by renamed agents" {
     factory.agent_counter = 3;
     factory.config_reload_in_progress = true;
     const second = try fixture.model("second", "https://second.invalid");
-    const beta = try factory.addAgent(&fixture.cfg, .{ .name = "beta", .description = "", .prompt = "", .model = .{ .model = second } });
+    const beta = try factory.addAgent(&fixture.cfg, .{ .name = "beta", .description = "", .prompt = "", .model = .{ .model = second } }, &.{});
     try factory.applySessionBindings(&fixture.cfg, true);
     factory.config_reload_in_progress = false;
     try std.testing.expectEqual(@as(u6, 4), @backingInt(beta));
@@ -1155,8 +1146,8 @@ test "reload reclaims binding slots released by renamed agents" {
     factory.agent_counter = 3;
     factory.config_reload_in_progress = true;
     const third = try fixture.model("third", "https://third.invalid");
-    const gamma = try factory.addAgent(&fixture.cfg, .{ .name = "gamma", .description = "", .prompt = "", .model = .{ .model = third } });
-    const beta_again = try factory.addAgent(&fixture.cfg, .{ .name = "beta", .description = "", .prompt = "", .model = .{ .model = third } });
+    const gamma = try factory.addAgent(&fixture.cfg, .{ .name = "gamma", .description = "", .prompt = "", .model = .{ .model = third } }, &.{});
+    const beta_again = try factory.addAgent(&fixture.cfg, .{ .name = "beta", .description = "", .prompt = "", .model = .{ .model = third } }, &.{});
     try factory.applySessionBindings(&fixture.cfg, true);
     factory.config_reload_in_progress = false;
     try std.testing.expectEqual(@as(u6, 4), @backingInt(beta_again));

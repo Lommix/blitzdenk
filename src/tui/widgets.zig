@@ -183,34 +183,7 @@ pub const Line = struct {
 
     /// Render at (x, y) clipping to max_width columns.
     pub fn render(self: *const Line, x: u16, y: u16, max_width: u16, buf: *Buffer) void {
-        var col: u16 = 0;
-        for (self.spans.items) |span| {
-            if (col >= max_width) break;
-            const span_style = if (span.style.fg != .reset or span.style.bg != .reset or
-                !span.style.modifier.eql(.{}))
-                span.style
-            else
-                self.style;
-            var i: usize = 0;
-            while (i < span.content.len) {
-                if (col >= max_width) break;
-                const len = std.unicode.utf8ByteSequenceLength(span.content[i]) catch break;
-                if (i + len > span.content.len) break;
-                const cp = std.unicode.utf8Decode(span.content[i..][0..len]) catch break;
-                i += len;
-                if (cp == '\t') {
-                    var k: u16 = 0;
-                    while (k < TAB_WIDTH and col < max_width) : (k += 1) {
-                        buf.set(x +| col, y, .{ .char = ' ', .style = span_style });
-                        col +|= 1;
-                    }
-                    continue;
-                }
-                if (cp < 0x20 or cp == 0x7F) continue;
-                buf.set(x +| col, y, .{ .char = cp, .style = span_style });
-                col +|= 1;
-            }
-        }
+        renderRowCells(self, x, y, max_width, buf, null);
     }
 };
 
@@ -1163,12 +1136,12 @@ fn pushTablePadding(line: *Line, alloc: std.mem.Allocator, width: usize, style: 
     try line.pushSpan(alloc, .{ .content = pad, .style = style });
 }
 
-const TableCellIter = struct {
+pub const TableCellIter = struct {
     text: []const u8,
     pos: usize,
     end: usize,
 
-    fn next(self: *TableCellIter) ?[]const u8 {
+    pub fn next(self: *TableCellIter) ?[]const u8 {
         if (self.pos > self.end) return null;
         const start = self.pos;
         const next_bar = std.mem.indexOfScalarPos(u8, self.text, start, '|') orelse self.end;
@@ -1177,7 +1150,7 @@ const TableCellIter = struct {
     }
 };
 
-fn splitTableCells(text: []const u8) TableCellIter {
+pub fn splitTableCells(text: []const u8) TableCellIter {
     var start: usize = 0;
     var end: usize = text.len;
     while (start < end and (text[start] == ' ' or text[start] == '\t')) start += 1;
@@ -1215,13 +1188,17 @@ fn fillBg(buf: *Buffer, area: Rect, clip: Rect, style: Style) void {
     }
 }
 
-/// Render a Line at signed (x, y), clipping to `clip` and to `max_width`
-/// columns. Mirrors Line.render but routes every cell write through clip.
-/// `para_bg` is the Paragraph background; cells whose effective style.bg is
-/// `.reset` (transparent) inherit it so text rows pick up the surrounding
-/// Paragraph fill instead of leaving the terminal default.
-fn renderRowClipped(row: *const Line, x: i32, y: i32, max_width: u16, buf: *Buffer, clip: Rect, para_bg: cell.Color) void {
-    if (y < 0 or y > std.math.maxInt(u16)) return;
+const RowClip = struct {
+    rect: Rect,
+    para_bg: cell.Color,
+};
+
+/// Decode a Line's spans into cells at signed (x, y), stopping after
+/// `max_width` columns. With `clip`, every write routes through setClipped
+/// and cells whose effective style.bg is `.reset` (transparent) inherit
+/// `para_bg` so text rows pick up the surrounding Paragraph fill instead of
+/// leaving the terminal default.
+fn renderRowCells(row: *const Line, x: i32, y: i32, max_width: u16, buf: *Buffer, clip: ?RowClip) void {
     var col: u16 = 0;
     for (row.spans.items) |span| {
         if (col >= max_width) break;
@@ -1230,7 +1207,9 @@ fn renderRowClipped(row: *const Line, x: i32, y: i32, max_width: u16, buf: *Buff
             span.style
         else
             row.style;
-        if (span_style.bg == .reset) span_style.bg = para_bg;
+        if (clip) |cl| {
+            if (span_style.bg == .reset) span_style.bg = cl.para_bg;
+        }
         var i: usize = 0;
         while (i < span.content.len) {
             if (col >= max_width) break;
@@ -1241,16 +1220,34 @@ fn renderRowClipped(row: *const Line, x: i32, y: i32, max_width: u16, buf: *Buff
             if (cp == '\t') {
                 var k: u16 = 0;
                 while (k < TAB_WIDTH and col < max_width) : (k += 1) {
-                    setClipped(buf, clip, x + @as(i32, col), y, .{ .char = ' ', .style = span_style });
+                    putRowCell(buf, clip, x + @as(i32, col), y, .{ .char = ' ', .style = span_style });
                     col +|= 1;
                 }
                 continue;
             }
             if (cp < 0x20 or cp == 0x7F) continue;
-            setClipped(buf, clip, x + @as(i32, col), y, .{ .char = cp, .style = span_style });
+            putRowCell(buf, clip, x + @as(i32, col), y, .{ .char = cp, .style = span_style });
             col +|= 1;
         }
     }
+}
+
+fn putRowCell(buf: *Buffer, clip: ?RowClip, x: i32, y: i32, c: Cell) void {
+    if (clip) |cl| {
+        setClipped(buf, cl.rect, x, y, c);
+        return;
+    }
+    if (y < 0) return;
+    const ux: u16 = @intCast(@min(x, std.math.maxInt(u16)));
+    const uy: u16 = @intCast(@min(y, std.math.maxInt(u16)));
+    buf.set(ux, uy, c);
+}
+
+/// Render a Line at signed (x, y), clipping to `clip` and to `max_width`
+/// columns. `para_bg` is the Paragraph background.
+fn renderRowClipped(row: *const Line, x: i32, y: i32, max_width: u16, buf: *Buffer, clip: Rect, para_bg: cell.Color) void {
+    if (y < 0 or y > std.math.maxInt(u16)) return;
+    renderRowCells(row, x, y, max_width, buf, .{ .rect = clip, .para_bg = para_bg });
 }
 
 test "wrapLine advances after a full row" {

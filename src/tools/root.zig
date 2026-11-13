@@ -198,11 +198,39 @@ pub fn okResult(_: ToolCall, content: []const u8) ToolResult {
     };
 }
 
-pub fn parseArgs(comptime T: type, alloc: std.mem.Allocator, call: ToolCall) ?T {
-    const parsed = std.json.parseFromSlice(T, alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch return null;
-    return parsed.value;
+pub fn toCrlf(alloc: std.mem.Allocator, lf_text: []const u8) ![]u8 {
+    const out = try alloc.alloc(u8, lf_text.len + std.mem.count(u8, lf_text, "\n"));
+    var j: usize = 0;
+    for (lf_text) |c| {
+        if (c == '\n') {
+            out[j] = '\r';
+            out[j + 1] = '\n';
+            j += 2;
+        } else {
+            out[j] = c;
+            j += 1;
+        }
+    }
+    return out;
+}
+
+pub fn permissionDenied(
+    ctx: ToolContext,
+    call: ToolCall,
+    decision: r.permissions.State,
+    comptime tool: []const u8,
+    comptime feedback_subject: []const u8,
+) ?ToolResult {
+    return switch (decision) {
+        .approved => null,
+        .denied => errResult(call, "User declined " ++ tool ++ ". Change the approach or ask the user before retrying."),
+        .message => |txt| errResult(call, std.fmt.allocPrint(
+            ctx.alloc,
+            "User declined " ++ feedback_subject ++ " and left feedback: {s}\nChange the approach or ask the user before retrying.",
+            .{txt},
+        ) catch txt),
+        else => errResult(call, "permission unresolved"),
+    };
 }
 
 pub fn replaceAll(input: []const u8, needle: []const u8, replacement: []const u8, buffer: []u8) []const u8 {

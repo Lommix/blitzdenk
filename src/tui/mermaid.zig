@@ -18,10 +18,11 @@ pub const Theme = struct {
 pub const Options = struct {
     width: u16 = 80,
     theme: Theme = .{},
-    max_node_width: u16 = 48,
-    max_height: usize = 4096,
-    max_cells: usize = 2 * 1024 * 1024,
 };
+
+const max_node_label_width: u16 = 48;
+const max_diagram_height: usize = 4096;
+const max_diagram_cells: usize = 2 * 1024 * 1024;
 
 const G_HDASH: u21 = cp(icon.box_h);
 const G_VDASH: u21 = cp(icon.box_v);
@@ -49,10 +50,6 @@ fn cp(comptime s: []const u8) u21 {
 }
 
 const DiagramKind = enum { flow, sequence, class, state, er, none };
-
-pub fn render(alloc: std.mem.Allocator, width: u16, source: []const u8, out: *std.ArrayList(Line)) !void {
-    try renderWithOptions(alloc, alloc, source, out, .{ .width = width });
-}
 
 pub fn renderWithOptions(gpa: std.mem.Allocator, alloc: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Line), options: Options) !void {
     const src = std.mem.trim(u8, source, " \t\r\n");
@@ -190,9 +187,9 @@ const Canvas = struct {
     theme: Theme,
 
     fn init(alloc: std.mem.Allocator, w: usize, h: usize, options: Options) !Canvas {
-        if (h > options.max_height) return error.DiagramTooLarge;
+        if (h > max_diagram_height) return error.DiagramTooLarge;
         const cells_len = std.math.mul(usize, w, h) catch return error.DiagramTooLarge;
-        if (cells_len > options.max_cells) return error.DiagramTooLarge;
+        if (cells_len > max_diagram_cells) return error.DiagramTooLarge;
         const cells = try alloc.alloc(CanvasCell, cells_len);
         for (cells) |*c| c.* = .{};
         return .{ .alloc = alloc, .w = w, .h = h, .cells = cells, .theme = options.theme };
@@ -221,6 +218,30 @@ fn drawVLine(c: *Canvas, x: isize, y0: isize, y1: isize, ch: u21, style: Style) 
     var y = @min(y0, y1);
     const ye = @max(y0, y1);
     while (y <= ye) : (y += 1) c.put(x, y, ch, style);
+}
+
+const BoxCorners = struct {
+    tl: u21,
+    tr: u21,
+    bl: u21,
+    br: u21,
+};
+
+const box_corners_rounded: BoxCorners = .{ .tl = cp("╭"), .tr = cp("╮"), .bl = cp("╰"), .br = cp("╯") };
+const box_corners_square: BoxCorners = .{ .tl = cp("┌"), .tr = cp("┐"), .bl = cp("└"), .br = cp("┘") };
+
+fn drawBoxBorder(c: *Canvas, left: isize, top: isize, right: isize, bottom: isize, corners: BoxCorners) void {
+    c.put(left, top, corners.tl, c.theme.border);
+    c.put(right, top, corners.tr, c.theme.border);
+    drawHLine(c, left + 1, right - 1, top, G_HDASH, c.theme.border);
+    c.put(left, bottom, corners.bl, c.theme.border);
+    c.put(right, bottom, corners.br, c.theme.border);
+    drawHLine(c, left + 1, right - 1, bottom, G_HDASH, c.theme.border);
+    var row = top + 1;
+    while (row < bottom) : (row += 1) {
+        c.put(left, row, G_VDASH, c.theme.border);
+        c.put(right, row, G_VDASH, c.theme.border);
+    }
 }
 
 fn putText(c: *Canvas, x: isize, y: isize, text: []const u8, max_cols: isize, style: Style) void {
@@ -523,10 +544,10 @@ fn renderFlowchart(alloc: std.mem.Allocator, output_alloc: std.mem.Allocator, sr
     }
 
     for (nodes.items) |*n| {
-        const initial_lines = try wrapNodeText(alloc, n.label, @as(usize, @max(5, options.max_node_width)) -| 4, n.shape, null);
+        const initial_lines = try wrapNodeText(alloc, n.label, @as(usize, @max(5, max_node_label_width)) -| 4, n.shape, null);
         n.width = @max(5, maxLineWidth(initial_lines) +| 4);
     }
-    const edge_label_width = @max(1, @min(@as(usize, @max(5, options.max_node_width)), if (width > 4) width - 4 else 1));
+    const edge_label_width = @max(1, @min(@as(usize, @max(5, max_node_label_width)), if (width > 4) width - 4 else 1));
     for (edges.items) |*edge| {
         if (edge.label) |label| edge.label_lines = try wrapText(alloc, label, edge_label_width);
     }
@@ -994,12 +1015,7 @@ fn layoutFlow(alloc: std.mem.Allocator, nodes: []Node, edges: []const Edge, dir:
 }
 
 fn edgeStyle(c: *const Canvas, kind: EdgeKind) Style {
-    return switch (kind) {
-        .solid => c.theme.edge,
-        .dotted => c.theme.muted,
-        .thick => c.theme.edge,
-        .line => c.theme.edge,
-    };
+    return if (kind == .dotted) c.theme.muted else c.theme.edge;
 }
 
 fn edgeGlyphs(kind: EdgeKind) struct { h: u21, v: u21 } {
@@ -1171,23 +1187,11 @@ fn drawFlowNode(c: *Canvas, n: *const Node) void {
     const right = left + w - 1;
     const bottom = top + @as(isize, @intCast(n.height)) - 1;
 
-    const Corners = struct { tl: u21, tr: u21, bl: u21, br: u21 };
-    const corners: Corners = switch (n.shape) {
-        .rounded => .{ .tl = cp("╭"), .tr = cp("╮"), .bl = cp("╰"), .br = cp("╯") },
-        .rect, .compartmented => .{ .tl = cp("┌"), .tr = cp("┐"), .bl = cp("└"), .br = cp("┘") },
+    const corners = switch (n.shape) {
+        .rounded => box_corners_rounded,
+        .rect, .compartmented => box_corners_square,
     };
-
-    c.put(left, top, corners.tl, c.theme.border);
-    c.put(right, top, corners.tr, c.theme.border);
-    drawHLine(c, left + 1, right - 1, top, G_HDASH, c.theme.border);
-    c.put(left, bottom, corners.bl, c.theme.border);
-    c.put(right, bottom, corners.br, c.theme.border);
-    drawHLine(c, left + 1, right - 1, bottom, G_HDASH, c.theme.border);
-    var row = top + 1;
-    while (row < bottom) : (row += 1) {
-        c.put(left, row, G_VDASH, c.theme.border);
-        c.put(right, row, G_VDASH, c.theme.border);
-    }
+    drawBoxBorder(c, left, top, right, bottom, corners);
 
     const separated = n.shape == .compartmented and n.lines.len > n.header_lines;
     if (separated) {
@@ -1287,7 +1291,7 @@ fn renderSequence(alloc: std.mem.Allocator, output_alloc: std.mem.Allocator, src
     defer alloc.free(col_widths);
     var header_total: isize = 0;
     for (parts.items, 0..) |p, i| {
-        const initial_lines = try wrapText(alloc, p.label, @as(usize, @max(5, options.max_node_width)) -| 4);
+        const initial_lines = try wrapText(alloc, p.label, @as(usize, @max(5, max_node_label_width)) -| 4);
         col_widths[i] = @intCast(@max(5, maxLineWidth(initial_lines) +| 4));
         header_total += col_widths[i];
     }
@@ -1322,7 +1326,7 @@ fn renderSequence(alloc: std.mem.Allocator, output_alloc: std.mem.Allocator, src
     var item_height: usize = 0;
     for (items.items) |*item| switch (item.*) {
         .note => |*nt| {
-            const initial_lines = try wrapText(alloc, nt.label, @as(usize, @max(5, options.max_node_width)) -| 4);
+            const initial_lines = try wrapText(alloc, nt.label, @as(usize, @max(5, max_node_label_width)) -| 4);
             nt.width = @max(5, maxLineWidth(initial_lines) +| 4);
             if (width > 0 and nt.kind != .over) {
                 const anchor: usize = @intCast(@max(0, centers[nt.a]));
@@ -1354,7 +1358,7 @@ fn renderSequence(alloc: std.mem.Allocator, output_alloc: std.mem.Allocator, src
         },
         .msg => |*msg| {
             const span = if (msg.from == msg.to)
-                @as(usize, @max(5, options.max_node_width))
+                @as(usize, @max(5, max_node_label_width))
             else
                 @max(1, @as(usize, @intCast(@abs(centers[msg.to] - centers[msg.from]))) -| 4);
             msg.lines = try wrapText(alloc, msg.label, span);
@@ -1490,17 +1494,7 @@ fn parseSeqNote(alloc: std.mem.Allocator, line: []const u8, parts: *std.ArrayLis
 fn drawSeqHeader(c: *Canvas, left: isize, top: isize, width: isize, height: isize, lines: []const []const u8) void {
     const right = left + width - 1;
     const bottom = top + height - 1;
-    c.put(left, top, cp("┌"), c.theme.border);
-    c.put(right, top, cp("┐"), c.theme.border);
-    drawHLine(c, left + 1, right - 1, top, G_HDASH, c.theme.border);
-    c.put(left, bottom, cp("└"), c.theme.border);
-    c.put(right, bottom, cp("┘"), c.theme.border);
-    drawHLine(c, left + 1, right - 1, bottom, G_HDASH, c.theme.border);
-    var row = top + 1;
-    while (row < bottom) : (row += 1) {
-        c.put(left, row, G_VDASH, c.theme.border);
-        c.put(right, row, G_VDASH, c.theme.border);
-    }
+    drawBoxBorder(c, left, top, right, bottom, box_corners_square);
     const inner = width - 4;
     for (lines, 0..) |line, index| {
         const tw = @min(@as(isize, @intCast(widthOf(line))), inner);
@@ -1565,18 +1559,8 @@ fn drawSeqNote(c: *Canvas, centers: []const isize, col_widths: []const isize, nt
     if (l < 0) l = 0;
     if (r >= @as(isize, @intCast(c.w))) r = @as(isize, @intCast(c.w)) - 1;
     if (r <= l) return;
-    c.put(l, y, cp("╭"), c.theme.border);
-    c.put(r, y, cp("╮"), c.theme.border);
-    drawHLine(c, l + 1, r - 1, y, G_HDASH, c.theme.border);
     const bottom = y + @as(isize, @intCast(nt.height)) - 1;
-    var row = y + 1;
-    while (row < bottom) : (row += 1) {
-        c.put(l, row, G_VDASH, c.theme.border);
-        c.put(r, row, G_VDASH, c.theme.border);
-    }
-    c.put(l, bottom, cp("╰"), c.theme.border);
-    c.put(r, bottom, cp("╯"), c.theme.border);
-    drawHLine(c, l + 1, r - 1, bottom, G_HDASH, c.theme.border);
+    drawBoxBorder(c, l, y, r, bottom, box_corners_rounded);
     for (nt.lines, 0..) |line, index| putText(c, l + 2, y + 1 + @as(isize, @intCast(index)), line, r - l - 3, c.theme.accent);
 }
 

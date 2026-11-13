@@ -295,10 +295,6 @@ pub const Registry = struct {
         }
     }
 
-    pub fn wake(self: *Registry, id: AgentId, options: sdk.GenerateOptions) !void {
-        try self.retry(id, options);
-    }
-
     pub fn compact(self: *Registry, id: AgentId) !CompactRequestResult {
         const slot = self.slotFor(id) orelse return error.AgentNotFound;
         const agent = if (slot.agent) |*value| value else return error.AgentNotFound;
@@ -338,12 +334,6 @@ pub const Registry = struct {
     pub fn cancelAll(self: *Registry) void {
         var depth: i32 = max_agents;
         while (depth >= 0) : (depth -= 1) self.cancelDepth(@intCast(depth));
-    }
-
-    pub fn wait(self: *Registry, id: AgentId) !SlotState {
-        const slot = self.slotFor(id) orelse return error.AgentNotFound;
-        try slot.event.wait(self.io);
-        return self.state(id) orelse error.AgentNotFound;
     }
 
     /// Reservations belong to the parent before the spawn command is applied.

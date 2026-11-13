@@ -24,32 +24,17 @@ pub const LuaHookDigests = struct {
 ///!Inject system reminder on tool turn finish
 ///!Too make models behave and don't loose focus
 pub const InjectionsHooks = struct {
-    const Self = @This();
-    _hooks: std.ArrayList(Callback) = .empty,
+    const hooks = [_]Callback{
+        inject_datetime_information,
+        inject_cwd_information,
+        inject_agents_context,
+        inject_available_skills,
+        inject_mcp_catalog,
+        inject_capability_catalog,
+        inject_lua_reload_notice,
+    };
 
-    pub fn init(alloc: std.mem.Allocator) !Self {
-        var self = Self{};
-
-        inline for (.{
-            &inject_datetime_information,
-            &inject_cwd_information,
-            &inject_agents_context,
-            &inject_available_skills,
-            &inject_mcp_catalog,
-            &inject_capability_catalog,
-            &inject_lua_reload_notice,
-        }) |cb| {
-            try self._hooks.append(alloc, cb);
-        }
-
-        return self;
-    }
-
-    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-        self._hooks.deinit(alloc);
-    }
-
-    pub fn build(self: *const Self, app: *r.app.App, agent: *r.agent.Agent) !?[]const u8 {
+    pub fn build(app: *r.app.App, agent: *r.agent.Agent) !?[]const u8 {
         if (agent.clean) return null;
 
         const alloc = agent.step_arena.allocator();
@@ -60,7 +45,7 @@ pub const InjectionsHooks = struct {
         // applying standard name conventions for now
         try w.print("<system-reminder>\n", .{});
 
-        for (self._hooks.items) |cb| {
+        for (hooks) |cb| {
             var hook_w = std.Io.Writer.Allocating.init(alloc);
 
             try cb(&hook_w.writer, app, agent);

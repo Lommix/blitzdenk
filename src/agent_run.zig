@@ -389,32 +389,17 @@ fn cloneEvent(alloc: std.mem.Allocator, event: Event) !Event {
             .tool_call_id = try alloc.dupe(u8, value.tool_call_id),
             .is_error = value.is_error,
         } },
-        .step => |value| .{ .step = .{
-            .number = value.number,
-            .tool_results = try cloneToolResultEvents(alloc, value.tool_results),
-            .usage = value.usage,
-            .compaction_count = value.compaction_count,
-            .context_estimate = value.context_estimate,
-        } },
+        .step => |value| .{ .step = value },
         .provider_error => |value| .{ .provider_error = .{
             .status_code = value.status_code,
             .response_body = try alloc.dupe(u8, value.response_body),
             .is_retryable = value.is_retryable,
             .will_retry = value.will_retry,
+            .retry_after_ms = value.retry_after_ms,
         } },
         .complete => |value| .{ .complete = value },
         .failed => |value| .{ .failed = value },
     };
-}
-
-fn cloneToolResultEvents(alloc: std.mem.Allocator, values: []const ToolResultEvent) ![]const ToolResultEvent {
-    const cloned = try alloc.alloc(ToolResultEvent, values.len);
-    for (values, 0..) |value, i| cloned[i] = .{
-        .tool_call_id = try alloc.dupe(u8, value.tool_call_id),
-        .is_error = value.is_error,
-        .image_url = if (value.image_url.len > 0) try alloc.dupe(u8, value.image_url) else "",
-    };
-    return cloned;
 }
 
 pub const OwnedOptions = struct {

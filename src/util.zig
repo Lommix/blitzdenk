@@ -21,6 +21,10 @@ pub fn stateDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !
     return std.fmt.allocPrint(alloc, "{s}/.local/state/blitzdenk", .{home});
 }
 
+pub fn nowMs(io: std.Io) i64 {
+    return @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_ms));
+}
+
 /// Owned copy of `text`, ill-formed UTF-8 replaced with U+FFFD.
 pub fn sanitizeUtf8(alloc: std.mem.Allocator, text: []const u8) ![]u8 {
     if (std.unicode.utf8ValidateSlice(text)) return alloc.dupe(u8, text);

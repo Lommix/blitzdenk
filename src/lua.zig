@@ -60,10 +60,7 @@ pub fn LuaFnBind(
             inline for (FnInfo.param_types, 0..) |p, i| {
                 switch (p.?) {
                     *r.app.App => {
-                        @field(args, std.fmt.comptimePrint("{}", .{i})) = getAppFromRegistry(state) orelse {
-                            _ = c.luaL_error(state, "failed to get app");
-                            return 0;
-                        };
+                        @field(args, std.fmt.comptimePrint("{}", .{i})) = requireAppFromRegistry(state, "failed to get app") orelse return 0;
                     },
                     *c.lua_State => {
                         @field(args, std.fmt.comptimePrint("{}", .{i})) = state;
@@ -403,69 +400,47 @@ const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields
     .{ .name = "rate_limit", .ty = LuaType.integer, .optional = true, .desc = "requests per minute; 0 = unlimited" },
 } } };
 
-const ThemeDef = LuaType{ .table_def = .{ .name = "BlitzTheme", .fields = &.{
-    .{ .name = "bg", .ty = LuaType.string, .optional = true },
-    .{ .name = "overlay_dark", .ty = LuaType.string, .optional = true },
-    .{ .name = "overlay", .ty = LuaType.string, .optional = true },
-    .{ .name = "border", .ty = LuaType.string, .optional = true },
-    .{ .name = "muted", .ty = LuaType.string, .optional = true },
-    .{ .name = "text", .ty = LuaType.string, .optional = true },
-    .{ .name = "text_hl", .ty = LuaType.string, .optional = true },
-    .{ .name = "ok", .ty = LuaType.string, .optional = true },
-    .{ .name = "info", .ty = LuaType.string, .optional = true },
-    .{ .name = "warn", .ty = LuaType.string, .optional = true },
-    .{ .name = "err", .ty = LuaType.string, .optional = true },
-    .{ .name = "on_err", .ty = LuaType.string, .optional = true },
-    .{ .name = "diff_surface", .ty = LuaType.string, .optional = true },
-    .{ .name = "diff_add", .ty = LuaType.string, .optional = true },
-    .{ .name = "diff_remove", .ty = LuaType.string, .optional = true },
-    .{ .name = "role_user", .ty = LuaType.string, .optional = true },
-    .{ .name = "role_agent", .ty = LuaType.string, .optional = true },
-    .{ .name = "role_system", .ty = LuaType.string, .optional = true },
-} } };
+const theme_colors = .{
+    .{"bg"},
+    .{"overlay_dark"},
+    .{"overlay"},
+    .{"border"},
+    .{"muted"},
+    .{"text"},
+    .{"text_hl"},
+    .{"ok"},
+    .{"info"},
+    .{"warn"},
+    .{"err"},
+    .{"on_err"},
+    .{"diff_surface"},
+    .{"diff_add"},
+    .{"diff_remove"},
+    .{"role_user"},
+    .{"role_agent"},
+    .{"role_system"},
+};
+
+const theme_color_fields = blk: {
+    var fields: [theme_colors.len]LuaType.Field = undefined;
+    for (theme_colors, 0..) |binding, i| {
+        fields[i] = .{ .name = binding[0], .ty = LuaType.string, .optional = true };
+    }
+    break :blk fields;
+};
+
+const ThemeDef = LuaType{ .table_def = .{ .name = "BlitzTheme", .fields = &theme_color_fields } };
 
 const ThemeArg = struct {
-    bg: ?[]const u8 = null,
-    overlay_dark: ?[]const u8 = null,
-    overlay: ?[]const u8 = null,
-    border: ?[]const u8 = null,
-    muted: ?[]const u8 = null,
-    text: ?[]const u8 = null,
-    text_hl: ?[]const u8 = null,
-    ok: ?[]const u8 = null,
-    info: ?[]const u8 = null,
-    warn: ?[]const u8 = null,
-    err: ?[]const u8 = null,
-    on_err: ?[]const u8 = null,
-    diff_surface: ?[]const u8 = null,
-    diff_add: ?[]const u8 = null,
-    diff_remove: ?[]const u8 = null,
-    role_user: ?[]const u8 = null,
-    role_agent: ?[]const u8 = null,
-    role_system: ?[]const u8 = null,
+    colors: [theme_colors.len]?[]const u8 = @splat(null),
 };
 
 fn applyTheme(a: *r.app.App, theme: ThemeArg) !void {
     const C = r.tui.Color;
     const t = &a.theme;
-    if (theme.bg) |v| t.bg = try C.parseStrHex(v);
-    if (theme.overlay_dark) |v| t.overlay_dark = try C.parseStrHex(v);
-    if (theme.overlay) |v| t.overlay = try C.parseStrHex(v);
-    if (theme.border) |v| t.border = try C.parseStrHex(v);
-    if (theme.muted) |v| t.muted = try C.parseStrHex(v);
-    if (theme.text) |v| t.text = try C.parseStrHex(v);
-    if (theme.text_hl) |v| t.text_hl = try C.parseStrHex(v);
-    if (theme.ok) |v| t.ok = try C.parseStrHex(v);
-    if (theme.info) |v| t.info = try C.parseStrHex(v);
-    if (theme.warn) |v| t.warn = try C.parseStrHex(v);
-    if (theme.err) |v| t.err = try C.parseStrHex(v);
-    if (theme.on_err) |v| t.on_err = try C.parseStrHex(v);
-    if (theme.diff_surface) |v| t.diff_surface = try C.parseStrHex(v);
-    if (theme.diff_add) |v| t.diff_add = try C.parseStrHex(v);
-    if (theme.diff_remove) |v| t.diff_remove = try C.parseStrHex(v);
-    if (theme.role_user) |v| t.role_user = try C.parseStrHex(v);
-    if (theme.role_agent) |v| t.role_agent = try C.parseStrHex(v);
-    if (theme.role_system) |v| t.role_system = try C.parseStrHex(v);
+    inline for (theme_colors, 0..) |binding, i| {
+        if (theme.colors[i]) |v| @field(t, binding[0]) = try C.parseStrHex(v);
+    }
     a.dirty = true;
 }
 
@@ -1014,12 +989,11 @@ pub const Blitz = LuaType{
                                         .only = def.skills.only,
                                         .except = def.skills.except,
                                     },
-                                    .tools = def.tools.items,
                                     .model = if (def.model) |handle| .{
                                         .model = @fromBackingInt(@intCast(handle)),
                                         .effort = effort,
                                     } else null,
-                                });
+                                }, def.tools.items);
 
                                 return @backingInt(agent_type);
                             }
@@ -1210,7 +1184,6 @@ pub const Blitz = LuaType{
                                     .key = parsed,
                                     .description_len = desc_len,
                                     .func_ref = func.idx,
-                                    .L = state,
                                 };
                                 if (description) |d| @memcpy(entry.description[0..d.len], d);
                                 vm.bind_entries.appendAssumeCapacity(entry);
@@ -1258,7 +1231,6 @@ pub const Blitz = LuaType{
                                 .name_len = cmd_name.len,
                                 .description_len = desc_len,
                                 .func_ref = func.idx,
-                                .L = state,
                             };
                             @memcpy(entry.name[0..cmd_name.len], cmd_name);
                             if (description) |d| @memcpy(entry.description[0..d.len], d);
@@ -1386,50 +1358,10 @@ pub const Blitz = LuaType{
                 .ty = LuaType{ .function = .{
                     .ret = &ThemeDef,
                     .fn_ptr = LuaFnBind((struct {
-                        const Ret = struct {
-                            bg: [7]u8,
-                            overlay_dark: [7]u8,
-                            overlay: [7]u8,
-                            border: [7]u8,
-                            muted: [7]u8,
-                            text: [7]u8,
-                            text_hl: [7]u8,
-                            ok: [7]u8,
-                            info: [7]u8,
-                            warn: [7]u8,
-                            err: [7]u8,
-                            on_err: [7]u8,
-                            diff_surface: [7]u8,
-                            diff_add: [7]u8,
-                            diff_remove: [7]u8,
-                            role_user: [7]u8,
-                            role_agent: [7]u8,
-                            role_system: [7]u8,
-                        };
-                        fn lua_fn(a: *r.app.App) !Ret {
+                        fn lua_fn(a: *r.app.App) !app.Theme {
                             a.mu.lockUncancelable(a.io);
                             defer a.mu.unlock(a.io);
-                            const t = a.theme;
-                            return .{
-                                .bg = t.bg.toHexStr(),
-                                .overlay_dark = t.overlay_dark.toHexStr(),
-                                .overlay = t.overlay.toHexStr(),
-                                .border = t.border.toHexStr(),
-                                .muted = t.muted.toHexStr(),
-                                .text = t.text.toHexStr(),
-                                .text_hl = t.text_hl.toHexStr(),
-                                .ok = t.ok.toHexStr(),
-                                .info = t.info.toHexStr(),
-                                .warn = t.warn.toHexStr(),
-                                .err = t.err.toHexStr(),
-                                .on_err = t.on_err.toHexStr(),
-                                .diff_surface = t.diff_surface.toHexStr(),
-                                .diff_add = t.diff_add.toHexStr(),
-                                .diff_remove = t.diff_remove.toHexStr(),
-                                .role_user = t.role_user.toHexStr(),
-                                .role_agent = t.role_agent.toHexStr(),
-                                .role_system = t.role_system.toHexStr(),
-                            };
+                            return a.theme;
                         }
                     }).lua_fn, "get_theme"),
                 } },
@@ -1488,10 +1420,7 @@ pub const Blitz = LuaType{
 
                         fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                             const state = L.?;
-                            const a = getAppFromRegistry(state) orelse {
-                                _ = c.luaL_error(state, "shell: app not initialized");
-                                return 0;
-                            };
+                            const a = requireAppFromRegistry(state, "shell: app not initialized") orelse return 0;
                             _ = c.luaL_checktype(state, 1, c.LUA_TTABLE);
 
                             var timeout_ms: ?i64 = null;
@@ -1558,10 +1487,7 @@ pub const Blitz = LuaType{
                     .fn_ptr = (struct {
                         fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                             const state = L.?;
-                            const a = getAppFromRegistry(state) orelse {
-                                _ = c.luaL_error(state, "write_tempfile: app not initialized");
-                                return 0;
-                            };
+                            const a = requireAppFromRegistry(state, "write_tempfile: app not initialized") orelse return 0;
                             const name = readAnyArg([]const u8, state, "write_tempfile", 1) orelse return 0;
                             const content = readAnyArg([]const u8, state, "write_tempfile", 2) orelse return 0;
                             const path = r.artifact.write(a.io, a.gpa, name, content) catch |err| {
@@ -1910,12 +1836,6 @@ fn copyPermSnapshot(arena: std.mem.Allocator, req: *r.permissions.Request) !Perm
     };
 }
 
-fn pushPermSnapshot(L: *c.lua_State, snap: PermSnapshot) void {
-    c.lua_createtable(L, 0, 16);
-    setFieldAny(L, -2, "ticket", snap.ticket);
-    setPermissionFields(L, snap.agent_id, snap.call_id, snap.tool, snap.tool_input, snap.agent, snap.payload);
-}
-
 fn findPendingTicket(a: *r.app.App, ticket: u64) ?*r.permissions.Request {
     for (a.pending_permissions.items) |req| {
         if (req.ticket == ticket) return req;
@@ -1935,10 +1855,7 @@ const BlitzPermissions = LuaType{ .table_def = .{
                 .fn_ptr = (struct {
                     fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                         const state = L.?;
-                        const a = getAppFromRegistry(state) orelse {
-                            _ = c.luaL_error(state, "blitz.permissions.list_pending: app not initialized");
-                            return 0;
-                        };
+                        const a = requireAppFromRegistry(state, "blitz.permissions.list_pending: app not initialized") orelse return 0;
                         const vm = fromState(state) orelse {
                             _ = c.luaL_error(state, "blitz.permissions.list_pending: no active lua vm");
                             return 0;
@@ -1962,7 +1879,7 @@ const BlitzPermissions = LuaType{ .table_def = .{
 
                         c.lua_createtable(state, @intCast(snaps.len), 0);
                         for (snaps, 0..) |snap, i| {
-                            pushPermSnapshot(state, snap);
+                            pushPermissionTable(state, snap.ticket, snap.agent_id, snap.call_id, snap.tool, snap.tool_input, snap.agent, snap.payload);
                             c.lua_rawseti(state, -2, @intCast(i + 1));
                         }
                         return 1;
@@ -1979,10 +1896,7 @@ const BlitzPermissions = LuaType{ .table_def = .{
                 .fn_ptr = (struct {
                     fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                         const state = L.?;
-                        const a = getAppFromRegistry(state) orelse {
-                            _ = c.luaL_error(state, "blitz.permissions.get: app not initialized");
-                            return 0;
-                        };
+                        const a = requireAppFromRegistry(state, "blitz.permissions.get: app not initialized") orelse return 0;
                         const vm = fromState(state) orelse {
                             _ = c.luaL_error(state, "blitz.permissions.get: no active lua vm");
                             return 0;
@@ -1998,7 +1912,7 @@ const BlitzPermissions = LuaType{ .table_def = .{
                             g.unlock();
                         }
                         if (snap) |found| {
-                            pushPermSnapshot(state, found);
+                            pushPermissionTable(state, found.ticket, found.agent_id, found.call_id, found.tool, found.tool_input, found.agent, found.payload);
                         } else {
                             c.lua_pushnil(state);
                         }
@@ -2019,10 +1933,7 @@ const BlitzPermissions = LuaType{ .table_def = .{
                 .fn_ptr = (struct {
                     fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                         const state = L.?;
-                        const a = getAppFromRegistry(state) orelse {
-                            _ = c.luaL_error(state, "blitz.permissions.resolve: app not initialized");
-                            return 0;
-                        };
+                        const a = requireAppFromRegistry(state, "blitz.permissions.resolve: app not initialized") orelse return 0;
                         const vm = fromState(state) orelse {
                             _ = c.luaL_error(state, "blitz.permissions.resolve: no active lua vm");
                             return 0;
@@ -2321,10 +2232,7 @@ const BlitzCmp = LuaType{ .table_def = .{ .name = "BlitzCmp", .fields = &.{
 
 fn luaInputGet(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L orelse return 0;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "input.get: app not initialized");
-        return 0;
-    };
+    const a = requireAppFromRegistry(state, "input.get: app not initialized") orelse return 0;
     const vm = fromState(state) orelse {
         _ = c.luaL_error(state, "input.get: no active lua vm");
         return 0;
@@ -2663,10 +2571,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
             .fn_ptr = (struct {
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
-                    const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "cmd.select: app not initialized");
-                        return 0;
-                    };
+                    const a = requireAppFromRegistry(state, "cmd.select: app not initialized") orelse return 0;
                     const vm = fromState(state) orelse {
                         _ = c.luaL_error(state, "cmd.select: no active lua vm");
                         return 0;
@@ -2719,6 +2624,12 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
     },
 } } };
 
+fn enqueueAgentTermination(a: *r.app.App, agent_id: r.AgentId, command: r.cmd.Command) ![]const u8 {
+    if (a.registry.get(agent_id) == null) return "Not Found";
+    try a.cmd_queue.append(a.io, command);
+    return "Success";
+}
+
 const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
     .{
         .name = "spawn",
@@ -2728,10 +2639,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
             .fn_ptr = (struct {
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
-                    const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "agent.spawn: app not initialized");
-                        return 0;
-                    };
+                    const a = requireAppFromRegistry(state, "agent.spawn: app not initialized") orelse return 0;
                     const vm = fromState(state) orelse {
                         _ = c.luaL_error(state, "agent.spawn: no active lua vm");
                         return 0;
@@ -2856,10 +2764,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
             .fn_ptr = (struct {
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
-                    const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "agent.await: app not initialized");
-                        return 0;
-                    };
+                    const a = requireAppFromRegistry(state, "agent.await: app not initialized") orelse return 0;
                     const vm = fromState(state) orelse {
                         _ = c.luaL_error(state, "agent.await: no active lua vm");
                         return 0;
@@ -2925,10 +2830,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
             .fn_ptr = (struct {
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
-                    const a = getAppFromRegistry(state) orelse {
-                        _ = c.luaL_error(state, "agent.result: app not initialized");
-                        return 0;
-                    };
+                    const a = requireAppFromRegistry(state, "agent.result: app not initialized") orelse return 0;
                     const id = readAgentIdArg(state, "agent.result", 1);
                     const agent = a.registry.get(id) orelse {
                         _ = c.luaL_error(state, "agent.result: agent not found");
@@ -2996,9 +2898,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
             .ret = &LuaString,
             .fn_ptr = LuaFnBind((struct {
                 fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
-                    if (a.registry.get(agent_id) == null) return "Not Found";
-                    try a.cmd_queue.append(a.io, .{ .cancel_agent = agent_id });
-                    return "Success";
+                    return enqueueAgentTermination(a, agent_id, .{ .cancel_agent = agent_id });
                 }
             }).lua_fn, "agent.cancel"),
         } },
@@ -3011,9 +2911,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
             .ret = &LuaString,
             .fn_ptr = LuaFnBind((struct {
                 fn lua_fn(_: *c.lua_State, a: *r.app.App, agent_id: r.AgentId) ![]const u8 {
-                    if (a.registry.get(agent_id) == null) return "Not Found";
-                    try a.cmd_queue.append(a.io, .{ .close_agent = agent_id });
-                    return "Success";
+                    return enqueueAgentTermination(a, agent_id, .{ .close_agent = agent_id });
                 }
             }).lua_fn, "agent.close"),
         } },
@@ -3129,7 +3027,6 @@ const LuaBindEntry = struct {
     description: [128]u8 = undefined,
     description_len: usize = 0,
     func_ref: c_int = c.LUA_NOREF,
-    L: ?*c.lua_State = null,
 
     fn descriptionSlice(self: *const LuaBindEntry) []const u8 {
         return self.description[0..self.description_len];
@@ -3166,7 +3063,6 @@ const LuaCommandEntry = struct {
     description: [128]u8 = undefined,
     description_len: usize = 0,
     func_ref: c_int = c.LUA_NOREF,
-    L: ?*c.lua_State = null,
 
     fn nameSlice(self: *const LuaCommandEntry) []const u8 {
         return self.name[0..self.name_len];
@@ -3220,6 +3116,11 @@ fn pushAny(L: *c.lua_State, value: anytype) void {
                     c.lua_rawseti(L, -2, @intCast(i + 1));
                 }
             }
+        },
+        .@"union" => {
+            if (T != tui.Color) @compileError("pushAny: unsupported union type " ++ @typeName(T));
+            const hex = value.toHexStr();
+            _ = c.lua_pushlstring(L, &hex, hex.len);
         },
         .@"struct" => |str| {
             if (T == r.AgentId) {
@@ -3350,10 +3251,6 @@ fn ReadResult(comptime T: type) type {
         pub fn Ok(v: T) @This() {
             return .{ .ok = v };
         }
-
-        pub fn E(err: anyerror) @This() {
-            return .{ .err = @tagName(err) };
-        }
     };
 }
 
@@ -3408,6 +3305,18 @@ fn readAnyValueAlloc(
             .only = raw.only.items,
             .except = raw.except.items,
         });
+    }
+
+    if (T == ThemeArg) {
+        if (c.lua_type(state, idx) != c.LUA_TTABLE) return .Err(name ++ " is not a table");
+        var out: ThemeArg = .{};
+        inline for (theme_colors, 0..) |binding, i| {
+            switch (readAnyFieldAlloc(?[]const u8, state, binding[0], idx, allocator)) {
+                .ok => |v| out.colors[i] = v,
+                .err => |msg| return .Err(msg),
+            }
+        }
+        return .Ok(out);
     }
 
     if (T == ToolNameList) {
@@ -3664,7 +3573,6 @@ const MAX_LUA_COMMANDS = 64;
 pub const MAX_LUA_WIDGETS = 8;
 pub const WIDGET_ERROR_CAP = 256;
 const MAX_LUA_MCP_SERVERS = 16;
-const MAX_LUA_MCP_ARGS = 32;
 const STDOUT_BUF_CAP = 1024 * 1024 * 16;
 const CANCELLATION_HOOK_INTERVAL = 10000;
 const MAX_STATE_DEPTH: u32 = 64;
@@ -3759,14 +3667,6 @@ pub const LuaVm = struct {
         try self.stdout_buf.ensureTotalCapacity(arena, STDOUT_BUF_CAP);
     }
 
-    fn bindLuaAllocator(self: *LuaVm) void {
-        if (self.is_tool_vm) {
-            c.lua_setallocf(self.L, &luaArenaAlloc, @ptrCast(&self.arena_state));
-        } else {
-            c.lua_setallocf(self.L, &luaGpaAlloc, @ptrCast(self));
-        }
-    }
-
     fn initLuaState(self: *LuaVm) !void {
         const allocf: c.lua_Alloc = if (self.is_tool_vm) &luaArenaAlloc else &luaGpaAlloc;
         const ud: *anyopaque = if (self.is_tool_vm) @ptrCast(&self.arena_state) else @ptrCast(self);
@@ -3778,7 +3678,6 @@ pub const LuaVm = struct {
     }
 
     pub fn setApp(self: *LuaVm, a: *app.App) void {
-        self.bindLuaAllocator();
         self.app = a;
         c.lua_pushlightuserdata(self.L, @ptrCast(a));
         c.lua_rawsetp(self.L, c.LUA_REGISTRYINDEX, @ptrCast(&app_registry_key));
@@ -3858,12 +3757,6 @@ pub const LuaVm = struct {
         self.spawn_callbacks.clearRetainingCapacity();
         self.stdout_buf = .empty;
         self.prepareArenaLists() catch return error.LuaInitFailed;
-        self.tool_entries.clearRetainingCapacity();
-        self.hook_entries.clearRetainingCapacity();
-        self.bind_entries.clearRetainingCapacity();
-        self.command_entries.clearRetainingCapacity();
-        self.mcp_entries.clearRetainingCapacity();
-        self.stdout_buf.clearRetainingCapacity();
         self.permission_hook = c.LUA_NOREF;
         self.prompt_hook = c.LUA_NOREF;
         if (self.app) |a| {
@@ -3957,26 +3850,20 @@ pub const LuaVm = struct {
         return out;
     }
 
-    fn collectEnabledServers(
-        comptime Entry: type,
-        comptime Cfg: type,
-        comptime toCfg: fn (*Entry) Cfg,
-        entries: []Entry,
-        alloc: Allocator,
-    ) ![]Cfg {
-        if (entries.len == 0) return &.{};
-        var count: usize = 0;
-        for (entries) |*entry| {
-            if (entry.enabled) count += 1;
+    pub fn getEnabledMcpServers(self: *LuaVm, alloc: Allocator) ![]@import("mcp.zig").ServerConfig {
+        const Cfg = @import("mcp.zig").ServerConfig;
+        var enabled_count: usize = 0;
+        for (self.mcp_entries.items) |*entry| {
+            if (entry.enabled) enabled_count += 1;
         }
-        if (count == 0) return &.{};
+        if (enabled_count == 0) return &.{};
 
-        const out = try alloc.alloc(Cfg, count);
-        var out_i: usize = 0;
-        for (entries) |*entry| {
+        const out = try alloc.alloc(Cfg, enabled_count);
+        var out_index: usize = 0;
+        for (self.mcp_entries.items) |*entry| {
             if (!entry.enabled) continue;
-            out[out_i] = toCfg(entry);
-            out_i += 1;
+            out[out_index] = mcpToConfig(entry);
+            out_index += 1;
         }
         return out;
     }
@@ -4001,10 +3888,6 @@ pub const LuaVm = struct {
 
     pub fn mcpConfig(self: *LuaVm, name: []const u8) ?@import("mcp.zig").ServerConfig {
         return mcpToConfig(self.findMcp(name) orelse return null);
-    }
-
-    pub fn getEnabledMcpServers(self: *LuaVm, alloc: Allocator) ![]@import("mcp.zig").ServerConfig {
-        return collectEnabledServers(LuaMcpServerEntry, @import("mcp.zig").ServerConfig, mcpToConfig, self.mcp_entries.items, alloc);
     }
 
     pub fn disableAllMcp(self: *LuaVm) void {
@@ -4222,7 +4105,7 @@ pub const LuaVm = struct {
         _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, self.permission_hook);
         if (c.lua_type(L, -1) != c.LUA_TFUNCTION) return null;
 
-        pushPermissionPayload(L, perm);
+        pushPermissionTable(L, null, perm.agent_id, perm.call_id, perm.tool_name, perm.tool_input, perm.agent, perm.payload);
 
         const status = c.lua_pcallk(L, 1, 1, 0, 0, null);
         if (status != 0) {
@@ -4463,34 +4346,13 @@ fn widgetArgString(L: *c.lua_State, idx: c_int) ?[]const u8 {
 pub fn parseWidgetColor(theme: *const app.Theme, str: []const u8) tui.Color {
     if (str.len == 0) return .reset;
     if (str[0] == '#') return tui.Color.parseStrHex(str) catch .reset;
-    const pairs = .{
-        .{ "bg", theme.bg },
-        .{ "overlay_dark", theme.overlay_dark },
-        .{ "overlay", theme.overlay },
-        .{ "border", theme.border },
-        .{ "muted", theme.muted },
-        .{ "text", theme.text },
-        .{ "text_hl", theme.text_hl },
-        .{ "ok", theme.ok },
-        .{ "info", theme.info },
-        .{ "warn", theme.warn },
-        .{ "err", theme.err },
-        .{ "on_err", theme.on_err },
-        .{ "diff_surface", theme.diff_surface },
-        .{ "diff_add", theme.diff_add },
-        .{ "diff_remove", theme.diff_remove },
-        .{ "role_user", theme.role_user },
-        .{ "role_agent", theme.role_agent },
-        .{ "role_system", theme.role_system },
-    };
-    inline for (pairs) |pair| {
-        if (std.mem.eql(u8, str, pair[0])) return pair[1];
+    inline for (theme_colors) |binding| {
+        if (std.mem.eql(u8, str, binding[0])) return @field(theme.*, binding[0]);
     }
     return tui.Color.parseStrHex(str) catch .reset;
 }
 
-fn luaBufSet(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
+fn bufSetFromLua(state: *c.lua_State, color: ?[]const u8) c_int {
     const draw = getDrawCtx(state) orelse return 0;
     const x = widgetArgInt(state, 1) orelse return 0;
     const y = widgetArgInt(state, 2) orelse return 0;
@@ -4498,34 +4360,25 @@ fn luaBufSet(L: ?*c.lua_State) callconv(.c) c_int {
     if (x < 0 or y < 0 or x >= draw.rect.width or y >= draw.rect.height) return 0;
     const ux: u16 = @intCast(x);
     const uy: u16 = @intCast(y);
+    const fg: tui.Color = if (color) |str| parseWidgetColor(draw.theme, str) else draw.theme.text;
     draw.buf.setStringMax(
         draw.rect.x +| ux,
         draw.rect.y +| uy,
         text,
-        .{ .fg = draw.theme.text },
+        .{ .fg = fg },
         draw.rect.width -| ux,
     );
     return 0;
 }
 
+fn luaBufSet(L: ?*c.lua_State) callconv(.c) c_int {
+    return bufSetFromLua(L.?, null);
+}
+
 fn luaBufSetColor(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
-    const draw = getDrawCtx(state) orelse return 0;
-    const x = widgetArgInt(state, 1) orelse return 0;
-    const y = widgetArgInt(state, 2) orelse return 0;
-    const text = widgetArgString(state, 3) orelse return 0;
     const color = widgetArgString(state, 4) orelse return 0;
-    if (x < 0 or y < 0 or x >= draw.rect.width or y >= draw.rect.height) return 0;
-    const ux: u16 = @intCast(x);
-    const uy: u16 = @intCast(y);
-    draw.buf.setStringMax(
-        draw.rect.x +| ux,
-        draw.rect.y +| uy,
-        text,
-        .{ .fg = parseWidgetColor(draw.theme, color) },
-        draw.rect.width -| ux,
-    );
-    return 0;
+    return bufSetFromLua(state, color);
 }
 
 const WidgetRegion = struct { x: u16, y: u16, w: u16, h: u16 };
@@ -4768,10 +4621,7 @@ fn luaAddWidget(state: *c.lua_State, kind: WidgetKind, comptime fname: []const u
         render: LuaFnRef = .{ .idx = c.LUA_NOREF },
     };
     const args = readAnyArg(Args, state, fname, 1) orelse return 0;
-    const a = getAppFromRegistry(state) orelse {
-        _ = c.luaL_error(state, "failed to get app");
-        return 0;
-    };
+    const a = requireAppFromRegistry(state, "failed to get app") orelse return 0;
     const vm = a.lua_vm;
 
     var entry = LuaWidgetEntry{ .kind = kind, .func_ref = args.render.idx };
@@ -4850,6 +4700,13 @@ pub fn getAppFromRegistry(L: *c.lua_State) ?*app.App {
     if (c.lua_type(L, -1) != c.LUA_TLIGHTUSERDATA) return null;
     const ptr = c.lua_touserdata(L, -1) orelse return null;
     return @ptrCast(@alignCast(ptr));
+}
+
+fn requireAppFromRegistry(L: *c.lua_State, message: [:0]const u8) ?*app.App {
+    return getAppFromRegistry(L) orelse {
+        _ = c.luaL_error(L, "%s", message.ptr);
+        return null;
+    };
 }
 
 /// blitz.bind(vim_key_combo_string, lua func)
@@ -5542,11 +5399,23 @@ fn unrefSpawnCb(state: *c.lua_State, cb: ?LuaFnRef) void {
     if (cb) |ref| c.luaL_unref(state, c.LUA_REGISTRYINDEX, ref.idx);
 }
 
-/// Push the hook payload table for a permission request. Strings point into
-/// session-arena memory and stay valid for the duration of the hook call.
-fn pushPermissionPayload(L: *c.lua_State, perm: *r.permissions.Request) void {
-    c.lua_createtable(L, 0, 17);
-    setPermissionFields(L, perm.agent_id, perm.call_id, perm.tool_name, perm.tool_input, perm.agent, perm.payload);
+/// Push a permission table. `ticket` is only set for parked snapshot lookups;
+/// hook payloads omit it and their strings point into session-arena memory that
+/// stays valid for the duration of the hook call.
+fn pushPermissionTable(
+    L: *c.lua_State,
+    ticket: ?u64,
+    agent_id: r.AgentId,
+    call_id: ?[]const u8,
+    tool_name: []const u8,
+    tool_input: []const u8,
+    agent: r.permissions.AgentInfo,
+    payload: r.permissions.Payload,
+) void {
+    const field_hint: c_int = if (ticket == null) 16 else 17;
+    c.lua_createtable(L, 0, field_hint);
+    if (ticket) |value| setFieldAny(L, -2, "ticket", value);
+    setPermissionFields(L, agent_id, call_id, tool_name, tool_input, agent, payload);
 }
 
 fn setPermissionFields(
@@ -5619,14 +5488,14 @@ fn luaToJsonAlloc(alloc: Allocator, L: *c.lua_State, idx: c_int) ![]u8 {
     return try w.toOwnedSlice();
 }
 
-fn luaToJsonWriter(L: *c.lua_State, idx: c_int, writer: anytype, depth: usize) !void {
+fn luaToJsonWriter(L: *c.lua_State, idx: c_int, writer: *std.Io.Writer, depth: usize) !void {
     if (depth > 32) return error.NestingTooDeep;
     const abs_idx = if (idx < 0) c.lua_gettop(L) + idx + 1 else idx;
     switch (c.lua_type(L, abs_idx)) {
         c.LUA_TSTRING => {
             var len: usize = 0;
             const ptr = c.lua_tolstring(L, abs_idx, &len);
-            try writeJsonString(writer, ptr[0..len]);
+            try std.json.Stringify.encodeJsonString(ptr[0..len], .{}, writer);
         },
         c.LUA_TNUMBER => {
             if (c.lua_isinteger(L, abs_idx) != 0) {
@@ -5686,7 +5555,7 @@ fn luaToJsonWriter(L: *c.lua_State, idx: c_int, writer: anytype, depth: usize) !
                     first = false;
                     var klen: usize = 0;
                     const kptr = c.lua_tolstring(L, -2, &klen);
-                    try writeJsonString(writer, kptr[0..klen]);
+                    try std.json.Stringify.encodeJsonString(kptr[0..klen], .{}, writer);
                     try writer.writeByte(':');
                     try luaToJsonWriter(L, -1, writer, depth + 1);
                     c.lua_pop(L, 1); // pop value, keep key
@@ -5698,21 +5567,6 @@ fn luaToJsonWriter(L: *c.lua_State, idx: c_int, writer: anytype, depth: usize) !
             try writer.writeAll("null");
         },
     }
-}
-
-fn writeJsonString(writer: anytype, s: []const u8) !void {
-    try writer.writeByte('"');
-    for (s) |ch| {
-        switch (ch) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => try writer.writeByte(ch),
-        }
-    }
-    try writer.writeByte('"');
 }
 
 /// Convert a Lua `args` table into a JSON schema string.
@@ -5742,7 +5596,7 @@ fn argsTableToJsonSchema(L: *c.lua_State, args_idx: c_int, buf: []u8) ![]const u
         if (!first) try w.writeByte(',');
         first = false;
 
-        try writeJsonString(w, kptr[0..klen]);
+        try std.json.Stringify.encodeJsonString(kptr[0..klen], .{}, w);
         try w.writeByte(':');
 
         if (c.lua_type(L, -1) == c.LUA_TTABLE) {
@@ -5755,7 +5609,7 @@ fn argsTableToJsonSchema(L: *c.lua_State, args_idx: c_int, buf: []u8) ![]const u
                 var tlen: usize = 0;
                 const tptr = c.lua_tolstring(L, -1, &tlen);
                 try w.writeAll("\"type\":");
-                try writeJsonString(w, tptr[0..tlen]);
+                try std.json.Stringify.encodeJsonString(tptr[0..tlen], .{}, w);
                 inner_first = false;
             }
             c.lua_pop(L, 1);
@@ -5767,7 +5621,7 @@ fn argsTableToJsonSchema(L: *c.lua_State, args_idx: c_int, buf: []u8) ![]const u
                 const dptr = c.lua_tolstring(L, -1, &dlen);
                 if (!inner_first) try w.writeByte(',');
                 try w.writeAll("\"description\":");
-                try writeJsonString(w, dptr[0..dlen]);
+                try std.json.Stringify.encodeJsonString(dptr[0..dlen], .{}, w);
             }
             c.lua_pop(L, 1);
 
@@ -5794,7 +5648,7 @@ fn argsTableToJsonSchema(L: *c.lua_State, args_idx: c_int, buf: []u8) ![]const u
         try w.writeAll(",\"required\":[");
         for (0..required_count) |i| {
             if (i > 0) try w.writeByte(',');
-            try writeJsonString(w, required_names[i].buf[0..required_names[i].len]);
+            try std.json.Stringify.encodeJsonString(required_names[i].buf[0..required_names[i].len], .{}, w);
         }
         try w.writeByte(']');
     }
@@ -5839,12 +5693,10 @@ fn pushJsonValueRecursive(L: *c.lua_State, val: std.json.Value) void {
 test "tool VMs resolve their owner and isolate globals" {
     var vm1 = try LuaVm.initTool(std.testing.allocator);
     defer vm1.deinit();
-    vm1.bindLuaAllocator();
     vm1.installOwner();
 
     var vm2 = try LuaVm.initTool(std.testing.allocator);
     defer vm2.deinit();
-    vm2.bindLuaAllocator();
     vm2.installOwner();
 
     try std.testing.expect(fromState(vm1.L) == vm1);

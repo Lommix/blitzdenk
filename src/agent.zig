@@ -87,7 +87,6 @@ pub const Agent = struct {
     state_arena: std.heap.ArenaAllocator,
     injection_mutex: std.Io.Mutex = .init,
     queued_messages: std.ArrayList(sdk.Message) = .empty,
-    tool_display: state.Locked(std.StringHashMapUnmanaged(state.ToolDisplay)) = .{},
     compaction: compact.State = .{},
     messages: ?agent_run.OwnedMessages = null,
     history_gen: u64 = 0,
@@ -146,14 +145,6 @@ pub const Agent = struct {
     pending_params: ?models.ModelParams = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, config: models.Config, options: InitOptions) !Agent {
-        var agent = try initModel(alloc, io, config, options);
-        agent.reasoning_effort = config.reasoning_effort orelse agent.reasoning_effort;
-        agent.reasoning = config.reasoning;
-        agent.flags.vision = config.vision;
-        return agent;
-    }
-
-    fn initModel(alloc: std.mem.Allocator, io: std.Io, config: models.Config, options: InitOptions) !Agent {
         var metadata = std.heap.ArenaAllocator.init(alloc);
         errdefer metadata.deinit();
         const name = try metadata.allocator().dupe(u8, options.identity.name);
@@ -161,7 +152,7 @@ pub const Agent = struct {
         const cwd = try metadata.allocator().dupe(u8, options.identity.cwd);
         const params = try config.params.clone(metadata.allocator());
         const model = try models.Model.init(alloc, config);
-        return .{
+        var agent = Agent{
             .alloc = alloc,
             .io = io,
             .model = model,
@@ -180,6 +171,10 @@ pub const Agent = struct {
             .clean = options.identity.clean,
             .context_limit = options.context_limit,
         };
+        agent.reasoning_effort = config.reasoning_effort orelse agent.reasoning_effort;
+        agent.reasoning = config.reasoning;
+        agent.flags.vision = config.vision;
+        return agent;
     }
 
     pub fn deinit(self: *Agent) void {
@@ -319,10 +314,6 @@ pub const Agent = struct {
         const alloc = self.injection_arena.allocator();
         const cloned = try agent_run.cloneMessages(alloc, messages);
         try self.queued_messages.appendSlice(alloc, cloned);
-    }
-
-    pub fn queueReminder(self: *Agent, text: []const u8) !void {
-        try self.queueMessages(&.{sdk.UserMessage(text)});
     }
 
     pub fn start(self: *Agent, options: sdk.GenerateOptions) !void {
@@ -569,10 +560,7 @@ pub const Agent = struct {
     }
 
     pub fn shouldAutoRetry(self: *const Agent, failure: anyerror) bool {
-        return !self.flags.cancel and self.willAutoRetry(failure);
-    }
-
-    pub fn willAutoRetry(self: *const Agent, failure: anyerror) bool {
+        if (self.flags.cancel) return false;
         if (self.retry_count >= self.max_retries) return false;
         if (failure == error.Canceled) return true;
         if (self.contextNearLimit()) return false;
@@ -852,9 +840,6 @@ pub const Agent = struct {
             self.compaction.last_compacted_estimate = self.contextSnapshot().tokens;
             self.compaction.must_progress_past_message_count = self.history().len;
             self.compaction.resetInFlight();
-            const display = self.tool_display.lock(self.io);
-            display.ptr.clearRetainingCapacity();
-            display.unlock();
             self.status = .complete;
             self.last_error = null;
             if (self.compaction.completed_continue_after == true and self.resume_options != null) {
@@ -999,7 +984,7 @@ test "agent owns SDK state and adopts completed history" {
     }, .{ .identity = .{ .name = "worker", .cwd = "/tmp", .type_idx = 2 } });
     defer agent.deinit();
     try agent.setMessages(&.{sdk.UserMessage("old")});
-    try agent.queueReminder("queued");
+    try agent.queueMessages(&.{sdk.UserMessage("queued")});
     var tool_name = [_]u8{ 'r', 'u', 'n' };
     try agent.setTools(&.{.{ .name = &tool_name }});
     tool_name[0] = 'x';
@@ -1163,6 +1148,58 @@ test "agent schedules auto retry on retryable provider failure and resets on suc
     try std.testing.expectEqual(@as(i128, 0), agent.retry_at_ns);
 }
 
+test "scheduled retry waits for the provider retry-after hint instead of the default delay" {
+    const retry_after_ms: u64 = 2_500;
+    const Fixture = struct {
+        fn modelId(_: *anyopaque) []const u8 {
+            return "fake";
+        }
+
+        fn generate(_: *anyopaque, _: std.mem.Allocator, _: std.Io, params: sdk.model.GenerateParams, _: ?*std.http.Client, _: u32) anyerror!*sdk.model.GenerateResult {
+            params.on_provider_error.?(params.on_provider_error_ctx, .{
+                .status_code = 429,
+                .response_body = "rate limited",
+                .is_retryable = true,
+                .retry_after_ms = retry_after_ms,
+            });
+            return error.RateLimited;
+        }
+
+        fn stream(ctx: *anyopaque, alloc: std.mem.Allocator, io: std.Io, params: sdk.model.GenerateParams, client: ?*std.http.Client, retries: u32, stream_ctx: *sdk.model.StreamContext) anyerror!*sdk.model.GenerateResult {
+            _ = stream_ctx;
+            return generate(ctx, alloc, io, params, client, retries);
+        }
+
+        fn collect(ctx: ?*anyopaque, event: agent_run.Event) void {
+            const agent: *Agent = @ptrCast(@alignCast(ctx.?));
+            agent.observe(event) catch unreachable;
+        }
+    };
+
+    var fixture: u8 = 0;
+    var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    var agent = try Agent.init(std.testing.allocator, io_state.io(), .{
+        .api_key = "key",
+        .model = "model",
+        .base_url = "https://example.com/v1",
+        .params = .{ .openai = .{} },
+    }, .{});
+    defer agent.deinit();
+    const vtable = sdk.model.ModelVTable{ .model_id = Fixture.modelId, .generate = Fixture.generate, .stream = Fixture.stream };
+    try agent.startModel(.{ .ctx = &fixture, .vtable = &vtable }, .{ .prompt = "hi" });
+    agent.task.?.wait();
+    while (agent.drain(2, &agent, Fixture.collect) != 0) {}
+    const before_reap_ns: i128 = @intCast(std.Io.Clock.Timestamp.now(agent.io, .real).raw.nanoseconds);
+    try std.testing.expect(agent.reap());
+    try std.testing.expectEqual(Status.retrying, agent.status);
+    try std.testing.expectEqual(@as(u32, 1), agent.retry_count);
+    const scheduled_wait_ns = agent.retry_at_ns - before_reap_ns;
+    const hint_wait_ns = @as(i128, @intCast(retry_after_ms)) * std.time.ns_per_ms;
+    const default_wait_ns = @as(i128, @intCast(agent.retry_delay_ms)) * std.time.ns_per_ms;
+    try std.testing.expect(scheduled_wait_ns >= hint_wait_ns);
+    try std.testing.expect(scheduled_wait_ns < default_wait_ns);
+}
+
 fn hugeInflatedHistory() [4]sdk.Message {
     const payload: [900_000]u8 = @splat('x');
     const part = [_]sdk.Part{.{ .text = &payload }};
@@ -1308,7 +1345,7 @@ fn testInStepCompaction(initial_context: u64, first_step_context: u64, later_ste
                 self.compactions += 1;
                 if (self.agent.injection_mutex.tryLock()) {
                     self.agent.injection_mutex.unlock(io);
-                    try self.agent.queueReminder("background result during compaction");
+                    try self.agent.queueMessages(&.{sdk.UserMessage("background result during compaction")});
                 } else {
                     self.injection_available = false;
                 }
@@ -1417,9 +1454,9 @@ test "prepared messages retain queued content after another injection" {
         .params = .{ .openai = .{} },
     }, .{});
     defer agent.deinit();
-    try agent.queueReminder("first notice");
+    try agent.queueMessages(&.{sdk.UserMessage("first notice")});
     const prepared = try Agent.prepareStep(&agent, .{ .number = 1, .messages = &.{} });
-    try agent.queueReminder("next notice");
+    try agent.queueMessages(&.{sdk.UserMessage("next notice")});
     try std.testing.expectEqual(@as(usize, 1), prepared.messages.len);
     try std.testing.expectEqualStrings("first notice", prepared.messages[0].text());
 }

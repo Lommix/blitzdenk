@@ -27,7 +27,7 @@ pub const Constraint = union(enum) {
 };
 
 /// Split a rect vertically (top to bottom, Y-down).
-pub fn splitCol(rect: Rect, buf: []Rect, constraints: []const Constraint) []Rect {
+fn splitCol(rect: Rect, buf: []Rect, constraints: []const Constraint) []Rect {
     std.debug.assert(buf.len >= constraints.len);
 
     var total_fixed: u16 = 0;

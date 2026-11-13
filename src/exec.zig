@@ -265,7 +265,7 @@ pub const CmdPool = struct {
             .stdout = .pipe,
             .stderr = .pipe,
             .environ_map = if (env_box) |b| b else null,
-            .pgid = if (kill_process_group and builtin.os.tag != .linux and builtin.os.tag != .windows) 0 else null,
+            .pgid = if (kill_process_group and builtin.os.tag != .linux) 0 else null,
         }) catch {
             slot.result_ty = .failed;
             slot.exit_code = null;
@@ -361,7 +361,6 @@ pub const CmdPool = struct {
     }
 
     fn terminateProcess(self: *Self, pid: std.process.Child.Id, kill_process_group: bool) void {
-        if (builtin.os.tag == .windows) return;
         const protection = self.io.swapCancelProtection(.blocked);
         defer _ = self.io.swapCancelProtection(protection);
         if (kill_process_group) std.posix.kill(-pid, std.posix.SIG.TERM) catch {};

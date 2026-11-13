@@ -185,19 +185,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
             .after = p.after orelse "",
             .path = commandPath(cmd),
         } });
-        switch (decision) {
-            .approved => {},
-            .denied => return r.errResult(call, "User declined patch. Change the approach or ask the user before retrying."),
-            .message => |txt| {
-                const wrapped = std.fmt.allocPrint(
-                    alloc,
-                    "User declined patch and left feedback: {s}\nChange the approach or ask the user before retrying.",
-                    .{txt},
-                ) catch txt;
-                return r.errResult(call, wrapped);
-            },
-            else => return r.errResult(call, "permission unresolved"),
-        }
+        if (r.permissionDenied(ctx, call, decision, "patch", "patch")) |res| return res;
     }
 
     // 4. Apply every command.
@@ -341,7 +329,6 @@ fn applyErrorDescription(alloc: std.mem.Allocator, err: ApplyError, diag: *const
         error.FileNotFound => "file not found",
         error.FileTooLarge => "file exceeds the 1 MiB patch limit",
         error.IoFailed => if (diag.message.len > 0) diag.message else "file operation failed",
-        error.InvalidCommand => "invalid command",
         else => try std.fmt.allocPrint(alloc, "{s}", .{@errorName(err)}),
     };
 }
@@ -393,15 +380,12 @@ pub const ApplyError = error{
     FileNotFound,
     FileTooLarge,
     IoFailed,
-    InvalidCommand,
 } || std.mem.Allocator.Error;
 
 /// Populated on apply failure so callers can show *why* / *where*.
 pub const ApplyDiagnostics = struct {
     path: []const u8 = "",
     hunk_index: usize = 0,
-    /// Index of the offending HunkLine within the hunk (0 if N/A).
-    hunk_line_index: usize = 0,
     /// First non-add line of the hunk we tried to anchor on.
     expected_anchor: []const u8 = "",
     message: []const u8 = "",
@@ -412,10 +396,6 @@ pub fn Result(comptime T: type) type {
         value: T,
         rest: []const u8,
     };
-}
-
-pub fn Parser(comptime T: type) type {
-    return *const fn (alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(T);
 }
 
 // ---- primitive combinators ----------------------------------------------
@@ -430,18 +410,15 @@ fn trimMarkerLine(bytes: []const u8) []const u8 {
 }
 
 fn firstLine(bytes: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < bytes.len and bytes[i] != '\n') : (i += 1) {}
-    var slice = bytes[0..i];
+    const end = std.mem.indexOfScalar(u8, bytes, '\n') orelse bytes.len;
+    var slice = bytes[0..end];
     if (slice.len > 0 and slice[slice.len - 1] == '\r') slice = slice[0 .. slice.len - 1];
     return slice;
 }
 
 fn lineRest(bytes: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < bytes.len and bytes[i] != '\n') : (i += 1) {}
-    if (i >= bytes.len) return bytes[bytes.len..];
-    return skipNewline(bytes[i..]);
+    const nl = std.mem.indexOfScalar(u8, bytes, '\n') orelse return bytes[bytes.len..];
+    return skipNewline(bytes[nl..]);
 }
 
 fn peekTrimmedEql(bytes: []const u8, literal: []const u8) bool {
@@ -457,12 +434,7 @@ fn isBlankInputLine(bytes: []const u8) bool {
     return trimMarkerLine(firstLine(bytes)).len == 0;
 }
 
-fn markerLine(
-    comptime literal: []const u8,
-    alloc: std.mem.Allocator,
-    bytes: []const u8,
-) ParseError!Result([]const u8) {
-    _ = alloc;
+fn markerLine(comptime literal: []const u8, bytes: []const u8) ParseError!Result([]const u8) {
     if (bytes.len == 0) return ParseError.UnexpectedEof;
     const raw = firstLine(bytes);
     const trimmed = trimMarkerLine(raw);
@@ -470,12 +442,7 @@ fn markerLine(
     return ok([]const u8, trimmed, lineRest(bytes));
 }
 
-fn markerPrefixLine(
-    comptime prefix: []const u8,
-    alloc: std.mem.Allocator,
-    bytes: []const u8,
-) ParseError!Result([]const u8) {
-    _ = alloc;
+fn markerPrefixLine(comptime prefix: []const u8, bytes: []const u8) ParseError!Result([]const u8) {
     if (bytes.len == 0) return ParseError.UnexpectedEof;
     const raw = firstLine(bytes);
     const trimmed = trimMarkerLine(raw);
@@ -484,7 +451,7 @@ fn markerPrefixLine(
 }
 
 /// Consume one '\n' (also accepts CRLF by stripping the '\r' from caller-side text).
-fn newline(_: std.mem.Allocator, bytes: []const u8) ParseError!Result(void) {
+fn newline(bytes: []const u8) ParseError!Result(void) {
     if (bytes.len == 0) return ParseError.UnexpectedEof;
     if (bytes[0] == '\n') return ok(void, {}, bytes[1..]);
     if (bytes[0] == '\r' and bytes.len >= 2 and bytes[1] == '\n') return ok(void, {}, bytes[2..]);
@@ -492,19 +459,18 @@ fn newline(_: std.mem.Allocator, bytes: []const u8) ParseError!Result(void) {
 }
 
 /// Take bytes until (but not including) '\n'. Strips trailing '\r' if present.
-fn untilNewline(_: std.mem.Allocator, bytes: []const u8) ParseError!Result([]const u8) {
-    var i: usize = 0;
-    while (i < bytes.len and bytes[i] != '\n') : (i += 1) {}
-    var slice = bytes[0..i];
+fn untilNewline(bytes: []const u8) ParseError!Result([]const u8) {
+    const end = std.mem.indexOfScalar(u8, bytes, '\n') orelse bytes.len;
+    var slice = bytes[0..end];
     if (slice.len > 0 and slice[slice.len - 1] == '\r') slice = slice[0 .. slice.len - 1];
-    return ok([]const u8, slice, bytes[i..]);
+    return ok([]const u8, slice, bytes[end..]);
 }
 
 /// One line: `untilNewline` then `newline`. EOF without trailing newline also OK (treated as last line).
-fn line(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result([]const u8) {
-    const text = try untilNewline(alloc, bytes);
+fn line(bytes: []const u8) ParseError!Result([]const u8) {
+    const text = try untilNewline(bytes);
     if (text.rest.len == 0) return text; // EOF — no newline to consume
-    const nl = try newline(alloc, text.rest);
+    const nl = try newline(text.rest);
     return ok([]const u8, text.value, nl.rest);
 }
 
@@ -521,25 +487,9 @@ fn skipNewline(bytes: []const u8) []const u8 {
 }
 
 fn stripMarkdownFenceWrapper(bytes: []const u8) []const u8 {
-    const first = firstLine(bytes);
-    const trimmed = trimMarkerLine(first);
+    const trimmed = trimMarkerLine(firstLine(bytes));
     if (!std.mem.startsWith(u8, trimmed, "```")) return bytes;
-
-    const body = lineRest(bytes);
-    var cursor = body;
-    var body_end: usize = body.len;
-    var offset: usize = 0;
-    while (cursor.len > 0) {
-        const raw = firstLine(cursor);
-        if (std.mem.eql(u8, trimMarkerLine(raw), "```")) {
-            body_end = offset;
-            break;
-        }
-        const rest = lineRest(cursor);
-        offset += cursor.len - rest.len;
-        cursor = rest;
-    }
-    return body[0..body_end];
+    return bodyUntilTerminatorLine(bytes, "```");
 }
 
 fn heredocTokenFromLine(line_bytes: []const u8) ?[]const u8 {
@@ -560,15 +510,18 @@ fn heredocTokenFromLine(line_bytes: []const u8) ?[]const u8 {
 }
 
 fn stripHeredocWrapper(bytes: []const u8) []const u8 {
-    const first = firstLine(bytes);
-    const token = heredocTokenFromLine(first) orelse return bytes;
+    const token = heredocTokenFromLine(firstLine(bytes)) orelse return bytes;
+    return bodyUntilTerminatorLine(bytes, token);
+}
+
+fn bodyUntilTerminatorLine(bytes: []const u8, terminator: []const u8) []const u8 {
     const body = lineRest(bytes);
     var cursor = body;
     var body_end: usize = body.len;
     var offset: usize = 0;
     while (cursor.len > 0) {
         const raw = firstLine(cursor);
-        if (std.mem.eql(u8, trimMarkerLine(raw), token)) {
+        if (std.mem.eql(u8, trimMarkerLine(raw), terminator)) {
             body_end = offset;
             break;
         }
@@ -603,12 +556,8 @@ fn hunkBoundaryEql(bytes: []const u8, literal: []const u8) bool {
 
 // ---- patch grammar parsers ----------------------------------------------
 
-fn parsePath(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result([]const u8) {
-    return line(alloc, bytes);
-}
-
 fn parseAddFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(PatchCommand) {
-    const hdr = try markerPrefixLine("*** Add File: ", alloc, bytes);
+    const hdr = try markerPrefixLine("*** Add File: ", bytes);
     const path = hdr.value;
 
     var lines: std.ArrayList([]const u8) = .empty;
@@ -616,7 +565,7 @@ fn parseAddFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(P
 
     var cursor = hdr.rest;
     while (cursor.len > 0 and cursor[0] == '+') {
-        const lr = try line(alloc, cursor[1..]);
+        const lr = try line(cursor[1..]);
         try lines.append(alloc, lr.value);
         cursor = lr.rest;
     }
@@ -625,16 +574,16 @@ fn parseAddFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(P
     return ok(PatchCommand, .{ .file_add = .{ .path = path, .lines = owned } }, cursor);
 }
 
-fn parseDeleteFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(PatchCommand) {
-    const hdr = try markerPrefixLine("*** Delete File: ", alloc, bytes);
+fn parseDeleteFile(bytes: []const u8) ParseError!Result(PatchCommand) {
+    const hdr = try markerPrefixLine("*** Delete File: ", bytes);
     return ok(PatchCommand, .{ .file_delete = .{ .path = hdr.value } }, hdr.rest);
 }
 
-fn parseMoveTo(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result([]const u8) {
-    return markerPrefixLine("*** Move to: ", alloc, bytes);
+fn parseMoveTo(bytes: []const u8) ParseError!Result([]const u8) {
+    return markerPrefixLine("*** Move to: ", bytes);
 }
 
-fn parseHunkLine(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(HunkLine) {
+fn parseHunkLine(bytes: []const u8) ParseError!Result(HunkLine) {
     if (bytes.len == 0) return ParseError.UnexpectedEof;
     if (bytes[0] == '\n') return ok(HunkLine, .{ .context = "" }, bytes[1..]);
     if (bytes.len >= 2 and bytes[0] == '\r' and bytes[1] == '\n') {
@@ -642,7 +591,7 @@ fn parseHunkLine(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(
     }
     const prefix = bytes[0];
     if (prefix != ' ' and prefix != '+' and prefix != '-') return ParseError.InvalidHunkLine;
-    const lr = try line(alloc, bytes[1..]);
+    const lr = try line(bytes[1..]);
     const hl: HunkLine = switch (prefix) {
         ' ' => .{ .context = lr.value },
         '+' => .{ .add = lr.value },
@@ -657,7 +606,7 @@ fn parseHunk(alloc: std.mem.Allocator, bytes: []const u8, allow_missing_context:
     var cursor: []const u8 = bytes;
 
     if (hunkBoundaryStartsWith(bytes, "@@")) {
-        const header_line = try markerPrefixLine("@@", alloc, bytes);
+        const header_line = try markerPrefixLine("@@", bytes);
         const h = trimMarkerLine(header_line.value);
         if (h.len > 0) {
             header = h;
@@ -675,7 +624,7 @@ fn parseHunk(alloc: std.mem.Allocator, bytes: []const u8, allow_missing_context:
         if (hunkBoundaryStartsWith(cursor, "@@")) break;
         if (hunkBoundaryStartsWith(cursor, "*** ")) break;
         if (cursor[0] != ' ' and cursor[0] != '+' and cursor[0] != '-' and cursor[0] != '\n' and cursor[0] != '\r') break;
-        const hl = try parseHunkLine(alloc, cursor);
+        const hl = try parseHunkLine(cursor);
         try lines.append(alloc, hl.value);
         cursor = hl.rest;
     }
@@ -691,13 +640,13 @@ fn parseHunk(alloc: std.mem.Allocator, bytes: []const u8, allow_missing_context:
 }
 
 fn parseUpdateFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(PatchCommand) {
-    const hdr = try markerPrefixLine("*** Update File: ", alloc, bytes);
+    const hdr = try markerPrefixLine("*** Update File: ", bytes);
     const path = hdr.value;
 
     var move_to: ?[]const u8 = null;
     var cursor = hdr.rest;
     if (peekTrimmedStartsWith(cursor, "*** Move to: ")) {
-        const mv = try parseMoveTo(alloc, cursor);
+        const mv = try parseMoveTo(cursor);
         move_to = mv.value;
         cursor = mv.rest;
     }
@@ -738,7 +687,7 @@ fn parseUpdateFile(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Resul
 
 fn parseFileOp(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(PatchCommand) {
     if (peekTrimmedStartsWith(bytes, "*** Add File: ")) return parseAddFile(alloc, bytes);
-    if (peekTrimmedStartsWith(bytes, "*** Delete File: ")) return parseDeleteFile(alloc, bytes);
+    if (peekTrimmedStartsWith(bytes, "*** Delete File: ")) return parseDeleteFile(bytes);
     if (peekTrimmedStartsWith(bytes, "*** Update File: ")) return parseUpdateFile(alloc, bytes);
     return ParseError.NoMatch;
 }
@@ -756,7 +705,7 @@ fn freeCommands(alloc: std.mem.Allocator, cmds: []const PatchCommand) void {
 
 pub fn parsePatch(alloc: std.mem.Allocator, bytes: []const u8) ParseError!Result(Patch) {
     const input = stripCommonWrappers(bytes);
-    const begin = try markerLine("*** Begin Patch", alloc, input);
+    const begin = try markerLine("*** Begin Patch", input);
 
     var cmds: std.ArrayList(PatchCommand) = .empty;
     defer cmds.deinit(alloc);
@@ -794,24 +743,6 @@ fn splitLines(alloc: std.mem.Allocator, src: []const u8) ![][]const u8 {
         try out.append(alloc, ln);
     }
     return out.toOwnedSlice(alloc);
-}
-
-/// Join lines back with `\n`. Mirrors `splitLines` so round-trip is identity.
-fn joinLines(alloc: std.mem.Allocator, lines: []const []const u8) ![]u8 {
-    var total: usize = 0;
-    for (lines) |l| total += l.len;
-    if (lines.len > 0) total += lines.len - 1;
-    var buf = try alloc.alloc(u8, total);
-    var i: usize = 0;
-    for (lines, 0..) |l, idx| {
-        @memcpy(buf[i .. i + l.len], l);
-        i += l.len;
-        if (idx + 1 < lines.len) {
-            buf[i] = '\n';
-            i += 1;
-        }
-    }
-    return buf;
 }
 
 /// Apply hunks to `src`, returning new content. Caller owns the result.
@@ -893,27 +824,10 @@ pub fn applyHunks(
     }
 
     const crlf = std.mem.indexOf(u8, src, "\r\n") != null;
-    const joined = try joinLines(alloc, lines);
+    const joined = try std.mem.join(alloc, "\n", lines);
     if (!crlf) return joined;
     defer alloc.free(joined);
-    return toCrlf(alloc, joined);
-}
-
-fn toCrlf(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
-    const extra = std.mem.count(u8, s, "\n");
-    const out = try alloc.alloc(u8, s.len + extra);
-    var j: usize = 0;
-    for (s) |c| {
-        if (c == '\n') {
-            out[j] = '\r';
-            out[j + 1] = '\n';
-            j += 2;
-        } else {
-            out[j] = c;
-            j += 1;
-        }
-    }
-    return out;
+    return r.toCrlf(alloc, joined);
 }
 
 const MatchMode = enum {
@@ -1045,8 +959,8 @@ fn lineMatches(
         .exact => std.mem.eql(u8, actual, pattern),
         .rstrip => std.mem.eql(
             u8,
-            trimLineRight(actual),
-            trimLineRight(pattern),
+            std.mem.trimEnd(u8, actual, " \t\r"),
+            std.mem.trimEnd(u8, pattern, " \t\r"),
         ),
         .trim => std.mem.eql(
             u8,
@@ -1065,17 +979,6 @@ fn lineMatches(
             );
         },
     };
-}
-
-fn trimLineRight(bytes: []const u8) []const u8 {
-    var end = bytes.len;
-    while (end > 0) {
-        switch (bytes[end - 1]) {
-            ' ', '\t', '\r' => end -= 1,
-            else => break,
-        }
-    }
-    return bytes[0..end];
 }
 
 fn normalizeCommonUnicode(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
@@ -1211,7 +1114,6 @@ fn deleteFile(ctx: r.ToolContext, path: []const u8, diag: *ApplyDiagnostics) App
     };
 }
 
-/// Like joinLines but always end with a newline (file-add lines come from `+` rows).
 fn joinLinesWithTrailingNewline(alloc: std.mem.Allocator, lines: []const []const u8) ![]u8 {
     var total: usize = 0;
     for (lines) |l| total += l.len + 1; // each line + '\n'

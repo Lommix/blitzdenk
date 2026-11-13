@@ -35,7 +35,6 @@ pub const WirePart = union(enum) {
         image: ?WireImage = null,
         is_error: bool = false,
         exit_loop: bool = false,
-        comp_strat: enum { truncate, keep, summarize } = .truncate,
     },
 };
 
@@ -43,9 +42,6 @@ pub const WireMessage = struct {
     role: WireRole,
     parts: []const WirePart,
     provider_items: []const []const u8 = &.{},
-    flags: struct {
-        allow_export: bool = true,
-    } = .{},
     time_ms: i64 = 0,
 };
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const r = @import("root.zig");
 
 const log = std.log.scoped(.oauth);
 
@@ -85,7 +86,6 @@ pub const Challenge = struct {
     resource_metadata: ?[]const u8 = null,
     scope: ?[]const u8 = null,
     @"error": ?[]const u8 = null,
-    error_description: ?[]const u8 = null,
 };
 
 pub fn parseBearerChallenge(header: []const u8) ?Challenge {
@@ -126,7 +126,6 @@ pub fn parseBearerChallenge(header: []const u8) ?Challenge {
         if (std.ascii.eqlIgnoreCase(name, "resource_metadata")) out.resource_metadata = value;
         if (std.ascii.eqlIgnoreCase(name, "scope")) out.scope = value;
         if (std.ascii.eqlIgnoreCase(name, "error")) out.@"error" = value;
-        if (std.ascii.eqlIgnoreCase(name, "error_description")) out.error_description = value;
     }
     return out;
 }
@@ -564,17 +563,6 @@ fn openBrowser(_: ?*anyopaque, io: std.Io, url: []const u8) error{Canceled}!bool
     return term.success();
 }
 
-pub const TaskConfig = struct {
-    name: []const u8,
-    url: []const u8,
-    client_id: ?[]const u8 = null,
-    client_secret: ?[]const u8 = null,
-    scopes: []const []const u8 = &.{},
-    redirect_port: u16 = DEFAULT_REDIRECT_PORT,
-    store_dir: []const u8,
-    timeout_s: u64 = AUTH_TIMEOUT_S,
-};
-
 const AuthServer = struct {
     issuer: []const u8,
     authorization_endpoint: []const u8,
@@ -610,7 +598,9 @@ pub const Task = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     arena: std.heap.ArenaAllocator,
-    cfg: TaskConfig,
+    server: r.mcp.ServerConfig,
+    store_dir: []const u8,
+    auth_timeout_s: u64,
     opener: Opener,
     phase_value: std.atomic.Value(Phase) = .init(.idle),
     finished: std.atomic.Value(bool) = .init(false),
@@ -621,23 +611,30 @@ pub const Task = struct {
     redirect_uri: []const u8 = "",
     opener_failed: bool = false,
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, cfg: TaskConfig, opener: Opener) !Task {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, server: r.mcp.ServerConfig, store_dir: []const u8, auth_timeout_s: u64, opener: Opener) !Task {
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
         const a = arena.allocator();
-        const scopes = try a.alloc([]const u8, cfg.scopes.len);
-        for (cfg.scopes, 0..) |s, i| scopes[i] = try a.dupe(u8, s);
-        const owned: TaskConfig = .{
-            .name = try a.dupe(u8, cfg.name),
-            .url = try a.dupe(u8, cfg.url),
-            .client_id = if (cfg.client_id) |v| try a.dupe(u8, v) else null,
-            .client_secret = if (cfg.client_secret) |v| try a.dupe(u8, v) else null,
+        const scopes = try a.alloc([]const u8, server.scopes.len);
+        for (server.scopes, 0..) |s, i| scopes[i] = try a.dupe(u8, s);
+        const owned: r.mcp.ServerConfig = .{
+            .name = try a.dupe(u8, server.name),
+            .tools_prefix = "",
+            .url = if (server.url) |v| try a.dupe(u8, v) else null,
+            .client_id = if (server.client_id) |v| try a.dupe(u8, v) else null,
+            .client_secret = if (server.client_secret) |v| try a.dupe(u8, v) else null,
             .scopes = scopes,
-            .redirect_port = cfg.redirect_port,
-            .store_dir = try a.dupe(u8, cfg.store_dir),
-            .timeout_s = cfg.timeout_s,
+            .redirect_port = server.redirect_port,
         };
-        return .{ .gpa = gpa, .io = io, .arena = arena, .opener = opener, .cfg = owned };
+        return .{
+            .gpa = gpa,
+            .io = io,
+            .arena = arena,
+            .server = owned,
+            .store_dir = try a.dupe(u8, store_dir),
+            .auth_timeout_s = auth_timeout_s,
+            .opener = opener,
+        };
     }
 
     pub fn start(self: *Task) void {
@@ -658,7 +655,7 @@ pub const Task = struct {
     }
 
     pub fn name(self: *const Task) []const u8 {
-        return self.cfg.name;
+        return self.server.name;
     }
 
     pub fn deinit(self: *Task) void {
@@ -677,7 +674,7 @@ pub const Task = struct {
         defer client.deinit();
         self.outcome = self.flow(&client) catch |err| {
             self.err_kind = ErrorKind.fromError(err);
-            log.warn("authorization for '{s}' failed: {s}", .{ self.cfg.name, @errorName(err) });
+            log.warn("authorization for '{s}' failed: {s}", .{ self.server.name, @errorName(err) });
             self.outcome = .failed;
             self.setPhase(.failed);
             return;
@@ -687,8 +684,9 @@ pub const Task = struct {
 
     fn flow(self: *Task, client: *std.http.Client) !Outcome {
         const a = self.arena.allocator();
-        const store: Store = .{ .io = self.io, .dir = self.cfg.store_dir };
-        const key = try normalizeUrl(a, self.cfg.url);
+        const store: Store = .{ .io = self.io, .dir = self.store_dir };
+        const url = self.server.url.?;
+        const key = try normalizeUrl(a, url);
         const now = nowSeconds(self.io);
 
         if (store.get(a, key)) |found| {
@@ -712,7 +710,7 @@ pub const Task = struct {
         }
 
         self.setPhase(.probing);
-        const probe = try httpSend(a, client, .POST, self.cfg.url, "application/json", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"blitz\",\"version\":\"0.1\"}}}", &.{
+        const probe = try httpSend(a, client, .POST, url, "application/json", "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"blitz\",\"version\":\"0.1\"}}}", &.{
             .{ .name = "accept", .value = "application/json, text/event-stream" },
         });
         log.info("probe {s} status {d}", .{ origin(key), probe.status });
@@ -723,9 +721,9 @@ pub const Task = struct {
         const prm = try discoverResource(a, client, key, challenge);
         const as = try discoverAuthServer(a, client, prm.auth_server);
         const resource = prm.resource orelse key;
-        const scope = try selectScope(a, self.cfg.scopes, challenge.scope, prm.scopes);
+        const scope = try selectScope(a, self.server.scopes, challenge.scope, prm.scopes);
 
-        var server = try bindLoopback(self.io, self.cfg.redirect_port);
+        var server = try bindLoopback(self.io, self.server.redirect_port);
         defer server.deinit(self.io);
         const redirect_uri = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}" ++ CALLBACK_PATH, .{server.socket.address.getPort()});
 
@@ -800,10 +798,10 @@ pub const Task = struct {
     }
 
     fn register(self: *Task, a: std.mem.Allocator, client: *std.http.Client, store: Store, as: AuthServer, auth_server: []const u8, redirect_uri: []const u8) !ClientAuth {
-        if (self.cfg.client_id) |id| return .{
+        if (self.server.client_id) |id| return .{
             .client_id = id,
-            .client_secret = self.cfg.client_secret,
-            .auth_method = if (self.cfg.client_secret != null) "client_secret_basic" else "none",
+            .client_secret = self.server.client_secret,
+            .auth_method = if (self.server.client_secret != null) "client_secret_basic" else "none",
         };
         if (store.findRegistration(a, auth_server, redirect_uri)) |rec| return .{
             .client_id = rec.client_id,
@@ -842,7 +840,7 @@ pub const Task = struct {
         var select = std.Io.Select(CallbackSel).init(self.io, &buffer);
         defer select.cancelDiscard();
         select.concurrent(.accept_failed, acceptLoop, .{ self, server, &select, &expect }) catch return error.NetworkError;
-        select.async(.timeout, sleepSeconds, .{ self.io, self.cfg.timeout_s });
+        select.async(.timeout, sleepSeconds, .{ self.io, self.auth_timeout_s });
         while (true) {
             const sel = try select.await();
             switch (sel) {

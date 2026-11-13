@@ -6,35 +6,6 @@ pub const Buffer = buffer_mod.Buffer;
 pub const Style = cell_mod.Style;
 const Color = cell_mod.Color;
 
-// ── Word Iterator ──
-pub const WordIterator = struct {
-    text: []const u8,
-    pos: usize = 0,
-
-    pub fn next(self: *WordIterator) ?[]const u8 {
-        // skip leading spaces
-        while (self.pos < self.text.len and self.text[self.pos] == ' ') {
-            self.pos += 1;
-        }
-        if (self.pos >= self.text.len) return null;
-
-        if (self.text[self.pos] == '\n') {
-            self.pos += 1;
-            return "\n";
-        }
-
-        const start = self.pos;
-        while (self.pos < self.text.len and self.text[self.pos] != ' ' and self.text[self.pos] != '\n') {
-            self.pos += 1;
-        }
-        // include trailing space as part of word so widths account for gaps
-        if (self.pos < self.text.len and self.text[self.pos] == ' ') {
-            self.pos += 1;
-        }
-        return self.text[start..self.pos];
-    }
-};
-
 // ── Line Iterator ──
 pub const LineIterator = struct {
     text: []const u8,

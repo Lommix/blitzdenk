@@ -3,6 +3,7 @@
 //! stay readable until a new job needs the entry or the owner goes away.
 const std = @import("std");
 const exec = @import("exec");
+const util = @import("util.zig");
 const AgentId = @import("agent-id").AgentId;
 
 pub const MAX_JOBS = 8;
@@ -258,9 +259,7 @@ pub fn formatLines(alloc: std.mem.Allocator, text: []const u8, dropped: usize, o
     return alloc.dupe(u8, body.items);
 }
 
-fn nowMs(io: std.Io) i64 {
-    return @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_ms));
-}
+const nowMs = util.nowMs;
 
 const testing = std.testing;
 

@@ -246,18 +246,11 @@ pub fn main(init: std.process.Init) !void {
             };
             const cwd_dir = project.dir;
             defer cwd_dir.close(io);
-            const resolved: ?[]const u8 = if (prefix) |p|
-                session_store.resolve(init.arena.allocator(), io, cwd_dir, p) catch |err| switch (err) {
-                    error.AmbiguousSessionId => {
-                        std.debug.print("Error: '{s}' matches multiple sessions\n", .{p});
-                        return;
-                    },
-                    else => {
-                        std.debug.print("Error: resolving '{s}' failed: {s}\n", .{ p, @errorName(err) });
-                        return;
-                    },
-                }
-            else blk: {
+            const resolved: ?[]const u8 = if (prefix) |p| switch (resolveSessionPrefix(init.arena.allocator(), io, cwd_dir, p, "resolving")) {
+                .id => |id| id,
+                .failed => return,
+                .no_match => null,
+            } else blk: {
                 const entries = session_store.list(init.arena.allocator(), io, cwd_dir) catch |err| {
                     std.debug.print("Error: listing sessions failed: {s}\n", .{@errorName(err)});
                     return;
@@ -444,7 +437,7 @@ fn evalCli(
     var cwd_buffer: [std.posix.PATH_MAX]u8 = undefined;
     const cwd_len = try std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buffer);
     const cwd = cwd_buffer[0..cwd_len];
-    const project_path = try sessionProjectDir(arena, try util.cacheDir(arena, env), cwd);
+    const project_path = try hashedCachePath(arena, try util.cacheDir(arena, env), cwd, null);
     const base = std.Io.Dir.cwd().openDir(io, project_path, .{}) catch |err| switch (err) {
         error.FileNotFound => failEval("no sessions found in {s}", .{project_path}),
         else => return err,
@@ -464,27 +457,50 @@ fn evalCli(
     try out.interface.flush();
 }
 
-fn sessionProjectDir(alloc: std.mem.Allocator, cache_dir: []const u8, project_cwd: []const u8) ![]u8 {
-    return std.fmt.allocPrint(alloc, "{s}/{x:0>16}", .{ cache_dir, std.hash.Fnv1a_64.hash(project_cwd) });
+fn hashedCachePath(alloc: std.mem.Allocator, cache_dir: []const u8, project_cwd: []const u8, subdir: ?[]const u8) ![]u8 {
+    const hash = std.hash.Fnv1a_64.hash(project_cwd);
+    if (subdir) |name| return std.fmt.allocPrint(alloc, "{s}/{s}/{x:0>16}", .{ cache_dir, name, hash });
+    return std.fmt.allocPrint(alloc, "{s}/{x:0>16}", .{ cache_dir, hash });
 }
 
-const SessionProject = struct { dir: std.Io.Dir, path: []const u8 };
+const OpenedDir = struct { dir: std.Io.Dir, path: []const u8 };
 
-fn openSessionProject(
+fn openHashedCacheDir(
     io: std.Io,
     alloc: std.mem.Allocator,
     env: *const std.process.Environ.Map,
     cwd: []const u8,
-) !SessionProject {
-    const path = try sessionProjectDir(alloc, try util.cacheDir(alloc, env), cwd);
+    subdir: ?[]const u8,
+) !OpenedDir {
+    const path = try hashedCachePath(alloc, try util.cacheDir(alloc, env), cwd, subdir);
     std.Io.Dir.cwd().createDirPath(io, path) catch {};
     return .{ .dir = try std.Io.Dir.cwd().openDir(io, path, .{}), .path = path };
 }
 
+fn openSessionProject(io: std.Io, alloc: std.mem.Allocator, env: *const std.process.Environ.Map, cwd: []const u8) !OpenedDir {
+    return openHashedCacheDir(io, alloc, env, cwd, null);
+}
+
 fn openHistoryStoreDir(io: std.Io, alloc: std.mem.Allocator, env: *const std.process.Environ.Map, cwd: []const u8) !std.Io.Dir {
-    const path = try std.fmt.allocPrint(alloc, "{s}/history/{x:0>16}", .{ try util.cacheDir(alloc, env), std.hash.Fnv1a_64.hash(cwd) });
-    std.Io.Dir.cwd().createDirPath(io, path) catch {};
-    return std.Io.Dir.cwd().openDir(io, path, .{});
+    return (try openHashedCacheDir(io, alloc, env, cwd, "history")).dir;
+}
+
+const ResolvedSessionPrefix = union(enum) {
+    id: []const u8,
+    no_match,
+    failed,
+};
+
+fn resolveSessionPrefix(alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prefix: []const u8, failure_label: []const u8) ResolvedSessionPrefix {
+    const resolved = session_store.resolve(alloc, io, dir, prefix) catch |err| {
+        if (err == error.AmbiguousSessionId) {
+            std.debug.print("Error: '{s}' matches multiple sessions\n", .{prefix});
+        } else {
+            std.debug.print("Error: {s} '{s}' failed: {s}\n", .{ failure_label, prefix, @errorName(err) });
+        }
+        return .failed;
+    };
+    return if (resolved) |id| .{ .id = id } else .no_match;
 }
 
 fn localTime(buf: []u8, millis: i64) []const u8 {
@@ -616,6 +632,29 @@ fn sessionsTui(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env
     try run(cwd, gpa, arena, io, env, .{}, null, id, false);
 }
 
+fn loadUserLua(app: *App, io: std.Io, arena: std.mem.Allocator, config_lua: ?ConfigLuaInfo, log_prefix: []const u8, prior_failed: bool) bool {
+    var failed = prior_failed;
+    if (config_lua) |info| {
+        const inject = std.fmt.allocPrint(arena, "package.path = \"{s}/?.lua;\" .. package.path", .{info.dir_path}) catch null;
+        if (inject) |code| app.lua_vm.exec(code) catch |err| {
+            failed = true;
+            std.log.scoped(.lua).err("{s}failed to configure lua package.path: {s} ({any})", .{ log_prefix, app.lua_vm.getLastError(), err });
+        };
+        app.lua_vm.load(info.abs_path) catch |err| {
+            failed = true;
+            std.log.scoped(.lua).err("{s}failed to load {s}: {s} ({any})", .{ log_prefix, info.abs_path, app.lua_vm.getLastError(), err });
+        };
+    }
+    if (cwdBlitzLuaExists(io) and !app.localLuaIsGlobal()) {
+        app.lua_vm.load("blitz.lua") catch |err| {
+            failed = true;
+            std.log.scoped(.lua).err("{s}failed to load blitz.lua: {s} ({any})", .{ log_prefix, app.lua_vm.getLastError(), err });
+        };
+    }
+    if (!failed) app.lua_vm.clearLastError();
+    return failed;
+}
+
 pub fn run(
     cwd: []const u8,
     gpa: std.mem.Allocator,
@@ -627,28 +666,8 @@ pub fn run(
     resume_session: ?[]const u8,
     headless: bool,
 ) !void {
-    const first_install = !globalBlitzLuaExists(io, env);
-    const done_marker_exists = setupMarkerExistsAbsolute(arena, io, env, r.wizard.DONE_MARKER);
-    const pending_marker_exists = setupMarkerExistsAbsolute(arena, io, env, r.wizard.PENDING_MARKER);
-    const wizard_pending = !done_marker_exists and (first_install or pending_marker_exists);
-
-    const interactive = stdinIsInteractiveTty(io);
-    if (wizard_pending and !interactive) {
-        std.debug.print("Error: first-run setup wizard is pending — run blitz interactively once to complete it\n", .{});
-        std.process.exit(1);
-    }
-
-    const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;
-
-    if (wizard_pending and first_install) {
-        if (config_lua) |info| {
-            if (std.Io.Dir.openDirAbsolute(io, info.dir_path, .{})) |opened| {
-                var config_dir = opened;
-                r.wizard.writePendingMarker(io, config_dir);
-                config_dir.close(io);
-            } else |_| {}
-        }
-    }
+    const gate = resolveStartupGate(arena, io, env);
+    const config_lua = gate.config_lua;
 
     const HOME = env.get("HOME") orelse return error.NoHomeFound;
     const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
@@ -669,12 +688,7 @@ pub fn run(
     var exec_pool = r.exec.CmdPool.init(gpa, io, env);
     app.registry = &registry;
     app.exec_pool = &exec_pool;
-    if (config_lua) |info| {
-        app.lua_config_dir = info.dir_path;
-        app.lua_config_abs = info.abs_path;
-        const state_dir: ?[]const u8 = util.stateDir(arena, env) catch null;
-        if (state_dir) |base| app.mcp_manager.token_dir = r.oauth.storeDir(arena, base) catch null;
-    }
+    wireConfigLua(&app, arena, env, config_lua);
     defer {
         app.cancelPermissions(null);
         registry.cancelAll();
@@ -685,53 +699,18 @@ pub fn run(
     app.lua_vm.setApp(&app);
     app.lua_vm.clearLastError();
 
-    var lua_load_failed = false;
-    if (config_lua) |info| {
-        const inject = try std.fmt.allocPrint(arena, "package.path = \"{s}/?.lua;\" .. package.path", .{info.dir_path});
-        app.lua_vm.exec(inject) catch |err| {
-            lua_load_failed = true;
-            std.log.scoped(.lua).err("failed to configure lua package.path: {s} ({any})", .{ app.lua_vm.getLastError(), err });
-        };
-        app.lua_vm.load(info.abs_path) catch |err| {
-            lua_load_failed = true;
-            std.log.scoped(.lua).err("failed to load {s}: {s} ({any})", .{ info.abs_path, app.lua_vm.getLastError(), err });
-        };
-    }
-    if (cwdBlitzLuaExists(io) and !app.localLuaIsGlobal()) {
-        app.lua_vm.load("blitz.lua") catch |err| {
-            lua_load_failed = true;
-            std.log.scoped(.lua).err("failed to load blitz.lua: {s} ({any})", .{ app.lua_vm.getLastError(), err });
-        };
-    }
-    if (!lua_load_failed) app.lua_vm.clearLastError();
-    app.lua_vm.readConfigFields();
-    try app.lua_vm.publishAvailableSystems(context_factory);
-    var lua_tools = try app.lua_vm.getRegisteredTools(arena);
-    var lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
-
-    for (lua_tools) |tool| {
-        try context_factory.add(tool, .all);
-    }
-    context_factory.precalcGeneralPromptSize(&app.config);
-
-    for (lua_binds) |bind| {
-        try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn }, .description = bind.description });
-    }
+    try initLuaSurface(&app, io, arena, context_factory, config_lua);
 
     var watch = config_watch.Watch.init(gpa);
     defer watch.deinit();
-    {
-        var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
-        const cwd_len = std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buf) catch 0;
-        if (cwd_len > 0) watch.blitz_path = try std.fmt.allocPrint(arena, "{s}/blitz.lua", .{cwd_buf[0..cwd_len]});
-    }
+    try watchCwdBlitzLua(&watch, arena, io);
     if (config_lua) |info| watch.config_dir = info.dir_path;
     watch.refreshAfterReload(io);
     var reload_tick: u32 = 0;
 
     app.reset();
     if (flags.approval_explicit) app.flags.approval_mode = flags.approval_mode;
-    if (wizard_pending) app.enterWizard();
+    if (gate.wizard_pending) app.enterWizard();
     if (app.input_mode != .wizard) app.warnUnboundAgentModels();
 
     var store = session_store.Store{ .io = io, .gpa = gpa, .base = cwd_dir };
@@ -746,44 +725,7 @@ pub fn run(
     }
     app.session_store = &store;
     var session_id_buf: [session_store.ID_LEN]u8 = undefined;
-    if (resume_session) |prefix| {
-        const resolved_opt = session_store.resolve(arena, io, cwd_dir, prefix) catch |err| blk: {
-            if (err == error.AmbiguousSessionId) {
-                std.debug.print("Error: '{s}' matches multiple sessions\n", .{prefix});
-            } else {
-                std.debug.print("Error: resolving session '{s}' failed: {s}\n", .{ prefix, @errorName(err) });
-            }
-            break :blk null;
-        };
-        const resolved = resolved_opt orelse return error.SessionNotFound;
-        const file_name = try session_store.fileName(arena, resolved);
-        const loaded_opt = session_store.load(arena, io, cwd_dir, file_name) catch |err| {
-            std.debug.print("Error: reading session '{s}' failed: {s}\n", .{ resolved, @errorName(err) });
-            return error.SessionNotFound;
-        };
-        const loaded = loaded_opt orelse {
-            std.debug.print("Error: session '{s}' has no usable header\n", .{resolved});
-            return error.SessionNotFound;
-        };
-        var resumed = false;
-        if (session.applySaveState(&app, &loaded.save)) |_| {
-            resumed = true;
-        } else |err| {
-            std.log.scoped(.session).warn("resume of {s} failed: {s}", .{ resolved, @errorName(err) });
-        }
-        if (resumed) {
-            try store.open(cwd, file_name);
-            session.bindJournal(&app);
-        } else {
-            store.create(cwd) catch |create_err| {
-                std.log.scoped(.session).warn("session journal unavailable: {s}", .{@errorName(create_err)});
-            };
-        }
-    } else {
-        store.create(cwd) catch |err| {
-            std.log.scoped(.session).warn("session journal unavailable: {s}", .{@errorName(err)});
-        };
-    }
+    try resumeOrCreateSession(&app, &store, arena, io, cwd_dir, cwd, resume_session);
     app.checkpoint();
 
     app.loadHistory(history_store_dir);
@@ -816,7 +758,7 @@ pub fn run(
         var was_running = app.running;
         var error_fade_pending = false;
         var last_frame_ns: i128 = 0;
-        var mouse_press: ?struct { x: u16, y: u16 } = null;
+        var mouse_press: ?MousePress = null;
         main_loop: while (true) {
             const now_ns: i128 = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
             const notifications_before = app.notifications.hasVisible();
@@ -844,67 +786,7 @@ pub fn run(
             // Drain new agent messages from broadcast into the timeline
             // app.drainBroadcast();
             // Mirror in-progress streaming message so TUI shows tokens as they arrive.
-            {
-                var g = app.permission_queue.lock(io);
-                const pending_before = app.pending_permissions.items.len;
-                const active_before = app.active_permission;
-                while (g.ptr.items.len > 0) {
-                    const next = g.ptr.swapRemove(0);
-                    g.unlock();
-
-                    app.fillAgentInfo(next);
-
-                    const decided = app.luaPermissionDecision(next);
-
-                    g = app.permission_queue.lock(io);
-                    if (decided) |d| {
-                        next.state = d;
-                        next.event.set(app.io);
-                        continue;
-                    }
-
-                    if (app.registry.state(next.agent_id) != .active) {
-                        next.state = .denied;
-                        next.event.set(app.io);
-                        continue;
-                    }
-
-                    const lua_stage = app.event_bus.willDeliver(io, .permission_requested);
-                    if (!lua_stage and app.permissionModeApproves(next)) {
-                        next.state = .approved;
-                        next.event.set(app.io);
-                        continue;
-                    }
-
-                    app.permission_ticket_next += 1;
-                    next.ticket = app.permission_ticket_next;
-                    next.stage = if (lua_stage) .in_lua else .in_tui;
-                    app.pending_permissions.append(app.gpa, next) catch {
-                        next.state = .denied;
-                        next.event.set(app.io);
-                        continue;
-                    };
-                    if (!app.event_bus.emit(&app, .{ .permission_requested = next.ticket })) app.releaseLuaStage(next);
-                }
-
-                var index: usize = 0;
-                while (index < app.pending_permissions.items.len) {
-                    const req = app.pending_permissions.items[index];
-                    if (req.state != .pending or app.registry.state(req.agent_id) != .active) {
-                        if (req.state == .pending) {
-                            app.settlePermission(req, .denied);
-                        } else {
-                            _ = app.pending_permissions.orderedRemove(index);
-                            if (app.active_permission == req) app.active_permission = null;
-                        }
-                        continue;
-                    }
-                    if (app.active_permission == null and req.stage == .in_tui) app.active_permission = req;
-                    index += 1;
-                }
-                if (app.pending_permissions.items.len != pending_before or app.active_permission != active_before) app.dirty = true;
-                g.unlock();
-            }
+            pumpPermissionQueue(&app);
 
             // cmd.select requests: show when no permission is on screen.
             if (app.active_permission == null and app.active_selection == null) {
@@ -927,99 +809,7 @@ pub fn run(
             const reload_requested = app.lua_reload_requested.load(.acquire);
             if (reload_tick >= 60 or reload_requested) {
                 reload_tick = 0;
-                const changed = if (reload_requested) false else watch.pollCycle(io);
-
-                var reload_completed = false;
-                var reload_failed = false;
-                if (reload_requested or changed) blk: {
-                    try app.waitForMcpTools();
-                    if (!app.lua_vm.vm_mu.tryLock()) break :blk;
-                    defer app.lua_vm.vm_mu.unlock(io);
-
-                    var reset_failed = false;
-
-                    app.lua_vm.clearLastError();
-                    app.event_bus.clear(io);
-                    app.lua_inject_hooks_enabled.store(false, .release);
-                    var lua_reload_failed = false;
-
-                    context_factory.config_reload_in_progress = true;
-                    defer context_factory.config_reload_in_progress = false;
-                    app.lua_vm.reset() catch |err| {
-                        reset_failed = true;
-                        lua_reload_failed = true;
-                        reload_failed = true;
-                        std.log.scoped(.lua).err("hot-reload: failed to reset lua vm ({any})", .{err});
-                    };
-                    app.clearSelections(false);
-                    app.keymap.custom.clearRetainingCapacity();
-                    context_factory.resetDefs();
-                    try context_factory.resetLoadedTools();
-                    if (config_lua) |info| {
-                        const inject = std.fmt.allocPrint(arena, "package.path = \"{s}/?.lua;\" .. package.path", .{info.dir_path}) catch null;
-                        if (inject) |code| app.lua_vm.exec(code) catch |err| {
-                            lua_reload_failed = true;
-                            reload_failed = true;
-                            std.log.scoped(.lua).err("hot-reload: failed to configure lua package.path: {s} ({any})", .{ app.lua_vm.getLastError(), err });
-                        };
-                        app.lua_vm.load(info.abs_path) catch |err| {
-                            lua_reload_failed = true;
-                            reload_failed = true;
-                            std.log.scoped(.lua).err("hot-reload: failed to load {s}: {s} ({any})", .{ info.abs_path, app.lua_vm.getLastError(), err });
-                        };
-                    }
-                    if (cwdBlitzLuaExists(io) and !app.localLuaIsGlobal()) {
-                        app.lua_vm.load("blitz.lua") catch |err| {
-                            lua_reload_failed = true;
-                            reload_failed = true;
-                            std.log.scoped(.lua).err("hot-reload: failed to load blitz.lua: {s} ({any})", .{ app.lua_vm.getLastError(), err });
-                        };
-                    }
-                    if (!lua_reload_failed) app.lua_vm.clearLastError();
-                    context_factory.config_reload_in_progress = false;
-                    context_factory.applySessionBindings(&app.config, !lua_reload_failed) catch |err| {
-                        std.log.scoped(.lua).err("hot-reload: failed to apply session bindings: {s}", .{@errorName(err)});
-                    };
-                    app.lua_vm.readConfigFields();
-                    app.view.invalidateRenderCache();
-                    if (app.input_mode != .wizard) app.warnUnboundAgentModels();
-                    try app.lua_vm.publishAvailableSystems(context_factory);
-                    app.dirty = true;
-
-                    lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
-                        std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
-                        if (reload_requested) {
-                            app.lua_reload_failed.store(true, .release);
-                            app.markLuaReloadDone();
-                        }
-                        break :blk;
-                    };
-                    for (lua_tools) |tool| try context_factory.add(tool, .all);
-                    context_factory.precalcGeneralPromptSize(&app.config);
-
-                    const reloaded_mcp_servers = app.lua_vm.getEnabledMcpServers(arena) catch |err| {
-                        std.log.scoped(.mcp).err("failed to load MCP server defs {any}", .{err});
-                        if (reload_requested) {
-                            app.lua_reload_failed.store(true, .release);
-                            app.markLuaReloadDone();
-                        }
-                        break :blk;
-                    };
-                    app.loadMcpTools(reloaded_mcp_servers);
-
-                    lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
-                    for (lua_binds) |bind| {
-                        try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn }, .description = bind.description });
-                    }
-
-                    if (reload_requested) app.lua_reload_failed.store(reload_failed, .release);
-                    try app.refreshLiveAgentTools();
-                    _ = app.lua_reload_generation.fetchAdd(1, .monotonic);
-                    if (reload_requested) app.markLuaReloadDone();
-                    if (!reset_failed) watch.refreshAfterReload(io);
-                    reload_completed = !reload_failed;
-                }
-                if (reload_completed and app.flags.notify_on_reload) app.cmd_queue.append(io, .{ .push_notification = "Lua sandbox reloaded" }) catch {};
+                try hotReloadLua(&app, io, arena, context_factory, &watch, config_lua, reload_requested);
             }
 
             term.pollAndEnqueue(16);
@@ -1314,53 +1104,12 @@ pub fn run(
                                         const cmd = AppCommand.parse(input);
 
                                         if (cmd) |c| {
-                                            switch (c) {
-                                                .mcp_connect => |name| {
-                                                    app.startMcpConnect(name);
-                                                    app.input.clear();
-                                                },
-                                                .mcp_cancel => {
-                                                    const active = app.mcp_auth != null;
-                                                    app.cancelMcpAuth();
-                                                    app.notifications.append(gpa, app.nowMillis(), "{s}", .{if (active) "MCP authorization canceled" else "MCP: no authorization running"}) catch {};
-                                                    app.input.clear();
-                                                },
-                                                .mcp_usage => {
-                                                    app.notifications.append(gpa, app.nowMillis(), "usage: /mcp connect <name> | /mcp cancel", .{}) catch {};
-                                                    app.input.clear();
-                                                },
-                                            }
+                                            handleAppCommand(&app, gpa, c);
                                             break;
                                         }
 
                                         if (skills.parseSkillCommand(input)) |sc| {
-                                            const entry = app.context_factory.skills.find(sc.name) orelse {
-                                                app.pushSystemMessage("unknown skill: {s}", .{sc.name});
-                                                app.input.clear();
-                                                break;
-                                            };
-                                            if (!entry.meta.user_invocable) {
-                                                app.pushSystemMessage("skill '{s}' is not user-invocable", .{entry.meta.name});
-                                                app.input.clear();
-                                                break;
-                                            }
-                                            const target = app.mainSkillTarget() orelse {
-                                                app.pushSystemMessage("skill '{s}' is not available for this agent", .{entry.meta.name});
-                                                app.input.clear();
-                                                break;
-                                            };
-                                            if (!skills.visibleTo(entry, target.name, target.is_main, target.filter)) {
-                                                app.pushSystemMessage("skill '{s}' is not available for this agent", .{entry.meta.name});
-                                                app.input.clear();
-                                                break;
-                                            }
-                                            const loaded = skills.loadSkill(app.io, app.sessionAlloc(), entry) orelse {
-                                                app.pushSystemMessage("unknown skill: {s}", .{sc.name});
-                                                app.input.clear();
-                                                break;
-                                            };
-                                            send_text = skills.skillSendText(app.sessionAlloc(), entry.meta.name, entry.path, loaded.body, sc.prompt) catch break;
-                                            timeline_text = skills.skillTimelineText(app.sessionAlloc(), entry.meta.name, sc.prompt) catch break;
+                                            if (!applySkillCommand(&app, sc, &send_text, &timeline_text)) break;
                                         } else {
                                             break;
                                         }
@@ -1369,27 +1118,7 @@ pub fn run(
                                     if (app.running) {
                                         app.pushHistory(history_store_dir, input);
                                         _ = app.event_bus.emit(&app, .{ .user_message_sent = timeline_text });
-                                        if (app.main_agent_id) |agent_id| {
-                                            const alloc = app.sessionAlloc();
-                                            const len: usize = if (app.screenshot_buf != null) 2 else 1;
-
-                                            const parts = try alloc.alloc(r.sdk.Part, len);
-                                            parts[0] = .{ .text = send_text };
-
-                                            if (app.screenshot_buf) |buf| {
-                                                parts[1] = .{ .image = .{
-                                                    .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{buf}),
-                                                    .media_type = "image/png",
-                                                } };
-                                            }
-
-                                            const entry = try TimelineEntry.userMessageSimple(alloc, .user, timeline_text);
-                                            try app.cmd_queue.append(io, .{ .queue_agent_message = .{
-                                                .agent_id = agent_id,
-                                                .parts = parts,
-                                                .timeline_entry = entry,
-                                            } });
-                                        }
+                                        try queueAgentMessage(&app, io, send_text, timeline_text);
 
                                         try app.cmd_queue.append(io, .{ .scroll_down = 999999 });
                                         app.screenshot_buf = null;
@@ -1399,16 +1128,12 @@ pub fn run(
 
                                     app.pushHistory(history_store_dir, input);
 
-                                    const alloc = app.sessionAlloc();
-                                    const parts: []const r.sdk.Part = if (app.screenshot_buf) |img_data|
-                                        alloc.dupe(r.sdk.Part, &.{
-                                            .{ .text = send_text },
-                                            .{ .image = .{ .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{img_data}), .media_type = "image/png" } },
-                                        }) catch break
+                                    const screenshot_url: ?[]const u8 = if (app.screenshot_buf) |img_data|
+                                        try std.fmt.allocPrint(app.sessionAlloc(), "data:image/png;base64,{s}", .{img_data})
                                     else
-                                        alloc.dupe(r.sdk.Part, &.{
-                                            .{ .text = send_text },
-                                        }) catch break;
+                                        null;
+
+                                    const parts = buildPromptParts(&app, send_text, screenshot_url) catch break;
 
                                     app.screenshot_buf = null;
 
@@ -1440,36 +1165,7 @@ pub fn run(
                         }
                     },
                     .mouse => |m| {
-                        if (app.image_viewer) |*viewer| {
-                            switch (r.image_view.handleMouse(viewer, m)) {
-                                .consumed => {},
-                                .close => app.closeImageViewer(),
-                                .pass => {},
-                            }
-                        } else {
-                            if (!r.view.timeline.handleScrollbarMouse(&app, m)) {
-                                const res = term.handleMouse(m);
-                                if (res.copied) {
-                                    app.notifications.append(gpa, app.nowMillis(), "Copied to clipboard!", .{}) catch {};
-                                }
-                                if (res.wheel < 0) {
-                                    try app.cmd_queue.append(io, .{ .scroll_up = @intCast(-res.wheel) });
-                                } else if (res.wheel > 0) {
-                                    try app.cmd_queue.append(io, .{ .scroll_down = @intCast(res.wheel) });
-                                }
-                            }
-                            if (m.button == .left and m.action == .press) {
-                                mouse_press = .{ .x = m.x, .y = m.y };
-                            }
-                            if (m.button == .left and m.action == .release) {
-                                if (mouse_press) |press| {
-                                    if (press.x == m.x and press.y == m.y and !r.view.tool_runs.toggleToolRunAt(&app, m.x, m.y)) {
-                                        openImageAt(&app, &term, m.x, m.y);
-                                    }
-                                }
-                                mouse_press = null;
-                            }
-                        }
+                        try handleMouse(&app, io, gpa, &term, m, &mouse_press);
                     },
                     .resize => {},
                     .none => break,
@@ -1488,12 +1184,394 @@ pub fn run(
     if (exit_hint) printSessionHint(&store, &session_id_buf);
 }
 
+const StartupGate = struct {
+    wizard_pending: bool,
+    config_lua: ?ConfigLuaInfo,
+};
+
+fn resolveStartupGate(arena: std.mem.Allocator, io: std.Io, env: *const std.process.Environ.Map) StartupGate {
+    const first_install = !globalBlitzLuaExists(io, env);
+    const done_marker_exists = setupMarkerExistsAbsolute(arena, io, env, r.wizard.DONE_MARKER);
+    const pending_marker_exists = setupMarkerExistsAbsolute(arena, io, env, r.wizard.PENDING_MARKER);
+    const wizard_pending = !done_marker_exists and (first_install or pending_marker_exists);
+
+    const interactive = stdinIsInteractiveTty(io);
+    if (wizard_pending and !interactive) {
+        std.debug.print("Error: first-run setup wizard is pending — run blitz interactively once to complete it\n", .{});
+        std.process.exit(1);
+    }
+
+    const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;
+
+    if (wizard_pending and first_install) {
+        if (config_lua) |info| {
+            if (std.Io.Dir.openDirAbsolute(io, info.dir_path, .{})) |opened| {
+                var config_dir = opened;
+                r.wizard.writePendingMarker(io, config_dir);
+                config_dir.close(io);
+            } else |_| {}
+        }
+    }
+
+    return .{ .wizard_pending = wizard_pending, .config_lua = config_lua };
+}
+
+fn wireConfigLua(app: *App, arena: std.mem.Allocator, env: *const std.process.Environ.Map, config_lua: ?ConfigLuaInfo) void {
+    if (config_lua) |info| {
+        app.lua_config_dir = info.dir_path;
+        app.lua_config_abs = info.abs_path;
+        const state_dir: ?[]const u8 = util.stateDir(arena, env) catch null;
+        if (state_dir) |base| app.mcp_manager.token_dir = r.oauth.storeDir(arena, base) catch null;
+    }
+}
+
+fn initLuaSurface(app: *App, io: std.Io, arena: std.mem.Allocator, context_factory: *r.ContextFactory, config_lua: ?ConfigLuaInfo) !void {
+    _ = loadUserLua(app, io, arena, config_lua, "", false);
+    app.lua_vm.readConfigFields();
+    try app.lua_vm.publishAvailableSystems(context_factory);
+    const lua_tools = try app.lua_vm.getRegisteredTools(arena);
+    const lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
+
+    for (lua_tools) |tool| {
+        try context_factory.add(tool, .all);
+    }
+    context_factory.precalcGeneralPromptSize(&app.config);
+
+    for (lua_binds) |bind| {
+        try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn }, .description = bind.description });
+    }
+}
+
+fn watchCwdBlitzLua(watch: *config_watch.Watch, arena: std.mem.Allocator, io: std.Io) !void {
+    var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
+    const cwd_len = std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buf) catch 0;
+    if (cwd_len > 0) watch.blitz_path = try std.fmt.allocPrint(arena, "{s}/blitz.lua", .{cwd_buf[0..cwd_len]});
+}
+
+fn resumeOrCreateSession(
+    app: *App,
+    store: *session_store.Store,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cwd_dir: std.Io.Dir,
+    cwd: []const u8,
+    resume_session: ?[]const u8,
+) !void {
+    if (resume_session) |prefix| {
+        const resolved = switch (resolveSessionPrefix(arena, io, cwd_dir, prefix, "resolving session")) {
+            .id => |id| id,
+            .no_match, .failed => return error.SessionNotFound,
+        };
+        const file_name = try session_store.fileName(arena, resolved);
+        const loaded_opt = session_store.load(arena, io, cwd_dir, file_name) catch |err| {
+            std.debug.print("Error: reading session '{s}' failed: {s}\n", .{ resolved, @errorName(err) });
+            return error.SessionNotFound;
+        };
+        const loaded = loaded_opt orelse {
+            std.debug.print("Error: session '{s}' has no usable header\n", .{resolved});
+            return error.SessionNotFound;
+        };
+        var resumed = false;
+        if (session.applySaveState(app, &loaded.save)) |_| {
+            resumed = true;
+        } else |err| {
+            std.log.scoped(.session).warn("resume of {s} failed: {s}", .{ resolved, @errorName(err) });
+        }
+        if (resumed) {
+            try store.open(cwd, file_name);
+            session.bindJournal(app);
+        } else {
+            store.create(cwd) catch |create_err| {
+                std.log.scoped(.session).warn("session journal unavailable: {s}", .{@errorName(create_err)});
+            };
+        }
+    } else {
+        store.create(cwd) catch |err| {
+            std.log.scoped(.session).warn("session journal unavailable: {s}", .{@errorName(err)});
+        };
+    }
+}
+
+fn pumpPermissionQueue(app: *App) void {
+    var g = app.permission_queue.lock(app.io);
+    const pending_before = app.pending_permissions.items.len;
+    const active_before = app.active_permission;
+    while (g.ptr.items.len > 0) {
+        const next = g.ptr.swapRemove(0);
+        g.unlock();
+
+        app.fillAgentInfo(next);
+
+        const decided = app.luaPermissionDecision(next);
+
+        g = app.permission_queue.lock(app.io);
+        if (decided) |d| {
+            next.state = d;
+            next.event.set(app.io);
+            continue;
+        }
+
+        if (app.registry.state(next.agent_id) != .active) {
+            next.state = .denied;
+            next.event.set(app.io);
+            continue;
+        }
+
+        const lua_stage = app.event_bus.willDeliver(app.io, .permission_requested);
+        if (!lua_stage and app.permissionModeApproves(next)) {
+            next.state = .approved;
+            next.event.set(app.io);
+            continue;
+        }
+
+        app.permission_ticket_next += 1;
+        next.ticket = app.permission_ticket_next;
+        next.stage = if (lua_stage) .in_lua else .in_tui;
+        app.pending_permissions.append(app.gpa, next) catch {
+            next.state = .denied;
+            next.event.set(app.io);
+            continue;
+        };
+        if (!app.event_bus.emit(app, .{ .permission_requested = next.ticket })) app.releaseLuaStage(next);
+    }
+
+    var index: usize = 0;
+    while (index < app.pending_permissions.items.len) {
+        const req = app.pending_permissions.items[index];
+        if (req.state != .pending or app.registry.state(req.agent_id) != .active) {
+            if (req.state == .pending) {
+                app.settlePermission(req, .denied);
+            } else {
+                _ = app.pending_permissions.orderedRemove(index);
+                if (app.active_permission == req) app.active_permission = null;
+            }
+            continue;
+        }
+        if (app.active_permission == null and req.stage == .in_tui) app.active_permission = req;
+        index += 1;
+    }
+    if (app.pending_permissions.items.len != pending_before or app.active_permission != active_before) app.dirty = true;
+    g.unlock();
+}
+
+fn hotReloadLua(
+    app: *App,
+    io: std.Io,
+    arena: std.mem.Allocator,
+    context_factory: *r.ContextFactory,
+    watch: *config_watch.Watch,
+    config_lua: ?ConfigLuaInfo,
+    reload_requested: bool,
+) !void {
+    const changed = if (reload_requested) false else watch.pollCycle(io);
+
+    var reload_completed = false;
+    var reload_failed = false;
+    if (reload_requested or changed) blk: {
+        try app.waitForMcpTools();
+        if (!app.lua_vm.vm_mu.tryLock()) break :blk;
+        defer app.lua_vm.vm_mu.unlock(io);
+
+        var reset_failed = false;
+
+        app.lua_vm.clearLastError();
+        app.event_bus.clear(io);
+        app.lua_inject_hooks_enabled.store(false, .release);
+
+        context_factory.config_reload_in_progress = true;
+        defer context_factory.config_reload_in_progress = false;
+        app.lua_vm.reset() catch |err| {
+            reset_failed = true;
+            reload_failed = true;
+            std.log.scoped(.lua).err("hot-reload: failed to reset lua vm ({any})", .{err});
+        };
+        app.clearSelections(false);
+        app.keymap.custom.clearRetainingCapacity();
+        context_factory.resetDefs();
+        try context_factory.resetLoadedTools();
+        const lua_reload_failed = loadUserLua(app, io, arena, config_lua, "hot-reload: ", reset_failed);
+        if (lua_reload_failed) reload_failed = true;
+        context_factory.config_reload_in_progress = false;
+        context_factory.applySessionBindings(&app.config, !lua_reload_failed) catch |err| {
+            std.log.scoped(.lua).err("hot-reload: failed to apply session bindings: {s}", .{@errorName(err)});
+        };
+        app.lua_vm.readConfigFields();
+        app.view.invalidateRenderCache();
+        if (app.input_mode != .wizard) app.warnUnboundAgentModels();
+        try app.lua_vm.publishAvailableSystems(context_factory);
+        app.dirty = true;
+
+        const lua_tools = app.lua_vm.getRegisteredTools(arena) catch |err| {
+            std.log.scoped(.lua).err("failed to load lua tool defs {any}", .{err});
+            if (reload_requested) {
+                app.lua_reload_failed.store(true, .release);
+                app.markLuaReloadDone();
+            }
+            break :blk;
+        };
+        for (lua_tools) |tool| try context_factory.add(tool, .all);
+        context_factory.precalcGeneralPromptSize(&app.config);
+
+        const reloaded_mcp_servers = app.lua_vm.getEnabledMcpServers(arena) catch |err| {
+            std.log.scoped(.mcp).err("failed to load MCP server defs {any}", .{err});
+            if (reload_requested) {
+                app.lua_reload_failed.store(true, .release);
+                app.markLuaReloadDone();
+            }
+            break :blk;
+        };
+        app.loadMcpTools(reloaded_mcp_servers);
+
+        const lua_binds = try app.lua_vm.getRegisteredKeybinds(arena);
+        for (lua_binds) |bind| {
+            try app.keymap.custom.append(app.appAlloc(), .{ .key = bind.key, .action = .{ .lua = bind.lua_fn }, .description = bind.description });
+        }
+
+        if (reload_requested) app.lua_reload_failed.store(reload_failed, .release);
+        try app.refreshLiveAgentTools();
+        _ = app.lua_reload_generation.fetchAdd(1, .monotonic);
+        if (reload_requested) app.markLuaReloadDone();
+        if (!reset_failed) watch.refreshAfterReload(io);
+        reload_completed = !reload_failed;
+    }
+    if (reload_completed and app.flags.notify_on_reload) app.cmd_queue.append(io, .{ .push_notification = "Lua sandbox reloaded" }) catch {};
+}
+
+fn handleAppCommand(app: *App, gpa: std.mem.Allocator, cmd: AppCommand) void {
+    switch (cmd) {
+        .mcp_connect => |name| {
+            app.startMcpConnect(name);
+            app.input.clear();
+        },
+        .mcp_cancel => {
+            const active = app.mcp_auth != null;
+            app.cancelMcpAuth();
+            app.notifications.append(gpa, app.nowMillis(), "{s}", .{if (active) "MCP authorization canceled" else "MCP: no authorization running"}) catch {};
+            app.input.clear();
+        },
+        .mcp_usage => {
+            app.notifications.append(gpa, app.nowMillis(), "usage: /mcp connect <name> | /mcp cancel", .{}) catch {};
+            app.input.clear();
+        },
+    }
+}
+
+fn applySkillCommand(app: *App, sc: skills.SkillCommand, send_text: *[]const u8, timeline_text: *[]const u8) bool {
+    const entry = app.context_factory.skills.find(sc.name) orelse {
+        app.pushSystemMessage("unknown skill: {s}", .{sc.name});
+        app.input.clear();
+        return false;
+    };
+    if (!entry.meta.user_invocable) {
+        app.pushSystemMessage("skill '{s}' is not user-invocable", .{entry.meta.name});
+        app.input.clear();
+        return false;
+    }
+    const target = app.mainSkillTarget() orelse {
+        app.pushSystemMessage("skill '{s}' is not available for this agent", .{entry.meta.name});
+        app.input.clear();
+        return false;
+    };
+    if (!skills.visibleTo(entry, target.name, target.is_main, target.filter)) {
+        app.pushSystemMessage("skill '{s}' is not available for this agent", .{entry.meta.name});
+        app.input.clear();
+        return false;
+    }
+    const loaded = skills.loadSkill(app.io, app.sessionAlloc(), entry) orelse {
+        app.pushSystemMessage("unknown skill: {s}", .{sc.name});
+        app.input.clear();
+        return false;
+    };
+    send_text.* = skills.skillSendText(app.sessionAlloc(), entry.meta.name, entry.path, loaded.body, sc.prompt) catch return false;
+    timeline_text.* = skills.skillTimelineText(app.sessionAlloc(), entry.meta.name, sc.prompt) catch return false;
+    return true;
+}
+
+fn queueAgentMessage(app: *App, io: std.Io, send_text: []const u8, timeline_text: []const u8) !void {
+    if (app.main_agent_id) |agent_id| {
+        const alloc = app.sessionAlloc();
+        const len: usize = if (app.screenshot_buf != null) 2 else 1;
+
+        const parts = try alloc.alloc(r.sdk.Part, len);
+        parts[0] = .{ .text = send_text };
+
+        if (app.screenshot_buf) |buf| {
+            parts[1] = .{ .image = .{
+                .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{buf}),
+                .media_type = "image/png",
+            } };
+        }
+
+        const entry = try TimelineEntry.userMessageSimple(alloc, .user, timeline_text);
+        try app.cmd_queue.append(io, .{ .queue_agent_message = .{
+            .agent_id = agent_id,
+            .parts = parts,
+            .timeline_entry = entry,
+        } });
+    }
+}
+
+fn buildPromptParts(app: *App, send_text: []const u8, screenshot_url: ?[]const u8) ![]const r.sdk.Part {
+    const alloc = app.sessionAlloc();
+    return if (screenshot_url) |url|
+        try alloc.dupe(r.sdk.Part, &.{
+            .{ .text = send_text },
+            .{ .image = .{ .url = url, .media_type = "image/png" } },
+        })
+    else
+        try alloc.dupe(r.sdk.Part, &.{
+            .{ .text = send_text },
+        });
+}
+
+const MousePress = struct { x: u16, y: u16 };
+
+fn handleMouse(
+    app: *App,
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    term: *tui.Terminal,
+    m: tui.Terminal.Mouse,
+    mouse_press: *?MousePress,
+) !void {
+    if (app.image_viewer) |*viewer| {
+        switch (r.image_view.handleMouse(viewer, m)) {
+            .consumed => {},
+            .close => app.closeImageViewer(),
+            .pass => {},
+        }
+    } else {
+        if (!r.view.timeline.handleScrollbarMouse(app, m)) {
+            const res = term.handleMouse(m);
+            if (res.copied) {
+                app.notifications.append(gpa, app.nowMillis(), "Copied to clipboard!", .{}) catch {};
+            }
+            if (res.wheel < 0) {
+                try app.cmd_queue.append(io, .{ .scroll_up = @intCast(-res.wheel) });
+            } else if (res.wheel > 0) {
+                try app.cmd_queue.append(io, .{ .scroll_down = @intCast(res.wheel) });
+            }
+        }
+        if (m.button == .left and m.action == .press) {
+            mouse_press.* = .{ .x = m.x, .y = m.y };
+        }
+        if (m.button == .left and m.action == .release) {
+            if (mouse_press.*) |press| {
+                if (press.x == m.x and press.y == m.y and !r.view.tool_runs.toggleToolRunAt(app, m.x, m.y)) {
+                    openImageAt(app, term, m.x, m.y);
+                }
+            }
+            mouse_press.* = null;
+        }
+    }
+}
+
 const image_token_punct = "\"'`([{<,;:";
 
 fn trimToken(token: []const u8) []const u8 {
     var start: usize = 0;
     var end: usize = token.len;
-    while (start < end and (std.mem.indexOfScalar(u8, image_token_punct, token[start]) != null or token[start] == '(')) start += 1;
+    while (start < end and (std.mem.indexOfScalar(u8, image_token_punct, token[start]) != null)) start += 1;
     while (end > start and (std.mem.indexOfScalar(u8, ")]}>.,;:'\"`", token[end - 1]) != null)) end -= 1;
     return token[start..end];
 }

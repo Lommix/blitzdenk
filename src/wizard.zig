@@ -411,7 +411,3 @@ fn writeNoOverwrite(io: std.Io, config_dir: std.Io.Dir, name: []const u8, conten
     try w.interface.writeAll(contents);
     try w.interface.flush();
 }
-
-pub fn defaultConfigLua() []const u8 {
-    return @embedFile("blitz_default.lua");
-}

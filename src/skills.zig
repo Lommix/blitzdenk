@@ -30,7 +30,6 @@ pub const SkillEntry = struct {
 
 pub const LoadedSkill = struct {
     raw: []u8,
-    name: []const u8,
     body: []const u8,
 };
 
@@ -114,7 +113,7 @@ pub fn loadSkill(io: std.Io, alloc: std.mem.Allocator, entry: *const SkillEntry)
         alloc.free(raw);
         return null;
     };
-    return .{ .raw = raw, .name = entry.meta.name, .body = body };
+    return .{ .raw = raw, .body = body };
 }
 
 fn scanDir(reg: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) void {

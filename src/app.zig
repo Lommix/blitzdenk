@@ -341,7 +341,6 @@ pub const App = struct {
     mcp_auth_url_shown: bool = false,
     notifications: Notifications = .{},
     event_bus: r.events.EventBus = .{},
-    injection_hooks: r.inject.InjectionsHooks = .{},
     path_completion: PathCompletion = .{},
     journal_restoring: bool = false,
     image_viewer: ?r.image_view.Viewer = null,
@@ -380,7 +379,6 @@ pub const App = struct {
             .cmd_queue = try r.cmd.CommandQueue.init(gpa),
             .lua_vm = lua_vm,
             .mcp_manager = r.mcp.Manager.init(gpa, agent_factory.io),
-            .injection_hooks = try r.inject.InjectionsHooks.init(gpa),
             .permission_queue = .{
                 .value = try .initCapacity(gpa, 16),
             },
@@ -399,7 +397,7 @@ pub const App = struct {
         self.image_view_next_id += 1;
         var viewer = r.image_view.open(self.gpa, self.image_view_next_id, self.io, self.cwd, token);
         if (viewer.img) |img| {
-            viewer.img = r.image.downsampleMaxSide(self.gpa, img, r.image_view.max_side) catch img;
+            viewer.img = r.image.scaleToFit(self.gpa, img, r.image_view.max_side, r.image_view.max_side) catch img;
         }
         self.image_viewer = viewer;
         self.dirty = true;
@@ -439,7 +437,6 @@ pub const App = struct {
         self.lua_vm.deinit();
         self.lua_state.deinit(self.gpa);
         self.cmd_queue.deinit();
-        self.injection_hooks.deinit(self.gpa);
         self.permission_queue.value.deinit(self.gpa);
         self.pending_permissions.deinit(self.gpa);
         self.notifications.deinit(self.gpa);
@@ -701,10 +698,6 @@ pub const App = struct {
         try g.ptr.setResult(self.sessionAlloc(), agent_id, call_id, is_error, "");
     }
 
-    pub fn markToolImage(self: *App, agent_id: r.AgentId, call_id: []const u8) !void {
-        return self.markToolImageUrl(agent_id, call_id, "");
-    }
-
     pub fn markToolImageUrl(self: *App, agent_id: r.AgentId, call_id: []const u8, image_url: []const u8) !void {
         if (agent_id.index >= r.agent_registry.max_agents) return error.InvalidAgent;
         const g = self.tool_status_entries.lock(self.io);
@@ -828,7 +821,6 @@ pub const App = struct {
         self.dropStreamingPreview();
         self.clearPendingDiffs();
         self.cancelPermissions(null);
-        self.registry.cancelAll();
 
         self.main_agent_id = null;
         self.running = false;
@@ -1076,7 +1068,7 @@ pub const App = struct {
 
     /// Queue `notice` as a reminder and start the agent's next turn when idle.
     fn remindAndWake(self: *App, id: r.AgentId, agent: *r.agent.Agent, notice: []const u8) !void {
-        try agent.queueReminder(notice);
+        try agent.queueMessages(&.{r.sdk.UserMessage(notice)});
         if (!agent.isBusy()) {
             try self.registry.run(id, .{ .max_steps = std.math.maxInt(usize) });
             _ = self.event_bus.emit(self, .{ .agent_started = .{ .id = id, .fresh = false } });
@@ -1380,15 +1372,14 @@ pub const App = struct {
             return;
         }
         self.cancelMcpAuth();
-        const task = r.oauth.Task.init(self.gpa, self.io, .{
-            .name = cfg.name,
-            .url = cfg.url.?,
-            .client_id = cfg.client_id,
-            .client_secret = cfg.client_secret,
-            .scopes = cfg.scopes,
-            .redirect_port = cfg.redirect_port,
-            .store_dir = store_dir.?,
-        }, r.oauth.browser_opener);
+        const task = r.oauth.Task.init(
+            self.gpa,
+            self.io,
+            cfg,
+            store_dir.?,
+            r.oauth.AUTH_TIMEOUT_S,
+            r.oauth.browser_opener,
+        );
         self.lua_vm.vm_mu.unlock(self.io);
         self.mcp_auth = task catch {
             self.notifications.append(self.gpa, self.nowMillis(), "MCP {s}: out of memory", .{name}) catch {};
@@ -1688,7 +1679,7 @@ pub const App = struct {
 
     fn buildReminderOpaque(ptr: ?*anyopaque, agent: *r.agent.Agent) anyerror!?[]const u8 {
         const self: *App = @ptrCast(@alignCast(ptr.?));
-        return try self.injection_hooks.build(self, agent);
+        return try r.inject.InjectionsHooks.build(self, agent);
     }
 
     pub fn resolveActivePermission(self: *App, state: r.permissions.State) void {
@@ -1814,9 +1805,6 @@ pub const App = struct {
         };
     }
 
-    /// Ctrl+V handler. When the system clipboard holds an image, saves it to a
-    /// temp file and embeds its `file://` URL (masked as `[Image]`) instead of
-    /// inserting the raw paste text. Reports the outcome with a notification.
     fn generalAgentVision(self: *App) bool {
         for (&self.registry.slots) |*slot| {
             const state = slot.state.load(.acquire);
@@ -1835,25 +1823,32 @@ pub const App = struct {
         return self.generalAgentVision();
     }
 
+    const ClipboardImagePaste = enum { inserted, save_failed, no_clipboard_image };
+
+    fn pasteClipboardImage(self: *App, f: *r.tui.Field(8192)) ClipboardImagePaste {
+        const img = r.clipboard.readImage(self.sessionAlloc(), self.exec_pool) catch null;
+        const image = img orelse return .no_clipboard_image;
+        defer self.sessionAlloc().free(image.data);
+        const url = r.clipboard.saveImage(self.io, self.sessionAlloc(), image.data, image.ext) catch null;
+        const pasted = url orelse return .save_failed;
+        self.insertPasteUrl(f, pasted);
+        return .inserted;
+    }
+
+    /// Ctrl+V handler. When the system clipboard holds an image, saves it to a
+    /// temp file and embeds its `file://` URL (masked as `[Image]`) instead of
+    /// inserting the raw paste text. Reports the outcome with a notification.
     pub fn pasteImage(self: *App) void {
         const f = self.pasteField() orelse return;
         if (!self.pasteVision()) {
             self.notifications.append(self.gpa, self.nowMillis(), "Current model does not support images", .{}) catch {};
             return;
         }
-        const img = r.clipboard.readImage(self.sessionAlloc(), self.exec_pool) catch null;
-        if (img) |image| {
-            defer self.sessionAlloc().free(image.data);
-            const url = r.clipboard.saveImage(self.io, self.sessionAlloc(), image.data, image.ext) catch null;
-            if (url) |u| {
-                self.insertPasteUrl(f, u);
-                self.notifications.append(self.gpa, self.nowMillis(), "Image pasted", .{}) catch {};
-                return;
-            }
-            self.notifications.append(self.gpa, self.nowMillis(), "Failed to save clipboard image", .{}) catch {};
-            return;
+        switch (self.pasteClipboardImage(f)) {
+            .inserted => self.notifications.append(self.gpa, self.nowMillis(), "Image pasted", .{}) catch {},
+            .save_failed => self.notifications.append(self.gpa, self.nowMillis(), "Failed to save clipboard image", .{}) catch {},
+            .no_clipboard_image => self.notifications.append(self.gpa, self.nowMillis(), "Clipboard holds no image", .{}) catch {},
         }
-        self.notifications.append(self.gpa, self.nowMillis(), "Clipboard holds no image", .{}) catch {};
     }
 
     /// Terminal paste event handler. Pastes the clipboard image if one is
@@ -1864,15 +1859,10 @@ pub const App = struct {
             self.appendPasteText(f, text);
             return;
         }
-        const img = r.clipboard.readImage(self.sessionAlloc(), self.exec_pool) catch null;
-        if (img) |image| {
-            defer self.sessionAlloc().free(image.data);
-            if (r.clipboard.saveImage(self.io, self.sessionAlloc(), image.data, image.ext) catch null) |u| {
-                self.insertPasteUrl(f, u);
-            }
-            return;
+        switch (self.pasteClipboardImage(f)) {
+            .inserted, .save_failed => {},
+            .no_clipboard_image => self.appendPasteText(f, text),
         }
-        self.appendPasteText(f, text);
     }
 
     fn insertPasteUrl(self: *App, f: *r.tui.Field(8192), url: []const u8) void {

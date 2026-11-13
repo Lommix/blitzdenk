@@ -179,10 +179,6 @@ fn appendPngChunk(alloc: std.mem.Allocator, out: *std.ArrayList(u8), kind: []con
     try out.appendSlice(alloc, &crc_buf);
 }
 
-pub fn downsampleMaxSide(alloc: std.mem.Allocator, img: Image, max_side: u32) !Image {
-    return scaleToFit(alloc, img, max_side, max_side);
-}
-
 pub fn scaleToFit(alloc: std.mem.Allocator, img: Image, max_w: u32, max_h: u32) !Image {
     if (max_w == 0 or max_h == 0) return img;
     if (img.width <= max_w and img.height <= max_h) return img;
@@ -192,20 +188,6 @@ pub fn scaleToFit(alloc: std.mem.Allocator, img: Image, max_w: u32, max_h: u32) 
     const out_w: u32 = @max(1, @as(u32, @intFromFloat(@as(f64, @floatFromInt(img.width)) * ratio)));
     const out_h: u32 = @max(1, @as(u32, @intFromFloat(@as(f64, @floatFromInt(img.height)) * ratio)));
     return resize(alloc, img, out_w, out_h);
-}
-
-pub fn scaleMaxHeight(alloc: std.mem.Allocator, img: Image, max_h: u32) !Image {
-    if (img.height <= max_h) return img;
-    const ratio = @as(f64, @floatFromInt(max_h)) / @as(f64, @floatFromInt(img.height));
-    const out_w: u32 = @max(1, @as(u32, @intFromFloat(@as(f64, @floatFromInt(img.width)) * ratio)));
-    return resize(alloc, img, out_w, max_h);
-}
-
-pub fn scaleMaxWidth(alloc: std.mem.Allocator, img: Image, max_w: u32) !Image {
-    if (img.width <= max_w) return img;
-    const ratio = @as(f64, @floatFromInt(max_w)) / @as(f64, @floatFromInt(img.width));
-    const out_h: u32 = @max(1, @as(u32, @intFromFloat(@as(f64, @floatFromInt(img.height)) * ratio)));
-    return resize(alloc, img, max_w, out_h);
 }
 
 fn resize(alloc: std.mem.Allocator, img: Image, out_w: u32, out_h: u32) !Image {

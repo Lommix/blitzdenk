@@ -111,19 +111,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall, background: bool) r.r.sdk.Too
         .description = description,
     } });
 
-    switch (decision) {
-        .approved => {},
-        .denied => return r.errResult(call, "User declined bash. Change the approach or ask the user before retrying."),
-        .message => |txt| {
-            const wrapped = std.fmt.allocPrint(
-                ctx.alloc,
-                "User declined bash command and left feedback: {s}\nChange the approach or ask the user before retrying.",
-                .{txt},
-            ) catch txt;
-            return r.errResult(call, wrapped);
-        },
-        else => return r.errResult(call, "permission unresolved"),
-    }
+    if (r.permissionDenied(ctx, call, decision, "bash", "bash command")) |res| return res;
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 

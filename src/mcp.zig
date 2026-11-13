@@ -285,82 +285,38 @@ fn argPreview(input: []const u8) []const u8 {
 }
 
 const FakeMcp = struct {
+    const test_http = @import("test_http.zig");
+
     inits: usize = 0,
     notifications: usize = 0,
     calls: usize = 0,
     saw_session_header: bool = false,
     saw_reinit_session_header: bool = false,
     saw_auth_header: bool = false,
-    done: bool = false,
 
-    fn serve(self: *FakeMcp, server: *std.Io.net.Server, io: std.Io) void {
-        while (!self.done) {
-            const stream = server.accept(io) catch return;
-            self.serveConnection(stream, io);
-            stream.close(io);
+    pub fn handleRequest(self: *FakeMcp, conn: *test_http.Connection, request: test_http.Request) anyerror!test_http.Next {
+        const session = request.header("mcp-session-id") orelse "";
+        if (std.mem.startsWith(u8, session, "sess-")) self.saw_session_header = true;
+        if (std.mem.startsWith(u8, session, "sess-2")) self.saw_reinit_session_header = true;
+        if (std.mem.eql(u8, request.authorization, "Bearer test-key")) self.saw_auth_header = true;
+
+        if (std.mem.indexOf(u8, request.body, "\"method\":\"initialize\"") != null) {
+            self.inits += 1;
+            return respondResult(conn, requestId(request.body), "{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}", self.inits);
+        } else if (std.mem.indexOf(u8, request.body, "\"method\":\"notifications/initialized\"") != null) {
+            self.notifications += 1;
+            return conn.respond(.{ .status = "202 Accepted", .keep_alive = true });
+        } else if (std.mem.indexOf(u8, request.body, "\"method\":\"tools/list\"") != null) {
+            return respondResult(conn, requestId(request.body), "{\"tools\":[{\"name\":\"echo\",\"description\":\"echo\",\"inputSchema\":{\"type\":\"object\"}}]}", null);
+        } else if (std.mem.indexOf(u8, request.body, "\"method\":\"tools/call\"") != null) {
+            self.calls += 1;
+            if (self.calls == 1) return conn.respond(.{ .status = "404 Not Found", .keep_alive = true });
+            try writeSseResult(conn, requestId(request.body));
+            std.Io.sleep(conn.io, .fromSeconds(60), .awake) catch {};
+            return .close;
+        } else {
+            return conn.respond(.{ .status = "400 Bad Request", .keep_alive = true });
         }
-    }
-
-    fn serveConnection(self: *FakeMcp, stream: std.Io.net.Stream, io: std.Io) void {
-        var rbuf: [8192]u8 = undefined;
-        var wbuf: [8192]u8 = undefined;
-        var reader = stream.reader(io, &rbuf);
-        var writer = stream.writer(io, &wbuf);
-
-        while (true) {
-            var head: [4096]u8 = undefined;
-            var head_len: usize = 0;
-            var body_buf: [4096]u8 = undefined;
-            const body = readHttpRequest(&reader.interface, &head, &head_len, &body_buf) catch return;
-            const head_slice = head[0..head_len];
-
-            if (std.mem.indexOf(u8, head_slice, "mcp-session-id: sess-") != null) self.saw_session_header = true;
-            if (std.mem.indexOf(u8, head_slice, "mcp-session-id: sess-2") != null) self.saw_reinit_session_header = true;
-            if (std.mem.indexOf(u8, head_slice, "authorization: Bearer test-key") != null) self.saw_auth_header = true;
-
-            if (std.mem.indexOf(u8, body, "\"method\":\"initialize\"") != null) {
-                self.inits += 1;
-                writeJson(&writer.interface, requestId(body), "{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}", self.inits) catch return;
-            } else if (std.mem.indexOf(u8, body, "\"method\":\"notifications/initialized\"") != null) {
-                self.notifications += 1;
-                writeEmpty(&writer.interface, "202 Accepted") catch return;
-            } else if (std.mem.indexOf(u8, body, "\"method\":\"tools/list\"") != null) {
-                writeJson(&writer.interface, requestId(body), "{\"tools\":[{\"name\":\"echo\",\"description\":\"echo\",\"inputSchema\":{\"type\":\"object\"}}]}", null) catch return;
-            } else if (std.mem.indexOf(u8, body, "\"method\":\"tools/call\"") != null) {
-                self.calls += 1;
-                if (self.calls == 1) {
-                    writeEmpty(&writer.interface, "404 Not Found") catch return;
-                    continue;
-                }
-                writeSse(&writer.interface, requestId(body)) catch return;
-                self.done = true;
-                std.Io.sleep(io, .fromSeconds(60), .awake) catch {};
-                return;
-            } else {
-                writeEmpty(&writer.interface, "400 Bad Request") catch return;
-            }
-        }
-    }
-
-    fn readHttpRequest(reader: *std.Io.Reader, head: []u8, head_len: *usize, body_buf: []u8) ![]const u8 {
-        while (head_len.* + 4 <= head.len) {
-            const b = reader.takeByte() catch return error.Closed;
-            head[head_len.*] = b;
-            head_len.* += 1;
-            if (head_len.* >= 4 and std.mem.eql(u8, head[head_len.* - 4 .. head_len.*], "\r\n\r\n")) break;
-        } else return error.HeadTooLong;
-
-        const head_slice = head[0..head_len.*];
-        const cl = std.mem.indexOf(u8, head_slice, "content-length:") orelse return error.BadRequest;
-        var i = cl + "content-length:".len;
-        while (i < head_slice.len and head_slice[i] == ' ') i += 1;
-        var n: usize = 0;
-        while (i < head_slice.len and head_slice[i] >= '0' and head_slice[i] <= '9') : (i += 1) {
-            n = n * 10 + (head_slice[i] - '0');
-        }
-        if (n > body_buf.len) return error.BodyTooLong;
-        try reader.readSliceAll(body_buf[0..n]);
-        return body_buf[0..n];
     }
 
     fn requestId(body: []const u8) i64 {
@@ -373,33 +329,31 @@ const FakeMcp = struct {
         return n;
     }
 
-    fn writeJson(w: *std.Io.Writer, id: i64, result: []const u8, session: ?usize) !void {
+    fn respondResult(conn: *test_http.Connection, id: i64, result: []const u8, session: ?usize) anyerror!test_http.Next {
         var body_buf: [2048]u8 = undefined;
         const body = try std.fmt.bufPrint(&body_buf, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{s}}}", .{ id, result });
+        var session_buf: [32]u8 = undefined;
+        var session_header: [1]test_http.Header = undefined;
+        var headers: []const test_http.Header = &.{};
         if (session) |seq| {
-            try w.print("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: keep-alive\r\nmcp-session-id: sess-{d}\r\n\r\n{s}", .{ body.len, seq, body });
-        } else {
-            try w.print("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: keep-alive\r\n\r\n{s}", .{ body.len, body });
+            session_header[0] = .{ .name = "mcp-session-id", .value = try std.fmt.bufPrint(&session_buf, "sess-{d}", .{seq}) };
+            headers = session_header[0..];
         }
-        try w.flush();
+        return conn.respond(.{ .status = "200 OK", .content_type = "application/json", .headers = headers, .body = body, .keep_alive = true });
     }
 
-    fn writeEmpty(w: *std.Io.Writer, status: []const u8) !void {
-        try w.print("HTTP/1.1 {s}\r\ncontent-length: 0\r\nconnection: keep-alive\r\n\r\n", .{status});
-        try w.flush();
-    }
-
-    fn writeSse(w: *std.Io.Writer, id: i64) !void {
+    fn writeSseResult(conn: *test_http.Connection, id: i64) !void {
         var event_buf: [2048]u8 = undefined;
         const event = try std.fmt.bufPrint(&event_buf, "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{{\"isError\":false,\"content\":[{{\"type\":\"text\",\"text\":\"hello\"}}]}}}}\n\n", .{id});
         var out_buf: [4096]u8 = undefined;
         const out = try std.fmt.bufPrint(&out_buf, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n{x}\r\n{s}\r\n", .{ event.len, event });
-        try w.writeAll(out);
-        try w.flush();
+        try conn.writer.writeAll(out);
+        try conn.writer.flush();
     }
 };
 
 test "MCP http client speaks streamable http with session reuse and sse responses" {
+    const test_http = @import("test_http.zig");
     var io_state = std.Io.Threaded.init(std.heap.page_allocator, .{});
     defer io_state.deinit();
     const io = io_state.io();
@@ -408,7 +362,7 @@ test "MCP http client speaks streamable http with session reuse and sse response
     defer server.deinit(io);
 
     var fake: FakeMcp = .{};
-    var serving = std.Io.async(io, FakeMcp.serve, .{ &fake, &server, io });
+    var serving = std.Io.async(io, test_http.Server(*FakeMcp).serve, .{ io, &server, &fake });
     defer serving.cancel(io);
 
     const url = try std.fmt.allocPrint(std.testing.allocator, "http://127.0.0.1:{d}/mcp", .{server.socket.address.getPort()});

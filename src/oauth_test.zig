@@ -2,8 +2,11 @@ const std = @import("std");
 const r = @import("root.zig");
 const oauth = @import("oauth.zig");
 const mcp = @import("mcp.zig");
+const test_http = @import("test_http.zig");
 
 const testing = std.testing;
+
+const TEST_AUTH_TIMEOUT_S: u64 = 20;
 
 const Fake = struct {
     io: std.Io,
@@ -38,18 +41,6 @@ const Fake = struct {
         self.port = server.socket.address.getPort();
     }
 
-    fn serve(self: *Fake, server: *std.Io.net.Server) void {
-        var group: std.Io.Group = .init;
-        defer group.cancel(self.io);
-        while (true) {
-            const stream = server.accept(self.io) catch return;
-            group.concurrent(self.io, handle, .{ self, stream }) catch {
-                stream.close(self.io);
-                return;
-            };
-        }
-    }
-
     fn dupe(self: *Fake, s: []const u8) []const u8 {
         return self.arena.allocator().dupe(u8, s) catch "";
     }
@@ -67,55 +58,22 @@ const Fake = struct {
         return std.fmt.bufPrint(buf, "http://127.0.0.1:{d}{s}", .{ self.port, self.issuer_path }) catch "";
     }
 
-    fn handle(self: *Fake, stream: std.Io.net.Stream) void {
-        defer stream.close(self.io);
-        var rbuf: [16384]u8 = undefined;
-        var wbuf: [16384]u8 = undefined;
-        var reader = stream.reader(self.io, &rbuf);
-        var writer = stream.writer(self.io, &wbuf);
-        const w = &writer.interface;
-
-        var head: [8192]u8 = undefined;
-        var head_len: usize = 0;
-        while (head_len < head.len) {
-            const b = reader.interface.takeByte() catch return;
-            head[head_len] = b;
-            head_len += 1;
-            if (head_len >= 4 and std.mem.eql(u8, head[head_len - 4 .. head_len], "\r\n\r\n")) break;
-        }
-        const head_slice = head[0..head_len];
-        var content_length: usize = 0;
-        var authorization: []const u8 = "";
-        var lines = std.mem.splitSequence(u8, head_slice, "\r\n");
-        const request_line = lines.first();
-        while (lines.next()) |line| {
-            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-            const name = line[0..colon];
-            const value = std.mem.trim(u8, line[colon + 1 ..], " ");
-            if (std.ascii.eqlIgnoreCase(name, "content-length")) content_length = std.fmt.parseInt(usize, value, 10) catch 0;
-            if (std.ascii.eqlIgnoreCase(name, "authorization")) authorization = value;
-        }
-        var body_buf: [8192]u8 = undefined;
-        if (content_length > body_buf.len) return;
-        reader.interface.readSliceAll(body_buf[0..content_length]) catch return;
-        const body = body_buf[0..content_length];
-
-        var parts = std.mem.splitScalar(u8, request_line, ' ');
-        const method = parts.first();
-        const target = parts.next() orelse "";
-
+    pub fn handleRequest(self: *Fake, conn: *test_http.Connection, request: test_http.Request) anyerror!test_http.Next {
         self.mu.lockUncancelable(self.io);
         defer self.mu.unlock(self.io);
-        self.record("{s} {s}", .{ method, target });
-        self.route(w, method, target, authorization, body) catch {};
-        w.flush() catch {};
+        self.record("{s} {s}", .{ request.method, request.target });
+        return self.route(conn, request);
     }
 
-    fn route(self: *Fake, w: *std.Io.Writer, method: []const u8, target: []const u8, authorization: []const u8, body: []const u8) !void {
+    fn route(self: *Fake, conn: *test_http.Connection, request: test_http.Request) anyerror!test_http.Next {
         var ob: [128]u8 = undefined;
         var ib: [160]u8 = undefined;
         const base = self.origin(&ob);
         const iss = self.issuer(&ib);
+        const method = request.method;
+        const target = request.target;
+        const authorization = request.authorization;
+        const body = request.body;
 
         if (std.mem.eql(u8, method, "POST") and (std.mem.eql(u8, target, "/mcp") or std.mem.eql(u8, target, "/other"))) {
             const slot: usize = if (std.mem.eql(u8, target, "/mcp")) 0 else 1;
@@ -125,16 +83,16 @@ const Fake = struct {
             if (!ok) {
                 self.mcp_401 += 1;
                 switch (self.challenge) {
-                    .not_found => return status(w, "404 Not Found", "", ""),
-                    .bare => return status(w, "401 Unauthorized", "Bearer", ""),
+                    .not_found => return conn.respond(.{ .status = "404 Not Found" }),
+                    .bare => return conn.respond(.{ .status = "401 Unauthorized", .headers = &.{.{ .name = "www-authenticate", .value = "Bearer" }} }),
                     .header => {
                         var hb: [512]u8 = undefined;
-                        const hdr = try std.fmt.bufPrint(&hb, "Bearer resource_metadata=\"{s}/meta/prm\", scope=\"{s}\"", .{ base, self.challenge_scope });
-                        return status(w, "401 Unauthorized", hdr, "");
+                        const challenge_value = try std.fmt.bufPrint(&hb, "Bearer resource_metadata=\"{s}/meta/prm\", scope=\"{s}\"", .{ base, self.challenge_scope });
+                        return conn.respond(.{ .status = "401 Unauthorized", .headers = &.{.{ .name = "www-authenticate", .value = challenge_value }} });
                     },
                 }
             }
-            return mcpReply(w, body);
+            return mcpReply(conn, body);
         }
 
         if (std.mem.eql(u8, method, "GET")) {
@@ -145,7 +103,7 @@ const Fake = struct {
             };
             if (std.mem.eql(u8, target, prm_target)) {
                 var jb: [512]u8 = undefined;
-                return json(w, "200 OK", try std.fmt.bufPrint(&jb, "{{\"resource\":\"{s}/mcp\",\"authorization_servers\":[\"{s}\"],\"scopes_supported\":[\"meta\"]}}", .{ base, iss }));
+                return conn.respond(.{ .status = "200 OK", .content_type = "application/json", .body = try std.fmt.bufPrint(&jb, "{{\"resource\":\"{s}/mcp\",\"authorization_servers\":[\"{s}\"],\"scopes_supported\":[\"meta\"]}}", .{ base, iss }) });
             }
             var as_buf: [256]u8 = undefined;
             const as_target = switch (self.as_at) {
@@ -158,21 +116,21 @@ const Fake = struct {
                 const reg: []const u8 = if (self.dcr) "/register" else "";
                 var rb: [160]u8 = undefined;
                 const reg_field = if (reg.len > 0) try std.fmt.bufPrint(&rb, ",\"registration_endpoint\":\"{s}/register\"", .{base}) else "";
-                return json(w, "200 OK", try std.fmt.bufPrint(&jb, "{{\"issuer\":\"{s}{s}\",\"authorization_endpoint\":\"{s}/authorize\",\"token_endpoint\":\"{s}/token\"{s},\"code_challenge_methods_supported\":[{s}]}}", .{
+                return conn.respond(.{ .status = "200 OK", .content_type = "application/json", .body = try std.fmt.bufPrint(&jb, "{{\"issuer\":\"{s}{s}\",\"authorization_endpoint\":\"{s}/authorize\",\"token_endpoint\":\"{s}/token\"{s},\"code_challenge_methods_supported\":[{s}]}}", .{
                     iss,
                     if (self.wrong_issuer) "/evil" else "",
                     base,
                     base,
                     reg_field,
                     if (self.pkce) "\"S256\"" else "\"plain\"",
-                }));
+                }) });
             }
-            return status(w, "404 Not Found", "", "");
+            return conn.respond(.{ .status = "404 Not Found" });
         }
 
         if (std.mem.eql(u8, target, "/register")) {
             self.register_body = self.dupe(body);
-            return json(w, "201 Created", "{\"client_id\":\"dyn-client\"}");
+            return conn.respond(.{ .status = "201 Created", .content_type = "application/json", .body = "{\"client_id\":\"dyn-client\"}" });
         }
 
         if (std.mem.eql(u8, target, "/token")) {
@@ -181,30 +139,20 @@ const Fake = struct {
             const is_refresh = std.mem.indexOf(u8, body, "grant_type=refresh_token") != null;
             if (is_refresh) switch (self.refresh_mode) {
                 .ok => {},
-                .invalid_grant => return json(w, "400 Bad Request", "{\"error\":\"invalid_grant\"}"),
-                .drop => return,
+                .invalid_grant => return conn.respond(.{ .status = "400 Bad Request", .content_type = "application/json", .body = "{\"error\":\"invalid_grant\"}" }),
+                .drop => return .close,
             };
             self.issued += 1;
             const at = self.dupe(try std.fmt.bufPrint(&ob, "at-{d}", .{self.issued}));
             self.tokens[0] = at;
             var jb: [512]u8 = undefined;
             const rt_field = if (!is_refresh or self.rotate) try std.fmt.bufPrint(&ib, ",\"refresh_token\":\"rt-{d}\"", .{self.issued}) else "";
-            return json(w, "200 OK", try std.fmt.bufPrint(&jb, "{{\"access_token\":\"{s}\",\"token_type\":\"Bearer\",\"expires_in\":{d}{s}}}", .{ at, self.expires_in, rt_field }));
+            return conn.respond(.{ .status = "200 OK", .content_type = "application/json", .body = try std.fmt.bufPrint(&jb, "{{\"access_token\":\"{s}\",\"token_type\":\"Bearer\",\"expires_in\":{d}{s}}}", .{ at, self.expires_in, rt_field }) });
         }
-        return status(w, "404 Not Found", "", "");
+        return conn.respond(.{ .status = "404 Not Found" });
     }
 
-    fn status(w: *std.Io.Writer, line: []const u8, www: []const u8, body: []const u8) !void {
-        try w.print("HTTP/1.1 {s}\r\n", .{line});
-        if (www.len > 0) try w.print("www-authenticate: {s}\r\n", .{www});
-        try w.print("content-length: {d}\r\nconnection: close\r\n\r\n{s}", .{ body.len, body });
-    }
-
-    fn json(w: *std.Io.Writer, line: []const u8, body: []const u8) !void {
-        try w.print("HTTP/1.1 {s}\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}", .{ line, body.len, body });
-    }
-
-    fn mcpReply(w: *std.Io.Writer, body: []const u8) !void {
+    fn mcpReply(conn: *test_http.Connection, body: []const u8) anyerror!test_http.Next {
         var id: i64 = 0;
         if (std.mem.indexOf(u8, body, "\"id\":")) |idx| {
             var i = idx + 5;
@@ -213,14 +161,14 @@ const Fake = struct {
         const result: []const u8 = if (std.mem.indexOf(u8, body, "\"initialize\"") != null)
             "{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}"
         else if (std.mem.indexOf(u8, body, "notifications/initialized") != null)
-            return status(w, "202 Accepted", "", "")
+            return conn.respond(.{ .status = "202 Accepted" })
         else if (std.mem.indexOf(u8, body, "tools/list") != null)
             "{\"tools\":[{\"name\":\"echo\",\"description\":\"echo\",\"inputSchema\":{\"type\":\"object\"}}]}"
         else
             "{\"isError\":false,\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}";
         var jb: [1024]u8 = undefined;
         const out = try std.fmt.bufPrint(&jb, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"result\":{s}}}", .{ id, result });
-        try w.print("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nmcp-session-id: s1\r\ncontent-length: {d}\r\nconnection: close\r\n\r\n{s}", .{ out.len, out });
+        return conn.respond(.{ .status = "200 OK", .content_type = "application/json", .headers = &.{.{ .name = "mcp-session-id", .value = "s1" }}, .body = out });
     }
 
     fn saw(self: *Fake, needle: []const u8) bool {
@@ -288,7 +236,7 @@ const Rig = struct {
         self.server = try address.listen(io, .{});
         self.fake = .{ .io = io };
         self.fake.listen(&self.server);
-        self.serving = std.Io.concurrent(io, Fake.serve, .{ &self.fake, &self.server }) catch return error.SkipZigTest;
+        self.serving = std.Io.concurrent(io, test_http.Server(*Fake).serve, .{ io, &self.server, &self.fake }) catch return error.SkipZigTest;
         self.tmp = testing.tmpDir(.{});
         const a = self.fake.arena.allocator();
         const tmp_path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{self.tmp.sub_path});
@@ -315,8 +263,8 @@ const Rig = struct {
         return .{ .io = self.ioh(), .dir = self.store_dir };
     }
 
-    fn taskConfig(self: *Rig) oauth.TaskConfig {
-        return .{ .name = "fake", .url = self.url, .store_dir = self.store_dir, .redirect_port = 0, .timeout_s = 20 };
+    fn serverConfig(self: *Rig) mcp.ServerConfig {
+        return .{ .name = "fake", .tools_prefix = "fk_", .url = self.url, .redirect_port = 0 };
     }
 
     fn seed(self: *Rig, rec: oauth.Record) !void {
@@ -397,7 +345,7 @@ test "oauth connect discovers from 401 challenge, registers, exchanges and store
     const io = rig.ioh();
 
     var opener: Opener = .{};
-    var task = try oauth.Task.init(testing.allocator, io, rig.taskConfig(), opener.opener());
+    var task = try oauth.Task.init(testing.allocator, io, rig.serverConfig(), rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
     defer task.deinit();
     try runToCallback(rig, &task);
 
@@ -471,7 +419,7 @@ test "oauth discovery falls back to well-known path and origin root" {
         var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena_state.deinit();
         var opener: Opener = .{};
-        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.taskConfig(), opener.opener());
+        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.serverConfig(), rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
         defer task.deinit();
         try runToCallback(rig, &task);
         try testing.expectEqualStrings("meta", authParam(arena_state.allocator(), &task, "scope"));
@@ -486,7 +434,7 @@ test "oauth authorization server metadata fallback order" {
         rig.fake.issuer_path = "/tenant";
         rig.fake.as_at = .oidc_append;
         var opener: Opener = .{};
-        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.taskConfig(), opener.opener());
+        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.serverConfig(), rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
         defer task.deinit();
         try runToCallback(rig, &task);
         const f = &rig.fake;
@@ -500,7 +448,7 @@ test "oauth authorization server metadata fallback order" {
         defer rig.destroy();
         rig.fake.as_at = .oidc_insert;
         var opener: Opener = .{};
-        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.taskConfig(), opener.opener());
+        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.serverConfig(), rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
         defer task.deinit();
         try runToCallback(rig, &task);
         const f = &rig.fake;
@@ -515,7 +463,7 @@ test "oauth refuses missing PKCE S256 and issuer mismatch" {
         rig.fake.pkce = case[0];
         rig.fake.wrong_issuer = case[1];
         var opener: Opener = .{};
-        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.taskConfig(), opener.opener());
+        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.serverConfig(), rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
         defer task.deinit();
         task.start();
         try waitDone(rig.ioh(), &task);
@@ -532,12 +480,12 @@ test "oauth registration: configured client, cached registration, missing regist
         var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena_state.deinit();
         const a = arena_state.allocator();
-        var cfg = rig.taskConfig();
+        var cfg = rig.serverConfig();
         cfg.client_id = "my-client";
         cfg.client_secret = "my-secret";
         cfg.scopes = &.{ "x", "y" };
         var opener: Opener = .{};
-        var task = try oauth.Task.init(testing.allocator, rig.ioh(), cfg, opener.opener());
+        var task = try oauth.Task.init(testing.allocator, rig.ioh(), cfg, rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
         defer task.deinit();
         try runToCallback(rig, &task);
         try testing.expectEqualStrings("my-client", authParam(a, &task, "client_id"));
@@ -555,7 +503,7 @@ test "oauth registration: configured client, cached registration, missing regist
         var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena_state.deinit();
         const a = arena_state.allocator();
-        var cfg = rig.taskConfig();
+        var cfg = rig.serverConfig();
         var probe = std.Io.net.IpAddress.parseIp4("127.0.0.1", 0) catch unreachable;
         var hold = try probe.listen(rig.ioh(), .{});
         cfg.redirect_port = hold.socket.address.getPort();
@@ -565,7 +513,7 @@ test "oauth registration: configured client, cached registration, missing regist
         base.redirect_uri = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/callback", .{cfg.redirect_port});
         try rig.seed(base);
         var opener: Opener = .{};
-        var task = try oauth.Task.init(testing.allocator, rig.ioh(), cfg, opener.opener());
+        var task = try oauth.Task.init(testing.allocator, rig.ioh(), cfg, rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
         defer task.deinit();
         try runToCallback(rig, &task);
         try testing.expectEqualStrings(base.redirect_uri, task.redirect_uri);
@@ -577,7 +525,7 @@ test "oauth registration: configured client, cached registration, missing regist
         defer rig.destroy();
         rig.fake.dcr = false;
         var opener: Opener = .{};
-        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.taskConfig(), opener.opener());
+        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.serverConfig(), rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
         defer task.deinit();
         task.start();
         try waitDone(rig.ioh(), &task);
@@ -592,7 +540,7 @@ test "oauth callback rejects wrong state and stores nothing" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
     var opener: Opener = .{ .result = false };
-    var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.taskConfig(), opener.opener());
+    var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.serverConfig(), rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
     defer task.deinit();
     try runToCallback(rig, &task);
     try testing.expect(task.opener_failed);
@@ -611,7 +559,7 @@ test "oauth cancel closes the listener and stores no token" {
     defer arena_state.deinit();
     const a = arena_state.allocator();
     var opener: Opener = .{};
-    var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.taskConfig(), opener.opener());
+    var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.serverConfig(), rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
     try runToCallback(rig, &task);
     const redirect = try a.dupe(u8, task.redirect_uri);
     const colon = std.mem.lastIndexOfScalar(u8, redirect[0 .. redirect.len - oauth.CALLBACK_PATH.len], ':').?;
@@ -625,10 +573,8 @@ test "oauth cancel closes the listener and stores no token" {
 test "oauth timeout fails the task" {
     const rig = try Rig.create();
     defer rig.destroy();
-    var cfg = rig.taskConfig();
-    cfg.timeout_s = 1;
     var opener: Opener = .{};
-    var task = try oauth.Task.init(testing.allocator, rig.ioh(), cfg, opener.opener());
+    var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.serverConfig(), rig.store_dir, 1, opener.opener());
     defer task.deinit();
     task.start();
     try waitDone(rig.ioh(), &task);
@@ -648,7 +594,7 @@ test "oauth connect with valid or refreshable token skips the browser" {
 
     var opener: Opener = .{};
     {
-        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.taskConfig(), opener.opener());
+        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.serverConfig(), rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
         defer task.deinit();
         task.start();
         try waitDone(rig.ioh(), &task);
@@ -657,7 +603,7 @@ test "oauth connect with valid or refreshable token skips the browser" {
     base.expires_at = oauth.nowSeconds(rig.ioh()) - 10;
     try rig.seed(base);
     {
-        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.taskConfig(), opener.opener());
+        var task = try oauth.Task.init(testing.allocator, rig.ioh(), rig.serverConfig(), rig.store_dir, TEST_AUTH_TIMEOUT_S, opener.opener());
         defer task.deinit();
         task.start();
         try waitDone(rig.ioh(), &task);

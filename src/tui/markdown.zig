@@ -139,10 +139,6 @@ pub const MarkdownStreamRenderer = struct {
     out_cursor: usize = 0,
     skip_newline: bool = false,
 
-    pub fn init(alloc: std.mem.Allocator, width: u16) Self {
-        return .{ .alloc = alloc, .gpa = alloc, .width = width, .mermaid_options = .{ .width = width } };
-    }
-
     pub fn initWithOptions(gpa: std.mem.Allocator, alloc: std.mem.Allocator, width: u16, theme: HighlightTheme, options: mermaid.Options) Self {
         var mermaid_options = options;
         mermaid_options.width = width;
@@ -341,53 +337,31 @@ pub const MarkdownStreamRenderer = struct {
 
         if (self.at_line_start) {
             // Need a full line (or EOF) to decide block-level structure.
-            const line_end = std.mem.indexOfScalarPos(u8, buf, self.cursor, '\n') orelse {
+            const line_end = std.mem.indexOfScalarPos(u8, buf, self.cursor, '\n') orelse blk: {
                 if (!self.eof) return .need_bytes;
-                const line = buf[self.cursor..];
-                if (listMarkerAtLineStart(line)) |info| return self.startListItem(line, info);
-                if (self.tryListContinuation(line)) |res| return res;
-                if (line.len > 0 and line[0] == '#') {
-                    var depth: usize = 0;
-                    while (depth < line.len and depth < 6 and line[depth] == '#') depth += 1;
-                    if (depth < line.len and line[depth] == ' ') return self.startHeading(line, buf.len, depth);
-                }
-                if (line.len >= 2 and line[0] == '>' and line[1] == ' ') return self.startQuote();
-                if (isTableSeparatorLine(line)) {
-                    self.cursor = buf.len;
-                    self.at_line_start = true;
-                    return .{ .span = .{ .content = line, .style = self.theme.hr, .kind = .table_separator } };
-                }
-                if (isTableRowLine(line)) {
-                    self.cursor = buf.len;
-                    self.at_line_start = true;
-                    return .{ .span = .{ .content = line, .style = self.theme.plain, .kind = .table_row } };
-                }
-                const trimmed = std.mem.trim(u8, line, " \t\r");
-                if (trimmed.len >= 3 and (allSameChar(trimmed, '-') or allSameChar(trimmed, '*') or allSameChar(trimmed, '_'))) {
-                    self.cursor = buf.len;
-                    self.at_line_start = true;
-                    return .{ .span = .{ .content = line, .style = self.theme.hr, .kind = .horizontal_rule } };
-                }
-                return self.emitInlineRun(buf.len);
+                break :blk buf.len;
             };
-
+            const unterminated_line = line_end == buf.len;
             const line = buf[self.cursor..line_end];
+
             if (listMarkerAtLineStart(line)) |info| return self.startListItem(line, info);
             if (self.tryListContinuation(line)) |res| return res;
 
-            if (isMermaidFenceLine(line)) return self.consumeMermaidBlock(line_end);
+            if (!unterminated_line) {
+                if (isMermaidFenceLine(line)) return self.consumeMermaidBlock(line_end);
 
-            // Fenced code block opener: ```lang
-            if (std.mem.startsWith(u8, line, "```")) {
-                const lang = std.mem.trim(u8, line[3..], " \t\r");
-                const n = @min(lang.len, self.code_lang_buf.len);
-                @memcpy(self.code_lang_buf[0..n], lang[0..n]);
-                self.code_lang_len = @intCast(n);
-                self.mode = .code;
-                self.cursor = line_end + 1;
-                self.at_line_start = true;
-                // preserve the newline so the caller splits the preceding line from the code block
-                return .{ .span = .{ .content = "\n", .style = self.theme.plain } };
+                // Fenced code block opener: ```lang
+                if (std.mem.startsWith(u8, line, "```")) {
+                    const lang = std.mem.trim(u8, line[3..], " \t\r");
+                    const n = @min(lang.len, self.code_lang_buf.len);
+                    @memcpy(self.code_lang_buf[0..n], lang[0..n]);
+                    self.code_lang_len = @intCast(n);
+                    self.mode = .code;
+                    self.cursor = line_end + 1;
+                    self.at_line_start = true;
+                    // preserve the newline so the caller splits the preceding line from the code block
+                    return .{ .span = .{ .content = "\n", .style = self.theme.plain } };
+                }
             }
 
             // Horizontal rule: ---, ***, ___ (or more) alone on line.
@@ -421,6 +395,8 @@ pub const MarkdownStreamRenderer = struct {
 
             // Blockquote: > text
             if (line.len >= 2 and line[0] == '>' and line[1] == ' ') return self.startQuote();
+
+            if (unterminated_line) return self.emitInlineRun(buf.len);
 
             // Empty line
             if (line.len == 0) {
@@ -877,7 +853,7 @@ fn isTableRowLine(line: []const u8) bool {
 
 fn isTableSeparatorLine(line: []const u8) bool {
     if (!isTableRowLine(line)) return false;
-    var cells = splitTableCells(line);
+    var cells = r.widgets.splitTableCells(line);
     var count: usize = 0;
     while (cells.next()) |cell_raw| {
         const cell = std.mem.trim(u8, cell_raw, " \t\r");
@@ -896,30 +872,6 @@ fn isTableSeparatorCell(cell: []const u8) bool {
         else => return false,
     };
     return dashes >= 3;
-}
-
-const TableCellIter = struct {
-    text: []const u8,
-    pos: usize,
-    end: usize,
-
-    fn next(self: *TableCellIter) ?[]const u8 {
-        if (self.pos > self.end) return null;
-        const start = self.pos;
-        const next_bar = std.mem.indexOfScalarPos(u8, self.text, start, '|') orelse self.end;
-        self.pos = next_bar + 1;
-        return self.text[start..next_bar];
-    }
-};
-
-fn splitTableCells(line: []const u8) TableCellIter {
-    var start: usize = 0;
-    var end: usize = line.len;
-    while (start < end and (line[start] == ' ' or line[start] == '\t')) start += 1;
-    if (start < end and line[start] == '|') start += 1;
-    while (end > start and (line[end - 1] == ' ' or line[end - 1] == '\t' or line[end - 1] == '\r')) end -= 1;
-    if (end > start and line[end - 1] == '|') end -= 1;
-    return .{ .text = line, .pos = start, .end = end };
 }
 
 /// Find the next occurrence of `cc` (a doubled char) starting at `from`.

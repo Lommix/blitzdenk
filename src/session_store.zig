@@ -32,7 +32,6 @@ pub const Record = struct {
     call_id: ?[]const u8 = null,
     ansi: []const u8 = "",
     state: session.ToolState = .pending,
-    child: ?u32 = null,
     children: []const u32 = &.{},
 
     pub fn jsonStringify(self: Record, j: anytype) !void {
@@ -337,10 +336,6 @@ pub fn wallMillis(io: std.Io) i64 {
     return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
 }
 
-pub fn idLen() usize {
-    return ID_LEN;
-}
-
 fn formatId(buf: []u8, millis: i64, io: std.Io) void {
     const secs: u64 = @intCast(@divTrunc(millis, std.time.ms_per_s));
     const es = std.time.epoch.EpochSeconds{ .secs = secs };
@@ -349,7 +344,7 @@ fn formatId(buf: []u8, millis: i64, io: std.Io) void {
     const ds = es.getDaySeconds();
     var random_bytes: [ID_RANDOM_LEN]u8 = undefined;
     io.random(&random_bytes);
-    const date_end = idLen() - ID_RANDOM_LEN;
+    const date_end = ID_LEN - ID_RANDOM_LEN;
     _ = std.fmt.bufPrint(buf[0..date_end], "{d:0>4}{d:0>2}{d:0>2}-{d:0>2}{d:0>2}{d:0>2}-", .{
         yd.year,
         @backingInt(md.month),
@@ -685,11 +680,7 @@ const Replay = struct {
             .tool_status => {
                 _ = try self.agent(record.agentID, false);
                 var merged: std.ArrayList(u32) = .empty;
-                if (record.children.len > 0) {
-                    try merged.appendSlice(alloc, record.children);
-                } else if (record.child) |id| {
-                    try merged.append(alloc, id);
-                }
+                try merged.appendSlice(alloc, record.children);
                 for (merged.items) |id| _ = try self.agent(id, false);
                 const call = record.call_id orelse return error.MissingCallId;
                 const key = try std.fmt.allocPrint(alloc, "{d}:{s}", .{ record.agentID.?, call });
@@ -1196,7 +1187,7 @@ test "failed reconciliation blocks subsequent writes" {
     try std.testing.expectEqual(@as(usize, 1), fixture.store.batch.items.len);
 }
 
-test "tool statuses replay multiple children and legacy child links" {
+test "tool statuses replay multiple children" {
     var fixture: TestLog = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -1206,10 +1197,6 @@ test "tool statuses replay multiple children and legacy child links" {
     const multiple = try fixture.read();
     try std.testing.expect(multiple.problem == null);
     try std.testing.expectEqualSlices(u32, &.{ 2, 3, 4, 5 }, multiple.save.tool_status[0].children);
-    try fixture.raw("{\"kind\":\"tool_status\",\"agentID\":1,\"call_id\":\"launch\",\"child\":2}\n");
-    const legacy = try fixture.read();
-    try std.testing.expect(legacy.problem == null);
-    try std.testing.expectEqualSlices(u32, &.{2}, legacy.save.tool_status[0].children);
 }
 
 test "journal restores absolute per-agent usage and compaction token state" {

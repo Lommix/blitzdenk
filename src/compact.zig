@@ -2,6 +2,7 @@ const std = @import("std");
 const sdk = @import("blitz-sdk");
 const agent_run = @import("agent_run.zig");
 const models = @import("models");
+const util = @import("util.zig");
 
 pub const SUMMARY_SYSTEM_PROMPT =
     \\You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
@@ -65,7 +66,6 @@ const READ_FILES_TAG = "read-files";
 const MODIFIED_FILES_TAG = "modified-files";
 
 pub const KEEP_RECENT_TOKENS: u64 = 1024 * 16;
-pub const TOOL_RESULT_MAX_CHARS: usize = COMPACT_HEAD_CHARS + COMPACT_TAIL_CHARS;
 pub const COMPACT_HEAD_CHARS: usize = 4096;
 pub const COMPACT_TAIL_CHARS: usize = 1024;
 pub const RESERVE_TOKENS: u64 = 1024 * 16;
@@ -270,10 +270,6 @@ pub fn buildCompactPrompt(alloc: std.mem.Allocator, io: std.Io, messages: []cons
     prompt[0] = sdk.SystemMessage(SUMMARY_SYSTEM_PROMPT);
     prompt[1] = sdk.UserMessage(text);
     return prompt;
-}
-
-pub fn installSummary(alloc: std.mem.Allocator, messages: []const sdk.Message, summary: []const u8) !agent_run.OwnedMessages {
-    return installSummaryAt(alloc, messages, summary, computeCutIndex(messages));
 }
 
 fn installSummaryAt(alloc: std.mem.Allocator, messages: []const sdk.Message, summary: []const u8, cut_index: usize) !agent_run.OwnedMessages {
@@ -594,7 +590,7 @@ fn writeToolResult(writer: *std.Io.Writer, io: std.Io, alloc: std.mem.Allocator,
     const spill_tail = readSpillTail(io, alloc, output);
     defer if (spill_tail) |t| alloc.free(t);
 
-    const owned = try sanitizeUtf8(alloc, output);
+    const owned = try util.sanitizeUtf8(alloc, output);
     defer alloc.free(owned);
     const bytes = owned;
     const total = utf8Count(bytes);
@@ -614,12 +610,6 @@ fn writeToolResult(writer: *std.Io.Writer, io: std.Io, alloc: std.mem.Allocator,
         }
     }
     try writer.writeByte('\n');
-}
-
-/// Owned copy of `s`, lossily repaired to valid UTF-8 when needed.
-fn sanitizeUtf8(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
-    if (std.unicode.utf8ValidateSlice(s)) return alloc.dupe(u8, s);
-    return std.fmt.allocPrint(alloc, "{f}", .{std.unicode.fmtUtf8(s)});
 }
 
 /// Count Unicode code points, clamping the walk so it never exceeds the slice.
@@ -663,7 +653,7 @@ fn readSpillTail(io: std.Io, alloc: std.mem.Allocator, output: []const u8) ?[]co
 
     const raw = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited64(64 * 1024 * 1024 + 1)) catch return null;
     defer alloc.free(raw);
-    const content = sanitizeUtf8(alloc, raw) catch return null;
+    const content = util.sanitizeUtf8(alloc, raw) catch return null;
     defer alloc.free(content);
     const total = utf8Count(content);
     const tail_chars = @min(COMPACT_TAIL_CHARS, total);

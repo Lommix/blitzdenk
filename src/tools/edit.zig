@@ -105,19 +105,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         .after = new_content,
         .path = args.file_path,
     } });
-    switch (decision) {
-        .approved => {},
-        .denied => return r.errResult(call, "User declined edit. Change the approach or ask the user before retrying."),
-        .message => |txt| {
-            const wrapped = std.fmt.allocPrint(
-                alloc,
-                "User declined the edit and left feedback: {s}\nChange the approach or ask the user before retrying.",
-                .{txt},
-            ) catch txt;
-            return r.errResult(call, wrapped);
-        },
-        else => return r.errResult(call, "permission unresolved"),
-    }
+    if (r.permissionDenied(ctx, call, decision, "edit", "the edit")) |res| return res;
 
     if (ctx.isCanceled()) return r.errResult(call, "canceled");
 
@@ -163,7 +151,7 @@ fn buildReplacement(
     const exact_new = if (consistent_crlf and
         std.mem.indexOfScalar(u8, new_string, '\n') != null and
         std.mem.indexOfScalar(u8, new_string, '\r') == null)
-        try denormalizeLineEndings(alloc, new_string, true)
+        try r.toCrlf(alloc, new_string)
     else
         new_string;
 
@@ -181,7 +169,8 @@ fn buildReplacement(
         !std.mem.eql(u8, new_lf, new_string))
     {
         if (try exactReplace(alloc, file_lf, old_lf, new_lf, replace_all)) |content_lf| {
-            return try denormalizeLineEndings(alloc, content_lf, normalize);
+            if (!normalize) return content_lf;
+            return try r.toCrlf(alloc, content_lf);
         }
     }
 
@@ -212,35 +201,13 @@ fn normalizeLineEndings(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
     var i: usize = 0;
     while (i < s.len) : (i += 1) {
         if (s[i] == '\r') {
-            if (i + 1 < s.len and s[i + 1] == '\n') {
-                try out.append(alloc, '\n');
-                i += 1;
-            } else {
-                try out.append(alloc, '\n');
-            }
+            if (i + 1 < s.len and s[i + 1] == '\n') i += 1;
+            try out.append(alloc, '\n');
         } else {
             try out.append(alloc, s[i]);
         }
     }
     return try out.toOwnedSlice(alloc);
-}
-
-fn denormalizeLineEndings(alloc: std.mem.Allocator, s: []const u8, crlf: bool) ![]const u8 {
-    if (!crlf) return s;
-    const extra = std.mem.count(u8, s, "\n");
-    const out = try alloc.alloc(u8, s.len + extra);
-    var j: usize = 0;
-    for (s) |c| {
-        if (c == '\n') {
-            out[j] = '\r';
-            out[j + 1] = '\n';
-            j += 2;
-        } else {
-            out[j] = c;
-            j += 1;
-        }
-    }
-    return out;
 }
 
 /// Build a diagnostic message when oldText is not found in file_content.
@@ -288,7 +255,7 @@ fn diagnoseMismatch(alloc: std.mem.Allocator, file_content: []const u8, oldText:
         var prefix_len: usize = @min(oldText.len, 128);
         while (prefix_len >= 16) : (prefix_len -= 1) {
             if (std.mem.indexOf(u8, file_content, oldText[0..prefix_len])) |idx| {
-                const line_no = countLinesUpTo(file_content, idx) + 1;
+                const line_no = std.mem.count(u8, file_content[0..@min(idx, file_content.len)], "\n") + 1;
                 return std.fmt.allocPrint(alloc, "{s}. HINT: only the first {d} bytes of oldText match (around line {d}). The mismatch starts there — re-read that region and copy exactly.", .{ head, prefix_len, line_no }) catch head;
             }
         }
@@ -331,13 +298,4 @@ fn normaliseWs(a: std.mem.Allocator, s: []const u8) ![]const u8 {
         }
     }
     return out.toOwnedSlice(a);
-}
-
-fn countLinesUpTo(s: []const u8, idx: usize) usize {
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < idx and i < s.len) : (i += 1) {
-        if (s[i] == '\n') n += 1;
-    }
-    return n;
 }
