@@ -48,13 +48,8 @@ pub const general_default_tool_set = .{
     r.tools.write.WriteTool,
     r.tools.edit.EditTool,
     r.tools.bash.BashTool,
-    r.tools.bash.BashBgTool,
-    r.tools.bash.KillJobTool,
-    r.tools.bash.ReadJobTool,
     r.tools.read.ReadTool,
-    r.tools.patch.PatchTool,
     r.tools.ask.AskTool,
-    r.tools.start.StartMcpTool,
     r.tools.skill.SkillTool,
 };
 
