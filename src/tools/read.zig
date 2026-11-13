@@ -33,9 +33,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         limit: ?u64 = null,
     };
 
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"file_path\": \"...\"}");
+    const args = r.parseArgs(Args, ctx, call) orelse return r.errResult(call, "invalid JSON arguments: expected {\"file_path\": \"...\"}");
 
     if (args.file_path.len == 0) return r.errResult(call, "path is empty");
 

@@ -106,11 +106,9 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const alloc = ctx.alloc;
     r.setToolStatusPrint(ctx, call, "patch", .{});
 
-    const args = (std.json.parseFromSlice(Args, alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch return r.errResult(call,
+    const args = r.parseArgs(Args, ctx, call) orelse return r.errResult(call,
         \\invalid JSON arguments, expected `{"patch": "..."}`
-    )).value;
+    );
 
     if (args.patch.len == 0) return r.errResult(call, "patch is empty");
 

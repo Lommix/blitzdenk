@@ -302,31 +302,21 @@ const FakeMcp = struct {
 
         if (std.mem.indexOf(u8, request.body, "\"method\":\"initialize\"") != null) {
             self.inits += 1;
-            return respondResult(conn, requestId(request.body), "{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}", self.inits);
+            return respondResult(conn, test_http.jsonRpcId(request.body), "{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}", self.inits);
         } else if (std.mem.indexOf(u8, request.body, "\"method\":\"notifications/initialized\"") != null) {
             self.notifications += 1;
             return conn.respond(.{ .status = "202 Accepted", .keep_alive = true });
         } else if (std.mem.indexOf(u8, request.body, "\"method\":\"tools/list\"") != null) {
-            return respondResult(conn, requestId(request.body), "{\"tools\":[{\"name\":\"echo\",\"description\":\"echo\",\"inputSchema\":{\"type\":\"object\"}}]}", null);
+            return respondResult(conn, test_http.jsonRpcId(request.body), "{\"tools\":[{\"name\":\"echo\",\"description\":\"echo\",\"inputSchema\":{\"type\":\"object\"}}]}", null);
         } else if (std.mem.indexOf(u8, request.body, "\"method\":\"tools/call\"") != null) {
             self.calls += 1;
             if (self.calls == 1) return conn.respond(.{ .status = "404 Not Found", .keep_alive = true });
-            try writeSseResult(conn, requestId(request.body));
+            try writeSseResult(conn, test_http.jsonRpcId(request.body));
             std.Io.sleep(conn.io, .fromSeconds(60), .awake) catch {};
             return .close;
         } else {
             return conn.respond(.{ .status = "400 Bad Request", .keep_alive = true });
         }
-    }
-
-    fn requestId(body: []const u8) i64 {
-        const idx = std.mem.indexOf(u8, body, "\"id\":") orelse return 0;
-        var i = idx + "\"id\":".len;
-        var n: i64 = 0;
-        while (i < body.len and body[i] >= '0' and body[i] <= '9') : (i += 1) {
-            n = n * 10 + (body[i] - '0');
-        }
-        return n;
     }
 
     fn respondResult(conn: *test_http.Connection, id: i64, result: []const u8, session: ?usize) anyerror!test_http.Next {

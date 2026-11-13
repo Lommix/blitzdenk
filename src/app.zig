@@ -928,8 +928,7 @@ pub const App = struct {
     }
 
     pub fn nowMillis(self: *App) i64 {
-        const now = std.Io.Clock.Timestamp.now(self.io, .real);
-        return @intCast(@divTrunc(now.raw.nanoseconds, std.time.ns_per_ms));
+        return r.util.nowMs(self.io);
     }
 
     fn probeHome(self: *const App) []const u8 {

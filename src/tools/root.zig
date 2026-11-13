@@ -198,6 +198,11 @@ pub fn okResult(_: ToolCall, content: []const u8) ToolResult {
     };
 }
 
+/// Parse tool-call JSON into `T` on the call arena; unknown fields are ignored.
+pub fn parseArgs(comptime T: type, ctx: ToolContext, call: ToolCall) ?T {
+    return std.json.parseFromSliceLeaky(T, ctx.alloc, call.input, .{ .ignore_unknown_fields = true }) catch null;
+}
+
 pub fn toCrlf(alloc: std.mem.Allocator, lf_text: []const u8) ![]u8 {
     const out = try alloc.alloc(u8, lf_text.len + std.mem.count(u8, lf_text, "\n"));
     var j: usize = 0;

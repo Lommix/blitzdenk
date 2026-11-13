@@ -73,9 +73,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall, background: bool) r.r.sdk.Too
         run_in_background: bool = false,
     };
 
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch {
+    const args = r.parseArgs(Args, ctx, call) orelse {
         std.log.err("[BAD CMD] {s}", .{call.input});
         return r.errResult(call, "invalid arguments: \"command\" is required and must be a non-empty string");
     };
@@ -219,9 +217,7 @@ pub const ReadJobTool = r.Tool{
 
 fn readJob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct { job_id: u32, offset: ?usize = null, limit: ?usize = null };
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid arguments: \"job_id\" is required; offset and limit must be positive integers");
+    const args = r.parseArgs(Args, ctx, call) orelse return r.errResult(call, "invalid arguments: \"job_id\" is required; offset and limit must be positive integers");
     if (args.offset == 0 or args.limit == 0) return r.errResult(call, "invalid arguments: offset and limit start at 1");
     const limit = args.limit orelse DEFAULT_JOB_READ_LINES;
 
@@ -258,9 +254,7 @@ pub const KillJobTool = r.Tool{
 
 fn killJob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const Args = struct { job_id: u32 };
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid arguments: \"job_id\" is required and must be a positive integer");
+    const args = r.parseArgs(Args, ctx, call) orelse return r.errResult(call, "invalid arguments: \"job_id\" is required and must be a positive integer");
 
     const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     r.setToolStatusPrint(ctx, call, "kill job {d}", .{args.job_id});
@@ -383,7 +377,7 @@ fn runWithDeadline(
     const handle = ctx.base.exec_pool.runWithOpts(opts) catch return error.OutOfMemory;
     const slot = &ctx.base.exec_pool.slots[@backingInt(handle)];
 
-    const start_ms: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(ctx.io, .real).nanoseconds, std.time.ns_per_ms));
+    const start_ms: i64 = r.r.util.nowMs(ctx.io);
     while (true) {
         if (slot.done.load(.acquire)) {
             return ctx.base.exec_pool.killAndCollect(handle);
@@ -392,7 +386,7 @@ fn runWithDeadline(
             ctx.base.exec_pool.cancel(handle);
             return error.Canceled;
         }
-        const now_ms: i64 = @intCast(@divTrunc(std.Io.Timestamp.now(ctx.io, .real).nanoseconds, std.time.ns_per_ms));
+        const now_ms: i64 = r.r.util.nowMs(ctx.io);
         if (now_ms - start_ms > deadline_ms) {
             return ctx.base.exec_pool.killAndCollect(handle);
         }

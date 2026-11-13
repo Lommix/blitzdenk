@@ -153,11 +153,7 @@ const Fake = struct {
     }
 
     fn mcpReply(conn: *test_http.Connection, body: []const u8) anyerror!test_http.Next {
-        var id: i64 = 0;
-        if (std.mem.indexOf(u8, body, "\"id\":")) |idx| {
-            var i = idx + 5;
-            while (i < body.len and body[i] >= '0' and body[i] <= '9') : (i += 1) id = id * 10 + (body[i] - '0');
-        }
+        const id = test_http.jsonRpcId(body);
         const result: []const u8 = if (std.mem.indexOf(u8, body, "\"initialize\"") != null)
             "{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}"
         else if (std.mem.indexOf(u8, body, "notifications/initialized") != null)

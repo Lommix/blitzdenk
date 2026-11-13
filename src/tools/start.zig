@@ -18,9 +18,7 @@ const StartArgs = struct {
 };
 
 fn startMcp(ctx: r.r.tools.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
-    const args = std.json.parseFromSliceLeaky(StartArgs, ctx.alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid JSON arguments");
+    const args = r.parseArgs(StartArgs, ctx, call) orelse return r.errResult(call, "invalid JSON arguments");
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var buf: [128]u8 = undefined;

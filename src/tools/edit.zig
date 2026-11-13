@@ -42,12 +42,12 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     r.setToolStatusPrint(ctx, call, "edit", .{});
 
-    const args = (std.json.parseFromSlice(Args, alloc, call.input, .{ .ignore_unknown_fields = true }) catch {
+    const args = r.parseArgs(Args, ctx, call) orelse {
         std.log.err("ARGs ERROR: {s}", .{call.input});
         return r.errResult(call,
             \\invalid JSON arguments, expected `{"file_path": "...", "old_string": "...", "new_string": "...", "replace_all": ...}`
         );
-    }).value;
+    };
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     var tool_buf: [r.STATUS_BUF]u8 = undefined;

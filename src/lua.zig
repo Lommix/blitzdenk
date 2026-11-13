@@ -66,10 +66,7 @@ pub fn LuaFnBind(
                         @field(args, std.fmt.comptimePrint("{}", .{i})) = state;
                     },
                     else => |any| {
-                        const vm = fromState(state) orelse {
-                            _ = c.luaL_error(state, "failed to get lua vm");
-                            return 0;
-                        };
+                        const vm = requireVm(state, "failed to get lua vm") orelse return 0;
 
                         switch (readAnyValueAlloc(any, state, name, @as(c_int, offset), vm.luaArena())) {
                             .ok => |val| {
@@ -1856,10 +1853,7 @@ const BlitzPermissions = LuaType{ .table_def = .{
                     fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                         const state = L.?;
                         const a = requireAppFromRegistry(state, "blitz.permissions.list_pending: app not initialized") orelse return 0;
-                        const vm = fromState(state) orelse {
-                            _ = c.luaL_error(state, "blitz.permissions.list_pending: no active lua vm");
-                            return 0;
-                        };
+                        const vm = requireVm(state, "blitz.permissions.list_pending: no active lua vm") orelse return 0;
                         const arena = vm.luaArena();
 
                         const g = a.permission_queue.lock(a.io);
@@ -1897,10 +1891,7 @@ const BlitzPermissions = LuaType{ .table_def = .{
                     fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                         const state = L.?;
                         const a = requireAppFromRegistry(state, "blitz.permissions.get: app not initialized") orelse return 0;
-                        const vm = fromState(state) orelse {
-                            _ = c.luaL_error(state, "blitz.permissions.get: no active lua vm");
-                            return 0;
-                        };
+                        const vm = requireVm(state, "blitz.permissions.get: no active lua vm") orelse return 0;
                         const raw_ticket = c.lua_tointegerx(state, 1, null);
 
                         var snap: ?PermSnapshot = null;
@@ -1934,10 +1925,7 @@ const BlitzPermissions = LuaType{ .table_def = .{
                     fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                         const state = L.?;
                         const a = requireAppFromRegistry(state, "blitz.permissions.resolve: app not initialized") orelse return 0;
-                        const vm = fromState(state) orelse {
-                            _ = c.luaL_error(state, "blitz.permissions.resolve: no active lua vm");
-                            return 0;
-                        };
+                        const vm = requireVm(state, "blitz.permissions.resolve: no active lua vm") orelse return 0;
                         if (c.lua_gettop(state) < 2 or c.lua_type(state, 2) != c.LUA_TTABLE) {
                             _ = c.luaL_error(state, "blitz.permissions.resolve: decision table required");
                             return 0;
@@ -2233,10 +2221,7 @@ const BlitzCmp = LuaType{ .table_def = .{ .name = "BlitzCmp", .fields = &.{
 fn luaInputGet(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L orelse return 0;
     const a = requireAppFromRegistry(state, "input.get: app not initialized") orelse return 0;
-    const vm = fromState(state) orelse {
-        _ = c.luaL_error(state, "input.get: no active lua vm");
-        return 0;
-    };
+    const vm = requireVm(state, "input.get: no active lua vm") orelse return 0;
     if (vm.is_tool_vm) {
         _ = c.luaL_error(state, "input.get: not available in tool vms");
         return 0;
@@ -2572,10 +2557,7 @@ const BlitzCmd = LuaType{ .table_def = .{ .name = "BlitzCmd", .fields = &.{
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
                     const a = requireAppFromRegistry(state, "cmd.select: app not initialized") orelse return 0;
-                    const vm = fromState(state) orelse {
-                        _ = c.luaL_error(state, "cmd.select: no active lua vm");
-                        return 0;
-                    };
+                    const vm = requireVm(state, "cmd.select: no active lua vm") orelse return 0;
                     if (vm.is_tool_vm) {
                         _ = c.luaL_error(state, "cmd.select: not available in tool vms");
                         return 0;
@@ -2640,10 +2622,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
                     const a = requireAppFromRegistry(state, "agent.spawn: app not initialized") orelse return 0;
-                    const vm = fromState(state) orelse {
-                        _ = c.luaL_error(state, "agent.spawn: no active lua vm");
-                        return 0;
-                    };
+                    const vm = requireVm(state, "agent.spawn: no active lua vm") orelse return 0;
 
                     const SpawnArgs = struct {
                         parent_id: ?r.AgentId = null,
@@ -2765,10 +2744,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
                 fn lua_fn(L: ?*c.lua_State) callconv(.c) c_int {
                     const state = L.?;
                     const a = requireAppFromRegistry(state, "agent.await: app not initialized") orelse return 0;
-                    const vm = fromState(state) orelse {
-                        _ = c.luaL_error(state, "agent.await: no active lua vm");
-                        return 0;
-                    };
+                    const vm = requireVm(state, "agent.await: no active lua vm") orelse return 0;
                     const id = readAgentIdArg(state, "agent.await", 1);
                     const io = a.io;
                     if (a.registry.state(id) == null) {
@@ -4001,7 +3977,7 @@ pub const LuaVm = struct {
             if (count.* >= out.len) return;
 
             const name = entry.nameSlice();
-            if (!startsWithIgnoreCase(name, prefix)) continue;
+            if (!std.ascii.startsWithIgnoreCase(name, prefix)) continue;
             {
                 var dup = false;
                 for (out[0..count.*]) |item| {
@@ -4017,14 +3993,6 @@ pub const LuaVm = struct {
             out[count.*] = .{ .text = name, .description = entry.descriptionSlice() };
             count.* += 1;
         }
-    }
-
-    fn startsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
-        if (prefix.len > value.len) return false;
-        for (prefix, 0..) |ch, i| {
-            if (std.ascii.toLower(ch) != std.ascii.toLower(value[i])) return false;
-        }
-        return true;
     }
 
     /// Read config fields from the blitz global table after script execution.
@@ -4709,6 +4677,13 @@ fn requireAppFromRegistry(L: *c.lua_State, message: [:0]const u8) ?*app.App {
     };
 }
 
+fn requireVm(L: *c.lua_State, message: [:0]const u8) ?*LuaVm {
+    return fromState(L) orelse {
+        _ = c.luaL_error(L, "%s", message.ptr);
+        return null;
+    };
+}
+
 /// blitz.bind(vim_key_combo_string, lua func)
 /// blitz.add_command("command", lua func)
 fn readAnyArg(
@@ -5127,10 +5102,7 @@ fn luaCtxBatch(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "ctx.batch: requests must be a table");
         return 0;
     }
-    const vm = fromState(state) orelse {
-        _ = c.luaL_error(state, "ctx.batch: no lua vm");
-        return 0;
-    };
+    const vm = requireVm(state, "ctx.batch: no lua vm") orelse return 0;
     const arena = vm.luaArena();
     const tool_ctx = bridge.tool_ctx;
     const count = c.lua_rawlen(state, 2);

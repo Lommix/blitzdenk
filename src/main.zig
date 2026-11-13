@@ -1128,12 +1128,7 @@ pub fn run(
 
                                     app.pushHistory(history_store_dir, input);
 
-                                    const screenshot_url: ?[]const u8 = if (app.screenshot_buf) |img_data|
-                                        try std.fmt.allocPrint(app.sessionAlloc(), "data:image/png;base64,{s}", .{img_data})
-                                    else
-                                        null;
-
-                                    const parts = buildPromptParts(&app, send_text, screenshot_url) catch break;
+                                    const parts = buildPromptParts(&app, send_text) catch break;
 
                                     app.screenshot_buf = null;
 
@@ -1489,20 +1484,8 @@ fn applySkillCommand(app: *App, sc: skills.SkillCommand, send_text: *[]const u8,
 
 fn queueAgentMessage(app: *App, io: std.Io, send_text: []const u8, timeline_text: []const u8) !void {
     if (app.main_agent_id) |agent_id| {
-        const alloc = app.sessionAlloc();
-        const len: usize = if (app.screenshot_buf != null) 2 else 1;
-
-        const parts = try alloc.alloc(r.sdk.Part, len);
-        parts[0] = .{ .text = send_text };
-
-        if (app.screenshot_buf) |buf| {
-            parts[1] = .{ .image = .{
-                .url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{buf}),
-                .media_type = "image/png",
-            } };
-        }
-
-        const entry = try TimelineEntry.userMessageSimple(alloc, .user, timeline_text);
+        const parts = try buildPromptParts(app, send_text);
+        const entry = try TimelineEntry.userMessageSimple(app.sessionAlloc(), .user, timeline_text);
         try app.cmd_queue.append(io, .{ .queue_agent_message = .{
             .agent_id = agent_id,
             .parts = parts,
@@ -1511,17 +1494,14 @@ fn queueAgentMessage(app: *App, io: std.Io, send_text: []const u8, timeline_text
     }
 }
 
-fn buildPromptParts(app: *App, send_text: []const u8, screenshot_url: ?[]const u8) ![]const r.sdk.Part {
+fn buildPromptParts(app: *App, send_text: []const u8) ![]const r.sdk.Part {
     const alloc = app.sessionAlloc();
-    return if (screenshot_url) |url|
-        try alloc.dupe(r.sdk.Part, &.{
-            .{ .text = send_text },
-            .{ .image = .{ .url = url, .media_type = "image/png" } },
-        })
-    else
-        try alloc.dupe(r.sdk.Part, &.{
-            .{ .text = send_text },
-        });
+    const img_data = app.screenshot_buf orelse return alloc.dupe(r.sdk.Part, &.{.{ .text = send_text }});
+    const url = try std.fmt.allocPrint(alloc, "data:image/png;base64,{s}", .{img_data});
+    return alloc.dupe(r.sdk.Part, &.{
+        .{ .text = send_text },
+        .{ .image = .{ .url = url, .media_type = "image/png" } },
+    });
 }
 
 const MousePress = struct { x: u16, y: u16 };

@@ -27,9 +27,7 @@ const Args = struct {
 
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const alloc = ctx.alloc;
-    const args = std.json.parseFromSliceLeaky(Args, alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"file_path\": \"...\", \"content\": \"...\"}");
+    const args = r.parseArgs(Args, ctx, call) orelse return r.errResult(call, "invalid JSON arguments: expected {\"file_path\": \"...\", \"content\": \"...\"}");
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
 

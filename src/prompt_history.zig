@@ -1,5 +1,5 @@
 const std = @import("std");
-const session_store = @import("session_store.zig");
+const util = @import("util.zig");
 
 pub const FILE_NAME = "prompts.jsonl";
 pub const MAX_ENTRIES = 100;
@@ -17,7 +17,7 @@ pub fn append(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, text: []const
     defer arena.deinit();
 
     var line: std.Io.Writer.Allocating = .init(arena.allocator());
-    try line.writer.print("{{\"kind\":\"prompt\",\"v\":1,\"ts\":{d},\"text\":", .{session_store.wallMillis(io)});
+    try line.writer.print("{{\"kind\":\"prompt\",\"v\":1,\"ts\":{d},\"text\":", .{util.nowMs(io)});
     try std.json.Stringify.value(text, .{}, &line.writer);
     try line.writer.writeAll("}\n");
 

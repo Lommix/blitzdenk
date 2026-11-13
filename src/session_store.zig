@@ -2,6 +2,7 @@ const std = @import("std");
 const session = @import("session.zig");
 const sdk = @import("blitz-sdk");
 const app = @import("app.zig");
+const util = @import("util.zig");
 const DIR_NAME = "sessions";
 pub const GC_AGE_MS: i64 = 16 * 24 * 60 * 60 * std.time.ms_per_s;
 const ID_RANDOM_LEN = 4;
@@ -146,7 +147,7 @@ pub const Store = struct {
         if (change == .interrupted_exchange) try self.interruptions.append(self.gpa, id);
         switch (change) {
             .append => {
-                const now = wallMillis(self.io);
+                const now = util.nowMs(self.io);
                 for (wire) |message| {
                     var stamped = message;
                     stamped.time_ms = now;
@@ -179,7 +180,7 @@ pub const Store = struct {
     fn createJournal(self: *Store) !void {
         var dir = try openSessionsDir(self.base, self.io);
         defer dir.close(self.io);
-        const now = wallMillis(self.io);
+        const now = util.nowMs(self.io);
         var id: [ID_LEN]u8 = undefined;
         formatId(&id, now, self.io);
         const name = try fileName(self.gpa, &id);
@@ -309,7 +310,7 @@ pub const Store = struct {
 };
 
 fn repair(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8, length: u64) !void {
-    const backup = try std.fmt.allocPrint(gpa, "{s}.{d}.bak", .{ name, wallMillis(io) });
+    const backup = try std.fmt.allocPrint(gpa, "{s}.{d}.bak", .{ name, util.nowMs(io) });
     defer gpa.free(backup);
     const temp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{name});
     defer gpa.free(temp);
@@ -330,10 +331,6 @@ fn repair(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, name: []const u8,
         offset += n;
     }
     try std.Io.Dir.rename(dir, temp, dir, name, io);
-}
-
-pub fn wallMillis(io: std.Io) i64 {
-    return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_ms));
 }
 
 fn formatId(buf: []u8, millis: i64, io: std.Io) void {
@@ -479,7 +476,7 @@ pub fn collectGarbage(alloc: std.mem.Allocator, io: std.Io, base: std.Io.Dir, ma
     defer freeList(alloc, entries);
     var sessions_dir = base.openDir(io, DIR_NAME, .{}) catch return;
     defer sessions_dir.close(io);
-    const now = wallMillis(io);
+    const now = util.nowMs(io);
     for (entries) |entry| {
         if (now - entry.modified_ms <= max_age_ms) continue;
         const name = std.mem.concat(alloc, u8, &.{ entry.id, NAME_EXTENSION }) catch continue;

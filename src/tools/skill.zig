@@ -19,9 +19,7 @@ fn run(ctx: r.ToolContext, call: r.ToolCall) r.ToolResult {
         name: []const u8,
     };
 
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid JSON arguments: expected {\"name\": \"...\"}");
+    const args = r.parseArgs(Args, ctx, call) orelse return r.errResult(call, "invalid JSON arguments: expected {\"name\": \"...\"}");
 
     if (args.name.len == 0) return r.errResult(call, "skill name is empty");
 

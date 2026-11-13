@@ -136,3 +136,14 @@ fn findHeader(headers: []const Header, name: []const u8) ?[]const u8 {
     }
     return null;
 }
+
+/// Numeric JSON-RPC `"id"` of a request body, 0 when absent.
+pub fn jsonRpcId(body: []const u8) i64 {
+    const idx = std.mem.indexOf(u8, body, "\"id\":") orelse return 0;
+    var i = idx + "\"id\":".len;
+    var n: i64 = 0;
+    while (i < body.len and body[i] >= '0' and body[i] <= '9') : (i += 1) {
+        n = n * 10 + (body[i] - '0');
+    }
+    return n;
+}

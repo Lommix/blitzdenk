@@ -67,9 +67,7 @@ const Args = struct {
 };
 
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
-    const args = std.json.parseFromSliceLeaky(Args, ctx.alloc, call.input, .{
-        .ignore_unknown_fields = true,
-    }) catch return r.errResult(call, "invalid JSON arguments: expected {questions: [{header, question, options: [{label, description?}], multi_select?}]}");
+    const args = r.parseArgs(Args, ctx, call) orelse return r.errResult(call, "invalid JSON arguments: expected {questions: [{header, question, options: [{label, description?}], multi_select?}]}");
 
     if (ask_session.validate(args.questions)) |violation| {
         const rule = ask_session.formatViolation(ctx.alloc, violation) catch
