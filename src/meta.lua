@@ -250,10 +250,18 @@
 ---@field ASK string
 ---load a registered mcp tools into session
 ---@field START_MCP string
+---search file contents with rg
+---@field GREP string
+---find files by name with fd
+---@field FIND string
+---list a directory
+---@field LS string
 
 ---@class BlitzToolsetDef
 ---bash with run_in_background, plus read_job and kill_job
 ---@field BASH_BACKGROUND string[]
+---read only search: grep, find and ls
+---@field READONLY string[]
 
 ---@class BlitzAgentCreatedEvent
 ---packed AgentId of the new agent

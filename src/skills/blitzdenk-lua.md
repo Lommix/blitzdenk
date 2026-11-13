@@ -104,6 +104,8 @@ blitz.set_capabilities({
   `add_tool` applies a toolset all or none.
 - `blitz.tools.BASH` is sync only. Background jobs need
   `blitz.toolsets.BASH_BACKGROUND`.
+- `blitz.toolsets.READONLY` is `GREP` (rg), `FIND` (fd) and `LS`. `GREP`
+  and `FIND` need `rg` and `fd` on PATH.
 - The read tool returns scaled images as PNG and shrinks further to fit the
   byte limit. A format the decoder cannot read goes out unscaled with a note.
 - Capability rules form the `<env_capabilities>` catalogue, injected once

@@ -50,6 +50,9 @@ pub const general_default_tool_set = .{
     r.tools.bash.BashTool,
     r.tools.read.ReadTool,
     r.tools.ask.AskTool,
+    r.tools.readonly.GrepTool,
+    r.tools.readonly.FindTool,
+    r.tools.readonly.LsTool,
 };
 
 pub const AgentDef = struct {

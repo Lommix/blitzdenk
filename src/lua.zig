@@ -1528,6 +1528,9 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "PATCH", .desc = "patch DSL tool. Replaces edit and write. GPT loves it", .ty = LuaType.string, .value = .{ .string = tl.patch.PatchTool.def.name } },
             .{ .name = "ASK", .desc = "multiple choice questions for the user", .ty = LuaType.string, .value = .{ .string = tl.ask.AskTool.def.name } },
             .{ .name = "START_MCP", .desc = "load a registered mcp tools into session", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },
+            .{ .name = "GREP", .desc = "search file contents with rg", .ty = LuaType.string, .value = .{ .string = tl.readonly.GrepTool.def.name } },
+            .{ .name = "FIND", .desc = "find files by name with fd", .ty = LuaType.string, .value = .{ .string = tl.readonly.FindTool.def.name } },
+            .{ .name = "LS", .desc = "list a directory", .ty = LuaType.string, .value = .{ .string = tl.readonly.LsTool.def.name } },
         },
     },
 };
@@ -1537,6 +1540,7 @@ pub const BlitzToolsetDef = LuaType{
         .name = "BlitzToolsetDef",
         .fields = &.{
             .{ .name = "BASH_BACKGROUND", .desc = "bash with run_in_background, plus read_job and kill_job", .ty = StringListDef, .value = .{ .strings = &tl.bash.SET_BASH_BACKGROUND } },
+            .{ .name = "READONLY", .desc = "read only search: grep, find and ls", .ty = StringListDef, .value = .{ .strings = &tl.readonly.SET_READONLY } },
         },
     },
 };

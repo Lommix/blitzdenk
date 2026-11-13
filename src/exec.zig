@@ -40,6 +40,8 @@ pub const CmdSlot = struct {
     /// Set for `RunOpts.background` runs. Then `stdout` holds the merged
     /// output and `mu` guards it while the worker appends.
     background: bool = false,
+    /// Set for `RunOpts.keep_head` runs.
+    keep_head: bool = false,
     mu: std.Io.Mutex = .init,
     /// Lines trimmed from the front of a background run's `stdout`.
     dropped_lines: usize = 0,
@@ -95,6 +97,9 @@ pub const CmdPool = struct {
         /// order, trimmed to `max_output` at line starts, with no drain
         /// ceiling. Read it while running with `lockOutput`.
         background: bool = false,
+        /// Keep the first `max_output` stdout bytes instead of the last, and
+        /// stop the child once they are captured.
+        keep_head: bool = false,
     };
 
     pub fn runWithOpts(self: *Self, opts: RunOpts) !Handle {
@@ -115,6 +120,7 @@ pub const CmdPool = struct {
         slot.cap = @max(opts.max_output orelse MAX_OUTPUT, 1);
         slot.drained = 0;
         slot.background = opts.background;
+        slot.keep_head = opts.keep_head;
         slot.dropped_lines = 0;
         errdefer {
             slot.owned.store(false, .release);
@@ -343,7 +349,8 @@ pub const CmdPool = struct {
             };
             try self.appendBuffered(slot, stdout_reader, stderr_reader);
             const ceiling = @max(MAX_DRAIN_BYTES, slot.cap *| 2);
-            if (!slot.background and !ceiling_hit and slot.drained > ceiling) {
+            const head_full = slot.keep_head and slot.stdout_truncated;
+            if (!slot.background and !ceiling_hit and (slot.drained > ceiling or head_full)) {
                 ceiling_hit = true;
                 self.terminateProcess(child.id.?, kill_process_group);
             }
@@ -396,11 +403,17 @@ pub const CmdPool = struct {
             return;
         }
 
-        try slot.stdout.appendSlice(self.alloc, out);
+        if (slot.keep_head) {
+            const room = slot.cap -| slot.stdout.items.len;
+            try slot.stdout.appendSlice(self.alloc, out[0..@min(out.len, room)]);
+            if (out.len > room) slot.stdout_truncated = true;
+        } else {
+            try slot.stdout.appendSlice(self.alloc, out);
+            trimToTail(&slot.stdout, slot.cap, slot.cap + TRIM_SLACK, &slot.stdout_truncated);
+        }
         try slot.stderr.appendSlice(self.alloc, err);
         slot.drained += out.len + err.len;
 
-        trimToTail(&slot.stdout, slot.cap, slot.cap + TRIM_SLACK, &slot.stdout_truncated);
         trimToTail(&slot.stderr, slot.cap, slot.cap + TRIM_SLACK, &slot.stderr_truncated);
     }
 
@@ -814,4 +827,23 @@ test "output beyond the cap keeps the tail and marks truncation" {
     try std.testing.expect(capped.stdout.len <= 64 * 1024);
     try std.testing.expect(capped.stdout_truncated);
     try std.testing.expect(!capped.stderr_truncated);
+}
+
+test "keep_head keeps the first bytes and stops the child" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var f: ProcessTestFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const start = nowMs(std.testing.io);
+    const res = try f.pool.runAndWaitTimeout(.{
+        .cwd = f.cwd,
+        .argv = &.{ "/bin/sh", "-c", "yes" },
+        .max_output = 16,
+        .keep_head = true,
+    }, 10000);
+    defer std.testing.allocator.free(res.stdout);
+    defer std.testing.allocator.free(res.stderr);
+    try std.testing.expect(nowMs(std.testing.io) - start < 5000);
+    try std.testing.expectEqualStrings("y\ny\ny\ny\ny\ny\ny\ny\n", res.stdout);
+    try std.testing.expect(res.stdout_truncated);
 }
