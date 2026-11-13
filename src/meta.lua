@@ -250,8 +250,6 @@
 ---@field ASK string
 ---load a registered mcp tools into session
 ---@field START_MCP string
----load a skill's full instructions by name
----@field SKILL string
 
 ---@class BlitzToolsetDef
 ---bash with run_in_background, plus read_job and kill_job
@@ -572,7 +570,7 @@
 ---@field model? integer
 ---@field effort? string
 ---@field in_agent_tool? boolean
----false disables all skills for this agent; a table restricts the catalogue and the skill tool
+---false disables all skills for this agent; a table restricts the catalogue and skill reads
 ---@field skills? boolean|BlitzSkillFilter
 
 ---@class BlitzTokenUsage

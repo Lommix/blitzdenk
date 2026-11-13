@@ -87,7 +87,7 @@ local tools = require("tools")
 local web = { tools.web_search, tools.web_fetch }  -- custom toolset
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
     blitz.toolsets.BASH_BACKGROUND, -- bash + read_job + kill_job
-    blitz.tools.READ, blitz.tools.EDIT, blitz.tools.SKILL,
+    blitz.tools.READ, blitz.tools.EDIT,
     web,
 })
 blitz.set_read_image_max(4096, 4096)
@@ -223,8 +223,9 @@ end)
 
 `skills` in `add_agent`, or `blitz.set_agent_skills(type, filter)` for an
 existing type (live agents pick it up next step). The filter covers the
-catalogue, the `skill` tool, and `/skill-<name>`; an agent with `read` or
-`bash` can still open the file. Skill names match case-insensitively.
+catalogue, skill loads via `read`, and `/skill-<name>`. The catalogue lists each
+skill's path; `read` on that path returns the body without frontmatter. A
+filtered-out skill reads as a plain file. Skill names match case-insensitively.
 
 A skill file narrows itself in `metadata`:
 

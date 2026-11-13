@@ -149,11 +149,12 @@ fn inject_datetime_information(w: *std.Io.Writer, _: *r.app.App, _: *r.agent.Age
     try w.print("[TIME] {s}\n", .{buf[0..n]});
 }
 
+const skill_guideline_line = "Summaries only. If the user names a skill, or the task clearly matches one, `read` its path before taking task actions, then follow its full instructions.";
 const skill_replacement_line = "The available skill catalog changed. This complete catalog replaces every earlier available-skills list in this session.";
 
 fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent) !void {
     const def = app.context_factory.agentTypeAt(agent.type_idx) orelse return;
-    if (!agent.hasTool(r.tools.skill.SkillTool.def.name)) return;
+    if (!agent.hasTool(r.tools.read.ReadTool.def.name)) return;
     if (!def.skills.enabled) {
         if (agent.skill_catalog_digest != null) {
             try emitCatalog(w, "available_skills", 0, "", &agent.skill_catalog_digest, skill_replacement_line);
@@ -170,8 +171,9 @@ fn inject_available_skills(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.A
     for (reg.entries.items) |entry| {
         if (!entry.meta.model_invocable) continue;
         if (!r.skills.visibleTo(&entry, def.name, is_main, def.skills)) continue;
+        if (count == 0) try rows.writer.writeAll(skill_guideline_line ++ "\n");
         count += 1;
-        try rows.writer.print("- `{s}`: ", .{entry.meta.name});
+        try rows.writer.print("- `{s}` ({s}): ", .{ entry.meta.name, entry.path });
         try writeCatalogField(&rows.writer, entry.meta.description);
         try rows.writer.writeByte('\n');
     }

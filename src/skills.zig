@@ -75,6 +75,13 @@ pub const SkillRegistry = struct {
         }
         return null;
     }
+
+    pub fn findPath(self: *const SkillRegistry, path: []const u8) ?*const SkillEntry {
+        for (self.entries.items, 0..) |entry, i| {
+            if (std.mem.eql(u8, entry.path, path)) return &self.entries.items[i];
+        }
+        return null;
+    }
 };
 
 pub fn visibleTo(entry: *const SkillEntry, agent_name: []const u8, is_main: bool, filter: Filter) bool {

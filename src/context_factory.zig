@@ -50,7 +50,6 @@ pub const general_default_tool_set = .{
     r.tools.bash.BashTool,
     r.tools.read.ReadTool,
     r.tools.ask.AskTool,
-    r.tools.skill.SkillTool,
 };
 
 pub const AgentDef = struct {
@@ -599,7 +598,6 @@ pub fn resetDefs(self: *Self) void {
             r.tools.read.ReadTool.def.name,
             r.tools.ask.AskTool.def.name,
             r.tools.start.StartMcpTool.def.name,
-            r.tools.skill.SkillTool.def.name,
         })),
     });
 
@@ -1156,6 +1154,7 @@ test "tool pool keeps one tool per exposed name and adds toolsets atomically" {
     const factory = try Self.init(std.testing.allocator, std.testing.io, "/tmp", "/tmp");
     defer factory.deinit();
     const bash = r.tools.bash;
+    inline for (.{ bash.BashBgTool, bash.ReadJobTool, bash.KillJobTool }) |tool| try factory.add(tool, .all);
 
     // A taken pool id is skipped, the built-in stays reachable.
     const pool_len = factory.loaded_tools.items.len;

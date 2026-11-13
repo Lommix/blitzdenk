@@ -9,8 +9,8 @@ pub const ReadTool = r.Tool{
         .description = "Read the contents of a file. Output includes line numbers. Supports text files and images (png, jpeg, gif, webp). For text files, output is truncated to " ++ r.DISPLAY_CAP_TEXT ++
             \\ (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
         ,
-        .prompt_snippet = "Read file contents and images",
-        .prompt_guidelines = "Prefer the read tool over bash cat/sed for file contents",
+        .prompt_snippet = "Read file contents, images and skills",
+        .prompt_guidelines = "Prefer the read tool over bash cat/sed for file contents. Use the read tool to load a skill's file when the task matches its description",
         .parameters_schema =
         \\{
         \\  "type": "object",
@@ -48,6 +48,8 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
         return r.errResult(call, "failed to resolve path");
 
     const app: *@import("../app.zig").App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    if (visibleSkill(app, ctx.agent(), resolved)) |entry| return readSkill(ctx, call, app, entry);
+
     var status_buf: [r.STATUS_BUF]u8 = undefined;
     var w = r.tui.AnsiWriter.init(&status_buf);
     w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "read ");
@@ -101,6 +103,28 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     const truncated = r.truncateOutputToOwned(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES);
     if (truncated.ptr != out.ptr) ctx.alloc.free(out);
     return r.okResult(call, truncated);
+}
+
+/// Catalog skill at `path` this agent may load; hidden skills read as plain files.
+fn visibleSkill(app: *r.r.app.App, agent: *r.r.agent.Agent, path: []const u8) ?*const r.r.skills.SkillEntry {
+    const entry = app.context_factory.skills.findPath(path) orelse return null;
+    if (!entry.meta.model_invocable) return null;
+    const def = app.context_factory.agentTypeAt(agent.type_idx) orelse return null;
+    if (!r.r.skills.visibleTo(entry, def.name, app.mainAgent() == agent, def.skills)) return null;
+    return entry;
+}
+
+fn readSkill(ctx: r.ToolContext, call: r.r.sdk.ToolCall, app: *r.r.app.App, entry: *const r.r.skills.SkillEntry) r.r.sdk.ToolOutput {
+    var status_buf: [r.STATUS_BUF]u8 = undefined;
+    var w = r.tui.AnsiWriter.init(&status_buf);
+    w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "read ");
+    w.styled(.{ .fg = app.theme.warn, .modifier = .{ .bold = true } }, entry.meta.name);
+    r.setToolStatus(ctx, call, w.finish()) catch {};
+
+    const loaded = r.r.skills.loadSkill(ctx.io, ctx.alloc, entry) orelse return r.errResult(call, "failed to load skill");
+    defer ctx.alloc.free(loaded.raw);
+    const body = ctx.alloc.dupe(u8, std.mem.trim(u8, loaded.body, " \t\r\n")) catch return r.errResult(call, "out of memory");
+    return r.okResult(call, body);
 }
 
 fn looksBinary(data: []const u8) bool {

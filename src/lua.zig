@@ -467,7 +467,7 @@ const AgentDef = LuaType{ .table_def = .{ .name = "BlitzAgentDef", .fields = &.{
     .{ .name = "model", .ty = LuaType.integer, .optional = true, .desc = "model handle from add_model" },
     .{ .name = "effort", .ty = LuaType.string, .optional = true },
     .{ .name = "in_agent_tool", .ty = LuaType.boolean, .optional = true },
-    .{ .name = "skills", .ty = LuaType{ .raw_refs = .{ .text = "boolean|BlitzSkillFilter", .refs = &.{SkillFilterDef} } }, .optional = true, .desc = "false disables all skills for this agent; a table restricts the catalogue and the skill tool" },
+    .{ .name = "skills", .ty = LuaType{ .raw_refs = .{ .text = "boolean|BlitzSkillFilter", .refs = &.{SkillFilterDef} } }, .optional = true, .desc = "false disables all skills for this agent; a table restricts the catalogue and skill reads" },
 } } };
 const SkillFilterArg = struct {
     enabled: bool = true,
@@ -1528,7 +1528,6 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "PATCH", .desc = "patch DSL tool. Replaces edit and write. GPT loves it", .ty = LuaType.string, .value = .{ .string = tl.patch.PatchTool.def.name } },
             .{ .name = "ASK", .desc = "multiple choice questions for the user", .ty = LuaType.string, .value = .{ .string = tl.ask.AskTool.def.name } },
             .{ .name = "START_MCP", .desc = "load a registered mcp tools into session", .ty = LuaType.string, .value = .{ .string = tl.start.StartMcpTool.def.name } },
-            .{ .name = "SKILL", .desc = "load a skill's full instructions by name", .ty = LuaType.string, .value = .{ .string = tl.skill.SkillTool.def.name } },
         },
     },
 };
@@ -5852,6 +5851,7 @@ test "toolsets flatten into agent tool lists and keep one tool per exposed name"
     const factory = try r.ContextFactory.init(std.testing.allocator, std.testing.io, "/tmp", "/tmp");
     defer factory.deinit();
     app_state.context_factory = factory;
+    inline for (.{ tl.bash.BashBgTool, tl.bash.ReadJobTool, tl.bash.KillJobTool }) |tool| try factory.add(tool, .all);
 
     const vm = try LuaVm.init(std.testing.allocator);
     defer vm.deinit();
