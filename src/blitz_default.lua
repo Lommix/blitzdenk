@@ -5,34 +5,9 @@ blitz.plugin("blitz-core", { url = "https://github.com/Lommix/blitz-core" })
 local core = require("blitz-core")
 
 ---------------------------------------------------------------------------------------------------
---- Theme configuration
----------------------------------------------------------------------------------------------------
-blitz.set_theme({
-	bg = "#282c34",
-	overlay_dark = "#21252b",
-	overlay = "#2c313a",
-	border = "#3e4451",
-	muted = "#5c6370",
-	text = "#abb2bf",
-	text_hl = "#d7dae0",
-	ok = "#98c379",
-	info = "#61afef",
-	warn = "#e5c07b",
-	err = "#e06c75",
-	on_err = "#282c34",
-	diff_surface = "#333842",
-	diff_add = "#98c379",
-	diff_remove = "#e06c75",
-	role_user = "#61afef",
-	role_agent = "#c678dd",
-	role_system = "#56b6c2",
-})
-
----------------------------------------------------------------------------------------------------
 --- Model configuration
 ---------------------------------------------------------------------------------------------------
 local default_model = nil
-
 local ok, provider = pcall(require, "provider")
 if ok and type(provider) == "number" then
 	default_model = provider
@@ -41,7 +16,6 @@ if ok and type(provider) == "number" then
 end
 
 blitz.set_compact_edge(250000)
-
 ---------------------------------------------------------------------------------------------------
 --- Env capability rules
 --- Each rule joins the injected env_capabilities catalogue when its binary
