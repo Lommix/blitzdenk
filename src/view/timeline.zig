@@ -93,6 +93,7 @@ pub const LayoutKey = struct {
     has_agent: bool,
     cell_px: r.tui.kitty.CellPixels,
     image_gen: u64,
+    children_gen: u64,
 };
 
 /// Inputs cached blocks depend on beyond layout: tool results come from history.
@@ -139,9 +140,9 @@ fn entryRenderCacheable(app: *App, entry: r.app.TimelineEntry, inner_w: u16) boo
     return true;
 }
 
-/// Drop slots whose keys changed, and slots of the open bash/read run: those
+/// Drop slots whose keys changed, and slots of the open tool run: those
 /// change as the run grows, and may predate an undo that reopened the run.
-fn syncEntryCache(app: *App, inner_w: u16, maybe_agent: ?*r.agent.Agent, open_entry: usize) void {
+fn syncEntryCache(app: *App, inner_w: u16, maybe_agent: ?*r.agent.Agent, open_entry: usize, children_gen: u64) void {
     const v = &app.view;
     const layout: LayoutKey = .{
         .width = inner_w,
@@ -151,6 +152,7 @@ fn syncEntryCache(app: *App, inner_w: u16, maybe_agent: ?*r.agent.Agent, open_en
         .has_agent = maybe_agent != null,
         .cell_px = app.cell_px,
         .image_gen = app.inline_images.eviction_gen,
+        .children_gen = children_gen,
     };
     const content: ContentKey = .{
         .agent_key = if (maybe_agent != null) app.main_agent_id.?.pack() else null,
@@ -174,7 +176,7 @@ fn edgeOf(items: []const blocks.RenderParagraphItem, top: bool) Edge {
     if (items.len == 0) return .empty;
     // Items are bottom-up: the last item is the top block.
     const item = if (top) items[items.len - 1] else items[0];
-    return if (item.is_tool_block) .tool else .other;
+    return if (item.kind.isTool()) .tool else .other;
 }
 
 /// Measure timeline entry `idx`, building its blocks when `need_items` or no
@@ -239,8 +241,15 @@ pub fn appendEntryRenderItems(
 pub fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inner_h: u16) !TimelineStack {
     var s = TimelineStack{};
     const maybe_agent: ?*r.agent.Agent = if (app.main_agent_id) |id| app.registry.get(id) else null;
-    const runs = try tool_runs.computeToolRuns(alloc, app.timeline.items, app.streaming_entry, &app.view.tool_runs_expanded, app.flags);
-    syncEntryCache(app, inner_w, maybe_agent, runs.open_entry);
+    const runs, const children_gen = blk: {
+        const statuses = app.tool_status_entries.lock(app.io);
+        defer statuses.unlock();
+        break :blk .{
+            try tool_runs.computeToolRuns(alloc, app.timeline.items, app.streaming_entry, &app.view.tool_runs_expanded, app.flags, statuses.ptr),
+            statuses.ptr.children_gen,
+        };
+    };
+    syncEntryCache(app, inner_w, maybe_agent, runs.open_entry, children_gen);
 
     var scroll_offset_usize: usize = if (app.view.auto_scroll) 0 else app.view.scroll_offset;
     const target: usize = @as(usize, inner_h) +| scroll_offset_usize;
@@ -261,7 +270,7 @@ pub fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inn
                 try para.appendText(alloc, txt, .{ .fg = app.theme.warn, .modifier = .{ .italic = true } });
             }
             const h = para.totalHeightLong(inner_w);
-            try s.items.append(alloc, .{ .p = para, .h = h });
+            try s.items.append(alloc, .{ .p = para, .h = h, .kind = .agent_message });
             s.total += h;
         }
     }
@@ -308,7 +317,7 @@ pub fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inn
     s.full_total = s.total +| hidden;
 
     if (i > 0 and s.items.items.len > 0) {
-        const walked_top_tool = s.items.items[s.items.items.len - 1].is_tool_block;
+        const walked_top_tool = s.items.items[s.items.items.len - 1].kind.isTool();
         s.full_total -|= blocks.toolSeam(walked_top_tool, above == .tool);
     }
 
@@ -372,7 +381,7 @@ pub fn renderTimelineStack(app: *App, s: TimelineStack, area: r.tui.Rect, buf: *
         var p = e.p;
         if (p.reverse) {
             p.scroll_offset = @intCast(item_bottom - visible_bottom);
-        } else if (e.is_tool_block) {
+        } else if (e.kind.isTool() or e.kind == .agent_call) {
             const skip: usize = @intCast(visible_top - item_top);
             p.scroll_offset +|= skip -| p.padding.top;
             p.padding.top -|= @intCast(@min(skip, p.padding.top));
@@ -388,19 +397,20 @@ pub fn renderTimelineStack(app: *App, s: TimelineStack, area: r.tui.Rect, buf: *
             .width = inner_w,
             .height = @intCast(visible_bottom - visible_top),
         };
-        if (e.toggle_run) |run| {
+        if (e.kind.toggle()) |run| {
             if (app.gpa.dupe(u8, run.id)) |owned| {
                 var hit_run = run;
                 hit_run.id = owned;
                 app.view.tool_run_hits.append(app.gpa, .{ .rect = sub, .run = hit_run }) catch app.gpa.free(owned);
             } else |_| {}
         }
-        if (e.live_calls != null) {
-            var recorded = e;
-            recorded.p = p;
-            view.recordFrameSnapshotTool(app, recorded, sub, inner_w);
+        switch (e.kind) {
+            .tool_group, .agent_call => |group| {
+                if (group.live_calls) |calls| view.recordFrameSnapshotTool(app, calls, p, sub, inner_w);
+                recordToolInlinePlacements(app, group.inline_images, p, sub);
+            },
+            .user_message, .agent_message, .edit => {},
         }
-        recordToolInlinePlacements(app, e.inline_images, p, sub);
         p.render(alloc, sub, area, buf);
     }
 }
@@ -564,7 +574,7 @@ test "hidden rows match the fully walked stack across tool seams and collapsed r
     app.timeline = .empty;
     try app.timeline.appendSlice(alloc, &entries);
 
-    const run = (try tool_runs.computeToolRuns(alloc, app.timeline.items, null, &app.view.tool_runs_expanded, app.flags)).runs[0];
+    const run = (try tool_runs.computeToolRuns(alloc, app.timeline.items, null, &app.view.tool_runs_expanded, app.flags, &app.tool_status_entries.value)).runs[0];
     try std.testing.expectEqualStrings("a1", run.id);
     var totals: [2]usize = undefined;
     for (0..2) |expanded| {

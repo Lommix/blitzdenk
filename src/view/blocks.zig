@@ -7,11 +7,41 @@ const tools = @import("tools.zig");
 pub const RenderParagraphItem = struct {
     p: r.tui.Paragraph,
     h: usize,
-    is_tool_block: bool = false,
-    live_calls: ?[]const tools.GroupCall = null,
-    inline_images: []const ToolInlineImage = &.{},
-    /// Summary row of a bash/read run; clicking it toggles the run.
-    toggle_run: ?tool_runs.ToolRun = null,
+    kind: Kind,
+
+    pub const Kind = union(enum) {
+        user_message,
+        agent_message,
+        tool_group: ToolGroup,
+        agent_call: ToolGroup,
+        edit: Edit,
+
+        pub fn isTool(self: Kind) bool {
+            return switch (self) {
+                .tool_group => true,
+                .edit => |edit| edit.toggle != null,
+                .user_message, .agent_message, .agent_call => false,
+            };
+        }
+
+        pub fn toggle(self: Kind) ?tool_runs.ToolRun {
+            return switch (self) {
+                .tool_group => |group| group.toggle,
+                .edit => |edit| edit.toggle,
+                .user_message, .agent_message, .agent_call => null,
+            };
+        }
+    };
+
+    pub const ToolGroup = struct {
+        live_calls: ?[]const tools.GroupCall = null,
+        inline_images: []const ToolInlineImage = &.{},
+        toggle: ?tool_runs.ToolRun = null,
+    };
+
+    pub const Edit = struct {
+        toggle: ?tool_runs.ToolRun = null,
+    };
 };
 
 pub const ToolInlineImage = struct {
@@ -32,13 +62,12 @@ pub fn toolSeam(lower_is_tool: bool, upper_is_tool: bool) usize {
 }
 
 /// Zero the facing padding between the last two stack items when both are tool
-/// blocks, keeping `total` in sync. Tool groups and run summary rows set
-/// `is_tool_block`.
+/// blocks, keeping `total` in sync.
 pub fn collapseToolPadding(out: *std.ArrayList(RenderParagraphItem), total: *usize) void {
     if (out.items.len < 2) return;
     const prev = &out.items[out.items.len - 2];
     const next = &out.items[out.items.len - 1];
-    if (!prev.is_tool_block or !next.is_tool_block) return;
+    if (!prev.kind.isTool() or !next.kind.isTool()) return;
     // Tool blocks carry no border, so padding rows are part of `h` one to one.
     prev.h -= prev.p.padding.top;
     next.h -= next.p.padding.bottom;
@@ -72,6 +101,8 @@ pub fn buildTimelineEntryParagraph(
     // Run slots match tool calls in part order; walk them backwards too.
     var slot_i = runs.slots.len;
 
+    const text_kind: RenderParagraphItem.Kind = if (entry.role == .user) .user_message else .agent_message;
+
     for (0..entry.parts.len) |i| {
         const part = entry.parts[entry.parts.len - i - 1];
         switch (part) {
@@ -80,6 +111,22 @@ pub fn buildTimelineEntryParagraph(
                     slot_i -= 1;
                     break :blk runs.slots[slot_i];
                 } else .{};
+                if (slot.agent) {
+                    try tools.appendToolGroup(arena, out, total, app, &tool_call_list, inner_w, live_tool_blocks);
+                    const solo = [_]tools.GroupCall{.{ .call = call }};
+                    var item = try tools.buildToolGroupParagraph(app, arena, &solo, inner_w);
+                    var group = item.kind.tool_group;
+                    if (live_tool_blocks) group.live_calls = arena.dupe(tools.GroupCall, &solo) catch null;
+                    item.kind = .{ .agent_call = group };
+                    try out.append(arena, item);
+                    total.* += item.h;
+                    continue;
+                }
+                if (runs.hasDiff(call.call_id)) {
+                    try tools.appendToolGroup(arena, out, total, app, &tool_call_list, inner_w, live_tool_blocks);
+                    try appendEditBlocks(arena, out, total, app, call, runs, inner_w);
+                    continue;
+                }
                 const run = if (slot.run != tool_runs.RunSlot.none) runs.runs[slot.run] else null;
                 const anchor = if (run) |value| value.anchor() else null;
                 if (anchor) |a| if (slot.pos < a) continue;
@@ -98,7 +145,7 @@ pub fn buildTimelineEntryParagraph(
                             var p = r.tui.Paragraph{};
                             try p.appendText(arena, text, .{ .fg = app.theme.muted });
                             const h = p.totalHeightLong(inner_w);
-                            try out.append(arena, .{ .p = p, .h = h });
+                            try out.append(arena, .{ .p = p, .h = h, .kind = text_kind });
                             total.* += h;
                         }
                     },
@@ -107,7 +154,7 @@ pub fn buildTimelineEntryParagraph(
                         var p = r.tui.Paragraph{};
                         try appendMarkdownText(&p, app.gpa, arena, text, inner_w, app.theme);
                         const h = p.totalHeightLong(inner_w);
-                        try out.append(arena, .{ .p = p, .h = h });
+                        try out.append(arena, .{ .p = p, .h = h, .kind = text_kind });
                         total.* += h;
                     },
                     .plain_text => |text| {
@@ -115,14 +162,14 @@ pub fn buildTimelineEntryParagraph(
                         var p = r.tui.Paragraph{};
                         try p.appendText(arena, text, .{ .fg = app.theme.text });
                         const h = p.totalHeightLong(inner_w);
-                        try out.append(arena, .{ .p = p, .h = h });
+                        try out.append(arena, .{ .p = p, .h = h, .kind = text_kind });
                         total.* += h;
                     },
                     .diff => |diff| {
-                        if (app.flags.show_diffs) {
+                        if (app.flags.show_diffs and diff.call_id.len == 0) {
                             const p = buildDiffParagraph(arena, app, diff);
                             const h = p.totalHeightLong(inner_w);
-                            try out.append(arena, .{ .p = p, .h = h });
+                            try out.append(arena, .{ .p = p, .h = h, .kind = .{ .edit = .{} } });
                             total.* += h;
                         }
                     },
@@ -150,8 +197,66 @@ pub fn buildTimelineEntryParagraph(
 
         try header_line.pushSpan(arena, .{ .content = role_text, .style = .{ .modifier = .{ .bold = true }, .fg = role_color } });
         try header_para.lines.append(arena, header_line);
-        try out.append(arena, .{ .p = header_para, .h = 1 });
+        try out.append(arena, .{ .p = header_para, .h = 1, .kind = text_kind });
         total.* += 1;
+    }
+}
+
+fn appendEditBlocks(
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(RenderParagraphItem),
+    total: *usize,
+    app: *App,
+    call: r.app.TimelinePart.ToolCallEntry,
+    runs: tool_runs.ToolRuns,
+    inner_w: u16,
+) !void {
+    const theme = app.theme;
+    const bold: @FieldType(r.tui.Style, "modifier") = .{ .bold = true };
+    var n = runs.diffs.len;
+    while (n > 0) {
+        n -= 1;
+        const diff = runs.diffs[n];
+        if (!std.mem.eql(u8, diff.call_id, call.call_id)) continue;
+        const id = try std.fmt.allocPrint(arena, "{s}#{d}", .{ call.call_id, n });
+        const open = app.flags.show_diffs != app.view.tool_runs_expanded.contains(id);
+        if (open) {
+            const p = buildDiffParagraph(arena, app, diff);
+            const h = p.totalHeightLong(inner_w);
+            try out.append(arena, .{ .p = p, .h = h, .kind = .{ .edit = .{} } });
+            total.* += h;
+        }
+
+        var p = r.tui.Paragraph{ .wrap = false, .padding = .all(tool_pad) };
+        p.style.bg = theme.bg;
+        if (open) p.padding.bottom = 0;
+        const path = if (app.cwd.len > 0) try std.mem.replaceOwned(u8, arena, diff.path, app.cwd, ".") else diff.path;
+        try p.appendLineSpan(arena, &.{
+            .{ .content = r.tui.icon.ok, .style = .{ .fg = theme.ok, .modifier = bold } },
+            .{ .content = " " },
+            .{ .content = call.tool_name, .style = .{ .fg = theme.text_hl, .modifier = bold } },
+            .{ .content = " " },
+            .{ .content = path, .style = .{ .fg = theme.muted } },
+        });
+
+        var stat: r.tools.DiffStat = .{};
+        for (diff.diff_lines) |line| switch (line.kind) {
+            .addition => stat.insertions += 1,
+            .deletion => stat.deletions += 1,
+            .context, .header => {},
+        };
+        var fold = r.tui.Line{};
+        try fold.pushSpan(arena, .{ .content = " " ++ r.tui.icon.box_bl ++ (if (open) " ▾ " else " ▸ "), .style = .{ .fg = theme.muted } });
+        if (stat.insertions > 0) try fold.pushSpanPrint(arena, "+{d} ", .{stat.insertions}, .{ .fg = theme.diff_add, .modifier = bold });
+        if (stat.deletions > 0) try fold.pushSpanPrint(arena, "-{d} ", .{stat.deletions}, .{ .fg = theme.diff_remove, .modifier = bold });
+        if (stat.total() == 0) try fold.pushSpan(arena, .{ .content = "0 ", .style = .{ .fg = theme.muted } });
+        try fold.pushSpan(arena, .{ .content = "lines", .style = .{ .fg = theme.muted } });
+        try p.lines.append(arena, fold);
+
+        const h = p.totalHeightLong(inner_w);
+        try out.append(arena, .{ .p = p, .h = h, .kind = .{ .edit = .{ .toggle = .{ .id = id, .entry = runs.entry, .expanded = open } } } });
+        total.* += h;
+        collapseToolPadding(out, total);
     }
 }
 

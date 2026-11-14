@@ -8,6 +8,7 @@ pub const ToolDiff = struct {
     path: []const u8,
     before: ?[]const u8,
     after: []const u8,
+    call_id: []const u8 = "",
 };
 
 pub const ToolCallPayload = struct {

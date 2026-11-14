@@ -196,6 +196,7 @@ pub const ToolStatusStore = struct {
     agents: [r.agent_registry.max_agents]ToolStatusAgent = @splat(.{}),
     archived: std.AutoHashMapUnmanaged(u32, ToolStatusAgent) = .empty,
     pending_children: std.AutoHashMapUnmanaged(u32, std.ArrayList(struct { owner: r.AgentId, call_id: []const u8 })) = .empty,
+    children_gen: u64 = 0,
 
     pub fn forWrite(self: *ToolStatusStore, alloc: std.mem.Allocator, id: r.AgentId) !*ToolStatusAgent {
         const current = &self.agents[id.index];
@@ -686,6 +687,7 @@ pub const App = struct {
             if (existing.pack() == child_id.pack()) return;
         }
         try res.value_ptr.child_ids.append(alloc, child_id);
+        g.ptr.children_gen += 1;
         const declared = self.session_store == null or self.session_store.?.declares(child_id.pack());
         if (!self.journal_restoring and !declared) {
             const pending = try g.ptr.pending_children.getOrPut(alloc, child_id.pack());
@@ -2301,6 +2303,15 @@ pub const App = struct {
             .role = .agent,
             .parts = parts,
         });
+        var i = self.timeline.items.len;
+        while (i > 0) {
+            i -= 1;
+            for (self.timeline.items[i].parts) |part| {
+                if (part != .tool_call or !std.mem.eql(u8, part.tool_call.call_id, diff.call_id)) continue;
+                self.view.invalidateFrom(i);
+                return;
+            }
+        }
     }
 
     pub fn queueDiffToHistory(self: *App, diff: r.permissions.ToolDiff) !void {
@@ -2312,7 +2323,9 @@ pub const App = struct {
         errdefer if (before) |b| self.gpa.free(b);
         const after = try self.gpa.dupe(u8, diff.after);
         errdefer self.gpa.free(after);
-        try g.ptr.append(self.gpa, .{ .path = path, .before = before, .after = after });
+        const call_id = try self.gpa.dupe(u8, diff.call_id);
+        errdefer self.gpa.free(call_id);
+        try g.ptr.append(self.gpa, .{ .path = path, .before = before, .after = after, .call_id = call_id });
     }
 
     pub fn drainPendingDiffs(self: *App) usize {
@@ -2327,6 +2340,7 @@ pub const App = struct {
             self.gpa.free(d.path);
             if (d.before) |b| self.gpa.free(b);
             self.gpa.free(d.after);
+            self.gpa.free(d.call_id);
         }
         self.gpa.free(items);
         return items.len;
@@ -2339,6 +2353,7 @@ pub const App = struct {
             self.gpa.free(d.path);
             if (d.before) |b| self.gpa.free(b);
             self.gpa.free(d.after);
+            self.gpa.free(d.call_id);
         }
         g.ptr.clearRetainingCapacity();
     }
@@ -2350,6 +2365,7 @@ pub fn diffTimelinePart(alloc: std.mem.Allocator, diff: r.permissions.ToolDiff) 
     return .{ .diff = .{
         .path = try alloc.dupe(u8, diff.path),
         .diff_lines = try lines.toOwnedSlice(alloc),
+        .call_id = try alloc.dupe(u8, diff.call_id),
     } };
 }
 
@@ -2397,6 +2413,7 @@ pub const TimelinePart = union(enum) {
     pub const DiffEntry = struct {
         path: []const u8,
         diff_lines: []const r.tui.DiffLine,
+        call_id: []const u8 = "",
     };
 };
 

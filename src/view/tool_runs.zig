@@ -4,7 +4,7 @@ const App = r.app.App;
 const blocks = @import("blocks.zig");
 const timeline = @import("timeline.zig");
 
-/// Expand or collapse the bash/read run whose summary row sits at (x, y).
+/// Flip the tool run or edit diff whose fold row sits at (x, y).
 pub fn toggleToolRunAt(self: *App, x: u16, y: u16) bool {
     self.mu.lockUncancelable(self.io);
     defer self.mu.unlock(self.io);
@@ -16,10 +16,10 @@ pub fn toggleToolRunAt(self: *App, x: u16, y: u16) bool {
     return false;
 }
 
-/// Flip `run` between collapsed and expanded and drop cached layouts from its
-/// first entry on. Expanding leaves follow mode so the pinned scroll path
-/// keeps the summary row in place while the earlier calls open below it; a
-/// collapse shrinks the offset back and resumes following once it reaches 0.
+/// Flip the fold of `run` and drop cached layouts from its first entry on.
+/// Expanding leaves follow mode so the pinned scroll path keeps the fold row
+/// in place while the rows open below it; a collapse shrinks the offset back
+/// and resumes following once it reaches 0.
 pub fn toggleRun(app: *App, run: ToolRun) void {
     const expanded = &app.view.tool_runs_expanded;
     if (!expanded.remove(run.id)) {
@@ -43,17 +43,20 @@ pub const ToolRunHit = struct {
     run: ToolRun,
 };
 
-/// Calls a collapsed bash/read run keeps visible, newest last.
+/// Calls a collapsed run keeps visible, newest last.
 const tool_run_visible = 3;
 
-fn isRunTool(name: []const u8) bool {
-    return std.mem.eql(u8, name, "bash") or std.mem.eql(u8, name, "read");
+fn isEditTool(name: []const u8) bool {
+    return std.mem.eql(u8, name, "edit") or std.mem.eql(u8, name, "write") or std.mem.eql(u8, name, "patch");
 }
 
-/// Consecutive bash/read calls across timeline entries. Visible text, role
-/// headers, shown thinking or diffs, and any other tool break a run.
+/// Consecutive tool calls across timeline entries. Visible text, role
+/// headers, shown thinking or diffs, edit tools and calls with sub-agents
+/// attached break a run. An edit fold
+/// reuses the type with `len` 0.
 pub const ToolRun = struct {
-    /// Call id of the first call; keys `tool_runs_expanded` and click hits.
+    /// Call id of the first call, or the key of an edit fold; keys
+    /// `tool_runs_expanded` and click hits.
     id: []const u8,
     /// Timeline index of the entry holding the first call.
     entry: usize,
@@ -71,6 +74,7 @@ pub const RunSlot = struct {
     pub const none = std.math.maxInt(u32);
     run: u32 = none,
     pos: u32 = 0,
+    agent: bool = false,
 };
 
 /// Per-frame run layout over the timeline plus the streaming entry. `slots`
@@ -83,10 +87,24 @@ pub const ToolRuns = struct {
     /// First entry of the run still open at the stream tail. Entries from
     /// here on change as the run grows, so they bypass the render caches.
     open_entry: usize = std.math.maxInt(usize),
+    diffs: []const r.app.TimelinePart.DiffEntry = &.{},
+    entry: usize = 0,
 
     pub fn forEntry(self: ToolRuns, idx: usize) ToolRuns {
         if (idx + 1 >= self.entry_start.len) return .{};
-        return .{ .runs = self.runs, .slots = self.slots[self.entry_start[idx]..self.entry_start[idx + 1]] };
+        return .{
+            .runs = self.runs,
+            .slots = self.slots[self.entry_start[idx]..self.entry_start[idx + 1]],
+            .diffs = self.diffs,
+            .entry = idx,
+        };
+    }
+
+    pub fn hasDiff(self: ToolRuns, call_id: []const u8) bool {
+        for (self.diffs) |diff| {
+            if (std.mem.eql(u8, diff.call_id, call_id)) return true;
+        }
+        return false;
     }
 };
 
@@ -96,9 +114,11 @@ pub fn computeToolRuns(
     tail: ?r.app.TimelineEntry,
     expanded: *const std.StringHashMapUnmanaged(void),
     flags: r.app.AppFlags,
+    statuses: *r.app.ToolStatusStore,
 ) !ToolRuns {
     var runs: std.ArrayList(ToolRun) = .empty;
     var slots: std.ArrayList(RunSlot) = .empty;
+    var diffs: std.ArrayList(r.app.TimelinePart.DiffEntry) = .empty;
     const count = entries.len + @intFromBool(tail != null);
     const entry_start = try alloc.alloc(u32, count + 1);
     var open: ?u32 = null;
@@ -110,9 +130,11 @@ pub fn computeToolRuns(
         if (entry.role != .agent or r.app.timelineEntryUserText(entry) != null) open = null;
         for (entry.parts) |part| switch (part) {
             .tool_call => |call| {
-                if (!isRunTool(call.tool_name)) {
+                const status = if (statuses.getAgent(call.agent_id)) |agent| agent.entries.getPtr(call.call_id) else null;
+                const has_children = if (status) |value| value.child_ids.items.len > 0 else false;
+                if (has_children or isEditTool(call.tool_name)) {
                     open = null;
-                    try slots.append(alloc, .{});
+                    try slots.append(alloc, .{ .agent = has_children });
                     continue;
                 }
                 if (open == null) {
@@ -128,7 +150,9 @@ pub fn computeToolRuns(
             .thinking => if (flags.show_thinking) {
                 open = null;
             },
-            .diff => if (flags.show_diffs) {
+            .diff => |diff| if (diff.call_id.len > 0) {
+                try diffs.append(alloc, diff);
+            } else if (flags.show_diffs) {
                 open = null;
             },
         };
@@ -139,6 +163,7 @@ pub fn computeToolRuns(
         .slots = slots.items,
         .entry_start = entry_start,
         .open_entry = if (open != null) open_entry else std.math.maxInt(usize),
+        .diffs = diffs.items,
     };
 }
 
@@ -161,13 +186,13 @@ pub fn appendRunSummary(
     }
     try p.lines.append(arena, line);
     const h = p.totalHeightLong(inner_w);
-    try out.append(arena, .{ .p = p, .h = h, .is_tool_block = true, .toggle_run = run });
+    try out.append(arena, .{ .p = p, .h = h, .kind = .{ .tool_group = .{ .toggle = run } } });
     total.* += h;
     blocks.collapseToolPadding(out, total);
 }
 
 fn runTestStack(app: *App, alloc: std.mem.Allocator, entries: []const r.app.TimelineEntry) ![]const []const u8 {
-    const runs = try computeToolRuns(alloc, entries, null, &app.view.tool_runs_expanded, app.flags);
+    const runs = try computeToolRuns(alloc, entries, null, &app.view.tool_runs_expanded, app.flags, &app.tool_status_entries.value);
     var items: std.ArrayList(blocks.RenderParagraphItem) = .empty;
     var total: usize = 0;
     var i = entries.len;
@@ -259,17 +284,24 @@ test "sequential bash and read calls collapse to the newest three and expand on 
         .{ .role = .agent, .parts = parts[6..7] },
     };
 
-    const runs = try computeToolRuns(alloc, &entries, null, &app.view.tool_runs_expanded, app.flags);
+    const runs = try computeToolRuns(alloc, &entries, null, &app.view.tool_runs_expanded, app.flags, &app.tool_status_entries.value);
     try std.testing.expectEqual(@as(usize, 2), runs.runs.len);
     try std.testing.expectEqual(@as(u32, 5), runs.runs[0].len);
     try std.testing.expectEqual(@as(u32, 1), runs.runs[1].len);
     try std.testing.expectEqual(@as(usize, 6), runs.open_entry);
 
     app.flags.show_thinking = true;
-    const split = try computeToolRuns(alloc, &entries, null, &app.view.tool_runs_expanded, app.flags);
+    const split = try computeToolRuns(alloc, &entries, null, &app.view.tool_runs_expanded, app.flags, &app.tool_status_entries.value);
     try std.testing.expectEqual(@as(usize, 3), split.runs.len);
     try std.testing.expectEqual(@as(u32, 4), split.runs[1].len);
     app.flags.show_thinking = false;
+
+    const launcher = statuses.entries.getPtr("c2").?;
+    try launcher.child_ids.append(alloc, .{ .index = 1, .generation = 0 });
+    const apart = try computeToolRuns(alloc, &entries, null, &app.view.tool_runs_expanded, app.flags, &app.tool_status_entries.value);
+    try std.testing.expectEqual(@as(usize, 3), apart.runs.len);
+    try std.testing.expect(apart.forEntry(2).slots[0].agent);
+    launcher.child_ids.clearRetainingCapacity();
 
     const collapsed = try runTestStack(&app, alloc, &entries);
     const ok = r.tui.icon.ok ++ " ";
@@ -306,4 +338,22 @@ test "sequential bash and read calls collapse to the newest three and expand on 
     try std.testing.expect(toggleToolRunAt(&app, stale.x, stale.y));
     app.view.clearRunHits(gpa);
     try std.testing.expect(app.view.tool_runs_expanded.contains("c1"));
+
+    app.cwd = "/work";
+    app.flags.show_diffs = false;
+    const diff_lines = [_]r.tui.DiffLine{
+        .{ .kind = .deletion, .line_number = 1, .content = "old" },
+        .{ .kind = .addition, .content = "new" },
+    };
+    var diff_parts = [_]r.app.TimelinePart{.{ .diff = .{ .path = "/work/a.zig", .diff_lines = &diff_lines, .call_id = "c6" } }};
+    const edited = entries ++ [_]r.app.TimelineEntry{.{ .role = .agent, .parts = &diff_parts }};
+    const folded = try runTestStack(&app, alloc, &edited);
+    const want_folded = [_][]const u8{ ok ++ "edit ./a.zig", " └ ▸ +1 -1 lines", ok ++ "c7" };
+    for (want_folded, folded[folded.len - want_folded.len ..]) |want, got| try std.testing.expectEqualStrings(want, got);
+
+    const head = app.view.tool_run_hits.items[0].rect;
+    try std.testing.expect(toggleToolRunAt(&app, head.x, head.y));
+    const opened = try runTestStack(&app, alloc, &edited);
+    const want_opened = [_][]const u8{ ok ++ "edit ./a.zig", " └ ▾ +1 -1 lines", "file: /work/a.zig", "   1 - old", "     + new", ok ++ "c7" };
+    for (want_opened, opened[opened.len - want_opened.len ..]) |want, got| try std.testing.expectEqualStrings(want, got);
 }

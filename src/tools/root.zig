@@ -159,7 +159,7 @@ pub fn writeToolChangedStatus(
     setToolStatus(ctx, call, w.finish()) catch {};
 
     if (app.main_agent_id != ctx.base.self_id) return;
-    app.queueDiffToHistory(.{ .path = path, .before = before, .after = after }) catch {};
+    app.queueDiffToHistory(.{ .path = path, .before = before, .after = after, .call_id = call.id }) catch {};
 }
 
 pub fn addToolChild(ctx: ToolContext, call: ToolCall, child_id: r.AgentId) void {

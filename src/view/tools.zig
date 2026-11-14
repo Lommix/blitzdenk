@@ -44,7 +44,7 @@ fn appendToolImage(
     }
 }
 
-/// Rail position of a call nested under a bash/read run summary row.
+/// Rail position of a call nested under a run summary row.
 pub const RunRail = enum { none, mid, last };
 
 /// A call of a tool group block, with its rail when it sits under a run summary.
@@ -65,7 +65,7 @@ pub fn appendToolGroup(
     if (calls.items.len == 0) return;
     std.mem.reverse(GroupCall, calls.items);
     var para = try buildToolGroupParagraph(app, arena, calls.items, inner_w);
-    if (live) para.live_calls = arena.dupe(GroupCall, calls.items) catch null;
+    if (live) para.kind.tool_group.live_calls = arena.dupe(GroupCall, calls.items) catch null;
     try out.append(arena, para);
     total.* += para.h;
     blocks.collapseToolPadding(out, total);
@@ -198,8 +198,7 @@ pub fn buildToolGroupParagraph(
     return .{
         .h = p.totalHeightLong(inner_w),
         .p = p,
-        .is_tool_block = true,
-        .inline_images = images.items,
+        .kind = .{ .tool_group = .{ .inline_images = images.items } },
     };
 }
 
@@ -461,8 +460,8 @@ test "tool images follow their calls, crop to the viewport, and follow recursive
         .{ .call = .{ .agent_id = parent_id, .call_id = "next", .tool_name = "bash" } },
     };
     const item = try buildToolGroupParagraph(&app, alloc, &calls, 40);
-    try std.testing.expectEqual(@as(usize, 1), item.inline_images.len);
-    try std.testing.expectEqual(@as(usize, 1), item.inline_images[0].row);
+    try std.testing.expectEqual(@as(usize, 1), item.kind.tool_group.inline_images.len);
+    try std.testing.expectEqual(@as(usize, 1), item.kind.tool_group.inline_images[0].row);
     try std.testing.expectEqual(@as(usize, 8), item.h);
     var stack = timeline.TimelineStack{ .total = item.h };
     try stack.items.append(alloc, item);
@@ -516,8 +515,8 @@ test "tool images follow their calls, crop to the viewport, and follow recursive
     }
     const launch = [_]GroupCall{.{ .call = .{ .agent_id = parent_id, .call_id = "launch", .tool_name = "start" } }};
     const nested = try buildToolGroupParagraph(&app, alloc, &launch, 40);
-    try std.testing.expectEqual(@as(usize, 1), nested.inline_images.len);
-    try std.testing.expectEqual(@as(u16, 9), nested.inline_images[0].col);
+    try std.testing.expectEqual(@as(usize, 1), nested.kind.tool_group.inline_images.len);
+    try std.testing.expectEqual(@as(u16, 9), nested.kind.tool_group.inline_images[0].col);
     stack = .{ .total = nested.h };
     try stack.items.append(alloc, nested);
     app.inline_placements.clearRetainingCapacity();
@@ -532,7 +531,7 @@ test "tool images follow their calls, crop to the viewport, and follow recursive
     try after.lines.append(alloc, try r.tui.Line.new(alloc, "after3", .{}, .{}));
     try grandchild.entries.put(alloc, "after3", after);
     const expired = try buildToolGroupParagraph(&app, alloc, &launch, 40);
-    try std.testing.expectEqual(@as(usize, 0), expired.inline_images.len);
+    try std.testing.expectEqual(@as(usize, 0), expired.kind.tool_group.inline_images.len);
     stack = .{ .total = expired.h };
     try stack.items.append(alloc, expired);
     app.inline_placements.clearRetainingCapacity();
@@ -540,10 +539,10 @@ test "tool images follow their calls, crop to the viewport, and follow recursive
     try std.testing.expectEqual(@as(usize, 0), app.inline_placements.items.len);
 
     const narrow = try buildToolGroupParagraph(&app, alloc, &calls, 6);
-    try std.testing.expectEqual(@as(usize, 0), narrow.inline_images.len);
+    try std.testing.expectEqual(@as(usize, 0), narrow.kind.tool_group.inline_images.len);
     app.flags.inline_images = false;
     const disabled = try buildToolGroupParagraph(&app, alloc, &calls, 40);
-    try std.testing.expectEqual(@as(usize, 0), disabled.inline_images.len);
+    try std.testing.expectEqual(@as(usize, 0), disabled.kind.tool_group.inline_images.len);
 }
 
 test "empty anchored tool entries carry their image call id" {
@@ -692,9 +691,9 @@ test "sibling agent rails preserve ancestry through multiline tools images and e
         for (line.spans.items) |span| try actual.appendSlice(alloc, span.content);
         try std.testing.expectEqualStrings(wanted, actual.items);
     }
-    try std.testing.expectEqual(@as(usize, 1), item.inline_images.len);
-    try std.testing.expectEqual(@as(usize, 9), item.inline_images[0].row);
-    try std.testing.expectEqual(@as(u16, 9), item.inline_images[0].col);
+    try std.testing.expectEqual(@as(usize, 1), item.kind.tool_group.inline_images.len);
+    try std.testing.expectEqual(@as(usize, 9), item.kind.tool_group.inline_images[0].row);
+    try std.testing.expectEqual(@as(u16, 9), item.kind.tool_group.inline_images[0].col);
     try std.testing.expect(!timeline.callChildrenReady(&app, calls[0].call, false));
     try std.testing.expect(!timeline.callChildrenReady(&app, calls[0].call, true));
     for (children) |child| registry.releaseReservation(child);

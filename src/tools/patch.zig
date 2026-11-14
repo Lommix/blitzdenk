@@ -223,6 +223,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
                 .path = commandPath(cmd),
                 .before = p.before,
                 .after = p.after orelse "",
+                .call_id = call.id,
             }) catch {};
         }
     }

@@ -38,9 +38,10 @@ pub const State = struct {
     frame_snapshot_resize_seen: u64 = 0,
     frame_snapshot_tools: std.ArrayList(FrameSnapshotTool) = .empty,
     frame_snapshot_calls: std.ArrayList(tools.GroupCall) = .empty,
-    /// First call ids of expanded bash/read runs; session allocated.
+    /// Flipped folds: first call ids of expanded tool runs, and keys of edit
+    /// diffs toggled away from the `show_diffs` default; session allocated.
     tool_runs_expanded: std.StringHashMapUnmanaged(void) = .empty,
-    /// Summary rows drawn last frame, hit-tested by mouse clicks.
+    /// Fold rows drawn last frame, hit-tested by mouse clicks.
     tool_run_hits: std.ArrayList(tool_runs.ToolRunHit) = .empty,
     widget_layout_cache: layout.WidgetLayout = .{},
     widget_layout_valid: bool = false,
@@ -143,8 +144,7 @@ fn repaintFrameSnapshotTools(app: *App, alloc: std.mem.Allocator, buf: *r.tui.Bu
     }
 }
 
-pub fn recordFrameSnapshotTool(app: *App, item: blocks.RenderParagraphItem, rect: r.tui.Rect, inner_w: u16) void {
-    const calls = item.live_calls orelse return;
+pub fn recordFrameSnapshotTool(app: *App, calls: []const tools.GroupCall, p: r.tui.Paragraph, rect: r.tui.Rect, inner_w: u16) void {
     const start = app.view.frame_snapshot_calls.items.len;
     app.view.frame_snapshot_calls.appendSlice(app.gpa, calls) catch {
         app.view.frame_snapshot_valid = false;
@@ -154,8 +154,8 @@ pub fn recordFrameSnapshotTool(app: *App, item: blocks.RenderParagraphItem, rect
         .calls_start = start,
         .calls_len = calls.len,
         .inner_w = inner_w,
-        .padding = item.p.padding,
-        .scroll_offset = item.p.scroll_offset,
+        .padding = p.padding,
+        .scroll_offset = p.scroll_offset,
         .rect = rect,
     }) catch {
         app.view.frame_snapshot_valid = false;
