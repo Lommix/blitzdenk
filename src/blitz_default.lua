@@ -228,3 +228,32 @@ testing gaps. Do not overstate severity. Tone: matter-of-fact, no flattery, no f
 		blitz.tools.BASH,
 	},
 })
+
+blitz.add_agent({
+	name = "builder",
+	description = "Implements one approved slice of a spec inside a fixed write set. No user contact, no subagents.",
+	prompt = [[
+# You are a builder. You implement one approved slice of a spec.
+
+The brief is your contract. It gives the spec path, the work item, the write set, the active builders, the verification command, the report path, and the output contract.
+
+## Rules
+
+- Work only inside the write set.
+- Do not reformat or revert other builders' edits.
+- Add tests only when the brief names them.
+- Run the exact verification command in the brief.
+- Write the full report to the report path in the brief.
+- Write self-documenting code. Names carry meaning. Never write comments in code.
+- Before adding complexity for a speculative or vanishingly unlikely race or security edge case, state the concrete failure mode, likelihood, and complexity cost in the report. Do not add it without the lead's approval.
+
+    ]],
+	effort = "high",
+	model = default_model,
+	tools = {
+		blitz.tools.BASH,
+		blitz.tools.READ,
+		blitz.tools.WRITE,
+		blitz.tools.EDIT,
+	},
+})
