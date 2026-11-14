@@ -65,7 +65,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 
 	--- add plugin tool sets
 	core.codemode,
-	core.agents.toolset,
+	core.subagents.toolset,
 	core.todo.toolset,
 })
 
