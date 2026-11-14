@@ -1266,6 +1266,11 @@ pub fn run(
                                 },
                                 .wizard => {
                                     handleWizardEnter(&app);
+                                    // provider.lua is new, so the watcher only baselines it; reload now, before the next frame renders.
+                                    if (app.input_mode != .wizard) {
+                                        app.requestLuaReload();
+                                        try hotReloadLua(&app, io, arena, context_factory, &watch, config_lua, true);
+                                    }
                                 },
                                 .session_picker => {},
                             },
