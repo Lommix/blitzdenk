@@ -13,7 +13,6 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 
 - Tiny system prompt, minimal tool descriptions. Simple is efficient.
 - Durable multi agent sessions. Nothing is ever lost, always recover.
-- File tools use direct file system calls. No helper processes.
 - MCP and Skill support (including remote mcp with oauth)
 - Multi-provider: any OpenAI or Anthropic chat/response schema supported, including local AI.
 - Image and mermaid diagram render in tui.
@@ -21,10 +20,12 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 - Version management: run `blitz update` on new releases. (pulls release bin from github)
 - Sessions management per project: `blitz continue <?session_id>` resumes, `blitz sessions` list all
 - Render custom widgets from Lua
+- Git based Lua plugin system with version management and locks
 
 ## Plugins
 
-Blitzdenk offers a Neovim like plugin API, where plugins are just git repositories.
+Blitzdenk offers a Neovim like plugin API, where plugins are just git repositories. Plugins
+are supported by LSP. Change anything and make it your own.
 
 ```lua
 blitz.plugin("blitz-core", { url = "https://github.com/Lommix/blitz-core" })
