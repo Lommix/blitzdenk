@@ -22,6 +22,22 @@ curl -fsSL https://raw.githubusercontent.com/Lommix/blitzdenk/master/install.sh 
 - Sessions management per project: `blitz continue <?session_id>` resumes, `blitz sessions` list all
 - Render custom widgets from Lua
 
+## Plugins
+
+Blitzdenk offers a Neovim like plugin API, where plugins are just git repositories.
+
+```lua
+blitz.plugin("blitz-core", { url = "https://github.com/Lommix/blitz-core" })
+local core = require("blitz-core")
+
+blitz.set_agent_tools(blitz.AGENT_GENERAL, {
+    ...
+	core.codemode,
+	core.subagents.toolset,
+	core.todo.toolset,
+})
+```
+
 ## About
 
 Blitzdenk is my personal harness following my needs and my vision. The target is to become the neovim
