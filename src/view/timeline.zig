@@ -72,7 +72,7 @@ pub const TimelineStack = struct {
 };
 
 /// Facing edge of an entry's block stack, for tool block seams.
-pub const Edge = enum { empty, tool, other };
+pub const Edge = blocks.Edge;
 
 /// One timeline entry as last measured. `h` excludes seams to neighbouring
 /// entries. In the cache, `items` holds prewrapped blocks once the entry is
@@ -175,8 +175,7 @@ fn syncEntryCache(app: *App, inner_w: u16, maybe_agent: ?*r.agent.Agent, open_en
 fn edgeOf(items: []const blocks.RenderParagraphItem, top: bool) Edge {
     if (items.len == 0) return .empty;
     // Items are bottom-up: the last item is the top block.
-    const item = if (top) items[items.len - 1] else items[0];
-    return if (item.kind.isTool()) .tool else .other;
+    return blocks.edge(if (top) items[items.len - 1] else items[0], top);
 }
 
 /// Measure timeline entry `idx`, building its blocks when `need_items` or no
@@ -234,7 +233,7 @@ pub fn appendEntryRenderItems(
     for (items) |item| {
         try out.append(alloc, item);
         total.* += item.h;
-        blocks.collapseToolPadding(out, total);
+        blocks.collapsePadding(out, total);
     }
 }
 
@@ -260,7 +259,7 @@ pub fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inn
         if (slot.state.load(.acquire) == .failed) {
             const detail = if (slot.agent.?.last_error) |err| @errorName(err) else null;
 
-            var para = r.tui.Paragraph{};
+            var para = r.tui.Paragraph{ .padding = blocks.message_padding };
             try para.appendLineSpan(alloc, &.{
                 .{ .content = "ERROR: ", .style = .{ .fg = app.theme.warn, .modifier = .{ .bold = true } } },
                 .{ .content = "Press Ctrl+R to retry", .style = .{ .fg = app.theme.muted } },
@@ -311,14 +310,13 @@ pub fn buildTimelineStack(app: *App, alloc: std.mem.Allocator, inner_w: u16, inn
         if (maybe_agent == null and entry.role != .system) continue;
         const slot = entryLayout(app, alloc, idx, inner_w, runs, false) catch break;
         if (slot.top == .empty) continue;
-        hidden += slot.h -| blocks.toolSeam(slot.top == .tool, above == .tool);
+        hidden += slot.h -| blocks.seam(slot.top, above);
         above = slot.bottom;
     }
     s.full_total = s.total +| hidden;
 
     if (i > 0 and s.items.items.len > 0) {
-        const walked_top_tool = s.items.items[s.items.items.len - 1].kind.isTool();
-        s.full_total -|= blocks.toolSeam(walked_top_tool, above == .tool);
+        s.full_total -|= blocks.seam(blocks.edge(s.items.items[s.items.items.len - 1], true), above);
     }
 
     const max_scroll: usize = s.full_total -| inner_h;
@@ -381,14 +379,12 @@ pub fn renderTimelineStack(app: *App, s: TimelineStack, area: r.tui.Rect, buf: *
         var p = e.p;
         if (p.reverse) {
             p.scroll_offset = @intCast(item_bottom - visible_bottom);
-        } else if (e.kind.isTool() or e.kind == .agent_call) {
+        } else {
             const skip: usize = @intCast(visible_top - item_top);
             p.scroll_offset +|= skip -| p.padding.top;
             p.padding.top -|= @intCast(@min(skip, p.padding.top));
             const cut_bottom: usize = @intCast(item_bottom - visible_bottom);
             p.padding.bottom -|= @intCast(@min(cut_bottom, p.padding.bottom));
-        } else {
-            p.scroll_offset +|= @intCast(visible_top - item_top);
         }
 
         const sub: r.tui.Rect = .{

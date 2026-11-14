@@ -270,16 +270,17 @@ pub const MarkdownStreamRenderer = struct {
 
     fn emitHeadingLine(self: *Self, span: r.Span) !void {
         const fill: u8 = if (span.kind == .heading_h1) '=' else '-';
-        const sep = if (fill == '=') "====" else "----";
+        const lead = if (fill == '=') "==== " else "---- ";
+        const trail = if (fill == '=') " ====" else " ----";
         const w: usize = self.width;
 
         var line = r.Line{ .style = span.style };
         errdefer line.deinit(self.alloc);
-        try line.pushSpan(self.alloc, .{ .content = sep, .style = span.style });
+        try line.pushSpan(self.alloc, .{ .content = lead, .style = span.style });
         try line.pushSpan(self.alloc, span);
-        try line.pushSpan(self.alloc, .{ .content = sep, .style = span.style });
+        try line.pushSpan(self.alloc, .{ .content = trail, .style = span.style });
 
-        const used: usize = 8 + span.widthCols();
+        const used: usize = 10 + span.widthCols();
         if (w > used) {
             const fill_len = w - used;
             const fill_buf = try self.alloc.alloc(u8, fill_len);

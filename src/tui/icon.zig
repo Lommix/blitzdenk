@@ -2,7 +2,7 @@
 // Requires a Nerd Font patched terminal font
 
 // -- Status --
-pub const ok = "\u{f00c}"; //
+pub const ok = "\u{23fa}";
 pub const fail = "\u{f00d}"; //
 pub const eye = "\u{f06e}"; //
 

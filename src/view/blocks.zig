@@ -52,28 +52,59 @@ pub const ToolInlineImage = struct {
     rows: u16,
 };
 
-/// Rows a tool block pads above and below its content. Stacked tool blocks
-/// drop the facing pads so they read as one block.
+/// Rows a padded block pads above and below its content; see `seam`.
 pub const tool_pad: u16 = 1;
 
-/// Rows saved where a tool block sits directly on another tool block.
-pub fn toolSeam(lower_is_tool: bool, upper_is_tool: bool) usize {
-    return if (lower_is_tool and upper_is_tool) 2 * @as(usize, tool_pad) else 0;
+pub const tool_padding: r.tui.Padding = .{ .left = 2, .right = 1, .top = tool_pad, .bottom = tool_pad };
+
+pub const message_padding: r.tui.Padding = .{ .left = 2, .top = tool_pad, .bottom = tool_pad };
+
+pub const Edge = enum { empty, tool, agent_call, message, other };
+
+pub fn edge(item: RenderParagraphItem, top: bool) Edge {
+    if (item.kind.isTool()) return .tool;
+    if (item.kind == .agent_call) return .agent_call;
+    const pad = if (top) item.p.padding.top else item.p.padding.bottom;
+    return if (pad > 0) .message else .other;
 }
 
-/// Zero the facing padding between the last two stack items when both are tool
-/// blocks, keeping `total` in sync.
-pub fn collapseToolPadding(out: *std.ArrayList(RenderParagraphItem), total: *usize) void {
+/// Rows saved where the top of `lower` meets the bottom of `upper`. Stacked
+/// tool blocks drop both pads; blocks sharing a background share one pad;
+/// a message next to a tool block keeps both, one row per background.
+pub fn seam(lower: Edge, upper: Edge) usize {
+    if (lower == .tool and upper == .tool) return 2 * @as(usize, tool_pad);
+    const tools_bg = (lower == .tool or lower == .agent_call) and (upper == .tool or upper == .agent_call);
+    return if (tools_bg or (lower == .message and upper == .message)) tool_pad else 0;
+}
+
+/// Drop the facing padding `seam` saves between the last two stack items,
+/// keeping `total` in sync.
+pub fn collapsePadding(out: *std.ArrayList(RenderParagraphItem), total: *usize) void {
     if (out.items.len < 2) return;
     const prev = &out.items[out.items.len - 2];
     const next = &out.items[out.items.len - 1];
-    if (!prev.kind.isTool() or !next.kind.isTool()) return;
-    // Tool blocks carry no border, so padding rows are part of `h` one to one.
-    prev.h -= prev.p.padding.top;
-    next.h -= next.p.padding.bottom;
-    total.* -= @as(usize, prev.p.padding.top) + next.p.padding.bottom;
-    prev.p.padding.top = 0;
-    next.p.padding.bottom = 0;
+    const saved = seam(edge(prev.*, true), edge(next.*, false));
+    if (saved == 0) return;
+    // Padded blocks carry no border, so padding rows are part of `h` one to one.
+    dropTopPadding(prev, total);
+    if (saved > tool_pad) {
+        next.h -= next.p.padding.bottom;
+        total.* -= next.p.padding.bottom;
+        next.p.padding.bottom = 0;
+    }
+}
+
+fn dropTopPadding(item: *RenderParagraphItem, total: *usize) void {
+    item.h -= item.p.padding.top;
+    total.* -= item.p.padding.top;
+    item.p.padding.top = 0;
+}
+
+fn push(arena: std.mem.Allocator, out: *std.ArrayList(RenderParagraphItem), total: *usize, p: r.tui.Paragraph, kind: RenderParagraphItem.Kind, inner_w: u16) !void {
+    const h = p.totalHeightLong(inner_w);
+    try out.append(arena, .{ .p = p, .h = h, .kind = kind });
+    total.* += h;
+    collapsePadding(out, total);
 }
 
 /// Build one r.tui.Paragraph per TimelineEntry. Allocations live in `arena`; do not
@@ -91,7 +122,8 @@ pub fn buildTimelineEntryParagraph(
 ) !void {
     // var buf: [255]u8 = undefined;
 
-    var header_para = r.tui.Paragraph{};
+    var header_para = r.tui.Paragraph{ .padding = .{ .left = message_padding.left, .top = message_padding.top } };
+    const first_item = out.items.len;
     var header_line = r.tui.Line{};
 
     var has_text = false;
@@ -142,35 +174,27 @@ pub fn buildTimelineEntryParagraph(
                 switch (part) {
                     .thinking => |text| {
                         if (app.flags.show_thinking) {
-                            var p = r.tui.Paragraph{};
+                            var p = r.tui.Paragraph{ .padding = message_padding };
                             try p.appendText(arena, text, .{ .fg = app.theme.muted });
-                            const h = p.totalHeightLong(inner_w);
-                            try out.append(arena, .{ .p = p, .h = h, .kind = text_kind });
-                            total.* += h;
+                            try push(arena, out, total, p, text_kind, inner_w);
                         }
                     },
                     .message => |text| {
                         has_text = true;
-                        var p = r.tui.Paragraph{};
-                        try appendMarkdownText(&p, app.gpa, arena, text, inner_w, app.theme);
-                        const h = p.totalHeightLong(inner_w);
-                        try out.append(arena, .{ .p = p, .h = h, .kind = text_kind });
-                        total.* += h;
+                        var p = r.tui.Paragraph{ .padding = message_padding };
+                        try appendMarkdownText(&p, app.gpa, arena, text, inner_w -| message_padding.left, app.theme);
+                        try push(arena, out, total, p, text_kind, inner_w);
                     },
                     .plain_text => |text| {
                         has_text = true;
-                        var p = r.tui.Paragraph{};
+                        var p = r.tui.Paragraph{ .padding = message_padding };
                         try p.appendText(arena, text, .{ .fg = app.theme.text });
-                        const h = p.totalHeightLong(inner_w);
-                        try out.append(arena, .{ .p = p, .h = h, .kind = text_kind });
-                        total.* += h;
+                        try push(arena, out, total, p, text_kind, inner_w);
                     },
                     .diff => |diff| {
                         if (app.flags.show_diffs and diff.call_id.len == 0) {
                             const p = buildDiffParagraph(arena, app, diff);
-                            const h = p.totalHeightLong(inner_w);
-                            try out.append(arena, .{ .p = p, .h = h, .kind = .{ .edit = .{} } });
-                            total.* += h;
+                            try push(arena, out, total, p, .{ .edit = .{} }, inner_w);
                         }
                     },
                     .tool_call => unreachable,
@@ -197,8 +221,11 @@ pub fn buildTimelineEntryParagraph(
 
         try header_line.pushSpan(arena, .{ .content = role_text, .style = .{ .modifier = .{ .bold = true }, .fg = role_color } });
         try header_para.lines.append(arena, header_line);
-        try out.append(arena, .{ .p = header_para, .h = 1, .kind = text_kind });
-        total.* += 1;
+        if (out.items.len > first_item) {
+            const below = &out.items[out.items.len - 1];
+            if (below.kind == .user_message or below.kind == .agent_message) dropTopPadding(below, total);
+        }
+        try push(arena, out, total, header_para, text_kind, inner_w);
     }
 }
 
@@ -227,7 +254,7 @@ fn appendEditBlocks(
             total.* += h;
         }
 
-        var p = r.tui.Paragraph{ .wrap = false, .padding = .all(tool_pad) };
+        var p = r.tui.Paragraph{ .wrap = false, .padding = tool_padding };
         p.style.bg = theme.bg;
         if (open) p.padding.bottom = 0;
         const path = if (app.cwd.len > 0) try std.mem.replaceOwned(u8, arena, diff.path, app.cwd, ".") else diff.path;
@@ -256,7 +283,7 @@ fn appendEditBlocks(
         const h = p.totalHeightLong(inner_w);
         try out.append(arena, .{ .p = p, .h = h, .kind = .{ .edit = .{ .toggle = .{ .id = id, .entry = runs.entry, .expanded = open } } } });
         total.* += h;
-        collapseToolPadding(out, total);
+        collapsePadding(out, total);
     }
 }
 

@@ -68,7 +68,7 @@ pub fn appendToolGroup(
     if (live) para.kind.tool_group.live_calls = arena.dupe(GroupCall, calls.items) catch null;
     try out.append(arena, para);
     total.* += para.h;
-    blocks.collapseToolPadding(out, total);
+    blocks.collapsePadding(out, total);
     calls.clearRetainingCapacity();
 }
 
@@ -92,7 +92,7 @@ pub fn buildToolGroupParagraph(
     var images: std.ArrayList(blocks.ToolInlineImage) = .empty;
 
     p.style.bg = app.theme.bg;
-    p.padding = .all(blocks.tool_pad);
+    p.padding = blocks.tool_padding;
 
     const statuses = app.tool_status_entries.lock(app.io);
     defer statuses.unlock();
@@ -469,22 +469,22 @@ test "tool images follow their calls, crop to the viewport, and follow recursive
     defer buf.deinit();
     const area = r.tui.Rect{ .x = 10, .y = 3, .width = 40, .height = 20 };
     timeline.renderTimelineStack(&app, stack, area, &buf);
-    try std.testing.expectEqual(@as(u21, '└'), buf.get(13, 5).char);
-    try std.testing.expectEqual(@as(u21, 'b'), buf.get(13, 9).char);
+    try std.testing.expectEqual(@as(u21, '└'), buf.get(14, 5).char);
+    try std.testing.expectEqual(@as(u21, 'b'), buf.get(14, 9).char);
     try std.testing.expectEqual(@as(usize, 1), app.inline_placements.items.len);
-    try std.testing.expectEqual(r.tui.Rect{ .x = 15, .y = 5, .width = 8, .height = 4 }, app.inline_placements.items[0].rect);
+    try std.testing.expectEqual(r.tui.Rect{ .x = 16, .y = 5, .width = 8, .height = 4 }, app.inline_placements.items[0].rect);
 
     app.inline_placements.clearRetainingCapacity();
     timeline.renderTimelineStack(&app, stack, .{ .x = 10, .y = 3, .width = 40, .height = 3 }, &buf);
     try std.testing.expectEqual(@as(usize, 1), app.inline_placements.items.len);
-    try std.testing.expectEqual(r.tui.Rect{ .x = 15, .y = 3, .width = 8, .height = 1 }, app.inline_placements.items[0].rect);
+    try std.testing.expectEqual(r.tui.Rect{ .x = 16, .y = 3, .width = 8, .height = 1 }, app.inline_placements.items[0].rect);
     try std.testing.expectEqual(@as(u32, 60), app.inline_placements.items[0].src.y);
     try std.testing.expectEqual(@as(u32, 20), app.inline_placements.items[0].src.h);
 
     app.inline_placements.clearRetainingCapacity();
     stack.scroll_offset = 5;
     timeline.renderTimelineStack(&app, stack, .{ .x = 10, .y = 3, .width = 40, .height = 3 }, &buf);
-    try std.testing.expectEqual(r.tui.Rect{ .x = 15, .y = 5, .width = 8, .height = 1 }, app.inline_placements.items[0].rect);
+    try std.testing.expectEqual(r.tui.Rect{ .x = 16, .y = 5, .width = 8, .height = 1 }, app.inline_placements.items[0].rect);
     try std.testing.expectEqual(@as(u32, 0), app.inline_placements.items[0].src.y);
     try std.testing.expectEqual(@as(u32, 20), app.inline_placements.items[0].src.h);
 
@@ -523,9 +523,9 @@ test "tool images follow their calls, crop to the viewport, and follow recursive
     buf.clear();
     timeline.renderTimelineStack(&app, stack, area, &buf);
     const nested_placement = app.inline_placements.items[0];
-    try std.testing.expectEqual(@as(u16, 20), nested_placement.rect.x);
-    try std.testing.expectEqual(@as(u21, '└'), buf.get(18, nested_placement.rect.y).char);
-    try std.testing.expectEqual(@as(u21, '│'), buf.get(14, nested_placement.rect.y).char);
+    try std.testing.expectEqual(@as(u16, 21), nested_placement.rect.x);
+    try std.testing.expectEqual(@as(u21, '└'), buf.get(19, nested_placement.rect.y).char);
+    try std.testing.expectEqual(@as(u21, '│'), buf.get(15, nested_placement.rect.y).char);
 
     var after = r.app.ToolStatusEntry{};
     try after.lines.append(alloc, try r.tui.Line.new(alloc, "after3", .{}, .{}));

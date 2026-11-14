@@ -175,7 +175,7 @@ pub fn appendRunSummary(
     run: ToolRun,
     inner_w: u16,
 ) !void {
-    var p = r.tui.Paragraph{ .wrap = false, .padding = .all(blocks.tool_pad) };
+    var p = r.tui.Paragraph{ .wrap = false, .padding = blocks.tool_padding };
     p.style.bg = app.theme.bg;
     var line = r.tui.Line{};
     const style: r.tui.Style = .{ .fg = app.theme.muted };
@@ -188,7 +188,7 @@ pub fn appendRunSummary(
     const h = p.totalHeightLong(inner_w);
     try out.append(arena, .{ .p = p, .h = h, .kind = .{ .tool_group = .{ .toggle = run } } });
     total.* += h;
-    blocks.collapseToolPadding(out, total);
+    blocks.collapsePadding(out, total);
 }
 
 fn runTestStack(app: *App, alloc: std.mem.Allocator, entries: []const r.app.TimelineEntry) ![]const []const u8 {
