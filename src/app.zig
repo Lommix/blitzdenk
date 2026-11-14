@@ -326,6 +326,8 @@ pub const App = struct {
     keymap: r.keys.KeyMap = .{},
     cmd_queue: r.cmd.CommandQueue,
     lua_vm: *r.lua.LuaVm,
+    /// Plugin loader state and the main VM snapshot sandbox VMs follow.
+    plugins: r.plugin.Manager,
     lua_state: r.lua_state.Store = .{},
     lua_status_bar_enabled: bool = false,
     lua_status_bar_cache: [512]u8 = undefined,
@@ -378,6 +380,7 @@ pub const App = struct {
             .cwd = cwd,
             .cmd_queue = try r.cmd.CommandQueue.init(gpa),
             .lua_vm = lua_vm,
+            .plugins = .init(gpa, io),
             .mcp_manager = r.mcp.Manager.init(gpa, agent_factory.io),
             .permission_queue = .{
                 .value = try .initCapacity(gpa, 16),
@@ -435,6 +438,7 @@ pub const App = struct {
         if (self.mcp_auth) |*task| task.deinit();
         self.mcp_manager.deinit();
         self.lua_vm.deinit();
+        self.plugins.deinit();
         self.lua_state.deinit(self.gpa);
         self.cmd_queue.deinit();
         self.permission_queue.value.deinit(self.gpa);

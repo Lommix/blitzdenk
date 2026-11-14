@@ -1,6 +1,6 @@
 ---
 name: blitzdenk-lua
-description: "Blitzdenk Lua config (`blitz.lua`): providers/models, custom tools, agents, commands, keybinds, input, hooks, permissions, MCP, drawing."
+description: "Blitzdenk Lua config (`blitz.lua`): providers/models, custom tools, agents, commands, keybinds, input, hooks, permissions, MCP, drawing, plugins."
 metadata:
   blitzdenk.main-agent-only: "true"
 ---
@@ -398,6 +398,59 @@ client registration runs when offered, else set `client_id`. Tokens live in
 `~/.local/state/blitzdenk`), keyed by url, so a rename keeps the login.
 Tokens refresh on expiry; deleting a record logs out. A server answering 401
 at load is skipped with a notification naming the connect command.
+
+## Plugins
+
+Plugins work like Neovim's: `blitz.plugin` declares and installs, `require`
+loads, the config calls `setup`.
+
+```lua
+blitz.plugin("blitz-tools", {
+    url = "https://github.com/acme/blitz-tools.git",
+    ref = "v1.0.0",                -- branch floats; tag or full SHA pins
+})
+blitz.plugin("my-plugin", { path = "~/dev/my-plugin" })   -- development, hot reloads
+
+local acme = require("blitz-tools")
+acme.setup({ prefix = "acme" })
+blitz.add_tool(blitz.AGENT_GENERAL, acme.tools.search)
+```
+
+- `blitz.plugin(name, spec)` installs, pins, and puts the plugin's `lua/` on
+  the module path. It runs no plugin code and returns nothing.
+- `require(name)` loads `lua/<name>/init.lua`. For a plugin that failed to
+  install it raises `plugin '<name>' is not available: ...`. Optional
+  plugins: `local ok, acme = pcall(require, "blitz-tools")`.
+- The config dir `.luarc.json` lists each plugin's `lua/` dir, so hover and
+  go-to-definition on `require(name)` reach the plugin source.
+- Git plugins belong in the global config; `./blitz.lua` takes `path` only.
+- A missing git plugin clones at startup only. Added to a running session it
+  is `not installed`; `blitz plugin update` in a shell installs it and the app
+  reloads. `blitz plugin list` shows each checkout. `blitz.plugins.get(name)`
+  returns a status handle.
+- Bad spec fields and duplicate names abort the config.
+- Later registrations of a tool, command, keybind, or agent name win, so
+  config after a plugin's `setup` overrides it.
+
+Plugin layout: `lua/<name>/init.lua` (required), more modules in
+`lua/<name>/*.lua`, skills in `skills/*.md`. `blitz plugin create <dir>`
+scaffolds the module and editor completion files.
+
+```lua
+-- lua/blitz-tools/init.lua
+local M = { tools = {} }
+
+---@param opts? table
+function M.setup(opts)
+    opts = opts or {}
+    M.tools.search = blitz.register_tool({ name = opts.prefix .. "_search", ... })
+end
+
+return M
+```
+
+Plugin code replays in every tool and hook VM, like the config: keep it free
+of side effects.
 
 ## Session transcripts
 

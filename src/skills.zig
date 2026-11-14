@@ -52,7 +52,8 @@ pub const SkillRegistry = struct {
         self.entries.deinit(alloc);
     }
 
-    pub fn scan(self: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, user_dir: ?std.Io.Dir, cwd: []const u8) void {
+    /// Project skills, then user skills, then plugin skill dirs in order. The first name wins.
+    pub fn scan(self: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, user_dir: ?std.Io.Dir, cwd: []const u8, plugin_dirs: []const []const u8) void {
         self.clear(alloc);
         if (cwd.len > 0) {
             if (findProjectRoot(alloc, io, cwd)) |root| {
@@ -62,11 +63,16 @@ pub const SkillRegistry = struct {
                 if (std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true })) |project_dir| {
                     var dir = project_dir;
                     defer dir.close(io);
-                    scanDir(self, alloc, io, dir);
+                    scanDir(self, alloc, io, dir, false);
                 } else |_| {}
             }
         }
-        if (user_dir) |dir| scanDir(self, alloc, io, dir);
+        if (user_dir) |dir| scanDir(self, alloc, io, dir, false);
+        for (plugin_dirs) |path| {
+            var dir = std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true }) catch continue;
+            defer dir.close(io);
+            scanDir(self, alloc, io, dir, true);
+        }
     }
 
     pub fn find(self: *const SkillRegistry, name: []const u8) ?*const SkillEntry {
@@ -123,7 +129,7 @@ pub fn loadSkill(io: std.Io, alloc: std.mem.Allocator, entry: *const SkillEntry)
     return .{ .raw = raw, .body = body };
 }
 
-fn scanDir(reg: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) void {
+fn scanDir(reg: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, warn_shadowed: bool) void {
     var it = dir.iterate();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var header_buf: [4096]u8 = undefined;
@@ -131,11 +137,11 @@ fn scanDir(reg: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, dir: std.I
     while (it.next(io) catch return) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
-        addEntry(reg, alloc, io, dir, entry.name, &path_buf, &header_buf);
+        addEntry(reg, alloc, io, dir, entry.name, &path_buf, &header_buf, warn_shadowed);
     }
 }
 
-fn addEntry(reg: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, path_buf: []u8, header_buf: []u8) void {
+fn addEntry(reg: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, path_buf: []u8, header_buf: []u8, warn_shadowed: bool) void {
     const len = dir.realPathFile(io, sub_path, path_buf) catch return;
     const meta = loadSkillMeta(io, path_buf[0..len], header_buf) orelse return;
     if (!isSkillName(meta.name)) {
@@ -144,7 +150,12 @@ fn addEntry(reg: *SkillRegistry, alloc: std.mem.Allocator, io: std.Io, dir: std.
         }
         return;
     }
-    if (reg.find(meta.name) != null) return;
+    if (reg.find(meta.name) != null) {
+        if (warn_shadowed and !@import("builtin").is_test) {
+            std.log.warn("plugin skill '{s}' at '{s}' is shadowed by an earlier skill", .{ meta.name, path_buf[0..len] });
+        }
+        return;
+    }
     const entry = allocEntry(alloc, meta, path_buf[0..len]) orelse return;
     reg.entries.append(alloc, entry) catch {
         freeEntry(alloc, entry);
@@ -530,7 +541,7 @@ test "registry merges layers first-wins and ignores invalid names" {
 
     var reg = SkillRegistry{};
     defer reg.deinit(std.testing.allocator);
-    reg.scan(std.testing.allocator, std.testing.io, user_dir, cwd_buf[0..cwd_len]);
+    reg.scan(std.testing.allocator, std.testing.io, user_dir, cwd_buf[0..cwd_len], &.{});
 
     try std.testing.expectEqual(@as(usize, 3), reg.entries.items.len);
     const zig = reg.find("zig").?;

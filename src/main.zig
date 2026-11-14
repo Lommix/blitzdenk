@@ -289,6 +289,24 @@ pub fn main(init: std.process.Init) !void {
         .cleanup => {
             try cleanupCli(io, init.arena.allocator(), init.environ_map, cli_flags.cleanup_sessions);
         },
+        .plugin_update => |names| {
+            const ok = try pluginCli(io, init.gpa, init.arena.allocator(), init.environ_map, .{ .update = .{ .names = names, .force = cli_flags.force } });
+            if (!ok) std.process.exit(1);
+        },
+        .plugin_list => {
+            const ok = try pluginCli(io, init.gpa, init.arena.allocator(), init.environ_map, .list);
+            if (!ok) std.process.exit(1);
+        },
+        .plugin_create => |dir| {
+            var buf: [1024]u8 = undefined;
+            var stdout = std.Io.File.stdout().writerStreaming(io, &buf);
+            const created = r.plugin.create(io, init.arena.allocator(), dir, &stdout.interface);
+            stdout.interface.flush() catch {};
+            created catch |err| {
+                if (err != error.InvalidName and err != error.NotADirectory) std.debug.print("Error: plugin create failed: {s}\n", .{@errorName(err)});
+                std.process.exit(1);
+            };
+        },
         .sessions => {
             sessionsTui(io, init.gpa, init.arena.allocator(), init.environ_map) catch |err| {
                 std.debug.print("Error: session picker failed: {s}\n", .{@errorName(err)});
@@ -308,6 +326,9 @@ pub fn main(init: std.process.Init) !void {
                 \\eval ID              print a recorded session in cwd as JSON
                 \\update               download and replace the running binary
                 \\cleanup              delete tmp artifacts and the debug log
+                \\plugin update [NAME...]  install, update, and prune git plugins
+                \\plugin list          show declared plugins and their checkouts
+                \\plugin create DIR    scaffold a plugin (lua/NAME/init.lua, meta.lua, .luarc.json)
                 \\
                 \\Flags:
                 \\  --log              write debug.log in path
@@ -317,10 +338,68 @@ pub fn main(init: std.process.Init) !void {
                 \\  --prompt "STRING"  prefill input in current cwd
                 \\  --headless         with --prompt: run headless, print final message
                 \\  --sessions         with cleanup: also delete recorded sessions
+                \\  --no-plugins       skip all plugins for this run
+                \\  --force            with plugin update: move pinned tags and commits
                 \\
             , .{r.VERSION});
         },
     }
+}
+
+const PluginAction = union(enum) {
+    update: struct { names: []const [:0]const u8, force: bool },
+    list,
+};
+
+/// `blitz plugin update|list`: collect declarations from the config without
+/// executing entries, then act on them. False on any failure.
+fn pluginCli(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env: *const std.process.Environ.Map, action: PluginAction) !bool {
+    const config_lua: ?ConfigLuaInfo = ensureConfigLua(arena, io, env) catch null;
+    var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
+    const cwd_len = try std.Io.Dir.cwd().realPathFile(io, ".", &cwd_buf);
+    const cwd = cwd_buf[0..cwd_len];
+    const HOME = env.get("HOME") orelse return error.NoHomeFound;
+    const context_factory = try r.ContextFactory.init(gpa, io, HOME, cwd);
+    var app = try App.init(io, gpa, context_factory, cwd);
+    var registry = r.agent_registry.Registry.init(gpa, io);
+    var exec_pool = r.exec.CmdPool.init(gpa, io, env);
+    app.registry = &registry;
+    app.exec_pool = &exec_pool;
+    wireConfigLua(&app, arena, env, config_lua);
+    defer {
+        app.deinit();
+        registry.deinit();
+        exec_pool.deinit();
+    }
+    app.lua_vm.setApp(&app);
+    try configurePlugins(&app, arena, env, config_lua, false);
+    app.plugins.collect = true;
+    app.lua_vm.stubBlitzApi();
+
+    const config_failed = loadUserLua(&app, io, arena, config_lua, "plugin update: ", false, .update);
+    var buf: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(io, &buf);
+    const out = &stdout.interface;
+    defer out.flush() catch {};
+    const decls = app.plugins.collected.items;
+    const update = switch (action) {
+        .update => |update| update,
+        .list => {
+            if (config_failed) try out.print("config error: {s}\nlisting the declarations collected before the error\n", .{app.lua_vm.getLastError()});
+            try app.plugins.list(&exec_pool, decls, out);
+            return !config_failed;
+        },
+    };
+    const names = update.names;
+    if (config_failed) try out.print("config error: {s}\nupdating the declarations collected before the error; pruning skipped\n", .{app.lua_vm.getLastError()});
+    const name_list = try arena.alloc([]const u8, names.len);
+    for (names, 0..) |name, i| name_list[i] = name;
+    const failures = try app.plugins.update(&exec_pool, decls, .{
+        .names = name_list,
+        .force = update.force,
+        .prune = names.len == 0 and !config_failed,
+    }, out);
+    return failures == 0 and !config_failed;
 }
 
 fn updateCli(io: std.Io, gpa: std.mem.Allocator, env: *const std.process.Environ.Map) !void {
@@ -632,27 +711,75 @@ fn sessionsTui(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, env
     try run(cwd, gpa, arena, io, env, .{}, null, id, false);
 }
 
-fn loadUserLua(app: *App, io: std.Io, arena: std.mem.Allocator, config_lua: ?ConfigLuaInfo, log_prefix: []const u8, prior_failed: bool) bool {
+fn loadUserLua(app: *App, io: std.Io, arena: std.mem.Allocator, config_lua: ?ConfigLuaInfo, log_prefix: []const u8, prior_failed: bool, phase: r.plugin.Phase) bool {
     var failed = prior_failed;
+    app.plugins.begin(phase);
     if (config_lua) |info| {
         const inject = std.fmt.allocPrint(arena, "package.path = \"{s}/?.lua;\" .. package.path", .{info.dir_path}) catch null;
         if (inject) |code| app.lua_vm.exec(code) catch |err| {
             failed = true;
             std.log.scoped(.lua).err("{s}failed to configure lua package.path: {s} ({any})", .{ log_prefix, app.lua_vm.getLastError(), err });
         };
+        app.lua_vm.plugin_scope = .global;
         app.lua_vm.load(info.abs_path) catch |err| {
             failed = true;
             std.log.scoped(.lua).err("{s}failed to load {s}: {s} ({any})", .{ log_prefix, info.abs_path, app.lua_vm.getLastError(), err });
         };
     }
     if (cwdBlitzLuaExists(io) and !app.localLuaIsGlobal()) {
+        app.lua_vm.plugin_scope = .project;
         app.lua_vm.load("blitz.lua") catch |err| {
             failed = true;
             std.log.scoped(.lua).err("{s}failed to load blitz.lua: {s} ({any})", .{ log_prefix, app.lua_vm.getLastError(), err });
         };
     }
     if (!failed) app.lua_vm.clearLastError();
+    app.plugins.finish(!failed);
+    publishPluginSkills(app, arena);
+    publishPluginLuarc(app, arena);
     return failed;
+}
+
+/// List every declared plugin in the config dir's `.luarc.json` so LuaLS
+/// types each `blitz.plugin` exports table and plugin modules.
+fn publishPluginLuarc(app: *App, arena: std.mem.Allocator) void {
+    const config_dir = app.lua_config_dir orelse return;
+    var dirs: std.ArrayList([]const u8) = .empty;
+    for (app.plugins.snapshot) |entry| {
+        if (entry.dir.len > 0) dirs.append(arena, entry.dir) catch continue;
+    }
+    r.plugin.writeLuarc(arena, app.io, config_dir, dirs.items) catch |err| {
+        std.log.scoped(.plugin).err("failed to write .luarc.json: {s}", .{@errorName(err)});
+    };
+}
+
+/// Hand the `skills/` dirs of loaded plugins to the skill scan.
+fn publishPluginSkills(app: *App, arena: std.mem.Allocator) void {
+    var dirs: std.ArrayList([]const u8) = .empty;
+    for (app.plugins.snapshot) |entry| {
+        if (!entry.loaded) continue;
+        const path = std.fs.path.join(arena, &.{ entry.dir, "skills" }) catch continue;
+        dirs.append(arena, path) catch continue;
+    }
+    app.context_factory.setPluginSkillDirs(dirs.items) catch |err| {
+        std.log.scoped(.plugin).err("failed to register plugin skills: {s}", .{@errorName(err)});
+    };
+}
+
+/// Point the watcher at path plugin roots and the lockfile.
+fn syncPluginWatch(watch: *config_watch.Watch, app: *App, arena: std.mem.Allocator) void {
+    watch.lock_path = app.plugins.lock_path orelse "";
+    var dirs: std.ArrayList([]const u8) = .empty;
+    for (app.plugins.snapshot) |entry| {
+        if (entry.path_plugin) dirs.append(arena, entry.dir) catch continue;
+    }
+    watch.setPluginDirs(dirs.items);
+}
+
+fn configurePlugins(app: *App, arena: std.mem.Allocator, env: *const std.process.Environ.Map, config_lua: ?ConfigLuaInfo, disabled: bool) !void {
+    const data_dir: ?[]const u8 = util.dataDir(arena, env) catch null;
+    try app.plugins.configure(data_dir, if (config_lua) |info| info.dir_path else null, env.get("HOME"));
+    app.plugins.disabled = disabled;
 }
 
 pub fn run(
@@ -698,6 +825,7 @@ pub fn run(
     }
     app.lua_vm.setApp(&app);
     app.lua_vm.clearLastError();
+    try configurePlugins(&app, arena, env, config_lua, flags.no_plugins);
 
     try initLuaSurface(&app, io, arena, context_factory, config_lua);
 
@@ -705,6 +833,7 @@ pub fn run(
     defer watch.deinit();
     try watchCwdBlitzLua(&watch, arena, io);
     if (config_lua) |info| watch.config_dir = info.dir_path;
+    syncPluginWatch(&watch, &app, arena);
     watch.refreshAfterReload(io);
     var reload_tick: u32 = 0;
 
@@ -1221,7 +1350,7 @@ fn wireConfigLua(app: *App, arena: std.mem.Allocator, env: *const std.process.En
 }
 
 fn initLuaSurface(app: *App, io: std.Io, arena: std.mem.Allocator, context_factory: *r.ContextFactory, config_lua: ?ConfigLuaInfo) !void {
-    _ = loadUserLua(app, io, arena, config_lua, "", false);
+    _ = loadUserLua(app, io, arena, config_lua, "", false, .startup);
     app.lua_vm.readConfigFields();
     try app.lua_vm.publishAvailableSystems(context_factory);
     const lua_tools = try app.lua_vm.getRegisteredTools(arena);
@@ -1384,7 +1513,7 @@ fn hotReloadLua(
         app.keymap.custom.clearRetainingCapacity();
         context_factory.resetDefs();
         try context_factory.resetLoadedTools();
-        const lua_reload_failed = loadUserLua(app, io, arena, config_lua, "hot-reload: ", reset_failed);
+        const lua_reload_failed = loadUserLua(app, io, arena, config_lua, "hot-reload: ", reset_failed, .reload);
         if (lua_reload_failed) reload_failed = true;
         context_factory.config_reload_in_progress = false;
         context_factory.applySessionBindings(&app.config, !lua_reload_failed) catch |err| {
@@ -1426,7 +1555,10 @@ fn hotReloadLua(
         try app.refreshLiveAgentTools();
         _ = app.lua_reload_generation.fetchAdd(1, .monotonic);
         if (reload_requested) app.markLuaReloadDone();
-        if (!reset_failed) watch.refreshAfterReload(io);
+        if (!reset_failed) {
+            syncPluginWatch(watch, app, arena);
+            watch.refreshAfterReload(io);
+        }
         reload_completed = !reload_failed;
     }
     if (reload_completed and app.flags.notify_on_reload) app.cmd_queue.append(io, .{ .push_notification = "Lua sandbox reloaded" }) catch {};
@@ -1915,6 +2047,10 @@ pub const CliFlags = packed struct {
     /// run --prompt headless, print final message instead of tui
     headless: bool = false,
     cleanup_sessions: bool = false,
+    /// skip every plugin declaration for this run
+    no_plugins: bool = false,
+    /// with `plugin update`: move pinned tags and commits too
+    force: bool = false,
 
     fn applyToken(self: *CliFlags, tok: []const u8, value: ?[]const u8) bool {
         if (std.mem.eql(u8, tok, "--log")) {
@@ -1958,6 +2094,16 @@ pub const CliFlags = packed struct {
 
         if (std.mem.eql(u8, tok, "--sessions")) {
             self.cleanup_sessions = true;
+            return true;
+        }
+
+        if (std.mem.eql(u8, tok, "--no-plugins")) {
+            self.no_plugins = true;
+            return true;
+        }
+
+        if (std.mem.eql(u8, tok, "--force")) {
+            self.force = true;
             return true;
         }
 
@@ -2032,6 +2178,12 @@ pub const CliCommand = union(enum) {
     help,
     update,
     cleanup,
+    /// `plugin update [names...]`
+    plugin_update: []const [:0]const u8,
+    /// `plugin list`
+    plugin_list,
+    /// `plugin create <dir>`
+    plugin_create: []const u8,
 
     pub const ParseResult = union(enum) {
         cmd: CliCommand,
@@ -2066,6 +2218,21 @@ pub const CliCommand = union(enum) {
         if (std.mem.eql(u8, head, "update")) return .{ .cmd = .update };
 
         if (std.mem.eql(u8, head, "cleanup")) return .{ .cmd = .cleanup };
+
+        if (std.mem.eql(u8, head, "plugin")) {
+            const usage = "usage: blitz plugin update [names...] [--force] | blitz plugin list | blitz plugin create <dir>\n";
+            if (rest.len == 0) return .{ .err = usage };
+            if (std.mem.eql(u8, rest[0], "update")) return .{ .cmd = .{ .plugin_update = rest[1..] } };
+            if (std.mem.eql(u8, rest[0], "list")) {
+                if (rest.len != 1) return .{ .err = "plugin list takes no arguments\n" };
+                return .{ .cmd = .plugin_list };
+            }
+            if (std.mem.eql(u8, rest[0], "create")) {
+                if (rest.len != 2 or rest[1].len == 0) return .{ .err = "plugin create requires one directory\n" };
+                return .{ .cmd = .{ .plugin_create = rest[1] } };
+            }
+            return .{ .err = usage };
+        }
 
         if (std.mem.eql(u8, head, "help")) return .{ .cmd = .help };
 

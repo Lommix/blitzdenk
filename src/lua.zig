@@ -605,7 +605,6 @@ pub const Blitz = LuaType{
                             fn luafn(a: *r.app.App, state: *c.lua_State, def: LuaTableRef) ![]const u8 {
                                 _ = a;
                                 const vm = fromState(state) orelse return error.NoLuaVm;
-                                if (vm.tool_entries.items.len >= MAX_LUA_TOOLS) return error.TooManyTools;
 
                                 var entry: LuaToolEntry = .{};
 
@@ -646,6 +645,18 @@ pub const Blitz = LuaType{
                                 c.lua_newtable(state);
                                 entry.state_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
 
+                                if (findEntry(vm, entry.nameSlice())) |existing| {
+                                    c.luaL_unref(state, c.LUA_REGISTRYINDEX, existing.func_ref);
+                                    c.luaL_unref(state, c.LUA_REGISTRYINDEX, existing.state_ref);
+                                    if (!vm.is_tool_vm) log.warn("tool '{s}' registered again; the later registration wins", .{entry.nameSlice()});
+                                    existing.* = entry;
+                                    return existing.nameSlice();
+                                }
+                                if (vm.tool_entries.items.len >= MAX_LUA_TOOLS) {
+                                    c.luaL_unref(state, c.LUA_REGISTRYINDEX, entry.func_ref);
+                                    c.luaL_unref(state, c.LUA_REGISTRYINDEX, entry.state_ref);
+                                    return error.TooManyTools;
+                                }
                                 vm.tool_entries.appendAssumeCapacity(entry);
                                 return vm.tool_entries.items[vm.tool_entries.items.len - 1].nameSlice();
                             }
@@ -1174,7 +1185,6 @@ pub const Blitz = LuaType{
                                 if (try isToolVm(state)) return;
                                 const parsed = keys.parseKeyString(key) orelse return error.InvalidKeyCombo;
                                 const vm = a.lua_vm;
-                                if (vm.bind_entries.items.len >= MAX_LUA_BINDS) return error.TooManyBinds;
                                 const desc_len = if (description) |d| d.len else 0;
                                 if (desc_len > 128) return error.BindDescriptionTooLong;
                                 var entry = LuaBindEntry{
@@ -1183,6 +1193,14 @@ pub const Blitz = LuaType{
                                     .func_ref = func.idx,
                                 };
                                 if (description) |d| @memcpy(entry.description[0..d.len], d);
+                                for (vm.bind_entries.items) |*existing| {
+                                    if (!existing.key.eql(parsed)) continue;
+                                    c.luaL_unref(state, c.LUA_REGISTRYINDEX, existing.func_ref);
+                                    log.warn("key '{s}' bound again; the later binding wins", .{key});
+                                    existing.* = entry;
+                                    return;
+                                }
+                                if (vm.bind_entries.items.len >= MAX_LUA_BINDS) return error.TooManyBinds;
                                 vm.bind_entries.appendAssumeCapacity(entry);
                             }
                         }).lua_fn, "bind"),
@@ -1210,7 +1228,6 @@ pub const Blitz = LuaType{
                         fn lua_fn(a: *r.app.App, state: *c.lua_State, name: []const u8, func: LuaFnRef, description: ?[]const u8) !void {
                             if (try isToolVm(state)) return;
                             const vm = a.lua_vm;
-                            if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) return error.TooManyCommands;
                             if (name.len == 0) return error.InvalidCommandName;
                             const stripped = if (name[0] == '/') name[1..] else name;
                             if (stripped.len == 0) return error.InvalidCommandName;
@@ -1231,6 +1248,14 @@ pub const Blitz = LuaType{
                             };
                             @memcpy(entry.name[0..cmd_name.len], cmd_name);
                             if (description) |d| @memcpy(entry.description[0..d.len], d);
+                            for (vm.command_entries.items) |*existing| {
+                                if (!std.mem.eql(u8, existing.nameSlice(), cmd_name)) continue;
+                                c.luaL_unref(state, c.LUA_REGISTRYINDEX, existing.func_ref);
+                                log.warn("command '{s}' registered again; the later registration wins", .{cmd_name});
+                                existing.* = entry;
+                                return;
+                            }
+                            if (vm.command_entries.items.len >= MAX_LUA_COMMANDS) return error.TooManyCommands;
                             vm.command_entries.appendAssumeCapacity(entry);
                         }
                     }).lua_fn, "add_command"),
@@ -1511,6 +1536,15 @@ pub const Blitz = LuaType{
                 } },
             },
             .{ .name = "state", .ty = BlitzState },
+            .{
+                .name = "plugin",
+                .desc = "Declare a plugin, like Neovim's `vim.pack.add`: install and pin it and put its `lua/` dir on the module path. Runs no plugin code. Use it with `require(name)`, which raises with the reason when the plugin is not available.",
+                .ty = LuaType{ .function = .{
+                    .args = &.{ .{ .name = "name", .ty = LuaString }, .{ .name = "spec", .ty = PluginSpecDef } },
+                    .fn_ptr = luaPluginDeclare,
+                } },
+            },
+            .{ .name = "plugins", .ty = BlitzPlugins },
             .{ .name = "status_bar_render", .ty = LuaType{ .raw = "fun(): string|nil" }, .desc = "Override the status bar text. Return a string to display, or nil to keep the default." },
         },
     },
@@ -3544,11 +3578,11 @@ fn luaAllocWith(alloc: *const Allocator, ptr: ?*anyopaque, osize: usize, nsize: 
     return @ptrCast(alloc.rawAlloc(nsize, alignment, @returnAddress()) orelse return null);
 }
 
-const MAX_LUA_TOOLS = 64;
+const MAX_LUA_TOOLS = 256;
 const LUA_ERROR_SHOW_MS: i64 = 8_000;
 pub const LUA_ERROR_FADE_NS: i128 = 2 * std.time.ns_per_s;
-const MAX_LUA_BINDS = 64;
-const MAX_LUA_COMMANDS = 64;
+const MAX_LUA_BINDS = 256;
+const MAX_LUA_COMMANDS = 256;
 pub const MAX_LUA_WIDGETS = 8;
 pub const WIDGET_ERROR_CAP = 256;
 const MAX_LUA_MCP_SERVERS = 16;
@@ -3604,6 +3638,9 @@ pub const LuaVm = struct {
     inject_hooks: std.ArrayList(LuaInjectEntry) = .empty,
     inject_hooks_generation: u64 = 0,
     prompt_hook: c_int = c.LUA_NOREF,
+    /// Declarations of this VM load, in order. Arena-backed.
+    plugin_records: std.ArrayList(PluginRecord) = .empty,
+    plugin_scope: PluginScope = .global,
     /// Packed agent id to registry ref of agent.spawn on_complete callbacks.
     /// Main vm only, touched under vm_mu.
     spawn_callbacks: std.AutoHashMapUnmanaged(u32, c_int) = .empty,
@@ -3654,6 +3691,7 @@ pub const LuaVm = struct {
         c.lua_pushcfunction(self.L, &luaPrintToBuffer);
         c.lua_setglobal(self.L, "print");
         registerBlitzLib(self.L);
+        installPluginSearcher(self.L);
     }
 
     pub fn setApp(self: *LuaVm, a: *app.App) void {
@@ -3694,6 +3732,21 @@ pub const LuaVm = struct {
         }
     }
 
+    /// Collect mode: replace `blitz` with an inert stub that keeps only
+    /// `plugin` and `plugins`, so config that feeds plugin stubs into the API
+    /// still runs to the last declaration.
+    pub fn stubBlitzApi(self: *LuaVm) void {
+        const L = self.L;
+        _ = c.lua_getglobal(L, "blitz");
+        pushPluginStub(L);
+        inline for (.{ "plugin", "plugins" }) |field| {
+            _ = c.lua_getfield(L, -2, field);
+            c.lua_setfield(L, -2, field);
+        }
+        c.lua_setglobal(L, "blitz");
+        c.lua_pop(L, 1);
+    }
+
     pub fn exec(self: *LuaVm, code: []const u8) !void {
         const status = c.luaL_loadbufferx(self.L, code.ptr, code.len, null, null);
         if (status != 0) {
@@ -3731,6 +3784,7 @@ pub const LuaVm = struct {
         self.bind_entries = .empty;
         self.command_entries = .empty;
         self.mcp_entries = .empty;
+        self.plugin_records = .empty;
         self.inject_hooks = .empty;
         self.inject_hooks_generation += 1;
         self.spawn_callbacks.clearRetainingCapacity();
@@ -4638,6 +4692,490 @@ fn luaAddPanel(L: ?*c.lua_State) callconv(.c) c_int {
     return luaAddWidget(L.?, .panel, "draw.panel");
 }
 
+// ── Plugins ────────────────────────────────────────────────────────────
+
+/// Which config file is running, for project restrictions and relative paths.
+pub const PluginScope = enum { global, project };
+
+const PluginRecord = struct {
+    name: []const u8,
+    dir: []const u8,
+    /// The namespaced searcher resolves this plugin's `lua/<name>/` modules.
+    searchable: bool,
+    /// Collect mode: `require` of this plugin yields an inert stub.
+    stub: bool = false,
+    /// Load error, surfaced by `require(name)`.
+    err: ?[]const u8 = null,
+    handle_ref: c_int = c.LUA_NOREF,
+};
+
+const PluginSpecDef = LuaType{ .table_def = .{ .name = "BlitzPluginSpec", .fields = &.{
+    .{ .name = "url", .ty = LuaString, .optional = true, .desc = "Full git URL. Exclusive with path. Global config only." },
+    .{ .name = "path", .ty = LuaString, .optional = true, .desc = "Local plugin directory. `~` expands; a relative path resolves from the declaring blitz.lua." },
+    .{ .name = "ref", .ty = LuaString, .optional = true, .desc = "Branch, tag, or full commit SHA. A branch or no ref floats; a tag or commit pins." },
+    .{ .name = "lazy", .ty = LuaBool, .optional = true, .desc = "Reserved and ignored." },
+} } };
+
+const PluginHandleDef = LuaType{ .table_def = .{ .name = "BlitzPluginHandle", .fields = &.{
+    .{ .name = "name", .ty = LuaString },
+    .{ .name = "dir", .ty = LuaString, .desc = "Canonical plugin root." },
+    .{ .name = "source", .ty = StringOrNilDef, .desc = "Git URL; nil for a path plugin." },
+    .{ .name = "ref", .ty = StringOrNilDef },
+    .{ .name = "commit", .ty = StringOrNilDef, .desc = "Resolved commit of a loaded git plugin." },
+    .{ .name = "path", .ty = StringOrNilDef, .desc = "Local path of a path plugin." },
+    .{ .name = "available", .ty = LuaBool, .desc = "Installed and on the module path; `require(name)` resolves." },
+    .{ .name = "error", .ty = StringOrNilDef },
+} } };
+
+const PluginHandleNilDef = LuaType{ .raw_refs = .{ .text = "BlitzPluginHandle|nil", .refs = &.{PluginHandleDef} } };
+const PluginHandleListDef = LuaType{ .raw_refs = .{ .text = "BlitzPluginHandle[]", .refs = &.{PluginHandleDef} } };
+
+const BlitzPlugins = LuaType{ .table_def = .{ .name = "BlitzPlugins", .fields = &.{
+    .{ .name = "list", .desc = "Plugin handles in declaration order, including failed and disabled ones.", .ty = LuaType{ .function = .{ .ret = &PluginHandleListDef, .fn_ptr = luaPluginsList } } },
+    .{ .name = "get", .desc = "Plugin handle by name, case-insensitive.", .ty = LuaType{ .function = .{ .args = &.{.{ .name = "name", .ty = LuaString }}, .ret = &PluginHandleNilDef, .fn_ptr = luaPluginsGet } } },
+} } };
+
+fn pluginFail(state: *c.lua_State, comptime fmt: []const u8, args: anytype) c_int {
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrintSentinel(&buf, "blitz.plugin: " ++ fmt, args, 0) catch "blitz.plugin: invalid declaration";
+    return c.luaL_error(state, "%s", msg.ptr);
+}
+
+fn luaSlice(state: *c.lua_State, idx: c_int) []const u8 {
+    var len: usize = 0;
+    const ptr = c.lua_tolstring(state, idx, &len) orelse return "";
+    return ptr[0..len];
+}
+
+const PluginSpec = struct {
+    url: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+    ref: ?[]const u8 = null,
+    lazy: bool = false,
+};
+
+const PLUGIN_SPEC_IDX: c_int = 2;
+
+/// Reads and type-checks the spec at stack index 2. Raises on bad fields.
+fn readPluginSpec(state: *c.lua_State, arena: Allocator) ?PluginSpec {
+    var spec: PluginSpec = .{};
+    c.lua_pushnil(state);
+    while (c.lua_next(state, PLUGIN_SPEC_IDX) != 0) {
+        defer c.lua_pop(state, 1);
+        if (c.lua_type(state, -2) != c.LUA_TSTRING) {
+            _ = pluginFail(state, "spec keys must be strings", .{});
+            return null;
+        }
+        const key = luaSlice(state, -2);
+        if (std.mem.eql(u8, key, "lazy")) {
+            if (c.lua_type(state, -1) != c.LUA_TBOOLEAN) {
+                _ = pluginFail(state, "lazy must be a boolean", .{});
+                return null;
+            }
+            spec.lazy = c.lua_toboolean(state, -1) != 0;
+            continue;
+        }
+        const slot: *?[]const u8 = if (std.mem.eql(u8, key, "url"))
+            &spec.url
+        else if (std.mem.eql(u8, key, "path"))
+            &spec.path
+        else if (std.mem.eql(u8, key, "ref"))
+            &spec.ref
+        else {
+            _ = pluginFail(state, "unknown field '{s}'", .{key});
+            return null;
+        };
+        if (c.lua_type(state, -1) != c.LUA_TSTRING) {
+            _ = pluginFail(state, "{s} must be a string", .{key});
+            return null;
+        }
+        const value = luaSlice(state, -1);
+        if (value.len == 0) {
+            _ = pluginFail(state, "{s} must not be empty", .{key});
+            return null;
+        }
+        slot.* = arena.dupe(u8, value) catch {
+            _ = pluginFail(state, "out of memory", .{});
+            return null;
+        };
+    }
+    return spec;
+}
+
+/// Expands `~` and resolves a relative path from the declaring config's dir.
+/// Lexical only, so sandbox VMs derive the same name without touching disk.
+fn resolvePluginPath(a: *app.App, vm: *const LuaVm, arena: Allocator, raw: []const u8) ![]const u8 {
+    var expanded = raw;
+    if (raw[0] == '~' and (raw.len == 1 or raw[1] == '/')) {
+        const home = a.plugins.home orelse return error.NoHomeFound;
+        expanded = try std.fmt.allocPrint(arena, "{s}{s}", .{ home, raw[1..] });
+    }
+    const base = switch (vm.plugin_scope) {
+        .global => a.lua_config_dir orelse try std.Io.Dir.cwd().realPathFileAlloc(a.io, ".", arena),
+        .project => try std.Io.Dir.cwd().realPathFileAlloc(a.io, ".", arena),
+    };
+    return std.fs.path.resolve(arena, &.{ base, expanded });
+}
+
+const PluginOutcome = struct {
+    dir: []const u8,
+    commit: ?[]const u8 = null,
+    /// Installed and on the module path.
+    available: bool = false,
+    err: ?[]const u8 = null,
+};
+
+/// Mode dispatch. Main VM: install and check out per the phase policy.
+/// Sandbox: follow the main VM snapshot only. Collect: record the decl.
+fn decidePlugin(vm: *LuaVm, a: *app.App, name: []const u8, spec: PluginSpec, path: ?[]const u8, out: *PluginOutcome) void {
+    const arena = vm.luaArena();
+    if (a.plugins.disabled) {
+        out.err = "plugins disabled";
+        return;
+    }
+    if (vm.is_tool_vm) {
+        const snap = a.plugins.find(name) orelse {
+            out.err = "not loaded in main VM";
+            return;
+        };
+        out.dir = arena.dupe(u8, snap.dir) catch return;
+        out.commit = if (snap.commit) |commit| arena.dupe(u8, commit) catch null else null;
+        if (snap.loaded) {
+            out.available = true;
+        } else {
+            out.err = if (snap.err) |e| arena.dupe(u8, e) catch "not loaded in main VM" else "not loaded in main VM";
+        }
+        return;
+    }
+    if (a.plugins.collect) {
+        a.plugins.collectDecl(.{ .name = name, .url = spec.url, .path = path, .ref = spec.ref });
+        return;
+    }
+    if (spec.url) |url| {
+        switch (a.plugins.loadGit(a.exec_pool, name, url, spec.ref)) {
+            .ok => |ok| {
+                out.dir = arena.dupe(u8, ok.dir) catch return;
+                out.commit = arena.dupe(u8, ok.commit) catch null;
+                out.available = true;
+            },
+            .err => |e| out.err = arena.dupe(u8, e) catch "plugin load failed",
+        }
+        return;
+    }
+    const dir = std.Io.Dir.cwd().realPathFileAlloc(a.io, path.?, arena) catch {
+        out.err = std.fmt.allocPrint(arena, "path plugin directory not found: {s}", .{path.?}) catch "path plugin directory not found";
+        return;
+    };
+    out.dir = dir;
+    const entry = r.plugin.entryPath(arena, dir, name) catch return;
+    if (!r.plugin.fileExists(a.io, entry)) {
+        out.err = std.fmt.allocPrint(arena, "no lua/{s}/init.lua in {s}", .{ name, dir }) catch "plugin module not found";
+        return;
+    }
+    out.available = true;
+}
+
+/// `package.loaded[name] = <value at idx>`, or nil when idx is 0.
+fn setPackageLoaded(state: *c.lua_State, name: [:0]const u8, idx: c_int) void {
+    _ = c.lua_getglobal(state, "package");
+    _ = c.lua_getfield(state, -1, "loaded");
+    if (idx == 0) c.lua_pushnil(state) else c.lua_pushvalue(state, idx);
+    c.lua_setfield(state, -2, name.ptr);
+    c.lua_pop(state, 2);
+}
+
+fn reportPluginError(vm: *LuaVm, a: *app.App, name: []const u8, msg: []const u8) void {
+    hookLog(.err, "plugin {s}: {s}", .{ name, msg });
+    if (vm.is_tool_vm) return;
+    a.notifications.append(a.gpa, a.nowMillis(), "plugin {s}: {s}", .{ name, msg }) catch {};
+}
+
+const PluginHandle = struct {
+    name: []const u8,
+    dir: []const u8,
+    source: ?[]const u8,
+    ref: ?[]const u8,
+    commit: ?[]const u8,
+    path: ?[]const u8,
+    available: bool,
+    err: ?[]const u8,
+};
+
+fn setOptStringField(state: *c.lua_State, table: c_int, comptime field: [:0]const u8, value: ?[]const u8) void {
+    const v = value orelse return;
+    _ = c.lua_pushlstring(state, v.ptr, v.len);
+    c.lua_setfield(state, table, field);
+}
+
+/// Pushes a read-only proxy over the handle data.
+fn pushPluginHandle(state: *c.lua_State, h: PluginHandle) void {
+    c.lua_createtable(state, 0, 9);
+    const data = c.lua_gettop(state);
+    setOptStringField(state, data, "name", h.name);
+    setOptStringField(state, data, "dir", h.dir);
+    setOptStringField(state, data, "source", h.source);
+    setOptStringField(state, data, "ref", h.ref);
+    setOptStringField(state, data, "commit", h.commit);
+    setOptStringField(state, data, "path", h.path);
+    setOptStringField(state, data, "error", h.err);
+    c.lua_pushboolean(state, @intFromBool(h.available));
+    c.lua_setfield(state, data, "available");
+
+    c.lua_createtable(state, 0, 0);
+    c.lua_createtable(state, 0, 4);
+    c.lua_pushvalue(state, data);
+    c.lua_setfield(state, -2, "__index");
+    c.lua_pushcfunction(state, &luaReadOnlyNewIndex);
+    c.lua_setfield(state, -2, "__newindex");
+    c.lua_pushvalue(state, data);
+    c.lua_pushcclosure(state, &luaHandlePairs, 1);
+    c.lua_setfield(state, -2, "__pairs");
+    _ = c.lua_pushstring(state, "locked");
+    c.lua_setfield(state, -2, "__metatable");
+    _ = c.lua_setmetatable(state, -2);
+    c.lua_rotate(state, data, -1);
+    c.lua_settop(state, -2);
+}
+
+fn luaReadOnlyNewIndex(L: ?*c.lua_State) callconv(.c) c_int {
+    return c.luaL_error(L.?, "plugin handles are read-only; edit the declaration and reload");
+}
+
+fn luaHandlePairs(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    _ = c.lua_getglobal(state, "next");
+    c.lua_pushvalue(state, c.lua_upvalueindex(1));
+    c.lua_pushnil(state);
+    return 3;
+}
+
+fn luaPluginDeclare(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const vm = requireVm(state, "blitz.plugin: no lua vm") orelse return 0;
+    const a = requireAppFromRegistry(state, "blitz.plugin: no app") orelse return 0;
+    var name_len: usize = 0;
+    const name_ptr = c.luaL_checklstring(state, 1, &name_len);
+    c.luaL_checktype(state, PLUGIN_SPEC_IDX, c.LUA_TTABLE);
+    c.lua_settop(state, PLUGIN_SPEC_IDX);
+    const arena = vm.luaArena();
+    const name = arena.dupe(u8, name_ptr[0..name_len]) catch return pluginFail(state, "out of memory", .{});
+    if (!r.plugin.isValidName(name)) return pluginFail(state, "invalid name '{s}'; use letters, digits, '_' and '-'", .{name});
+    const spec = readPluginSpec(state, arena) orelse return 0;
+
+    if ((spec.url == null) == (spec.path == null)) return pluginFail(state, "set exactly one of url or path", .{});
+    if (spec.url) |url| {
+        if (vm.plugin_scope == .project) return pluginFail(state, "git plugins are not allowed in the project blitz.lua; declare a path plugin", .{});
+        if (!r.plugin.isFullGitUrl(url)) return pluginFail(state, "url '{s}' is not a full git URL", .{url});
+    } else if (spec.ref != null) return pluginFail(state, "ref requires url", .{});
+
+    const path: ?[]const u8 = if (spec.path) |p|
+        resolvePluginPath(a, vm, arena, p) catch |err| return pluginFail(state, "cannot resolve path '{s}': {s}", .{ p, @errorName(err) })
+    else
+        null;
+
+    for (vm.plugin_records.items) |rec| {
+        if (r.plugin.eqlName(rec.name, name)) return pluginFail(state, "duplicate plugin name '{s}'", .{name});
+    }
+    if (spec.lazy and !vm.is_tool_vm) std.log.scoped(.plugin).warn("plugin {s}: lazy is reserved and ignored", .{name});
+
+    var out: PluginOutcome = .{ .dir = path orelse (a.plugins.gitDir(arena, name) orelse "") };
+    decidePlugin(vm, a, name, spec, path, &out);
+
+    const rec_index = vm.plugin_records.items.len;
+    const collect = !vm.is_tool_vm and a.plugins.collect;
+    vm.plugin_records.append(arena, .{
+        .name = name,
+        .dir = out.dir,
+        .searchable = out.available,
+        .stub = collect,
+        .err = out.err,
+    }) catch return pluginFail(state, "out of memory", .{});
+    if (out.err) |msg| {
+        if (!vm.is_tool_vm and !a.plugins.disabled) reportPluginError(vm, a, name, msg);
+    }
+    const commit = if (out.available) out.commit else null;
+    if (!vm.is_tool_vm) a.plugins.record(.{
+        .name = name,
+        .dir = out.dir,
+        .commit = commit,
+        .loaded = out.available,
+        .err = out.err,
+        .path_plugin = path != null,
+    });
+
+    pushPluginHandle(state, .{
+        .name = name,
+        .dir = out.dir,
+        .source = spec.url,
+        .ref = spec.ref,
+        .commit = commit,
+        .path = path,
+        .available = out.available,
+        .err = out.err,
+    });
+    vm.plugin_records.items[rec_index].handle_ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+
+    // Collect mode never runs plugin code, so a broken plugin cannot block its
+    // own update. `require(name)` yields a stub and the config keeps going.
+    if (collect) {
+        const name_z = arena.dupeSentinel(u8, name, 0) catch return pluginFail(state, "out of memory", .{});
+        pushPluginStub(state);
+        setPackageLoaded(state, name_z, c.lua_gettop(state));
+    }
+    return 0;
+}
+
+/// Inert stand-in for a plugin module in collect mode. Field access, calls,
+/// and arithmetic yield another stub. Integer keys are nil, so `ipairs` and
+/// tool lists built from stubs come out empty.
+fn pushPluginStub(state: *c.lua_State) void {
+    c.lua_createtable(state, 0, 0);
+    c.lua_createtable(state, 0, 10);
+    c.lua_pushcfunction(state, &luaPluginStubIndex);
+    c.lua_setfield(state, -2, "__index");
+    inline for (.{ "__call", "__concat", "__add", "__sub", "__mul", "__div", "__mod", "__unm" }) |event| {
+        c.lua_pushcfunction(state, &luaPluginStubNew);
+        c.lua_setfield(state, -2, event);
+    }
+    c.lua_pushcfunction(state, &luaPluginStubString);
+    c.lua_setfield(state, -2, "__tostring");
+    _ = c.lua_setmetatable(state, -2);
+}
+
+fn luaPluginStubIndex(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    if (c.lua_type(state, 2) == c.LUA_TNUMBER) {
+        c.lua_pushnil(state);
+    } else pushPluginStub(state);
+    return 1;
+}
+
+fn luaPluginStubNew(L: ?*c.lua_State) callconv(.c) c_int {
+    pushPluginStub(L.?);
+    return 1;
+}
+
+fn luaPluginStubString(L: ?*c.lua_State) callconv(.c) c_int {
+    _ = c.lua_pushstring(L.?, "<plugin stub>");
+    return 1;
+}
+
+fn luaPluginStubLoader(L: ?*c.lua_State) callconv(.c) c_int {
+    pushPluginStub(L.?);
+    return 1;
+}
+
+fn luaPluginsList(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const vm = requireVm(state, "blitz.plugins.list: no lua vm") orelse return 0;
+    c.lua_createtable(state, @intCast(vm.plugin_records.items.len), 0);
+    for (vm.plugin_records.items, 1..) |rec, i| {
+        _ = c.lua_rawgeti(state, c.LUA_REGISTRYINDEX, rec.handle_ref);
+        c.lua_rawseti(state, -2, @intCast(i));
+    }
+    return 1;
+}
+
+fn luaPluginsGet(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const vm = requireVm(state, "blitz.plugins.get: no lua vm") orelse return 0;
+    var len: usize = 0;
+    const ptr = c.luaL_checklstring(state, 1, &len);
+    const name = ptr[0..len];
+    for (vm.plugin_records.items) |rec| {
+        if (!r.plugin.eqlName(rec.name, name)) continue;
+        _ = c.lua_rawgeti(state, c.LUA_REGISTRYINDEX, rec.handle_ref);
+        return 1;
+    }
+    c.lua_pushnil(state);
+    return 1;
+}
+
+/// `<dir>/lua/<head>/init.lua` or `<dir>/lua/<head>/<a>/<b>.lua` for `head.a.b`.
+fn pluginModulePath(buf: []u8, dir: []const u8, head: []const u8, rest: ?[]const u8) ?[:0]const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    w.print("{s}/lua/{s}", .{ dir, head }) catch return null;
+    if (rest) |tail| {
+        var it = std.mem.splitScalar(u8, tail, '.');
+        while (it.next()) |seg| {
+            if (seg.len == 0 or std.mem.indexOfScalar(u8, seg, '/') != null) return null;
+            w.print("/{s}", .{seg}) catch return null;
+        }
+        w.writeAll(".lua") catch return null;
+    } else {
+        w.writeAll("/init.lua") catch return null;
+    }
+    w.writeByte(0) catch return null;
+    const out = w.buffered();
+    return out[0 .. out.len - 1 :0];
+}
+
+/// package.searchers entry, after the config path searcher. `require("x")`
+/// and `require("x.y")` resolve under `lua/x/` of loaded plugins, in
+/// declaration order. The dir name, not the plugin name, is the namespace,
+/// so a plugin renamed with `name` still finds its own modules.
+fn luaPluginSearcher(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    var len: usize = 0;
+    const ptr = c.luaL_checklstring(state, 1, &len);
+    const modname = ptr[0..len];
+    const vm = fromState(state) orelse {
+        _ = c.lua_pushstring(state, "\n\tno plugin searcher state");
+        return 1;
+    };
+    const dot = std.mem.indexOfScalar(u8, modname, '.');
+    const head = if (dot) |d| modname[0..d] else modname;
+    if (!r.plugin.isValidName(head)) {
+        _ = c.lua_pushfstring(state, "\n\tno plugin module '%s'", ptr);
+        return 1;
+    }
+    // Collect mode runs no plugin code and an uninstalled repo's module names
+    // are unknown, so every module the config dir cannot resolve is a stub.
+    for (vm.plugin_records.items) |rec| {
+        if (rec.stub) {
+            c.lua_pushcfunction(state, &luaPluginStubLoader);
+            _ = c.lua_pushstring(state, "<plugin stub>");
+            return 2;
+        }
+        if (std.mem.eql(u8, rec.name, head)) {
+            if (!rec.searchable) {
+                var msg_buf: [1024]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msg_buf, "\n\tplugin '{s}' is not available: {s}", .{ rec.name, rec.err orelse "unknown error" }) catch "\n\tplugin is not available";
+                _ = c.lua_pushlstring(state, msg.ptr, msg.len);
+                return 1;
+            }
+        }
+        if (!rec.searchable) continue;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = pluginModulePath(&buf, rec.dir, head, if (dot) |d| modname[d + 1 ..] else null) orelse break;
+        const status = c.luaL_loadfilex(state, path.ptr, null);
+        if (status == c.LUA_ERRFILE) {
+            c.lua_pop(state, 1);
+            continue;
+        }
+        if (status != 0) {
+            return c.luaL_error(state, "error loading module '%s' from file '%s':\n\t%s", ptr, path.ptr, c.lua_tolstring(state, -1, null));
+        }
+        _ = c.lua_pushlstring(state, path.ptr, path.len);
+        return 2;
+    }
+    _ = c.lua_pushfstring(state, "\n\tno plugin module '%s'", ptr);
+    return 1;
+}
+
+fn installPluginSearcher(L: *c.lua_State) void {
+    _ = c.lua_getglobal(L, "package");
+    _ = c.lua_getfield(L, -1, "searchers");
+    var i = c.luaL_len(L, -1);
+    while (i >= 3) : (i -= 1) {
+        _ = c.lua_rawgeti(L, -1, i);
+        c.lua_rawseti(L, -2, i + 1);
+    }
+    c.lua_pushcfunction(L, &luaPluginSearcher);
+    c.lua_rawseti(L, -2, 3);
+    c.lua_pop(L, 2);
+}
+
 fn registerBlitzLib(L: *c.lua_State) void {
     setLuaTypeGlobal(L, "blitz", Blitz);
 }
@@ -4744,10 +5282,12 @@ fn loadToolConfig(vm: *LuaVm, a: *r.app.App) !void {
         try vm.exec(inject);
     }
     if (a.lua_config_abs) |abs| {
+        vm.plugin_scope = .global;
         try vm.load(abs);
     }
     if (a.localLuaIsGlobal()) return;
     if (std.Io.Dir.cwd().statFile(a.io, "blitz.lua", .{})) |_| {
+        vm.plugin_scope = .project;
         try vm.load("blitz.lua");
     } else |_| {}
 }
@@ -5855,7 +6395,6 @@ test "toolsets flatten into agent tool lists and keep one tool per exposed name"
     const factory = try r.ContextFactory.init(std.testing.allocator, std.testing.io, "/tmp", "/tmp");
     defer factory.deinit();
     app_state.context_factory = factory;
-    inline for (.{ tl.bash.BashBgTool, tl.bash.ReadJobTool, tl.bash.KillJobTool }) |tool| try factory.add(tool, .all);
 
     const vm = try LuaVm.init(std.testing.allocator);
     defer vm.deinit();
@@ -5906,7 +6445,7 @@ test "skill filters combine lua config and skill metadata" {
     const factory = try r.ContextFactory.init(std.testing.allocator, std.testing.io, "/tmp", "/tmp");
     defer factory.deinit();
     app_state.context_factory = factory;
-    factory.skills.scan(std.testing.allocator, std.testing.io, tmp.dir, "");
+    factory.skills.scan(std.testing.allocator, std.testing.io, tmp.dir, "", &.{});
 
     const vm = try LuaVm.init(std.testing.allocator);
     defer vm.deinit();
@@ -6256,4 +6795,183 @@ test "config require resolves modules from a canonical directory" {
     const vm = try LuaVm.init(alloc);
     defer vm.deinit();
     try loadToolConfig(vm, &a);
+}
+
+fn pluginTestApp(io: std.Io, config_dir: []const u8, config_abs: []const u8) r.app.App {
+    var app_state = permissionTestApp();
+    app_state.plugins = .init(std.testing.allocator, io);
+    app_state.notifications = .{};
+    app_state.cwd = config_dir;
+    app_state.lua_config_dir = config_dir;
+    app_state.lua_config_abs = config_abs;
+    return app_state;
+}
+
+test "plugins declare only; require loads them and sandbox VMs follow the main snapshot" {
+    std.testing.log_level = .err;
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "cfg");
+    try tmp.dir.createDirPath(io, "plug/lua/plug");
+    try tmp.dir.createDirPath(io, "broken/lua/broken");
+    try tmp.dir.createDirPath(io, "nomodule");
+    try tmp.dir.writeFile(io, .{ .sub_path = "cfg/blitz.lua", .data =
+        \\RETURNS = select("#", blitz.plugin("plug", { path = "../plug" }))
+        \\BEFORE = LOADS
+        \\blitz.plugin("broken", { path = "../broken" })
+        \\blitz.plugin("missing", { path = "../missing" })
+        \\blitz.plugin("nomodule", { path = "../nomodule" })
+        \\OK, PLUG = pcall(require, "plug")
+        \\if OK then PLUG.setup({ prefix = "p" }) end
+        \\B_OK, B_ERR = pcall(require, "broken")
+        \\M_OK, M_ERR = pcall(require, "missing")
+        \\X_OK, X_ERR = pcall(require, "nomodule")
+        \\H = blitz.plugins.get("plug")
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "plug/lua/plug/init.lua", .data =
+        \\LOADS = (LOADS or 0) + 1
+        \\local M = { util = require("plug.util"), tools = {} }
+        \\function M.setup(opts)
+        \\  M.tools.main = blitz.register_tool({ name = opts.prefix .. "_tool", description = "d", func = function() return { msg = "x" } end })
+        \\end
+        \\return M
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "plug/lua/plug/util.lua", .data = "return { x = 3 }" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "broken/lua/broken/init.lua", .data = "error('boom')" });
+    const cfg = try tmp.dir.realPathFileAlloc(io, "cfg", arena);
+    const cfg_abs = try std.fs.path.join(arena, &.{ cfg, "blitz.lua" });
+
+    var app_state = pluginTestApp(io, cfg, cfg_abs);
+    defer app_state.plugins.deinit();
+    defer app_state.notifications.deinit(std.testing.allocator);
+
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+    app_state.lua_vm = vm;
+    app_state.plugins.begin(.startup);
+    vm.plugin_scope = .global;
+    try vm.load(cfg_abs);
+    app_state.plugins.finish(true);
+
+    try vm.exec(
+        \\assert(RETURNS == 0 and BEFORE == nil, "declaring runs no plugin code")
+        \\assert(OK, tostring(PLUG))
+        \\assert(LOADS == 1 and require("plug") == PLUG and LOADS == 1)
+        \\assert(PLUG.tools.main == "p_tool" and PLUG.util.x == 3)
+        \\assert(not pcall(require, "plug.missing"))
+        \\assert(H.available and H.name == "plug" and H.path ~= nil and H.source == nil and H.commit == nil)
+        \\assert(not pcall(function() H.name = "x" end))
+        \\local seen = 0
+        \\for k in pairs(H) do seen = seen + 1 end
+        \\assert(seen >= 4, "pairs over handle")
+        \\assert(blitz.plugins.get("PLUG") == H and blitz.plugins.get("nope") == nil)
+        \\assert(#blitz.plugins.list() == 4)
+        \\assert(not B_OK and B_ERR:find("boom") and blitz.plugins.get("broken").available, B_ERR)
+        \\assert(not M_OK and M_ERR:find("plugin 'missing' is not available", 1, true) and M_ERR:find("not found"), M_ERR)
+        \\assert(not blitz.plugins.get("missing").available)
+        \\assert(not X_OK and X_ERR:find("no lua/nomodule/init.lua"), X_ERR)
+        \\local function fails(name, spec, needle)
+        \\  local ok, err = pcall(blitz.plugin, name, spec)
+        \\  assert(not ok and err:find(needle, 1, true), tostring(err))
+        \\end
+        \\fails("Plug", { path = "../plug" }, "duplicate plugin name")
+        \\fails("bad.name", { path = "../plug" }, "invalid name")
+        \\fails("x", { path = "../plug", tag = "x" }, "unknown field 'tag'")
+        \\fails("x", { path = "../plug", opts = {} }, "unknown field 'opts'")
+        \\fails("x", { url = "owner/repo" }, "not a full git URL")
+        \\fails("x", { path = "../plug", url = "https://x/y.git" }, "exactly one of url or path")
+        \\fails("x", { path = "../plug", ref = "v1" }, "ref requires url")
+        \\fails({ path = "../plug" }, nil, "string expected")
+    );
+    try std.testing.expect(findEntry(vm, "p_tool") != null);
+    try std.testing.expect(app_state.plugins.find("plug").?.loaded);
+    try std.testing.expect(!app_state.plugins.find("missing").?.loaded);
+
+    vm.plugin_scope = .project;
+    try std.testing.expectError(error.LuaExecFailed, vm.exec("blitz.plugin('y', { url = 'https://x/y.git' })"));
+    try std.testing.expect(std.mem.indexOf(u8, vm.getLastError(), "not allowed in the project") != null);
+
+    // The sandbox replays the config and resolves only what the main VM made available.
+    {
+        const tool_vm = try LuaVm.initTool(std.testing.allocator);
+        defer tool_vm.deinit();
+        tool_vm.setApp(&app_state);
+        try loadToolConfig(tool_vm, &app_state);
+        try tool_vm.exec(
+            \\assert(OK and LOADS == 1 and PLUG.tools.main == "p_tool")
+            \\assert(not B_OK and B_ERR:find("boom"))
+        );
+        try std.testing.expect(findEntry(tool_vm, "p_tool") != null);
+    }
+
+    // A plugin the main VM rejected never resolves in a sandbox.
+    app_state.plugins.begin(.startup);
+    app_state.plugins.record(.{ .name = "plug", .dir = "/nowhere", .err = "rejected" });
+    app_state.plugins.finish(false);
+    {
+        const tool_vm = try LuaVm.initTool(std.testing.allocator);
+        defer tool_vm.deinit();
+        tool_vm.setApp(&app_state);
+        try loadToolConfig(tool_vm, &app_state);
+        try tool_vm.exec("assert(not OK and PLUG:find('rejected') and LOADS == nil and not H.available)");
+        try std.testing.expect(findEntry(tool_vm, "p_tool") == null);
+        try tool_vm.exec("assert(not M_OK and M_ERR:find('not loaded in main VM'))");
+    }
+
+    app_state.plugins.disabled = true;
+    try vm.reset();
+    vm.plugin_scope = .global;
+    try vm.load(cfg_abs);
+    try vm.exec("assert(not OK and PLUG:find('plugins disabled') and not H.available and LOADS == nil)");
+
+    // Collect mode never runs plugin code; require yields an inert stub.
+    app_state.plugins.disabled = false;
+    app_state.plugins.collect = true;
+    try vm.reset();
+    vm.stubBlitzApi();
+    vm.plugin_scope = .global;
+    try vm.load(cfg_abs);
+    try vm.exec(
+        \\blitz.add_tool(blitz.AGENT_GENERAL, PLUG.tools.main)
+        \\blitz.set_agent_model(PLUG.agent, 3)
+        \\assert(blitz.plugins.get("plug") ~= nil)
+    );
+    try vm.exec(
+        \\assert(OK and LOADS == nil and tostring(PLUG) == "<plugin stub>")
+        \\local deep = PLUG.tools.main.x("y") .. "z"
+        \\assert(tostring(deep) == "<plugin stub>")
+        \\for _ in ipairs(PLUG.tools) do error("stub iterates") end
+        \\assert(tostring(require("plug.util")) == "<plugin stub>")
+        \\assert(tostring(require("other-module")) == "<plugin stub>")
+    );
+    try std.testing.expect(findEntry(vm, "p_tool") == null);
+    try std.testing.expectEqual(@as(usize, 4), app_state.plugins.collected.items.len);
+}
+
+test "later registrations of tools, commands, and binds replace earlier ones" {
+    var app_state = permissionTestApp();
+    const vm = try LuaVm.init(std.testing.allocator);
+    defer vm.deinit();
+    vm.setApp(&app_state);
+    app_state.lua_vm = vm;
+    std.testing.log_level = .err;
+    try vm.exec(
+        \\blitz.register_tool({ name = "t", description = "first", func = function() return {} end })
+        \\blitz.register_tool({ name = "t", description = "second", func = function() return {} end })
+        \\blitz.add_command("c", function(rem) end, "first")
+        \\blitz.add_command("/c", function(rem) end, "second")
+        \\blitz.bind("<C-x>", function() end, "first")
+        \\blitz.bind("<C-x>", function() end, "second")
+    );
+    try std.testing.expectEqual(@as(usize, 1), vm.tool_entries.items.len);
+    try std.testing.expectEqualStrings("second", vm.tool_entries.items[0].descSlice());
+    try std.testing.expectEqual(@as(usize, 1), vm.command_entries.items.len);
+    try std.testing.expectEqualStrings("second", vm.command_entries.items[0].descriptionSlice().?);
+    try std.testing.expectEqual(@as(usize, 1), vm.bind_entries.items.len);
+    try std.testing.expectEqualStrings("second", vm.bind_entries.items[0].descriptionSlice());
 }

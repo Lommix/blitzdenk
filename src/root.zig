@@ -29,6 +29,7 @@ pub const clipboard = @import("clipboard.zig");
 pub const keys = @import("keys.zig");
 pub const events = @import("events.zig");
 pub const lua = @import("lua.zig");
+pub const plugin = @import("plugin.zig");
 pub const lua_state = @import("lua_state.zig");
 pub const mcp = @import("mcp.zig");
 pub const oauth = @import("oauth.zig");

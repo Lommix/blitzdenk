@@ -639,6 +639,37 @@
 ---or nil,false on a non-string key.
 ---@field get fun(key: string)
 
+---@class BlitzPluginSpec
+---Full git URL. Exclusive with path. Global config only.
+---@field url? string
+---Local plugin directory. `~` expands; a relative path resolves from the declaring blitz.lua.
+---@field path? string
+---Branch, tag, or full commit SHA. A branch or no ref floats; a tag or commit pins.
+---@field ref? string
+---Reserved and ignored.
+---@field lazy? boolean
+
+---@class BlitzPluginHandle
+---@field name string
+---Canonical plugin root.
+---@field dir string
+---Git URL; nil for a path plugin.
+---@field source string|nil
+---@field ref string|nil
+---Resolved commit of a loaded git plugin.
+---@field commit string|nil
+---Local path of a path plugin.
+---@field path string|nil
+---Installed and on the module path; `require(name)` resolves.
+---@field available boolean
+---@field error string|nil
+
+---@class BlitzPlugins
+---Plugin handles in declaration order, including failed and disabled ones.
+---@field list fun(): BlitzPluginHandle[]
+---Plugin handle by name, case-insensitive.
+---@field get fun(name: string): BlitzPluginHandle|nil
+
 ---@class Blitz
 ---@field mcp BlitzMcp
 ---@field json BlitzJson
@@ -743,6 +774,9 @@
 ---Push a new popup notification with a lifetime of 8s to the top right corner.
 ---@field push_notification fun(message: string)
 ---@field state BlitzState
+---Declare a plugin, like Neovim's `vim.pack.add`: install and pin it and put its `lua/` dir on the module path. Runs no plugin code. Use it with `require(name)`, which raises with the reason when the plugin is not available.
+---@field plugin fun(name: string, spec: BlitzPluginSpec)
+---@field plugins BlitzPlugins
 ---Override the status bar text. Return a string to display, or nil to keep the default.
 ---@field status_bar_render fun(): string|nil
 

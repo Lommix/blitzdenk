@@ -21,6 +21,15 @@ pub fn stateDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) !
     return std.fmt.allocPrint(alloc, "{s}/.local/state/blitzdenk", .{home});
 }
 
+pub fn dataDir(alloc: std.mem.Allocator, env: *const std.process.Environ.Map) ![]u8 {
+    const xdg = env.get("XDG_DATA_HOME") orelse "";
+    if (xdg.len > 0 and std.fs.path.isAbsolute(xdg))
+        return std.fmt.allocPrint(alloc, "{s}/blitzdenk", .{xdg});
+    const home = env.get("HOME") orelse return error.NoHomeFound;
+    if (!std.fs.path.isAbsolute(home)) return error.NoHomeFound;
+    return std.fmt.allocPrint(alloc, "{s}/.local/share/blitzdenk", .{home});
+}
+
 pub fn nowMs(io: std.Io) i64 {
     return @intCast(@divTrunc(std.Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_ms));
 }
@@ -95,4 +104,20 @@ test "state dir honors XDG_STATE_HOME and falls back to HOME" {
 
     try env.put("HOME", "relative/home");
     try std.testing.expectError(error.NoHomeFound, stateDir(std.testing.allocator, &env));
+}
+
+test "data dir honors XDG_DATA_HOME and falls back to HOME" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    try env.put("XDG_DATA_HOME", "/x/data");
+    const xdg = try dataDir(std.testing.allocator, &env);
+    defer std.testing.allocator.free(xdg);
+    try std.testing.expectEqualStrings("/x/data/blitzdenk", xdg);
+
+    try env.put("XDG_DATA_HOME", "");
+    try env.put("HOME", "/home/u");
+    const home = try dataDir(std.testing.allocator, &env);
+    defer std.testing.allocator.free(home);
+    try std.testing.expectEqualStrings("/home/u/.local/share/blitzdenk", home);
 }

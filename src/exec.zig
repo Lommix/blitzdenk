@@ -92,6 +92,8 @@ pub const CmdPool = struct {
         /// holding stdout/stderr pipes open after the main process is killed.
         kill_process_group: bool = false,
         scrub_env: bool = false,
+        /// Variables set on top of the inherited (or scrubbed) environment.
+        extra_env: []const [2][]const u8 = &.{},
         max_output: ?usize = null,
         /// Long-lived run: stdout and stderr merge into `stdout` in arrival
         /// order, trimmed to `max_output` at line starts, with no drain
@@ -151,7 +153,7 @@ pub const CmdPool = struct {
     }
 
     fn buildEnvBox(self: *Self, opts: RunOpts) !?*std.process.Environ.Map {
-        if (!opts.scrub_env) return null;
+        if (!opts.scrub_env and opts.extra_env.len == 0) return null;
 
         const box = try self.alloc.create(std.process.Environ.Map);
         errdefer self.alloc.destroy(box);
@@ -161,9 +163,10 @@ pub const CmdPool = struct {
         const keys = self.env.keys();
         const vals = self.env.values();
         for (keys, vals) |k, v| {
-            if (stripEnvKey(k)) continue;
+            if (opts.scrub_env and stripEnvKey(k)) continue;
             try box.put(k, v);
         }
+        for (opts.extra_env) |pair| try box.put(pair[0], pair[1]);
         return box;
     }
 

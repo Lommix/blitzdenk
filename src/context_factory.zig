@@ -30,6 +30,8 @@ io: std.Io,
 config_dir: ?std.Io.Dir,
 skill_dir: ?std.Io.Dir,
 skills: skills_mod.SkillRegistry = .{},
+/// `<plugin>/skills` dirs of loaded plugins, scanned after user skills.
+plugin_skill_dirs: std.ArrayList([]u8) = .empty,
 cwd: []const u8 = "",
 flags: Flags = .{},
 general_prompt_size: usize = 0,
@@ -44,12 +46,17 @@ pub const CapabilityRule = struct {
     rule: []const u8,
 };
 
-pub const general_default_tool_set = .{
+pub const inbuilt_tool_set = .{
     r.tools.write.WriteTool,
     r.tools.edit.EditTool,
     r.tools.bash.BashTool,
+    r.tools.bash.BashBgTool,
+    r.tools.bash.KillJobTool,
+    r.tools.bash.ReadJobTool,
     r.tools.read.ReadTool,
+    r.tools.patch.PatchTool,
     r.tools.ask.AskTool,
+    r.tools.start.StartMcpTool,
     r.tools.readonly.GrepTool,
     r.tools.readonly.FindTool,
     r.tools.readonly.LsTool,
@@ -148,7 +155,7 @@ pub const Flags = packed struct(u8) {
 
 fn buildDefaultTools(alloc: std.mem.Allocator) !std.ArrayList(ToolEntry) {
     var list = std.ArrayList(ToolEntry).empty;
-    inline for (general_default_tool_set) |tool| {
+    inline for (inbuilt_tool_set) |tool| {
         try list.append(alloc, .{ .tool = tool, .flags = .all });
     }
     return list;
@@ -491,12 +498,13 @@ fn warnUnknownSkills(self: *const Self, agent_name: []const u8, filter: skills_m
 }
 
 pub fn addAgent(self: *Self, cfg: *const r.config.BlitzdenkCfg, def: AgentDef, tool_names: []const []const u8) !AgentType {
-    if (self.findAgentType(def.name) != null) return error.DuplicateAgentName;
+    const existing = self.findAgentType(def.name);
     if (tool_names.len > MAX_AGENT_TOOLS) return error.TooManyTools;
     for (tool_names) |name| if (name.len > MAX_TOOL_NAME_LEN) return error.NameTooLong;
     self.warnUnknownSkills(def.name, def.skills);
 
-    const idx: AgentType = if (self.sessionBindingFor(def.name)) |binding|
+    if (existing != null) std.log.scoped(.agents).warn("agent '{s}' registered again; the later registration wins", .{def.name});
+    const idx: AgentType = if (existing) |agent_type| agent_type else if (self.sessionBindingFor(def.name)) |binding|
         binding.agent_type
     else blk: {
         var index = self.agent_counter;
@@ -572,7 +580,25 @@ fn getAgentMut(self: *Self, agent_type: AgentType) ?*AgentDef {
 
 pub fn rescanSkills(self: *Self, cwd: []const u8) void {
     self.cwd = cwd;
-    self.skills.scan(self.alloc, self.io, self.skill_dir, self.cwd);
+    self.skills.scan(self.alloc, self.io, self.skill_dir, self.cwd, self.plugin_skill_dirs.items);
+}
+
+/// Replace the plugin skill dirs and rescan.
+pub fn setPluginSkillDirs(self: *Self, dirs: []const []const u8) !void {
+    self.freePluginSkillDirs();
+    for (dirs) |dir| {
+        const copy = try self.alloc.dupe(u8, dir);
+        self.plugin_skill_dirs.append(self.alloc, copy) catch |err| {
+            self.alloc.free(copy);
+            return err;
+        };
+    }
+    self.rescanSkills(self.cwd);
+}
+
+fn freePluginSkillDirs(self: *Self) void {
+    for (self.plugin_skill_dirs.items) |dir| self.alloc.free(dir);
+    self.plugin_skill_dirs.clearRetainingCapacity();
 }
 
 /// Restore embedded defaults and free any Lua-installed definitions.
@@ -841,6 +867,8 @@ pub fn deinit(self: *Self) void {
     self.session_bindings.deinit(self.alloc);
     self.session_arena.deinit();
     self.skills.deinit(self.alloc);
+    self.freePluginSkillDirs();
+    self.plugin_skill_dirs.deinit(self.alloc);
     self.prompt_arena.deinit();
     self.alloc.destroy(self);
 }
@@ -1153,11 +1181,19 @@ test "reload reclaims binding slots released by renamed agents" {
     try std.testing.expectEqualStrings("third", (try fixture.config(gamma)).model);
 }
 
+test "default pool resolves every tool the default agent and toolsets name" {
+    const factory = try Self.init(std.testing.allocator, std.testing.io, "/tmp", "/tmp");
+    defer factory.deinit();
+    const tools = &factory.getAgent(.general).?.tools;
+    for (0..tools.len) |i| try std.testing.expect(factory.findLoaded(tools.nameAt(i)) != null);
+    for (r.tools.bash.SET_BASH_BACKGROUND) |name| try std.testing.expect(factory.findLoaded(name) != null);
+    try std.testing.expect(factory.findLoaded(r.tools.patch.PatchTool.def.name) != null);
+}
+
 test "tool pool keeps one tool per exposed name and adds toolsets atomically" {
     const factory = try Self.init(std.testing.allocator, std.testing.io, "/tmp", "/tmp");
     defer factory.deinit();
     const bash = r.tools.bash;
-    inline for (.{ bash.BashBgTool, bash.ReadJobTool, bash.KillJobTool }) |tool| try factory.add(tool, .all);
 
     // A taken pool id is skipped, the built-in stays reachable.
     const pool_len = factory.loaded_tools.items.len;
