@@ -129,6 +129,7 @@ pub fn buildTimelineEntryParagraph(
     var header_line = r.tui.Line{};
 
     var has_text = false;
+    var has_handoff = false;
 
     // Header last so it renders on top (stack is bottom-up)
     var tool_call_list = std.ArrayList(tools.GroupCall).empty;
@@ -199,6 +200,10 @@ pub fn buildTimelineEntryParagraph(
                             try push(arena, out, total, p, .{ .edit = .{} }, inner_w);
                         }
                     },
+                    .handoff => |text| {
+                        has_handoff = true;
+                        try appendHandoffBlocks(arena, out, total, app, text, runs.entry, inner_w);
+                    },
                     .tool_call => unreachable,
                 }
             },
@@ -207,7 +212,7 @@ pub fn buildTimelineEntryParagraph(
 
     try tools.appendToolGroup(arena, out, total, app, &tool_call_list, inner_w, live_tool_blocks);
 
-    const show_header = entry.role != .agent or has_text;
+    const show_header = (entry.role != .agent or has_text) and !has_handoff;
     if (show_header) {
         const role_text: []const u8 = switch (entry.role) {
             .user => "❯ you:",
@@ -287,6 +292,52 @@ fn appendEditBlocks(
         total.* += h;
         collapsePadding(out, total);
     }
+}
+
+fn appendHandoffBlocks(
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(RenderParagraphItem),
+    total: *usize,
+    app: *App,
+    text: []const u8,
+    entry: usize,
+    inner_w: u16,
+) !void {
+    const theme = app.theme;
+    const bold: @FieldType(r.tui.Style, "modifier") = .{ .bold = true };
+    const id = try std.fmt.allocPrint(arena, "handoff#{d}", .{entry});
+    const open = app.view.tool_runs_expanded.contains(id);
+    if (open) {
+        var body: r.tui.Paragraph = .{
+            .border = .single,
+            .sides = .left_only,
+            .padding = .{ .left = 1 },
+            .style = .{ .fg = theme.border, .bg = theme.diff_surface },
+        };
+        try appendMarkdownText(&body, app.gpa, arena, text, inner_w -| 2, theme);
+        const h = body.totalHeightLong(inner_w);
+        try out.append(arena, .{ .p = body, .h = h, .kind = .{ .edit = .{} } });
+        total.* += h;
+    }
+
+    var p = r.tui.Paragraph{ .wrap = false, .padding = tool_padding };
+    p.style.bg = theme.bg;
+    if (open) p.padding.bottom = 0;
+    try p.appendLineSpan(arena, &.{
+        .{ .content = r.tui.icon.ok, .style = .{ .fg = theme.ok, .modifier = bold } },
+        .{ .content = " " },
+        .{ .content = "compact", .style = .{ .fg = theme.text_hl, .modifier = bold } },
+        .{ .content = " handoff", .style = .{ .fg = theme.muted } },
+    });
+    var fold = r.tui.Line{};
+    try fold.pushSpan(arena, .{ .content = " " ++ r.tui.icon.box_bl ++ (if (open) " ▾ " else " ▸ "), .style = .{ .fg = theme.muted } });
+    try fold.pushSpanPrint(arena, "{d} lines", .{std.mem.count(u8, text, "\n") + 1}, .{ .fg = theme.muted });
+    try p.lines.append(arena, fold);
+
+    const h = p.totalHeightLong(inner_w);
+    try out.append(arena, .{ .p = p, .h = h, .kind = .{ .edit = .{ .toggle = .{ .id = id, .entry = entry, .expanded = open } } } });
+    total.* += h;
+    collapsePadding(out, total);
 }
 
 fn buildDiffParagraph(arena: std.mem.Allocator, app: *App, d: r.app.TimelinePart.DiffEntry) r.tui.Paragraph {

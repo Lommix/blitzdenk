@@ -148,7 +148,7 @@ pub fn computeToolRuns(
                 try slots.append(alloc, .{ .run = open.?, .pos = run.len });
                 run.len += 1;
             },
-            .message, .plain_text => open = null,
+            .message, .plain_text, .handoff => open = null,
             .thinking => if (flags.show_thinking) {
                 open = null;
             },
@@ -358,4 +358,18 @@ test "sequential bash and read calls collapse to the newest three and expand on 
     const opened = try runTestStack(&app, alloc, &edited);
     const want_opened = [_][]const u8{ ok ++ "edit ./a.zig", " └ ▾ +1 -1 lines", "file: /work/a.zig", "   1 - old", "     + new", ok ++ "c7" };
     for (want_opened, opened[opened.len - want_opened.len ..]) |want, got| try std.testing.expectEqualStrings(want, got);
+
+    var handoff_parts = [_]r.app.TimelinePart{.{ .handoff = "## Goal\nship it" }};
+    const compacted = edited ++ [_]r.app.TimelineEntry{.{ .role = .system, .parts = &handoff_parts }};
+    const closed = try runTestStack(&app, alloc, &compacted);
+    const want_closed = [_][]const u8{ ok ++ "compact handoff", " └ ▸ 2 lines" };
+    for (want_closed, closed[closed.len - want_closed.len ..]) |want, got| try std.testing.expectEqualStrings(want, got);
+
+    for (app.view.tool_run_hits.items) |fold| {
+        if (std.mem.startsWith(u8, fold.run.id, "handoff#")) break toggleRun(&app, fold.run);
+    } else return error.TestExpectedEqual;
+    const shown = try runTestStack(&app, alloc, &compacted);
+    try std.testing.expect(shown.len > closed.len);
+    try std.testing.expectEqualStrings(" └ ▾ 2 lines", shown[closed.len - 1]);
+    try std.testing.expect(std.mem.indexOf(u8, shown[shown.len - 1], "ship it") != null);
 }

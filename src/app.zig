@@ -1680,7 +1680,14 @@ pub const App = struct {
 
         self.compaction_completion_seen_count = compacted_count;
         _ = self.event_bus.emit(self, .{ .compaction_complete = agent_id });
-        self.pushSystemMessage("compact complete", .{});
+        const alloc = self.sessionAlloc();
+        const handoff = (r.compact.handoffMarkdown(alloc, agent.history()) catch null) orelse {
+            self.pushSystemMessage("compact complete", .{});
+            return;
+        };
+        const parts = alloc.alloc(TimelinePart, 1) catch return;
+        parts[0] = .{ .handoff = handoff };
+        self.appendTimelineEntry(alloc, .{ .role = .system, .parts = parts }) catch return;
         self.dirty = true;
     }
 
@@ -2041,7 +2048,7 @@ pub const App = struct {
             .message => |text| if (!timelineCoversText(shown, .message, text)) return false,
             .thinking => |text| if (!timelineCoversText(shown, .thinking, text)) return false,
             .tool_call => |call| if (!timelineCoversCall(shown, call.call_id)) return false,
-            .plain_text, .diff => return false,
+            .plain_text, .diff, .handoff => return false,
         };
         return true;
     }
@@ -2405,6 +2412,7 @@ pub const TimelinePart = union(enum) {
     plain_text: []const u8,
     diff: DiffEntry,
     tool_call: ToolCallEntry,
+    handoff: []const u8,
 
     pub const ToolCallEntry = struct {
         agent_id: r.AgentId,

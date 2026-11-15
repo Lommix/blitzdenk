@@ -531,6 +531,35 @@ pub fn isSummaryMessage(message: sdk.Message) bool {
     return false;
 }
 
+pub fn handoffMarkdown(alloc: std.mem.Allocator, messages: []const sdk.Message) !?[]u8 {
+    var i = messages.len;
+    while (i > 0) {
+        i -= 1;
+        const text = messages[i].text();
+        if (!std.mem.startsWith(u8, text, SUMMARY_PREFIX)) continue;
+
+        var scratch = std.heap.ArenaAllocator.init(alloc);
+        defer scratch.deinit();
+        var lists: FileLists = .{};
+        try carryFileTags(scratch.allocator(), text, &lists);
+
+        var body = text[SUMMARY_PREFIX.len..];
+        inline for (.{ READ_FILES_TAG, MODIFIED_FILES_TAG }) |tag| {
+            if (std.mem.lastIndexOf(u8, body, "<" ++ tag ++ ">")) |at| body = body[0..at];
+        }
+
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        errdefer out.deinit();
+        try out.writer.writeAll(std.mem.trim(u8, body, " \t\r\n"));
+        inline for (.{ "Read files", "Modified files" }, .{ lists.read.items, lists.modified.items }) |title, paths| {
+            if (paths.len > 0) try out.writer.writeAll("\n\n## " ++ title);
+            for (paths) |path| try out.writer.print("\n- `{s}`", .{path});
+        }
+        return try out.toOwnedSlice();
+    }
+    return null;
+}
+
 fn findSystemMessage(messages: []const sdk.Message) ?sdk.Message {
     for (messages) |message| if (message.role == .system) return message;
     return null;
@@ -686,6 +715,10 @@ test "installed summary lists distinct files from read and write calls" {
     try std.testing.expect(isSummaryMessage(summary));
     const text = summary.text();
     try std.testing.expect(std.mem.indexOf(u8, text, "<read-files>\nsrc/a.zig\n</read-files>") != null);
+    const handoff = (try handoffMarkdown(std.testing.allocator, outcome.messages)).?;
+    defer std.testing.allocator.free(handoff);
+    try std.testing.expect(std.mem.startsWith(u8, handoff, "checkpoint\n\n## Read files\n- `src/a.zig`"));
+    try std.testing.expect(std.mem.indexOf(u8, handoff, "<read-files>") == null);
     try std.testing.expect(std.mem.endsWith(u8, text, "<modified-files>\nsrc/b.zig\nsrc/a.zig\nsrc/d.zig\n</modified-files>"));
     try std.testing.expectEqual(@as(usize, 3), outcome.messages.len);
 }
