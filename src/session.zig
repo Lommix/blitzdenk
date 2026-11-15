@@ -801,7 +801,16 @@ test "tool spawns and manual links retain the visible call through nested and ba
             var path_buf: [std.fs.max_path_bytes]u8 = undefined;
             const config_dir = path_buf[0..try tmp.dir.realPath(rig.a.io, &path_buf)];
             const config_path = try std.fs.path.join(alloc, &.{ config_dir, "config.lua" });
-            try tmp.dir.writeFile(rig.a.io, .{ .sub_path = "config.lua", .data = @embedFile("blitz_default.lua") ++
+            try tmp.dir.writeFile(rig.a.io, .{ .sub_path = "config.lua", .data =
+                \\blitz.register_tool({ name = "codemode", description = "Run a Lua script against ctx", func = function(ctx, call)
+                \\    local script = assert(load(call.arguments.code, "codemode", "t", setmetatable({ ctx = ctx }, { __index = _G })))
+                \\    script()
+                \\    return {}
+                \\end })
+                \\blitz.register_tool({ name = "agent", description = "Spawn a background child agent", func = function(ctx, call)
+                \\    local id = blitz.agent.spawn({ parent_id = ctx.agent_id, prompt = call.arguments.prompt, background = true })
+                \\    return { msg = "agent_id: " .. id }
+                \\end })
                 \\blitz.register_tool({ name = "delegate", description = "Delegate through another tool", func = function(ctx, call)
                 \\    return { msg = ctx:call("agent", call.arguments) }
                 \\end })
