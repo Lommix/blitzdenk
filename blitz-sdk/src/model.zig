@@ -1,3 +1,5 @@
+//! Vtable model abstraction: language, embedding, and image entry points with their params and results.
+
 const std = @import("std");
 const types = @import("types.zig");
 const options = @import("options.zig");

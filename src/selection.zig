@@ -1,3 +1,6 @@
+//! Queued `blitz.select` requests. A `Selection` owns its arena and ask session,
+//! so a choice widget keeps its questions and Lua continuation while a
+//! permission request takes the screen.
 const std = @import("std");
 const permissions = @import("permissions");
 const ask_session = @import("ask_session.zig");

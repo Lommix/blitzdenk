@@ -1,3 +1,5 @@
+//! Image generation entry point that copies provider image bytes into caller-owned results.
+
 const std = @import("std");
 const model = @import("model.zig");
 const options = @import("options.zig");

@@ -1,3 +1,5 @@
+//! API-key resolution and owned HTTP auth header construction shared by every provider.
+
 const std = @import("std");
 const builtin = @import("builtin");
 

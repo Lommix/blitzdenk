@@ -1,3 +1,5 @@
+//! Timeline line diffs: Myers shortest-edit-script with context collapsing and
+//! gap headers, plus the raw keep, delete and insert operations.
 const std = @import("std");
 const r = @import("root.zig");
 

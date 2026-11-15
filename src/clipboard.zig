@@ -1,3 +1,5 @@
+//! Clipboard image capture: PNG or JPEG bytes from wl-paste, xclip or osascript,
+//! saved under the private tmp directory, and paste-token mapping to `[Image]`.
 const std = @import("std");
 const builtin = @import("builtin");
 const exec = @import("exec");

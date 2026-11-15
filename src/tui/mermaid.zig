@@ -1,3 +1,7 @@
+//! Mermaid diagram renderer. Detects flowchart, sequence, state, class, and ER
+//! sources, then paints their boxes, edges, and labels onto an off-screen
+//! character canvas that becomes styled lines.
+
 const std = @import("std");
 const widgets = @import("widgets.zig");
 const cell = @import("cell.zig");

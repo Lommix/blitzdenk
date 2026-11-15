@@ -1,3 +1,5 @@
+//! Provider and model configuration: fixed-capacity arrays behind stable handles,
+//! with provider URL, key and header state, and per-model params and cost.
 const std = @import("std");
 const models = @import("models");
 const sdk = @import("blitz-sdk");

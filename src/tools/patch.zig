@@ -1,3 +1,7 @@
+//! Patch tool definition, parser and applier. Owns the `*** Begin Patch`
+//! command language (`PatchCommand`, `Hunk`, `HunkLine`) and the preview pass
+//! that runs before permissions and disk writes.
+
 const r = @import("root.zig");
 const std = @import("std");
 

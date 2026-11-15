@@ -1,3 +1,7 @@
+//! Raw-mode terminal session. Owns termios and alternate-screen state, the
+//! input event queue with mouse selection, and the double-buffered draw loop
+//! that emits only changed cells.
+
 const std = @import("std");
 const posix = std.posix;
 const buffer_mod = @import("buffer.zig");

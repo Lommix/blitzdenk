@@ -1,3 +1,5 @@
+//! OpenAI-compatible provider for arbitrary self-hosted or third-party base URLs.
+
 const std = @import("std");
 const model = @import("../model.zig");
 const auth = @import("../auth.zig");

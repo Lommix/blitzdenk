@@ -1,3 +1,6 @@
+//! Linux exec shim. enter verifies its parent pid, installs PDEATHSIG, starts a
+//! new session, and replaces itself with the real command, so spawned children
+//! die with Blitzdenk.
 const std = @import("std");
 const builtin = @import("builtin");
 

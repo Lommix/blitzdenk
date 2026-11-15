@@ -1,3 +1,6 @@
+//! Rectangle geometry: the screen-space `Rect`, `Constraint` values of fixed
+//! or fill, and `Col`, which splits a rect into vertically stacked bands.
+
 const std = @import("std");
 
 pub const Rect = struct {

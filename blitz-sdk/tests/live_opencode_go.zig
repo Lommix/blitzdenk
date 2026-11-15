@@ -1,3 +1,5 @@
+//! Live OpenCode Go tool-loop tests against Chat Completions, Responses, and Anthropic Messages.
+
 const std = @import("std");
 const sdk = @import("blitz-sdk");
 

@@ -1,3 +1,7 @@
+//! Self-update from GitHub releases. Owns `VersionInfo`, the asynchronous
+//! `CheckTask`, per-target asset naming, download failure classification, and
+//! checksum-verified in-place binary replacement.
+
 const std = @import("std");
 const r = @import("root.zig");
 const exec = @import("exec");

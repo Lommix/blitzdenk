@@ -1,3 +1,5 @@
+//! First-run wizard and session picker bodies: step headings, options,
+//! key/value summaries, validation errors, and the text fields embedded in them.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;

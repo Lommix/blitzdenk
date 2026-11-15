@@ -1,3 +1,6 @@
+//! Tool group blocks: `GroupCall` rows with their run rails, the recursive
+//! sub-agent rail (`RailNode`), tool result lookup from agent history, and the
+//! inline images that hang under a call.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;

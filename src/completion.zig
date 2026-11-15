@@ -1,3 +1,5 @@
+//! Prompt path completion. Tokenizes the input at the cursor, expands `~` and
+//! `./` prefixes, and caches sorted directory entries for a few seconds.
 const std = @import("std");
 
 pub const Kind = enum { dir, file };

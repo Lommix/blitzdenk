@@ -1,3 +1,6 @@
+//! Session journals on disk. Owns record framing and validation, buffered
+//! append and flush, load with repair of torn tails, prefix id resolution,
+//! summary rows and garbage collection of old sessions.
 const std = @import("std");
 const session = @import("session.zig");
 const sdk = @import("blitz-sdk");

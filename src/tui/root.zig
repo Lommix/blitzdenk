@@ -1,3 +1,6 @@
+//! Public surface of the TUI layer: one import for geometry, cells, buffers,
+//! terminal, widgets, markdown, icons, and layout helpers.
+
 const rect = @import("rect.zig");
 const cell = @import("cell.zig");
 const buf = @import("buffer.zig");

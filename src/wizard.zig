@@ -1,3 +1,6 @@
+//! First-run provider setup wizard. Owns the provider and model catalog, the
+//! `Wizard` step state machine, and rendering of the generated `provider.lua`.
+
 const std = @import("std");
 const root = @import("root.zig");
 

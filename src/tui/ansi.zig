@@ -1,3 +1,6 @@
+//! Fixed-capacity ANSI escape writer. Packs styled spans and plain text into a
+//! caller-provided byte slice, truncating only on UTF-8 boundaries.
+
 const std = @import("std");
 const cell = @import("cell.zig");
 

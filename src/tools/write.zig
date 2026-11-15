@@ -1,3 +1,7 @@
+//! Write tool definition and runner. Resolves the target path, requests
+//! permission, and atomically writes content while creating parent
+//! directories.
+
 const r = @import("root.zig");
 const std = @import("std");
 

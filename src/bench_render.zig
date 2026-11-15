@@ -1,3 +1,5 @@
+//! Timeline render benchmark. Builds a synthetic settled transcript and times
+//! frame rendering, reporting per-frame cost against a budget.
 const std = @import("std");
 const r = @import("root.zig");
 const App = r.app.App;

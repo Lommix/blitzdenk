@@ -1,3 +1,6 @@
+//! Application event bus. EventBus dispatches AppEvents (agent lifecycle,
+//! compaction, permission requests, and user messages) to subscribed Lua hooks
+//! on detached threads with owned payload copies.
 const std = @import("std");
 const r = @import("root.zig");
 const AgentId = r.AgentId;

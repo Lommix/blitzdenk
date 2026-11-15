@@ -1,3 +1,5 @@
+//! OpenAI Chat Completions provider: requests, responses, streams, embeddings, and images.
+
 const std = @import("std");
 const types = @import("../types.zig");
 const model = @import("../model.zig");

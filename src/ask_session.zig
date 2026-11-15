@@ -1,3 +1,5 @@
+//! Interactive ask widget: active tab, per-question cursors, toggles and
+//! resolved answers, plus rendering and validation of the answer text.
 const std = @import("std");
 const tui = @import("tui/root.zig");
 const permissions = @import("permissions");

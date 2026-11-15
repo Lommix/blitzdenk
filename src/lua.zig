@@ -1,3 +1,5 @@
+//! The Lua surface: the `blitz` global table that generates meta.lua, bindings
+//! for tools, hooks, commands, MCP and widgets, and the config and tool VMs.
 const std = @import("std");
 const builtin = @import("builtin");
 const app = @import("app.zig");

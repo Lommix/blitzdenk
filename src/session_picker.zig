@@ -1,3 +1,5 @@
+//! Session picker model for the startup list. Owns the rows, the new-session
+//! row, cursor movement and the scroll window that keeps the selection visible.
 pub const EMPTY_PROMPT_LABEL = "<no prompt saved>";
 
 pub const Row = struct {

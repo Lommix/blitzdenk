@@ -1,3 +1,5 @@
+//! OpenAI Responses API provider: streamed events, reasoning replay, and conversation compaction.
+
 const std = @import("std");
 const model = @import("../model.zig");
 const types = @import("../types.zig");

@@ -1,3 +1,5 @@
+//! Shared provider transport: chat request JSON, retrying HTTP posts, SSE streaming, and rate limiting.
+
 const std = @import("std");
 const model = @import("../model.zig");
 const types = @import("../types.zig");

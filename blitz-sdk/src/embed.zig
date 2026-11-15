@@ -1,3 +1,5 @@
+//! Embedding entry points that batch values into parallel provider requests and merge their results.
+
 const std = @import("std");
 const model = @import("model.zig");
 const options = @import("options.zig");

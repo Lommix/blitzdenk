@@ -1,3 +1,6 @@
+//! Private temporary artifacts. write stores named content under the
+//! per-process tmp directory with a sanitized stem, random suffix, and 0600
+//! permissions, returning the absolute path.
 const std = @import("std");
 const util = @import("util.zig");
 

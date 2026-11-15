@@ -1,3 +1,6 @@
+//! TUI key bindings. Owns the default bindings, user overrides layered on top,
+//! the action names and the parsing and formatting of vim-style key specs such
+//! as `<C-c>` and `<S-Up>`.
 const std = @import("std");
 const tui = @import("tui/root.zig");
 

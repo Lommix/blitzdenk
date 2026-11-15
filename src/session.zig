@@ -1,3 +1,5 @@
+//! Session journal format: wire chat, part, message, agent and tool types, SDK
+//! message conversion, and `applySaveState` to rebuild app and agent state.
 const std = @import("std");
 
 const r = @import("root.zig");

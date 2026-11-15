@@ -1,3 +1,5 @@
+//! Agent slot identity. AgentId packs a slot index and generation into a u32,
+//! so a stale handle cannot address a slot that was reused.
 pub const max_agents = 128;
 
 pub const AgentId = packed struct {

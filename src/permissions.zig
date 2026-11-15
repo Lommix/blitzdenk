@@ -1,3 +1,5 @@
+//! Permission and ask requests: questions, options and answers with bitmask
+//! encoding, request payloads and stages, and the approval mode policy.
 const std = @import("std");
 const AgentId = @import("agent-id").AgentId;
 

@@ -1,3 +1,5 @@
+//! Core SDK data model: messages, parts, tools, usage, finish reasons, stream chunks, and results.
+
 const std = @import("std");
 
 pub const Role = enum {

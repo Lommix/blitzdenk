@@ -1,3 +1,5 @@
+//! Entry point and command line: flag parsing, startup resolution, the TUI run
+//! loop, and the `sessions`, `eval`, `update`, `cleanup` and `plugin` subcommands.
 // ----------------------------------------------------------------
 // Blitzdenk 0.1
 // Copyright (c) 2026 Lorenz Mielke. All Rights Reserved.

@@ -1,3 +1,5 @@
+//! Running application: owns timeline, input, permissions, config, Lua VM,
+//! plugins, MCP, events and agents, and drives input, render and background results.
 const std = @import("std");
 const r = @import("root.zig");
 const text_utils = r.tui.text_utils;

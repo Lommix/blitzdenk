@@ -1,3 +1,5 @@
+//! Provider registry exposing the OpenAI, Anthropic, Responses, and compatible backends.
+
 const std = @import("std");
 
 pub const openai = @import("openai.zig");

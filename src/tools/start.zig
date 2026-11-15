@@ -1,3 +1,6 @@
+//! `start_mcp` tool: starts one configured MCP server by name and adds its
+//! tools to the running session.
+
 const std = @import("std");
 const r = @import("root.zig");
 

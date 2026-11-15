@@ -1,3 +1,7 @@
+//! Bash tool definitions and synchronous and background runners. Also owns the
+//! `read_job` and `kill_job` tools, background job notices, and ANSI stripping
+//! over captured output.
+
 const r = @import("root.zig");
 const std = @import("std");
 const exec = @import("exec");

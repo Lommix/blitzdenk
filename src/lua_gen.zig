@@ -1,3 +1,5 @@
+//! Generator for `src/meta.lua`: walks `lua.Blitz` and emits the `---@meta`
+//! annotations and `blitz` global that editors and the language server read.
 const std = @import("std");
 const lua = @import("lua.zig");
 

@@ -1,3 +1,7 @@
+//! Session transcript export. Resolves a session id or unique prefix, then
+//! renders `WireAgent` journals as one flat JSON document with compaction and
+//! reset markers in place of replaced history.
+
 const std = @import("std");
 const session = @import("session.zig");
 const session_store = @import("session_store.zig");

@@ -1,3 +1,7 @@
+//! Read-only search tool definitions and runners: `grep`, `find` and `ls`.
+//! Owns ripgrep and fd argument construction, output caps, timeouts, and search
+//! error formatting.
+
 const std = @import("std");
 const r = @import("root.zig");
 

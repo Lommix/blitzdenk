@@ -1,3 +1,6 @@
+//! Re-export hub for the Blitzdenk module graph. Collects the public names —
+//! app, agent, lua, tools, tui, session — that every other module imports
+//! through `r`.
 pub const VERSION = @import("build_options").version;
 
 pub const sdk = @import("blitz-sdk");

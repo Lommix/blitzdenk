@@ -1,3 +1,6 @@
+//! Permission dialog rendering: the approval box for tool calls and diffs, the
+//! ask-session question widget, and the inline message field with its measured
+//! row count.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;

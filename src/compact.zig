@@ -1,3 +1,5 @@
+//! Conversation compaction: pick a safe cut point, request a structured summary,
+//! reinstall it with carried-over file lists, and track auto-compact and retry state.
 const std = @import("std");
 const sdk = @import("blitz-sdk");
 const agent_run = @import("agent_run.zig");

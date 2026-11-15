@@ -1,3 +1,6 @@
+//! Kitty graphics protocol client: terminal support probing, cell pixel size,
+//! chunked RGBA upload, and image or placement deletion.
+
 const std = @import("std");
 const posix = std.posix;
 

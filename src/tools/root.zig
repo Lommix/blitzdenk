@@ -1,3 +1,7 @@
+//! Tool registry facade for the built-in tool modules. Re-exports
+//! `Definition`, `Context` and display helpers, and owns the shared file mutex,
+//! diff-stat, status and atomic-write utilities.
+
 const std = @import("std");
 
 pub const context = @import("context.zig");

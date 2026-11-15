@@ -1,3 +1,5 @@
+//! Model Context Protocol client: server configs, stdio and HTTP transports,
+//! tool discovery, and the manager that reloads servers and prefixes their tools.
 const std = @import("std");
 const r = @import("root.zig");
 

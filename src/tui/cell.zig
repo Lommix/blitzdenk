@@ -1,3 +1,6 @@
+//! Terminal cell values: `Color` palette/indexed/RGB entries, `Modifier` text
+//! attributes, `Style` pairs of both, and the `Cell` glyph-plus-style unit.
+
 const std = @import("std");
 
 pub const Color = union(enum) {

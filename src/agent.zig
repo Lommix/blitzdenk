@@ -1,3 +1,6 @@
+//! Single conversation agent. Agent owns identity, model settings, message
+//! history, tools, usage accounting, and the run and compaction tasks that
+//! stream responses and shrink context.
 const std = @import("std");
 const sdk = @import("blitz-sdk");
 const models = @import("models");

@@ -1,3 +1,5 @@
+//! Tool run grouping: fold consecutive tool calls into collapsible runs, with
+//! fold summaries, click hit testing, and expanded-run cache invalidation.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;

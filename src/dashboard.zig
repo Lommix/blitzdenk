@@ -1,3 +1,6 @@
+//! Startup dashboard. build_header renders the animated BLITZENK wordmark and
+//! build_info renders the welcome panel with key bindings, model, cwd, and
+//! session stats.
 const std = @import("std");
 const r = @import("root.zig");
 

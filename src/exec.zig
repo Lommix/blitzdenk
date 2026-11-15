@@ -1,12 +1,5 @@
-//! Process execution pool. Spawns each command as a `std.Io.async` worker.
-//!
-//! API surface:
-//! - `runAndWait` blocks the caller until the command exits. Used by foreground
-//!   tools that trust the child to exit.
-//! - `runAndWaitTimeout` is the same synchronous surface with a wall-clock
-//!   deadline. Used by foreground tools that spawn potentially hanging children.
-//! - `release`/`cancel` release or cancel a worker future. Only the slot
-//!   owner (the `runAndWait` caller or `Handle` holder) may release.
+//! Process execution pool: fixed slots, capped output, and blocking
+//! `runAndWait`/`runAndWaitTimeout` calls whose futures only the slot owner releases.
 const std = @import("std");
 const builtin = @import("builtin");
 pub const shim = @import("exec_shim.zig");

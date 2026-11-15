@@ -1,3 +1,5 @@
+//! Glyph constants: Nerd Font status icons plus the single and double
+//! box-drawing pieces that widget borders and mermaid diagrams draw with.
 // Nerdfont icon constants (Unicode codepoints)
 // Requires a Nerd Font patched terminal font
 

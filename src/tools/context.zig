@@ -1,3 +1,7 @@
+//! Tool execution context and installation. Owns `BaseContext`, `Context`,
+//! `Definition`, and the SDK trampoline that binds agent, permissions, display
+//! and output caps.
+
 const std = @import("std");
 const sdk = @import("blitz-sdk");
 const exec = @import("exec");

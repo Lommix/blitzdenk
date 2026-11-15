@@ -1,3 +1,5 @@
+//! Inline tool-result images through kitty graphics: per-call entries, bounded
+//! decode budgets, background decode threads, and cell-derived placements.
 const std = @import("std");
 const r = @import("root.zig");
 const kitty = @import("tui/kitty.zig");

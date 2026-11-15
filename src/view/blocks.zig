@@ -1,3 +1,5 @@
+//! Timeline block paragraphs: one `tui.Paragraph` per timeline entry, typed block
+//! metadata for tool groups, agent calls and edits, and the padding seams between blocks.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;

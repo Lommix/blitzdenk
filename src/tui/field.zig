@@ -1,3 +1,6 @@
+//! Fixed-capacity UTF-8 text field with a byte cursor, built per capacity by
+//! `Field(max)`. Handles codepoint-aware insert, deletion, and movement.
+
 const std = @import("std");
 
 fn clampUtf8(bytes: []const u8, limit: usize) usize {

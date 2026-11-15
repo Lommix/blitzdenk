@@ -1,3 +1,6 @@
+//! Frame layout: Lua widget sidebars and panels (`WidgetLayout`,
+//! `WidgetPanelSlot`), their anchoring above and below the footer, and the footer
+//! height each input mode needs.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;

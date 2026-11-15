@@ -1,3 +1,5 @@
+//! Mutex-guarded values: `Locked` pairs a value with an `Io.Mutex`, and `Guard`
+//! is the scoped handle `lock` returns for mutating shared state.
 const std = @import("std");
 
 pub fn Guard(comptime T: type) type {

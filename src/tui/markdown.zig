@@ -1,3 +1,7 @@
+//! Streaming markdown renderer. Parses fed bytes incrementally into styled,
+//! width-wrapped lines, highlighting fenced code by language and handing
+//! mermaid fences to the diagram renderer.
+
 const std = @import("std");
 const r = @import("root.zig");
 const mermaid = @import("mermaid.zig");

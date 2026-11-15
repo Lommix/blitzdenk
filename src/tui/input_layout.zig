@@ -1,3 +1,7 @@
+//! Wrap-aware layout for editable text: the styled rows to draw, the byte
+//! range each row covers, and the visual `Pos` of a byte cursor, including
+//! masked fields and vertical cursor moves.
+
 const std = @import("std");
 const widgets = @import("widgets.zig");
 const cell = @import("cell.zig");

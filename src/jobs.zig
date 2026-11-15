@@ -1,6 +1,5 @@
-//! Background shell jobs. The exec slot keeps the merged output in memory;
-//! the app tick reaps finished jobs and notifies the owning agent. Exited jobs
-//! stay readable until a new job needs the entry or the owner goes away.
+//! Background shell jobs: the exec slot keeps merged output in memory, the app
+//! tick reaps finished jobs, and exited jobs stay readable until the entry is reused.
 const std = @import("std");
 const exec = @import("exec");
 const util = @import("util.zig");

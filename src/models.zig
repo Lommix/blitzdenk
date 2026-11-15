@@ -1,3 +1,6 @@
+//! Model configuration across providers. Owns the OpenAI chat, OpenAI responses
+//! and Anthropic option sets, the reasoning effort mapping, and the SDK chat
+//! client chosen for each kind.
 const std = @import("std");
 const sdk = @import("blitz-sdk");
 

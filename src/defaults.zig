@@ -1,3 +1,6 @@
+//! Embedded default configuration. ensure installs meta.lua, .luarc.json,
+//! blitz.lua, and the Lua skill into the user's config dir, forcing refresh of
+//! generated files.
 const std = @import("std");
 
 pub const CONFIG_DIR = ".config/blitzdenk/";

@@ -1,3 +1,6 @@
+//! Skill catalog: markdown discovery across project, user and plugin directories,
+//! frontmatter parsing, per-agent visibility filters, and command extraction.
+
 const std = @import("std");
 const context_factory = @import("context_factory.zig");
 

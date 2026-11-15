@@ -1,3 +1,7 @@
+//! Ask tool definition and runner. Validates batched multiple-choice
+//! questions and routes them through the permission handler, returning
+//! numbered answers.
+
 const std = @import("std");
 const r = @import("root.zig");
 const ask_session = r.r.ask_session;

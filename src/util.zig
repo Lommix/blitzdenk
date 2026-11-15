@@ -1,3 +1,7 @@
+//! Shared environment helpers: XDG cache, state and data directory
+//! resolution, the millisecond clock, UTF-8 sanitizing, and recursive
+//! `deepClone`.
+
 const std = @import("std");
 
 /// Low-value scratch; wiped automatically when the system reboots.

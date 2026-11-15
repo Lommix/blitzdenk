@@ -1,3 +1,6 @@
+//! Composer footer rendering: the input widget's progress, input and status
+//! rows, the shared single-field text widget (`renderFieldWidget`), and the
+//! completion popup anchored to the cursor.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;

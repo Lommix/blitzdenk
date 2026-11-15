@@ -1,3 +1,6 @@
+//! Timeline measurement and scrolling: `TimelineStack` of stacked blocks, the
+//! per-entry cache keyed by `LayoutKey` and `ContentKey`, scroll pinning, the
+//! scrollbar, and inline image placements.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;

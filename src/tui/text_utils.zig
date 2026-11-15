@@ -1,3 +1,6 @@
+//! Wrapped-text helpers: a width-aware `LineIterator`, row counting, spinner
+//! frames, and per-column gradient wave coloring.
+
 const std = @import("std");
 const buffer_mod = @import("buffer.zig");
 const cell_mod = @import("cell.zig");

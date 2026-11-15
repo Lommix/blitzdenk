@@ -1,3 +1,5 @@
+//! Request options, cancellation, and lifecycle hooks for language, embedding, and image calls.
+
 const std = @import("std");
 const types = @import("types.zig");
 

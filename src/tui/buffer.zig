@@ -1,3 +1,6 @@
+//! Cell grid for one terminal rect. Owns the cell slice, takes writes in
+//! terminal coordinates, and yields per-cell diffs against the previous frame.
+
 const std = @import("std");
 const cell_mod = @import("cell.zig");
 const rect_mod = @import("rect.zig");

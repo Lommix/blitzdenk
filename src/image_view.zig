@@ -1,3 +1,6 @@
+//! Full-screen image viewer for one file. A `Viewer` owns the decoded image,
+//! zoom step, pan offsets, kitty placement and drag state, and handles its own
+//! keys, mouse input and rendering.
 const std = @import("std");
 const r = @import("root.zig");
 const kitty = @import("tui/kitty.zig");

@@ -1,3 +1,7 @@
+//! Drawable widgets over `Buffer`: blocks and borders, spans, lines, text,
+//! paragraphs, diff lines, padding, and the wrapping and table helpers they
+//! build on.
+
 const std = @import("std");
 const rect = @import("rect.zig");
 const cell = @import("cell.zig");

@@ -1,3 +1,6 @@
+//! Prompt history persisted as JSONL in the config directory. Owns the prompt
+//! entries, appending with torn-tail repair, and loading the most recent
+//! `MAX_ENTRIES` prompts for recall in the input.
 const std = @import("std");
 const util = @import("util.zig");
 

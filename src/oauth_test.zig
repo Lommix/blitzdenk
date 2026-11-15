@@ -1,3 +1,5 @@
+//! End-to-end OAuth tests against an in-process fake HTTP server: discovery
+//! variants, PKCE, dynamic registration, refresh and failure.
 const std = @import("std");
 const r = @import("root.zig");
 const oauth = @import("oauth.zig");

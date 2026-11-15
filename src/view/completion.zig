@@ -1,3 +1,5 @@
+//! Composer completion candidates: slash commands, MCP server names and
+//! filesystem entries, ranked into rows and written back as a replaced token.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;

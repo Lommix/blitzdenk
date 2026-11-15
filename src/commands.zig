@@ -1,3 +1,5 @@
+//! Thread-safe command queue: deferred `App` mutations deep-cloned into an arena
+//! for the app thread, plus the Lua-visible actions such as spawn, compact and scroll.
 const std = @import("std");
 const r = @import("root.zig");
 const App = r.app.App;

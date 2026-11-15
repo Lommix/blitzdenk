@@ -1,3 +1,5 @@
+//! Provider-agnostic generation loop: tool steps, hooks, streaming callbacks, and object output.
+
 const std = @import("std");
 const types = @import("types.zig");
 const model = @import("model.zig");

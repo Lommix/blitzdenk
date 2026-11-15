@@ -1,3 +1,5 @@
+//! Comptime JSON Schema derivation from Zig types for structured object generation.
+
 const std = @import("std");
 
 pub fn schemaFrom(comptime T: type) []const u8 {

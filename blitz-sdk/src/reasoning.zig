@@ -1,3 +1,5 @@
+//! Reasoning details: merging streamed blocks, extracting visible text, and sizing replay payloads.
+
 const std = @import("std");
 
 const payload_keys = [_][]const u8{ "text", "summary", "data" };

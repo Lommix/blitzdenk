@@ -1,3 +1,5 @@
+//! Per-URL sliding-window request throttling shared by provider HTTP calls.
+
 const std = @import("std");
 const opts_mod = @import("options.zig");
 

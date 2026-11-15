@@ -1,3 +1,5 @@
+//! Provider error classification into API, context-overflow, and network payloads with retryability.
+
 const std = @import("std");
 
 pub const APIError = struct {

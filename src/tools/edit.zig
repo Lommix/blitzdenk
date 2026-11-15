@@ -1,3 +1,7 @@
+//! Edit tool definition and runner. Performs unique text replacement under the
+//! global file mutex, with ambiguity diagnostics, a permission diff, and
+//! config-reload marking.
+
 const r = @import("root.zig");
 const std = @import("std");
 

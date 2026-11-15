@@ -1,3 +1,5 @@
+//! Anthropic Messages provider: chat, streaming, and tool-call translation against the Messages API.
+
 const std = @import("std");
 const model = @import("../model.zig");
 const types = @import("../types.zig");

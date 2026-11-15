@@ -1,3 +1,5 @@
+//! In-memory images: PNG, JPEG and GIF decode to 8-bit RGBA, plus PNG encoding
+//! and fit-to-box resampling under `max_pixel_bytes`.
 const std = @import("std");
 
 pub const Error = error{

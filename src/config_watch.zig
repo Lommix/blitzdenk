@@ -1,3 +1,6 @@
+//! Config and plugin watcher. Watch polls blitz.lua, reloadable config Lua
+//! files, the lockfile, and plugin lua/skills trees by mtime, size, and digest,
+//! reporting whether anything changed.
 const std = @import("std");
 
 pub const Entry = struct {

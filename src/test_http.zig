@@ -1,3 +1,6 @@
+//! Test-only HTTP/1.1 server harness. Owns `Connection`, `Request`, `Response`
+//! and the generic `Server` driven by the MCP and OAuth integration tests.
+
 const std = @import("std");
 
 const HEAD_MAX = 8192;

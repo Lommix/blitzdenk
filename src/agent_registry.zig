@@ -1,3 +1,5 @@
+//! Fixed-slot agent registry: reserve, activate, pin, evict and reap agents,
+//! track usage, queue compaction, and hold per-slot lifecycle and cache state.
 const std = @import("std");
 const sdk = @import("blitz-sdk");
 const agent_mod = @import("agent.zig");

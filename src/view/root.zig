@@ -1,3 +1,5 @@
+//! Render entry point: `State` holds every render-only cache, and `render`
+//! composes widgets, timeline, composer, chrome and inline images into one buffer.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;

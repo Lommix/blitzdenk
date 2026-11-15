@@ -1,3 +1,5 @@
+//! Public SDK surface re-exporting types, options, errors, providers, and entry points.
+
 pub const types = @import("types.zig");
 pub const model = @import("model.zig");
 pub const options = @import("options.zig");

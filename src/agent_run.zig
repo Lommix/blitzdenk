@@ -1,3 +1,5 @@
+//! Background agent run: one SDK streaming turn on a worker thread, publishing
+//! text, reasoning, tool and step events, and returning checkpoints, usage and messages.
 const std = @import("std");
 const builtin = @import("builtin");
 const sdk = @import("blitz-sdk");

@@ -1,3 +1,6 @@
+//! Read tool definition and runner. Serves paged file sections, images for
+//! vision models, URL image loads, and skill bodies from the catalog.
+
 const r = @import("root.zig");
 const std = @import("std");
 

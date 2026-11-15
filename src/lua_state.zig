@@ -1,3 +1,6 @@
+//! Values crossing Lua VM boundaries: booleans, integers, numbers, strings and
+//! nested tables with deep clone and free. The mutex-guarded `Store` holds the
+//! keys behind `blitz.state.set/get`.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 

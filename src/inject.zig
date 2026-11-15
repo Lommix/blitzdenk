@@ -1,3 +1,6 @@
+//! System reminders injected into an agent's context on tool turns: datetime,
+//! cwd, agent tree, skills, MCP catalog and capability catalog. Also merges the
+//! Lua inject hooks registered per agent.
 const std = @import("std");
 const builtin = @import("builtin");
 const ct = @import("ctime");

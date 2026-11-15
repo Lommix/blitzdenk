@@ -1,4 +1,6 @@
-///! building agents and prompts
+//! Agent and prompt construction. ContextFactory owns agent definitions, tool
+//! sets, model bindings, skills, and capability rules, and builds per-agent SDK
+//! configs and prompts.
 const Self = @This();
 
 const std = @import("std");

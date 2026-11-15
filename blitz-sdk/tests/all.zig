@@ -1,3 +1,5 @@
+//! Integration suite for tool loops, hooks, cancellation, streaming reasoning, and header ownership.
+
 const std = @import("std");
 const sdk = @import("blitz-sdk");
 

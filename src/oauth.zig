@@ -1,3 +1,5 @@
+//! OAuth 2.1 with PKCE for MCP servers: metadata discovery, dynamic client
+//! registration, the loopback callback, stored tokens, and authorize and refresh tasks.
 const std = @import("std");
 const builtin = @import("builtin");
 const r = @import("root.zig");

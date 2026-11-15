@@ -1,3 +1,7 @@
+//! Tool output sizing and spill handling. Owns the display caps, tail
+//! truncation, UTF-8 repair, line counting, and spill-file locators for
+//! oversized results.
+
 const std = @import("std");
 const artifact = @import("../artifact.zig");
 

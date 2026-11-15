@@ -1,3 +1,6 @@
+//! Chrome around the timeline: notifications, the status bar, the main-agent
+//! progress line, and the Lua-status-bar cache, widget surfaces and error banner
+//! that overlay the frame.
 const std = @import("std");
 const r = @import("../root.zig");
 const ct = @import("ctime");
