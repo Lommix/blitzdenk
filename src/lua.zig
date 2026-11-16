@@ -741,30 +741,6 @@ pub const Blitz = LuaType{
                         last_active: i64,
                     };
 
-                    fn stateLabel(slot_state: r.agent_registry.SlotState, agent: *const r.agent.Agent) []const u8 {
-                        return switch (slot_state) {
-                            .complete => "complete",
-                            .failed => "failed",
-                            .active => switch (agent.status) {
-                                .compacting => "compacting",
-                                .retrying => "retrying",
-                                .complete => if (agent.isBusy()) "complete" else "waiting",
-                                .failed => "failed",
-                                .canceled => "canceled",
-                                .idle => "idle",
-                                .running => switch (agent.activity) {
-                                    .idle => "running",
-                                    .processing => "processing",
-                                    .thinking => "thinking",
-                                    .writing => "writing",
-                                    .calling => "calling",
-                                    .retrying => "retrying",
-                                },
-                            },
-                            .free, .reserved => "",
-                        };
-                    }
-
                     /// NOTE: solves the problem, revisit later
                     threadlocal var rows: [r.agent_registry.max_agents]AgentRow = undefined;
 
@@ -780,7 +756,7 @@ pub const Blitz = LuaType{
                                 .agent_id = id,
                                 .name = agent.name,
                                 .task = agent.task_description,
-                                .state = stateLabel(slot_state, agent),
+                                .state = agentStateLabel(slot_state, agent),
                                 .ctx = agent.contextPercent(),
                                 .context_tokens = agent.contextSnapshot().tokens,
                                 .context_limit = agent.context_limit,
@@ -1671,6 +1647,64 @@ pub const BlitzHooks = LuaType{
             \\mode check and the TUI.
             ++ ListenerVmDesc, .ty = EventFn(.permission_requested, BlitzPermissionRequestEvent) },
             .{
+                .name = "tick",
+                .desc =
+                \\Register a callback that runs on every TUI loop iteration:
+                \\at least every 16 ms while idle, more often during input.
+                \\It is not a fixed rate; throttle on your own clock. Each
+                \\call adds a callback; all run in registration order in the
+                \\main Lua VM on the main thread. An iteration is skipped
+                \\while another thread holds the main VM. A callback that
+                \\errors is unregistered. Keep it short and call
+                \\blitz.draw.redraw() when the visuals change. A reload clears
+                \\every callback. Never call blitz.agent.await inside it.
+                ,
+                .ty = LuaType{ .function = .{
+                    .args = &.{.{ .name = "func", .ty = LuaType{ .function = .{ .args = &.{} } } }},
+                    .fn_ptr = LuaFnBind((struct {
+                        fn t(state: *c.lua_State, a: *r.app.App, func: LuaFnRef) !void {
+                            _ = a;
+                            if (try isToolVm(state)) return;
+                            const vm = fromState(state) orelse return error.NoLuaVm;
+                            vm.tick_hooks.append(vm.luaArena(), func.idx) catch {
+                                c.luaL_unref(state, c.LUA_REGISTRYINDEX, func.idx);
+                                return error.OutOfMemory;
+                            };
+                        }
+                    }).t, "tick"),
+                } },
+            },
+            .{
+                .name = "state_changed",
+                .desc =
+                \\Register a callback that runs when the main agent's state
+                \\changes. It receives the new state, the same label as
+                \\BlitzAgentRow.state, or "" when there is no main agent.
+                \\Changes are sampled once per loop iteration, so states
+                \\shorter than that are coalesced. Each call adds a callback;
+                \\all run in registration order in the main Lua VM on the
+                \\main thread. A callback that errors is unregistered. A
+                \\reload clears every callback and reports the current state
+                \\again. Never call blitz.agent.await inside it.
+                ,
+                .ty = LuaType{ .function = .{
+                    .args = &.{.{ .name = "func", .ty = LuaType{ .function = .{
+                        .args = &.{.{ .name = "state", .ty = LuaType.string }},
+                    } } }},
+                    .fn_ptr = LuaFnBind((struct {
+                        fn t(state: *c.lua_State, a: *r.app.App, func: LuaFnRef) !void {
+                            _ = a;
+                            if (try isToolVm(state)) return;
+                            const vm = fromState(state) orelse return error.NoLuaVm;
+                            vm.state_hooks.append(vm.luaArena(), func.idx) catch {
+                                c.luaL_unref(state, c.LUA_REGISTRYINDEX, func.idx);
+                                return error.OutOfMemory;
+                            };
+                        }
+                    }).t, "state_changed"),
+                } },
+            },
+            .{
                 .name = "inject",
                 .desc =
                 \\Install one system-reminder injection listener. Takes one
@@ -1756,7 +1790,7 @@ pub const BlitzHooks = LuaType{
             },
             .{
                 .name = "clear",
-                .desc = "Remove the approve, inject, and prompt hooks.",
+                .desc = "Remove the approve, inject, prompt, tick, and state_changed hooks.",
                 .ty = LuaType{ .function = .{
                     .args = &.{},
                     .fn_ptr = LuaFnBind((struct {
@@ -1769,6 +1803,10 @@ pub const BlitzHooks = LuaType{
                             vm.inject_hooks.clearRetainingCapacity();
                             vm.inject_hooks_generation += 1;
                             vm.prompt_hook = c.LUA_NOREF;
+                            for (vm.tick_hooks.items) |func_ref| c.luaL_unref(state, c.LUA_REGISTRYINDEX, func_ref);
+                            vm.tick_hooks.clearRetainingCapacity();
+                            for (vm.state_hooks.items) |func_ref| c.luaL_unref(state, c.LUA_REGISTRYINDEX, func_ref);
+                            vm.state_hooks.clearRetainingCapacity();
                         }
                     }).t, "clear"),
                 } },
@@ -3533,6 +3571,37 @@ fn fromState(L: *c.lua_State) ?*LuaVm {
     return @ptrCast(@alignCast(ptr));
 }
 
+fn agentStateLabel(slot_state: r.agent_registry.SlotState, agent: *const r.agent.Agent) []const u8 {
+    return switch (slot_state) {
+        .complete => "complete",
+        .failed => "failed",
+        .active => switch (agent.status) {
+            .compacting => "compacting",
+            .retrying => "retrying",
+            .complete => if (agent.isBusy()) "complete" else "waiting",
+            .failed => "failed",
+            .canceled => "canceled",
+            .idle => "idle",
+            .running => switch (agent.activity) {
+                .idle => "running",
+                .processing => "processing",
+                .thinking => "thinking",
+                .writing => "writing",
+                .calling => "calling",
+                .retrying => "retrying",
+            },
+        },
+        .free, .reserved => "",
+    };
+}
+
+fn mainAgentStateLabel(a: *const r.app.App) []const u8 {
+    const id = a.main_agent_id orelse return "";
+    const slot_state = a.registry.state(id) orelse return "";
+    const agent = a.registry.get(id) orelse return "";
+    return agentStateLabel(slot_state, agent);
+}
+
 fn isToolVm(state: *c.lua_State) !bool {
     const vm = fromState(state) orelse return error.NoLuaVm;
     return vm.is_tool_vm;
@@ -3640,6 +3709,9 @@ pub const LuaVm = struct {
     inject_hooks: std.ArrayList(LuaInjectEntry) = .empty,
     inject_hooks_generation: u64 = 0,
     prompt_hook: c_int = c.LUA_NOREF,
+    tick_hooks: std.ArrayList(c_int) = .empty,
+    state_hooks: std.ArrayList(c_int) = .empty,
+    reported_main_state: []const u8 = "",
     /// Declarations of this VM load, in order. Arena-backed.
     plugin_records: std.ArrayList(PluginRecord) = .empty,
     plugin_scope: PluginScope = .global,
@@ -3789,6 +3861,9 @@ pub const LuaVm = struct {
         self.plugin_records = .empty;
         self.inject_hooks = .empty;
         self.inject_hooks_generation += 1;
+        self.tick_hooks = .empty;
+        self.state_hooks = .empty;
+        self.reported_main_state = "";
         self.spawn_callbacks.clearRetainingCapacity();
         self.stdout_buf = .empty;
         self.prepareArenaLists() catch return error.LuaInitFailed;
@@ -4022,6 +4097,49 @@ pub const LuaVm = struct {
                     .{ @tagName(tag), if (err_ptr) |p| p[0..err_len] else "unknown error" },
                 );
                 c.lua_pop(L, 1);
+            }
+        }
+    }
+
+    pub fn invokeTickHooks(self: *LuaVm) void {
+        const a = self.app orelse return;
+        if (self.tick_hooks.items.len == 0) return;
+        if (!self.vm_mu.tryLock()) return;
+        defer self.vm_mu.unlock(a.io);
+        self.runLoopHooks(a, &self.tick_hooks, "tick", null);
+    }
+
+    pub fn invokeStateHooks(self: *LuaVm) void {
+        const a = self.app orelse return;
+        const main_state = mainAgentStateLabel(a);
+        if (std.mem.eql(u8, main_state, self.reported_main_state)) return;
+        if (!self.vm_mu.tryLock()) return;
+        defer self.vm_mu.unlock(a.io);
+        self.reported_main_state = main_state;
+        self.runLoopHooks(a, &self.state_hooks, "state_changed", main_state);
+    }
+
+    fn runLoopHooks(self: *LuaVm, a: *app.App, hooks: *std.ArrayList(c_int), comptime hook_name: []const u8, main_state: ?[]const u8) void {
+        const L = self.L;
+        const top = c.lua_gettop(L);
+        defer c.lua_settop(L, top);
+
+        var index: usize = 0;
+        while (index < hooks.items.len) {
+            const func_ref = hooks.items[index];
+            _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, func_ref);
+            if (main_state) |label| _ = c.lua_pushlstring(L, label.ptr, label.len);
+            const status = c.lua_pcallk(L, if (main_state != null) 1 else 0, 0, 0, 0, null);
+            if (status == 0) {
+                index += 1;
+                continue;
+            }
+            self.popError(.action);
+            a.dirty = true;
+            hookLog(.err, hook_name ++ " hook unregistered after error: {s}", .{self.getLastError()});
+            if (index < hooks.items.len and hooks.items[index] == func_ref) {
+                c.luaL_unref(L, c.LUA_REGISTRYINDEX, func_ref);
+                _ = hooks.orderedRemove(index);
             }
         }
     }

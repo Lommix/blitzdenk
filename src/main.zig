@@ -945,6 +945,8 @@ pub fn run(
 
             term.pollAndEnqueue(16);
             try app.tick();
+            app.lua_vm.invokeTickHooks();
+            app.lua_vm.invokeStateHooks();
 
             while (true) {
                 const next_event = term.nextEvent();
@@ -1929,6 +1931,7 @@ fn runHeadless(app: *App, io: std.Io, prompt: []const u8) !void {
     while (app.running) {
         try app.cmd_queue.apply(io, app);
         try app.tick();
+        app.lua_vm.invokeStateHooks();
         resolvePermissionsHeadless(app, io);
         try std.Io.sleep(io, .fromMilliseconds(10), .awake);
     }

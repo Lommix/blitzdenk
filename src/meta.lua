@@ -366,6 +366,26 @@
 ---listener finished; unresolved tickets then fall back to the
 ---mode check and the TUI.The listener runs in a sandbox Lua VM on a background thread. Cannot mutate lua state. Use `blitz.state.set/get`
 ---@field permission_requested fun(func: fun(ev: BlitzPermissionRequestEvent))
+---Register a callback that runs on every TUI loop iteration:
+---at least every 16 ms while idle, more often during input.
+---It is not a fixed rate; throttle on your own clock. Each
+---call adds a callback; all run in registration order in the
+---main Lua VM on the main thread. An iteration is skipped
+---while another thread holds the main VM. A callback that
+---errors is unregistered. Keep it short and call
+---blitz.draw.redraw() when the visuals change. A reload clears
+---every callback. Never call blitz.agent.await inside it.
+---@field tick fun(func: fun())
+---Register a callback that runs when the main agent's state
+---changes. It receives the new state, the same label as
+---BlitzAgentRow.state, or "" when there is no main agent.
+---Changes are sampled once per loop iteration, so states
+---shorter than that are coalesced. Each call adds a callback;
+---all run in registration order in the main Lua VM on the
+---main thread. A callback that errors is unregistered. A
+---reload clears every callback and reports the current state
+---again. Never call blitz.agent.await inside it.
+---@field state_changed fun(func: fun(state: string))
 ---Install one system-reminder injection listener. Takes one
 ---BlitzInjectHook table. func runs for every agent step before
 ---the reminder is built, in the main Lua VM on the calling
@@ -389,7 +409,7 @@
 ---normal flow. Last registration wins. Never call
 ---blitz.agent.await inside the hook.
 ---@field approve fun(hook: fun(payload: BlitzPermissionPayload): BlitzPermissionDecision)
----Remove the approve, inject, and prompt hooks.
+---Remove the approve, inject, prompt, tick, and state_changed hooks.
 ---@field clear fun()
 
 ---@class BlitzPermissionSnapshot
