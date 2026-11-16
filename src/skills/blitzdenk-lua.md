@@ -145,6 +145,13 @@ local my_tool = blitz.register_tool({
 - `msg` goes out as tool result text. Images follow as user content: a
   `user` message on `openai`/`response`, an image block on `anthropic`.
   Strict endpoints (DeepSeek) reject images inside tool messages.
+- `tools = { ... }` (ids and toolsets) seals the tool: `ctx:call` and
+  `ctx:batch` run only those tools, by id or exposed name, even when the agent
+  does not hold them. They are resolved on every call, so reloads and MCP
+  tools apply. `ctx.tools` lists the resolved exposed names, `nil` without
+  `tools`. Their descriptions and schemas are appended to the tool
+  description. A tool with `tools` cannot be granted. Without `tools`,
+  `ctx:call` runs the agent's own tools and rejects the running tool.
 
 ## Agents
 

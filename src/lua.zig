@@ -191,11 +191,12 @@ const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "cwd", .ty = LuaType.string, .desc = "Working directory for tool file operations." },
     .{ .name = "agent_id", .ty = AgentIdDef },
     .{ .name = "state", .ty = LuaType.table },
+    .{ .name = "tools", .ty = LuaType{ .raw = "string[]|nil" }, .optional = true, .desc = "Exposed names of the granted tools that resolved for this call, in grant order, first wins on a shared name. Nil when the tool has no grant list." },
     .{ .name = "set_status", .ty = LuaType{ .raw = "fun(self: BlitzCtx, msg: string)" }, .desc = "Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines." },
     .{ .name = "set_child_id", .ty = LuaType{ .raw = "fun(self: BlitzCtx, agent_id: integer)" } },
     .{ .name = "approve", .ty = LuaType{ .raw = "fun(self: BlitzCtx, description: string): integer, string|nil" } },
     .{ .name = "ask", .ty = LuaType{ .raw_refs = .{ .text = "fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil", .refs = &.{ AskRequestDef, AskAnswersOrNilDef } } }, .desc = std.fmt.comptimePrint("Ask the user up to {d} independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index.", .{r.permissions.MAX_QUESTIONS}) },
-    .{ .name = "call", .ty = LuaType{ .raw = "fun(self: BlitzCtx, name: string, args: table): string" }, .desc = "Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. Rejects nested codemode." },
+    .{ .name = "call", .ty = LuaType{ .raw = "fun(self: BlitzCtx, name: string, args: table): string" }, .desc = "Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. A tool without a grant list cannot call itself; one with a grant list can only call granted tools." },
     .{ .name = "batch", .ty = LuaType{ .raw = "fun(self: BlitzCtx, requests: table): string[]" }, .desc = "Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order. A failed item does not abort the batch." },
 } } };
 const CallDef = LuaType{ .table_def = .{ .name = "BlitzCall", .fields = &.{
@@ -379,6 +380,7 @@ const ToolDef = LuaType{ .table_def = .{ .name = "ToolDef", .fields = &.{
     .{ .name = "snippet", .ty = LuaType.string, .optional = true },
     .{ .name = "guidelines", .ty = LuaType.string, .optional = true },
     .{ .name = "requires_vision", .ty = LuaType.boolean, .optional = true, .desc = "only offer the tool to agents whose model has vision" },
+    .{ .name = "tools", .ty = ToolNamesDef, .optional = true, .desc = "Sealed grant list of tool ids and toolsets. The tool can run these through ctx:call and ctx:batch without the agent holding them, and nothing else. They are listed with their schemas in the tool description. Absent keeps the default: ctx:call and ctx:batch run the tools of the calling agent." },
     .{ .name = "func", .ty = LuaType{ .raw_refs = .{
         .text = "fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult",
         .refs = &.{ CtxDef, CallDef, ToolResultDef },
@@ -549,6 +551,7 @@ pub const Blitz = LuaType{
                                     .ok => |value| value orelse false,
                                     .err => false,
                                 };
+                                entry.nested_tools = try readToolGrants(state, def.idx, vm.luaArena(), entry.nameSlice());
 
                                 if (getStringField(state, def.idx, "schema", &entry.schema)) |len| {
                                     entry.schema_len = len;
@@ -2982,6 +2985,7 @@ const LuaToolEntry = struct {
     schema: [2048]u8 = undefined,
     schema_len: usize = 0,
     requires_vision: bool = false,
+    nested_tools: ?[]const []const u8 = null,
     func_ref: c_int = c.LUA_NOREF,
     state_ref: c_int = c.LUA_NOREF,
     L: ?*c.lua_State = null,
@@ -3427,6 +3431,29 @@ fn getStringField(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8, d
     return len;
 }
 
+fn readToolGrants(state: *c.lua_State, table_idx: c_int, alloc: Allocator, own_name: []const u8) !?[]const []const u8 {
+    _ = c.lua_getfield(state, table_idx, "tools");
+    defer c.lua_pop(state, 1);
+    if (c.lua_type(state, -1) == c.LUA_TNIL) return null;
+
+    var collected: std.ArrayList([]const u8) = .empty;
+    if (collectToolNames(state, -1, alloc, &collected, 0) != null) return error.InvalidToolGrants;
+
+    var grants: std.ArrayList([]const u8) = .empty;
+    next: for (collected.items) |name| {
+        if (name.len == 0) return error.EmptyToolGrant;
+        if (name.len > r.ContextFactory.MAX_TOOL_NAME_LEN) return error.ToolGrantNameTooLong;
+        if (!std.unicode.utf8ValidateSlice(name)) return error.InvalidToolGrantName;
+        if (std.mem.eql(u8, name, own_name)) return error.SelfToolGrant;
+        for (grants.items) |taken| {
+            if (std.mem.eql(u8, taken, name)) continue :next;
+        }
+        try grants.append(alloc, name);
+    }
+    if (grants.items.len > r.ContextFactory.MAX_AGENT_TOOLS) return error.TooManyToolGrants;
+    return grants.items;
+}
+
 fn findEntry(vm: *LuaVm, name: []const u8) ?*LuaToolEntry {
     for (vm.tool_entries.items) |*entry| {
         if (std.mem.eql(u8, entry.nameSlice(), name)) return entry;
@@ -3464,11 +3491,18 @@ fn pushEventPayload(L: *c.lua_State, event: r.events.AppEvent) c_int {
 
 // ── ToolContext bridge (passed as light userdata during tool calls) ──
 
+const GrantedTool = struct {
+    id: []const u8,
+    name: []const u8,
+    func: r.tools.context.ToolFn,
+};
+
 const CtxBridge = struct {
     cwd: []const u8,
     tool_ctx: ToolContext,
     tool_call: ToolCall,
     nested_count: usize = 0,
+    granted: ?[]const GrantedTool = null,
 };
 
 // ── LuaVm ───────────────────────────────────────────────────────────
@@ -3839,6 +3873,7 @@ pub const LuaVm = struct {
                     .prompt_snippet = if (entry.snippet_len > 0) entry.snippetSlice() else null,
                     .prompt_guidelines = if (entry.guidelines_len > 0) entry.guidelinesSlice() else null,
                     .requires_vision = entry.requires_vision,
+                    .nested_tools = entry.nested_tools,
                 },
                 .func = &luaToolTrampoline,
             };
@@ -5263,6 +5298,9 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
         .tool_ctx = ctx,
         .tool_call = call,
     };
+    if (entry.nested_tools) |grants| {
+        bridge.granted = snapshotGrants(vm.luaArena(), app_ptr.context_factory, grants, ctxVision(&bridge)) catch return failedResult(call, "oom");
+    }
     vm.owner = ctx.owner(call.id);
     pushCtxTable(L, &bridge, entry.state_ref);
     pushCallTable(vm.luaArena(), L, call);
@@ -5302,6 +5340,19 @@ fn luaToolTrampoline(ctx: ToolContext, call: ToolCall) ToolResult {
     const ret = interpretReturns(L, ctx, call);
     c.lua_pop(L, 1);
     return ret;
+}
+
+fn snapshotGrants(arena: Allocator, factory: *const r.ContextFactory, grants: []const []const u8, vision: bool) ![]const GrantedTool {
+    const tools = try factory.resolveGrants(arena, grants, vision);
+    const granted = try arena.alloc(GrantedTool, tools.len);
+    for (tools, granted) |tool, *slot| {
+        slot.* = .{
+            .id = try arena.dupe(u8, tool.key()),
+            .name = try arena.dupe(u8, tool.def.name),
+            .func = tool.func,
+        };
+    }
+    return granted;
 }
 
 fn interpretReturns(L: *c.lua_State, ctx: ToolContext, call: ToolCall) ToolResult {
@@ -5374,6 +5425,15 @@ fn pushCtxTable(L: *c.lua_State, bridge: *CtxBridge, state_ref: c_int) void {
     setFieldAny(L, -2, "vision", ctxVision(bridge));
 
     setFieldAny(L, -2, "agent_id", bridge.tool_ctx.base.self_id);
+
+    if (bridge.granted) |granted| {
+        c.lua_createtable(L, @intCast(granted.len), 0);
+        for (granted, 0..) |tool, i| {
+            _ = c.lua_pushlstring(L, tool.name.ptr, tool.name.len);
+            c.lua_rawseti(L, -2, @intCast(i + 1));
+        }
+        setFieldPushed(L, -2, "tools");
+    }
 
     _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, state_ref);
     setFieldPushed(L, -2, "state");
@@ -5453,36 +5513,48 @@ const NestedToolRun = struct {
 };
 
 fn prepareNestedRun(bridge: *CtxBridge, state: *c.lua_State, name: []const u8, args_idx: c_int) !?NestedToolRun {
-    if (std.mem.eql(u8, name, "codemode")) {
-        _ = c.luaL_error(state, "nested codemode is not allowed");
-        return null;
-    }
     const vm = fromState(state) orelse return error.NoLuaVm;
     const arena = vm.luaArena();
 
-    for (bridge.tool_ctx.agent().tools) |tool| {
-        if (!std.mem.eql(u8, tool.name, name)) continue;
-        if (tool.execute == null) break;
-        bridge.nested_count += 1;
-        const owner: r.tools.context.Owner = vm.owner orelse .{
-            .agent_id = bridge.tool_ctx.base.self_id,
-            .call_id = bridge.tool_call.id,
+    var tool: r.sdk.Tool = undefined;
+    if (bridge.granted) |granted| {
+        const match = for (granted) |entry| {
+            if (std.mem.eql(u8, entry.id, name) or std.mem.eql(u8, entry.name, name)) break entry;
+        } else {
+            _ = c.luaL_error(state, "tool '%s' is not granted to this tool", (try arena.dupeSentinel(u8, name, 0)).ptr);
+            return null;
         };
-        return .{
-            .tool = tool,
-            .owner = owner,
-            .call = .{
-                .id = try std.fmt.allocPrint(arena, "{s}/{d}", .{ bridge.tool_call.id, bridge.nested_count }),
-                .name = try arena.dupe(u8, name),
-                .input = luaToJsonAlloc(arena, state, args_idx) catch {
-                    _ = c.luaL_error(state, "nested tool args must be JSON-serializable");
-                    return null;
-                },
-            },
+        tool = try r.tools.context.nestedTool(match.name, match.func, bridge.tool_ctx.base, arena);
+    } else {
+        if (std.mem.eql(u8, name, bridge.tool_call.name)) {
+            _ = c.luaL_error(state, "a tool cannot call itself");
+            return null;
+        }
+        tool = for (bridge.tool_ctx.agent().tools) |candidate| {
+            if (std.mem.eql(u8, candidate.name, name) and candidate.execute != null) break candidate;
+        } else {
+            _ = c.luaL_error(state, "unknown tool");
+            return null;
         };
     }
-    _ = c.luaL_error(state, "unknown tool");
-    return null;
+
+    bridge.nested_count += 1;
+    const owner: r.tools.context.Owner = vm.owner orelse .{
+        .agent_id = bridge.tool_ctx.base.self_id,
+        .call_id = bridge.tool_call.id,
+    };
+    return .{
+        .tool = tool,
+        .owner = owner,
+        .call = .{
+            .id = try std.fmt.allocPrint(arena, "{s}/{d}", .{ bridge.tool_call.id, bridge.nested_count }),
+            .name = try arena.dupe(u8, tool.name),
+            .input = luaToJsonAlloc(arena, state, args_idx) catch {
+                _ = c.luaL_error(state, "nested tool args must be JSON-serializable");
+                return null;
+            },
+        },
+    };
 }
 
 fn runNestedTool(run: NestedToolRun, alloc: Allocator, io: std.Io) anyerror![]const u8 {

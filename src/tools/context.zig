@@ -96,6 +96,7 @@ pub const DefinitionMeta = struct {
     prompt_snippet: ?[]const u8 = null,
     prompt_guidelines: ?[]const u8 = null,
     requires_vision: bool = false,
+    nested_tools: ?[]const []const u8 = null,
 };
 
 pub const Definition = struct {
@@ -138,6 +139,12 @@ fn installInternal(agent: *agent_mod.Agent, base: BaseContext, definitions: []co
         };
     }
     if (live) try agent.setToolsLive(tools) else try agent.setTools(tools);
+}
+
+pub fn nestedTool(name: []const u8, func: ToolFn, base: BaseContext, alloc: std.mem.Allocator) !sdk.Tool {
+    const binding = try alloc.create(Binding);
+    binding.* = .{ .base = base, .execute = func };
+    return .{ .name = name, .execute = trampoline, .execute_ctx = binding };
 }
 
 pub fn runWithOwner(tool: sdk.Tool, alloc: std.mem.Allocator, io: std.Io, call: sdk.ToolCall, owner: Owner) !sdk.ToolOutput {

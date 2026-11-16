@@ -650,6 +650,7 @@ pub fn add(self: *Self, tool: r.tools.Tool, flags: ToolFlags) !void {
     owned.def.parameters_schema = try alloc.dupe(u8, tool.def.parameters_schema);
     owned.def.prompt_snippet = if (tool.def.prompt_snippet) |text| try alloc.dupe(u8, text) else null;
     owned.def.prompt_guidelines = if (tool.def.prompt_guidelines) |text| try alloc.dupe(u8, text) else null;
+    owned.def.nested_tools = if (tool.def.nested_tools) |grants| try dupNameList(alloc, grants) else null;
     try self.loaded_tools.append(self.alloc, .{ .tool = owned, .flags = flags });
 }
 
@@ -718,7 +719,56 @@ fn refreshAgentToolsInternal(self: *const Self, agent: *r.agent.Agent, base: r.t
         definitions[count] = tool;
         count += 1;
     }
+    var catalogue_arena = std.heap.ArenaAllocator.init(self.alloc);
+    defer catalogue_arena.deinit();
+    for (definitions[0..count]) |*definition| {
+        const grants = definition.def.nested_tools orelse continue;
+        definition.def.description = try self.describeGrants(catalogue_arena.allocator(), definition.def.description, grants, definitions[0..count], vision);
+    }
     if (live) try r.tools.context.installLive(agent, base, definitions[0..count]) else try r.tools.context.install(agent, base, definitions[0..count]);
+}
+
+/// Matches the pool id first, then the exposed name. First entry wins.
+pub fn resolveLoaded(self: *const Self, name: []const u8) ?r.tools.Tool {
+    if (self.findLoaded(name)) |tool| return tool;
+    for (self.loaded_tools.items) |entry| {
+        if (std.mem.eql(u8, entry.tool.def.name, name)) return entry.tool;
+    }
+    return null;
+}
+
+/// The tools a grant list resolves to right now: one per exposed name, first
+/// wins. Unresolved grants, tools that hold grants themselves, and tools that
+/// need vision the caller lacks are dropped.
+pub fn resolveGrants(self: *const Self, alloc: std.mem.Allocator, grants: []const []const u8, vision: bool) ![]r.tools.Tool {
+    var resolved: std.ArrayList(r.tools.Tool) = .empty;
+    grants: for (grants) |grant| {
+        const tool = self.resolveLoaded(grant) orelse continue;
+        if (tool.def.nested_tools != null) continue;
+        if (tool.def.requires_vision and !vision) continue;
+        for (resolved.items) |taken| {
+            if (std.mem.eql(u8, taken.def.name, tool.def.name)) continue :grants;
+        }
+        try resolved.append(alloc, tool);
+    }
+    return resolved.items;
+}
+
+fn describeGrants(self: *const Self, alloc: std.mem.Allocator, base: []const u8, grants: []const []const u8, held: []const r.tools.Tool, vision: bool) ![]const u8 {
+    const tools = try self.resolveGrants(alloc, grants, vision);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    try out.writer.print("{s}\n\nCallable tools:", .{base});
+    for (tools) |tool| {
+        const already_held = for (held) |own| {
+            if (std.mem.eql(u8, own.def.name, tool.def.name)) break true;
+        } else false;
+        if (already_held) {
+            try out.writer.print("\n- {s}: same arguments as the tool of the same name", .{tool.def.name});
+        } else {
+            try out.writer.print("\n- {s}: {s}\n  schema: {s}", .{ tool.def.name, tool.def.description, tool.def.parameters_schema });
+        }
+    }
+    return out.written();
 }
 
 fn findLoaded(self: *const Self, name: []const u8) ?r.tools.Tool {

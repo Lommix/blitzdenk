@@ -574,13 +574,15 @@
 ---@field cwd string
 ---@field agent_id integer
 ---@field state table
+---Exposed names of the granted tools that resolved for this call, in grant order, first wins on a shared name. Nil when the tool has no grant list.
+---@field tools? string[]|nil
 ---Set the tool status text. May contain ANSI SGR escape codes for styling, and newlines for multiple lines.
 ---@field set_status fun(self: BlitzCtx, msg: string)
 ---@field set_child_id fun(self: BlitzCtx, agent_id: integer)
 ---@field approve fun(self: BlitzCtx, description: string): integer, string|nil
 ---Ask the user up to 8 independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index.
 ---@field ask fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil
----Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. Rejects nested codemode.
+---Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. A tool without a grant list cannot call itself; one with a grant list can only call granted tools.
 ---@field call fun(self: BlitzCtx, name: string, args: table): string
 ---Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order. A failed item does not abort the batch.
 ---@field batch fun(self: BlitzCtx, requests: table): string[]
@@ -606,6 +608,8 @@
 ---@field guidelines? string
 ---only offer the tool to agents whose model has vision
 ---@field requires_vision? boolean
+---Sealed grant list of tool ids and toolsets. The tool can run these through ctx:call and ctx:batch without the agent holding them, and nothing else. They are listed with their schemas in the tool description. Absent keeps the default: ctx:call and ctx:batch run the tools of the calling agent.
+---@field tools? (string|string[])[]
 ---@field func fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult
 
 ---@class BlitzAgentRow
