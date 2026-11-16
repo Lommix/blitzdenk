@@ -17,6 +17,7 @@ pub fn enter(init: std.process.Init) !void {
     _ = std.posix.prctl(.SET_PDEATHSIG, .{ @backingInt(std.posix.SIG.KILL), 0, 0, 0 }) catch std.process.exit(126);
     if (std.posix.getppid() != parent) std.process.exit(126);
     if (std.c.setsid() < 0) std.process.exit(126);
+    if (std.c.isatty(0) == 1) _ = std.os.linux.ioctl(0, std.os.linux.T.IOCSCTTY, 0);
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     if (argv.len < 4) std.process.exit(126);
     const err = std.process.replace(init.io, .{ .argv = argv[3..], .expand_arg0 = .expand });

@@ -3,6 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 pub const shim = @import("exec_shim.zig");
+pub const vt = @import("vt.zig");
 
 pub const MAX_OUTPUT = 1024 * 1024;
 const TRIM_SLACK = 262144;
@@ -11,6 +12,7 @@ const SLOT_COUNT = 64;
 const TERMINATE_GRACE_MS = 500;
 const DRAIN_TIMEOUT_MS = 2000;
 const PROCESS_POLL_MS = 10;
+const PTY_READ_CHUNK = 16 * 1024;
 
 pub const CmdSlot = struct {
     in_use: std.atomic.Value(bool) = .init(false),
@@ -30,14 +32,15 @@ pub const CmdSlot = struct {
     stderr_truncated: bool = false,
     cap: usize = MAX_OUTPUT,
     drained: usize = 0,
-    /// Set for `RunOpts.background` runs. Then `stdout` holds the merged
-    /// output and `mu` guards it while the worker appends.
+    /// Set for `RunOpts.background` runs. The child gets a pty and `screen`
+    /// renders its output; `mu` guards the screen while the worker feeds it.
     background: bool = false,
+    screen: ?*vt.Screen = null,
+    /// Pty master of a running background run, or -1. Guarded by `mu`.
+    pty_master: c_int = -1,
     /// Set for `RunOpts.keep_head` runs.
     keep_head: bool = false,
     mu: std.Io.Mutex = .init,
-    /// Lines trimmed from the front of a background run's `stdout`.
-    dropped_lines: usize = 0,
 };
 
 pub const CmdResult = struct {
@@ -53,6 +56,54 @@ pub const CmdResult = struct {
     stdout_truncated: bool = false,
     stderr_truncated: bool = false,
     dropped_lines: usize = 0,
+};
+
+const Pty = struct {
+    const PollFd = extern struct { fd: c_int, events: c_short, revents: c_short };
+    const POLLIN: c_short = 0x1;
+    const F_SETFD: c_int = 2;
+    const F_GETFL: c_int = 3;
+    const F_SETFL: c_int = 4;
+    const FD_CLOEXEC: c_int = 1;
+    const O_NONBLOCK: c_int = if (builtin.os.tag == .linux) 0o4000 else 0x4;
+
+    const c = struct {
+        extern "c" fn openpty(master: *c_int, slave: *c_int, name: ?[*]u8, termios: ?*const anyopaque, size: ?*const std.posix.winsize) c_int;
+        extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
+        extern "c" fn poll(fds: *PollFd, count: c_ulong, timeout: c_int) c_int;
+        extern "c" fn read(fd: c_int, buf: [*]u8, len: usize) isize;
+        extern "c" fn write(fd: c_int, buf: [*]const u8, len: usize) isize;
+        extern "c" fn close(fd: c_int) c_int;
+    };
+
+    master: c_int,
+    slave: c_int,
+
+    fn open(cols: usize, rows: usize) !Pty {
+        var master: c_int = undefined;
+        var slave: c_int = undefined;
+        const size: std.posix.winsize = .{ .row = @intCast(rows), .col = @intCast(cols), .xpixel = 0, .ypixel = 0 };
+        if (c.openpty(&master, &slave, null, null, &size) != 0) return error.OpenPtyFailed;
+        _ = c.fcntl(master, F_SETFD, FD_CLOEXEC);
+        _ = c.fcntl(slave, F_SETFD, FD_CLOEXEC);
+        _ = c.fcntl(master, F_SETFL, c.fcntl(master, F_GETFL) | O_NONBLOCK);
+        return .{ .master = master, .slave = slave };
+    }
+
+    fn slaveFile(self: Pty) std.Io.File {
+        return .{ .handle = self.slave, .flags = .{ .nonblocking = false } };
+    }
+
+    fn closeSlave(self: *Pty) void {
+        if (self.slave < 0) return;
+        _ = c.close(self.slave);
+        self.slave = -1;
+    }
+
+    fn closeAll(self: *Pty) void {
+        self.closeSlave();
+        _ = c.close(self.master);
+    }
 };
 
 pub const CmdPool = struct {
@@ -74,6 +125,7 @@ pub const CmdPool = struct {
             slot.future.cancel(self.io) catch {};
             slot.stdout.deinit(self.alloc);
             slot.stderr.deinit(self.alloc);
+            self.destroyScreen(slot);
         }
     }
 
@@ -88,9 +140,10 @@ pub const CmdPool = struct {
         /// Variables set on top of the inherited (or scrubbed) environment.
         extra_env: []const [2][]const u8 = &.{},
         max_output: ?usize = null,
-        /// Long-lived run: stdout and stderr merge into `stdout` in arrival
-        /// order, trimmed to `max_output` at line starts, with no drain
-        /// ceiling. Read it while running with `lockOutput`.
+        /// Long-lived run on a pty: stdout and stderr merge, and a terminal
+        /// emulator renders them. Scrollback is trimmed to `max_output` at line
+        /// starts, with no drain ceiling. Read it while running with
+        /// `readOutput`.
         background: bool = false,
         /// Keep the first `max_output` stdout bytes instead of the last, and
         /// stop the child once they are captured.
@@ -116,11 +169,13 @@ pub const CmdPool = struct {
         slot.drained = 0;
         slot.background = opts.background;
         slot.keep_head = opts.keep_head;
-        slot.dropped_lines = 0;
         errdefer {
             slot.owned.store(false, .release);
             slot.in_use.store(false, .release);
         }
+
+        slot.screen = if (opts.background) try self.createScreen(slot.cap) else null;
+        errdefer self.destroyScreen(slot);
 
         var final_argv: ?[]const []const u8 = try self.dupeArgv(opts.argv);
         errdefer if (final_argv) |a| self.freeArgv(a);
@@ -193,6 +248,7 @@ pub const CmdPool = struct {
         slot.stderr.deinit(self.alloc);
         slot.stdout = .empty;
         slot.stderr = .empty;
+        self.destroyScreen(slot);
         slot.in_use.store(false, .release);
     }
 
@@ -200,22 +256,20 @@ pub const CmdPool = struct {
         self.release(handle);
     }
 
-    pub const OutputView = struct {
-        slot: *CmdSlot,
-        io: std.Io,
-        text: []const u8,
+    /// Owned copy of a rendered terminal. Free `text` with the pool allocator.
+    pub const Output = struct {
+        text: []u8,
         dropped_lines: usize,
-
-        pub fn unlock(self: OutputView) void {
-            self.slot.mu.unlock(self.io);
-        }
     };
 
-    /// Lock a background run's merged output for reading. Call `unlock`.
-    pub fn lockOutput(self: *Self, handle: Handle) OutputView {
+    /// Render a background run's terminal: scrollback plus the visible screen.
+    pub fn readOutput(self: *Self, handle: Handle, alloc: std.mem.Allocator) !Output {
         const slot = &self.slots[@backingInt(handle)];
+        const screen = slot.screen orelse return error.NotBackground;
         slot.mu.lockUncancelable(self.io);
-        return .{ .slot = slot, .io = self.io, .text = slot.stdout.items, .dropped_lines = slot.dropped_lines };
+        defer slot.mu.unlock(self.io);
+        const snap = try screen.snapshot(alloc);
+        return .{ .text = snap.text, .dropped_lines = snap.dropped_lines };
     }
 
     /// Cancels a running worker and returns its partial output. Buffers are
@@ -227,17 +281,24 @@ pub const CmdPool = struct {
         errdefer self.release(handle);
         if (timed_out) slot.future.cancel(self.io) catch {};
         slot.future.await(self.io) catch {};
-        if (!slot.background) trimToTail(&slot.stdout, slot.cap, slot.cap, &slot.stdout_truncated);
-        trimToTail(&slot.stderr, slot.cap, slot.cap, &slot.stderr_truncated);
-        const out = try self.alloc.dupe(u8, slot.stdout.items);
+        var dropped_lines: usize = 0;
+        const out = if (slot.screen) |screen| blk: {
+            const snap = try screen.snapshot(self.alloc);
+            dropped_lines = snap.dropped_lines;
+            slot.stdout_truncated = dropped_lines > 0;
+            break :blk snap.text;
+        } else blk: {
+            trimToTail(&slot.stdout, slot.cap, slot.cap, &slot.stdout_truncated);
+            break :blk try self.alloc.dupe(u8, slot.stdout.items);
+        };
         errdefer self.alloc.free(out);
+        trimToTail(&slot.stderr, slot.cap, slot.cap, &slot.stderr_truncated);
         const err = try self.alloc.dupe(u8, slot.stderr.items);
         const ty = if (timed_out) CmdResult.ResType.timeout else slot.result_ty;
         const exit_code = slot.exit_code;
         const signal = slot.signal;
         const stdout_truncated = slot.stdout_truncated;
         const stderr_truncated = slot.stderr_truncated;
-        const dropped_lines = slot.dropped_lines;
         self.release(handle);
         return .{ .stdout = out, .stderr = err, .ty = ty, .exit_code = exit_code, .signal = signal, .stdout_truncated = stdout_truncated, .stderr_truncated = stderr_truncated, .dropped_lines = dropped_lines };
     }
@@ -260,12 +321,21 @@ pub const CmdPool = struct {
         };
         defer slot.done.store(true, .release);
 
+        var pty: ?Pty = if (slot.background) Pty.open(slot.screen.?.cols, slot.screen.?.rows) catch {
+            slot.result_ty = .failed;
+            return;
+        } else null;
+        defer if (pty) |*p| self.closePty(slot, p);
+        if (pty) |p| self.setPtyMaster(slot, p.master);
+
+        const output_io: std.process.SpawnOptions.StdIo = if (pty) |p| .{ .file = p.slaveFile() } else .pipe;
+        const input_io: std.process.SpawnOptions.StdIo = if (pty != null) output_io else .ignore;
         var child = std.process.spawn(self.io, .{
             .argv = argv,
             .cwd = if (cwd) |c| .{ .path = c } else .inherit,
-            .stdin = .ignore,
-            .stdout = .pipe,
-            .stderr = .pipe,
+            .stdin = input_io,
+            .stdout = output_io,
+            .stderr = output_io,
             .environ_map = if (env_box) |b| b else null,
             .pgid = if (kill_process_group and builtin.os.tag != .linux) 0 else null,
         }) catch {
@@ -274,12 +344,13 @@ pub const CmdPool = struct {
             slot.signal = null;
             return;
         };
+        if (pty) |*p| p.closeSlave();
         defer if (child.id) |pid| {
             self.terminateProcess(pid, kill_process_group);
             child.kill(self.io);
         };
 
-        const term = self.collectOutput(slot, &child, kill_process_group) catch |err| switch (err) {
+        const term = (if (pty) |*p| self.collectPty(slot, &child, p, kill_process_group) else self.collectOutput(slot, &child, kill_process_group)) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => {
                 slot.result_ty = .failed;
@@ -305,7 +376,8 @@ pub const CmdPool = struct {
         }
     }
 
-    const CollectError = std.Io.File.MultiReader.UnendingError ||
+    const CollectError = std.Io.Cancelable ||
+        std.Io.File.MultiReader.UnendingError ||
         std.Io.Batch.AwaitConcurrentError ||
         std.process.Child.WaitError ||
         std.mem.Allocator.Error;
@@ -318,6 +390,106 @@ pub const CmdPool = struct {
     ) CollectError!std.process.Child.Term {
         try self.drainOutput(slot, child, kill_process_group);
         return child.wait(self.io);
+    }
+
+    fn collectPty(
+        self: *Self,
+        slot: *CmdSlot,
+        child: *std.process.Child,
+        pty: *Pty,
+        kill_process_group: bool,
+    ) CollectError!std.process.Child.Term {
+        try self.drainPty(slot, child, pty, kill_process_group);
+        return child.wait(self.io);
+    }
+
+    fn drainPty(self: *Self, slot: *CmdSlot, child: *std.process.Child, pty: *Pty, kill_process_group: bool) CollectError!void {
+        var chunk: [PTY_READ_CHUNK]u8 = undefined;
+        var drain_start: ?i64 = null;
+        while (true) {
+            try self.io.checkCancel();
+            if (drain_start == null and leaderExited(child.id.?)) drain_start = nowMs(self.io);
+            if (drain_start) |start| if (nowMs(self.io) - start >= DRAIN_TIMEOUT_MS) {
+                self.terminateProcess(child.id.?, kill_process_group);
+                while (self.pumpPty(slot, pty, &chunk, 0) == .data) {}
+                return;
+            };
+            if (self.pumpPty(slot, pty, &chunk, PROCESS_POLL_MS) == .closed) return;
+        }
+    }
+
+    const Pump = enum { idle, data, closed };
+
+    /// Move what the pty master has ready into the screen, then answer any
+    /// terminal queries the child sent.
+    fn pumpPty(self: *Self, slot: *CmdSlot, pty: *Pty, chunk: []u8, timeout_ms: c_int) Pump {
+        var poll_fd: Pty.PollFd = .{ .fd = pty.master, .events = Pty.POLLIN, .revents = 0 };
+        if (Pty.c.poll(@ptrCast(&poll_fd), 1, timeout_ms) <= 0) return .idle;
+        const count = Pty.c.read(pty.master, chunk.ptr, chunk.len);
+        if (count == 0) return .closed;
+        if (count < 0) return if (std.posix.errno(count) == .INTR or std.posix.errno(count) == .AGAIN) .idle else .closed;
+
+        const screen = slot.screen.?;
+        var reply_buf: [vt.MAX_REPLY]u8 = undefined;
+        var reply_len: usize = 0;
+        {
+            slot.mu.lockUncancelable(self.io);
+            defer slot.mu.unlock(self.io);
+            screen.feed(chunk[0..@intCast(count)]);
+            reply_len = screen.replies().len;
+            @memcpy(reply_buf[0..reply_len], screen.replies());
+            screen.clearReplies();
+        }
+        if (reply_len > 0) _ = Pty.c.write(pty.master, &reply_buf, reply_len);
+        return .data;
+    }
+
+    fn setPtyMaster(self: *Self, slot: *CmdSlot, master: c_int) void {
+        slot.mu.lockUncancelable(self.io);
+        defer slot.mu.unlock(self.io);
+        slot.pty_master = master;
+    }
+
+    fn closePty(self: *Self, slot: *CmdSlot, pty: *Pty) void {
+        self.setPtyMaster(slot, -1);
+        pty.closeAll();
+    }
+
+    /// Send keystrokes to a running background run. Returns how many bytes the
+    /// terminal accepted; fewer than `bytes.len` means its input buffer is full.
+    pub fn writeInput(self: *Self, handle: Handle, bytes: []const u8) !usize {
+        const slot = &self.slots[@backingInt(handle)];
+        slot.mu.lockUncancelable(self.io);
+        defer slot.mu.unlock(self.io);
+        if (slot.pty_master < 0) return error.NotRunning;
+        var written: usize = 0;
+        while (written < bytes.len) {
+            const count = Pty.c.write(slot.pty_master, bytes[written..].ptr, bytes.len - written);
+            if (count > 0) {
+                written += @intCast(count);
+                continue;
+            }
+            switch (std.posix.errno(count)) {
+                .INTR => continue,
+                .AGAIN => break,
+                else => return error.WriteFailed,
+            }
+        }
+        return written;
+    }
+
+    fn createScreen(self: *Self, history_cap: usize) !*vt.Screen {
+        const screen = try self.alloc.create(vt.Screen);
+        errdefer self.alloc.destroy(screen);
+        screen.* = try vt.Screen.init(self.alloc, vt.DEFAULT_COLS, vt.DEFAULT_ROWS, history_cap);
+        return screen;
+    }
+
+    fn destroyScreen(self: *Self, slot: *CmdSlot) void {
+        const screen = slot.screen orelse return;
+        screen.deinit();
+        self.alloc.destroy(screen);
+        slot.screen = null;
     }
 
     fn drainOutput(self: *Self, slot: *CmdSlot, child: *std.process.Child, kill_process_group: bool) CollectError!void {
@@ -346,7 +518,7 @@ pub const CmdPool = struct {
             try self.appendBuffered(slot, stdout_reader, stderr_reader);
             const ceiling = @max(MAX_DRAIN_BYTES, slot.cap *| 2);
             const head_full = slot.keep_head and slot.stdout_truncated;
-            if (!slot.background and !ceiling_hit and (slot.drained > ceiling or head_full)) {
+            if (!ceiling_hit and (slot.drained > ceiling or head_full)) {
                 ceiling_hit = true;
                 self.terminateProcess(child.id.?, kill_process_group);
             }
@@ -390,15 +562,6 @@ pub const CmdPool = struct {
         stdout_reader.toss(out.len);
         stderr_reader.toss(err.len);
 
-        if (slot.background) {
-            slot.mu.lockUncancelable(self.io);
-            defer slot.mu.unlock(self.io);
-            try slot.stdout.appendSlice(self.alloc, out);
-            try slot.stdout.appendSlice(self.alloc, err);
-            trimToLines(slot);
-            return;
-        }
-
         if (slot.keep_head) {
             const room = slot.cap -| slot.stdout.items.len;
             try slot.stdout.appendSlice(self.alloc, out[0..@min(out.len, room)]);
@@ -411,19 +574,6 @@ pub const CmdPool = struct {
         slot.drained += out.len + err.len;
 
         trimToTail(&slot.stderr, slot.cap, slot.cap + TRIM_SLACK, &slot.stderr_truncated);
-    }
-
-    /// Keep about `slot.cap` bytes of a background run, cut at a line start.
-    fn trimToLines(slot: *CmdSlot) void {
-        const items = slot.stdout.items;
-        if (items.len <= slot.cap + TRIM_SLACK) return;
-        var drop = items.len - slot.cap;
-        if (std.mem.indexOfScalarPos(u8, items, drop, '\n')) |nl| drop = nl + 1;
-        slot.dropped_lines += std.mem.count(u8, items[0..drop], "\n");
-        const n = items.len - drop;
-        std.mem.copyForwards(u8, items[0..n], items[drop..]);
-        slot.stdout.items.len = n;
-        slot.stdout_truncated = true;
     }
 
     fn trimToTail(list: *std.ArrayList(u8), keep: usize, threshold: usize, truncated: *bool) void {

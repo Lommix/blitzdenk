@@ -86,7 +86,7 @@ read the live agent.
 local tools = require("tools")
 local web = { tools.web_search, tools.web_fetch }  -- custom toolset
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
-    blitz.toolsets.BASH_BACKGROUND, -- bash + read_job + kill_job
+    blitz.toolsets.BASH_BACKGROUND, -- bash + read_job + write_job + kill_job
     blitz.tools.READ, blitz.tools.EDIT,
     web,
 })

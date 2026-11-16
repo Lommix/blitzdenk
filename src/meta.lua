@@ -353,6 +353,8 @@
 ---@field KILL_JOB string
 ---read background bash job output
 ---@field READ_JOB string
+---send keystrokes to a background bash job
+---@field WRITE_JOB string
 ---reading text files and images
 ---@field READ string
 ---write new files
@@ -373,7 +375,7 @@
 ---@field LS string
 
 ---@class BlitzToolsetDef
----bash with run_in_background, plus read_job and kill_job
+---bash with run_in_background, plus read_job, write_job and kill_job
 ---@field BASH_BACKGROUND string[]
 ---read only search: grep, find and ls
 ---@field READONLY string[]

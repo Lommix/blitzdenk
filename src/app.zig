@@ -1095,7 +1095,7 @@ pub const App = struct {
         try self.jobs.tick(self.exec_pool, self, jobOwnerAlive, &finished);
         for (finished.items) |done| {
             const agent = self.registry.get(done.owner) orelse continue;
-            const notice = try r.tools.bash.formatJobNotice(self.gpa, done);
+            const notice = try r.tools.bash.formatJobNotice(self.io, self.gpa, done);
             defer self.gpa.free(notice);
             try self.remindAndWake(done.owner, agent, notice);
         }

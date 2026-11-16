@@ -1,6 +1,6 @@
 //! Bash tool definitions and synchronous and background runners. Also owns the
-//! `read_job` and `kill_job` tools, background job notices, and ANSI stripping
-//! over captured output.
+//! `read_job`, `write_job` and `kill_job` tools, background job notices, and ANSI stripping
+//! over foreground output.
 
 const r = @import("root.zig");
 const std = @import("std");
@@ -14,7 +14,7 @@ pub const BashTool = r.Tool{ .def = bashDef(false), .func = &runSync };
 pub const BashBgTool = r.Tool{ .id = "bash_bg", .def = bashDef(true), .func = &runBg };
 
 /// Tool ids of the background bash set, exposed to Lua as `blitz.toolsets`.
-pub const SET_BASH_BACKGROUND = [_][]const u8{ BashBgTool.id.?, ReadJobTool.def.name, KillJobTool.def.name };
+pub const SET_BASH_BACKGROUND = [_][]const u8{ BashBgTool.id.?, ReadJobTool.def.name, KillJobTool.def.name, WriteJobTool.def.name };
 
 fn bashDef(comptime background: bool) r.context.DefinitionMeta {
     const description =
@@ -32,7 +32,7 @@ fn bashDef(comptime background: bool) r.context.DefinitionMeta {
         \\Processes left running with `&` are killed when the command returns.
     ;
     const background_description =
-        \\ For servers, watchers, and long builds use run_in_background: it returns a job id at once, and you get a reminder when the job exits. Do not poll or sleep while waiting for it. Read its merged stdout and stderr with read_job; some programs buffer output when it is not a terminal (use PYTHONUNBUFFERED=1 or `stdbuf -oL`). Stop a job with kill_job.
+        \\ For servers, watchers, and long builds use run_in_background: it returns a job id at once, and you get a reminder when the job exits. Do not poll or sleep while waiting for it. The job runs on a terminal (TERM=xterm-256color, 200x50) and read_job shows what that terminal displays, so progress bars and full-screen programs show their current frame. Its stdin is the terminal: answer prompts and drive interactive programs with write_job. Stop a job with kill_job.
     ;
     const schema_head =
         \\{"type": "object", "properties": {
@@ -183,30 +183,31 @@ fn writeJobState(alloc: std.mem.Allocator, body: *std.ArrayList(u8), exit_code: 
     }
 }
 
-fn appendClean(alloc: std.mem.Allocator, body: *std.ArrayList(u8), text: []const u8) !void {
-    const clean = try alloc.alloc(u8, text.len);
-    defer alloc.free(clean);
-    try body.appendSlice(alloc, stripAnsi(text, clean));
-}
-
 /// Reminder text for a background job that exited.
-pub fn formatJobNotice(alloc: std.mem.Allocator, done: r.r.jobs.Finished) ![]const u8 {
+pub fn formatJobNotice(io: std.Io, alloc: std.mem.Allocator, done: r.r.jobs.Finished) ![]const u8 {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(alloc);
+    var spill_tag_buf: [32]u8 = undefined;
 
     try body.print(alloc, "Background job {d} ", .{done.id});
     try writeJobState(alloc, &body, done.exit_code, done.signal);
     const command = done.command[0..@min(done.command.len, MAX_JOB_COMMAND_BYTES)];
     const ellipsis = if (command.len < done.command.len) "..." else "";
     try body.print(alloc, " after {d}s: `{s}{s}`. Use read_job for more output.\n", .{ @divTrunc(done.elapsed_ms, std.time.ms_per_s), command, ellipsis });
-    try appendClean(alloc, &body, done.tail);
+    const capped_tail = r.capOutput(io, alloc, spillTag(&spill_tag_buf, done.id), done.tail);
+    defer if (capped_tail.ptr != done.tail.ptr) alloc.free(capped_tail);
+    try body.appendSlice(alloc, capped_tail);
     return alloc.dupe(u8, body.items);
+}
+
+fn spillTag(buf: []u8, job_id: u32) []const u8 {
+    return std.fmt.bufPrint(buf, "job-{d}", .{job_id}) catch "job";
 }
 
 pub const ReadJobTool = r.Tool{
     .def = .{
         .name = "read_job",
-        .description = "Read the merged stdout and stderr of a background bash job, running or exited. Output includes line numbers counted from the job start. Without offset, returns the last `limit` lines. The oldest lines are dropped once a job holds more than " ++ std.fmt.comptimePrint("{d}MB", .{r.r.jobs.LOG_CAP / (1024 * 1024)}) ++ ".",
+        .description = "Read the terminal screen of a background bash job, running or exited: scrollback followed by the visible rows, with stdout and stderr merged. Cleared screens and carriage-return redraws show only their current state. Output includes line numbers counted from the job start. Without offset, returns the last `limit` lines. The oldest lines are dropped once a job holds more than " ++ std.fmt.comptimePrint("{d}MB", .{r.r.jobs.LOG_CAP / (1024 * 1024)}) ++ ".",
         .prompt_snippet = "Read background bash job output",
         .parameters_schema =
         \\{"type": "object", "properties": {
@@ -225,21 +226,122 @@ fn readJob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     if (args.offset == 0 or args.limit == 0) return r.errResult(call, "invalid arguments: offset and limit start at 1");
     const limit = args.limit orelse DEFAULT_JOB_READ_LINES;
 
-    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
     r.setToolStatusPrint(ctx, call, "read job {d}", .{args.job_id});
-    const page = (app.jobs.read(ctx.base.exec_pool, ctx.alloc, args.job_id, args.offset, limit) catch
-        return r.errResult(call, "oom")) orelse
-        return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "no job {d}", .{args.job_id}) catch "no such job");
+    var body: std.ArrayList(u8) = .empty;
+    appendJobPage(ctx, &body, args.job_id, args.offset, limit) catch |err| switch (err) {
+        error.NoSuchJob => return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "no job {d}", .{args.job_id}) catch "no such job"),
+        else => return r.errResult(call, "could not read the job"),
+    };
+    return r.okResult(call, r.capOutput(ctx.io, ctx.alloc, call.id, body.items));
+}
+
+fn appendJobPage(ctx: r.ToolContext, body: *std.ArrayList(u8), job_id: u32, offset: ?usize, limit: usize) !void {
+    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    const page = (try app.jobs.read(ctx.base.exec_pool, ctx.alloc, job_id, offset, limit)) orelse return error.NoSuchJob;
+    try body.print(ctx.alloc, "[job {d} ", .{job_id});
+    switch (page.state) {
+        .running => try body.appendSlice(ctx.alloc, "running"),
+        .exited => |e| try writeJobState(ctx.alloc, body, e.exit_code, e.signal),
+    }
+    try body.appendSlice(ctx.alloc, "]\n");
+    try body.appendSlice(ctx.alloc, page.text);
+}
+
+const WRITE_JOB_SETTLE_MS = 250;
+const WRITE_JOB_ECHO_LINES = 50;
+
+pub const WriteJobTool = r.Tool{
+    .def = .{
+        .name = "write_job",
+        .description = "Type into the terminal of a running background bash job, then return the screen as read_job would. The input is sent as keystrokes after decoding the escapes \\r, \\n, \\t, \\e, \\xHH, \\uXXXX and \\\\ (a literal backslash): use \\r for Enter, \\u0003 for Ctrl-C, \\u0004 for Ctrl-D, \\u001b for Escape and \\u001b[A / \\u001b[B for the arrow keys. Output that arrives after a short wait needs another read_job.",
+        .prompt_snippet = "Send keystrokes to a background bash job",
+        .parameters_schema =
+        \\{"type": "object", "properties": {
+        \\  "job_id": {"type": "integer", "description": "Job id returned by bash"},
+        \\  "input": {"type": "string", "description": "Keystrokes to send, without any added newline"}
+        \\}, "required": ["job_id", "input"]}
+        ,
+    },
+    .func = &writeJob,
+};
+
+fn writeJob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
+    const Args = struct { job_id: u32, input: []const u8 };
+    const args = r.parseArgs(Args, ctx, call) orelse return r.errResult(call, "invalid arguments: \"job_id\" and \"input\" are required");
+    if (args.input.len == 0) return r.errResult(call, "invalid arguments: \"input\" is empty");
+    const keystrokes = decodeKeystrokes(ctx.alloc, args.input) catch return r.errResult(call, "oom");
+
+    const app: *r.r.app.App = @ptrCast(@alignCast(ctx.base.display.ctx.?));
+    r.setToolStatusPrint(ctx, call, "write job {d}", .{args.job_id});
+    const sent = app.jobs.write(ctx.base.exec_pool, args.job_id, keystrokes) catch
+        return r.errResult(call, "could not write to the job terminal");
+    const written = switch (sent) {
+        .not_found => return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "no job {d}", .{args.job_id}) catch "no such job"),
+        .exited => return r.errResult(call, std.fmt.allocPrint(ctx.alloc, "job {d} is no longer running", .{args.job_id}) catch "job is not running"),
+        .written => |count| count,
+    };
+
+    std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(WRITE_JOB_SETTLE_MS), .real) catch return r.errResult(call, "canceled");
 
     var body: std.ArrayList(u8) = .empty;
-    body.print(ctx.alloc, "[job {d} ", .{args.job_id}) catch return r.errResult(call, "oom");
-    switch (page.state) {
-        .running => body.appendSlice(ctx.alloc, "running") catch return r.errResult(call, "oom"),
-        .exited => |e| writeJobState(ctx.alloc, &body, e.exit_code, e.signal) catch return r.errResult(call, "oom"),
+    if (written < keystrokes.len) {
+        body.print(ctx.alloc, "Only {d} of {d} bytes were accepted: the terminal input buffer is full.\n", .{ written, keystrokes.len }) catch return r.errResult(call, "oom");
+    } else {
+        body.print(ctx.alloc, "Sent {d} bytes to job {d}.\n", .{ written, args.job_id }) catch return r.errResult(call, "oom");
     }
-    body.appendSlice(ctx.alloc, "]\n") catch return r.errResult(call, "oom");
-    appendClean(ctx.alloc, &body, page.text) catch return r.errResult(call, "oom");
+    appendJobPage(ctx, &body, args.job_id, null, WRITE_JOB_ECHO_LINES) catch return r.errResult(call, "could not read the job");
     return r.okResult(call, r.capOutput(ctx.io, ctx.alloc, call.id, body.items));
+}
+
+fn decodeKeystrokes(alloc: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] != '\\' or i + 1 >= input.len) {
+            try out.append(alloc, input[i]);
+            i += 1;
+            continue;
+        }
+        const next = input[i + 1];
+        const simple: ?u8 = switch (next) {
+            'r' => '\r',
+            'n' => '\n',
+            't' => '\t',
+            'e' => 0x1b,
+            '\\' => '\\',
+            else => null,
+        };
+        if (simple) |byte| {
+            try out.append(alloc, byte);
+            i += 2;
+            continue;
+        }
+        const digits: usize = switch (next) {
+            'x' => 2,
+            'u' => 4,
+            else => 0,
+        };
+        const hex = if (digits > 0 and i + 2 + digits <= input.len) input[i + 2 .. i + 2 + digits] else "";
+        const code = if (hex.len > 0) std.fmt.parseInt(u21, hex, 16) catch null else null;
+        if (code) |point| {
+            if (next == 'x') {
+                try out.append(alloc, @intCast(point));
+            } else {
+                var encoded: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(point, &encoded) catch {
+                    try out.append(alloc, input[i]);
+                    i += 1;
+                    continue;
+                };
+                try out.appendSlice(alloc, encoded[0..len]);
+            }
+            i += 2 + digits;
+            continue;
+        }
+        try out.append(alloc, input[i]);
+        i += 1;
+    }
+    return out.items;
 }
 
 pub const KillJobTool = r.Tool{
@@ -268,7 +370,7 @@ fn killJob(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 
     var body: std.ArrayList(u8) = .empty;
     body.print(ctx.alloc, "Killed job {d}.\n", .{args.job_id}) catch return r.errResult(call, "oom");
-    appendClean(ctx.alloc, &body, killed.tail) catch return r.errResult(call, "oom");
+    body.appendSlice(ctx.alloc, killed.tail) catch return r.errResult(call, "oom");
     return r.okResult(call, body.items);
 }
 
@@ -449,16 +551,16 @@ test "formatBashResult strips ansi and renders result markers" {
     try std.testing.expectEqualStrings("x\n[timed out after 5000ms; retry with a larger timeout]", slow);
 }
 
-test "formatJobNotice reports the exit and a clean tail" {
+test "formatJobNotice reports the exit and the tail" {
     const alloc = std.testing.allocator;
-    const notice = try formatJobNotice(alloc, .{
+    const notice = try formatJobNotice(std.testing.io, alloc, .{
         .id = 4,
         .owner = .{ .index = 0, .generation = 0 },
         .command = "npm run dev",
         .exit_code = 1,
         .signal = null,
         .elapsed_ms = 41_500,
-        .tail = "[lines 1-1 of 1]\n     1\t\x1b[31mError\x1b[0m: boom\n",
+        .tail = "[lines 1-1 of 1]\n     1\tError: boom\n",
     });
     defer alloc.free(notice);
     try std.testing.expectEqualStrings(

@@ -1,5 +1,6 @@
-//! Background shell jobs: the exec slot keeps merged output in memory, the app
-//! tick reaps finished jobs, and exited jobs stay readable until the entry is reused.
+//! Background shell jobs: each runs on a pty and the exec slot renders its
+//! output through a terminal emulator, the app tick reaps finished jobs, and
+//! exited jobs stay readable until the entry is reused.
 const std = @import("std");
 const exec = @import("exec");
 const util = @import("util.zig");
@@ -79,6 +80,7 @@ pub const Jobs = struct {
             .argv = &.{ "/bin/sh", "-c", command },
             .kill_process_group = true,
             .scrub_env = true,
+            .extra_env = &.{.{ "TERM", "xterm-256color" }},
             .background = true,
             .max_output = LOG_CAP,
         });
@@ -126,11 +128,34 @@ pub const Jobs = struct {
                 .state = .{ .exited = .{ .exit_code = res.exit_code, .signal = res.signal } },
                 .text = try formatLines(alloc, res.stdout, res.dropped_lines, offset, limit),
             };
-            const view = pool.lockOutput(job.handle);
-            defer view.unlock();
-            return .{ .state = .running, .text = try formatLines(alloc, view.text, view.dropped_lines, offset, limit) };
+            const output = try pool.readOutput(job.handle, alloc);
+            defer alloc.free(output.text);
+            return .{ .state = .running, .text = try formatLines(alloc, output.text, output.dropped_lines, offset, limit) };
         }
         return null;
+    }
+
+    pub const Sent = union(enum) {
+        not_found,
+        exited,
+        written: usize,
+    };
+
+    /// Type `bytes` into a running job's terminal.
+    pub fn write(self: *Jobs, pool: *exec.CmdPool, id: u32, bytes: []const u8) !Sent {
+        self.mu.lockUncancelable(pool.io);
+        defer self.mu.unlock(pool.io);
+        for (self.items) |item| {
+            const job = item orelse continue;
+            if (job.id != id) continue;
+            if (job.result != null) return .exited;
+            const written = pool.writeInput(job.handle, bytes) catch |err| switch (err) {
+                error.NotRunning => return .exited,
+                else => |e| return e,
+            };
+            return .{ .written = written };
+        }
+        return .not_found;
     }
 
     pub fn countRunning(self: *Jobs, io: std.Io) u32 {

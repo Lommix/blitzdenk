@@ -1461,6 +1461,7 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "BASH", .desc = "execute bash scripts", .ty = LuaType.string, .value = .{ .string = tl.bash.BashTool.def.name } },
             .{ .name = "KILL_JOB", .desc = "stop a background bash job", .ty = LuaType.string, .value = .{ .string = tl.bash.KillJobTool.def.name } },
             .{ .name = "READ_JOB", .desc = "read background bash job output", .ty = LuaType.string, .value = .{ .string = tl.bash.ReadJobTool.def.name } },
+            .{ .name = "WRITE_JOB", .desc = "send keystrokes to a background bash job", .ty = LuaType.string, .value = .{ .string = tl.bash.WriteJobTool.def.name } },
             .{ .name = "READ", .desc = "reading text files and images", .ty = LuaType.string, .value = .{ .string = tl.read.ReadTool.def.name } },
             .{ .name = "WRITE", .desc = "write new files", .ty = LuaType.string, .value = .{ .string = tl.write.WriteTool.def.name } },
             .{ .name = "EDIT", .desc = "default string replace edit", .ty = LuaType.string, .value = .{ .string = tl.edit.EditTool.def.name } },
@@ -1478,7 +1479,7 @@ pub const BlitzToolsetDef = LuaType{
     .table_def = .{
         .name = "BlitzToolsetDef",
         .fields = &.{
-            .{ .name = "BASH_BACKGROUND", .desc = "bash with run_in_background, plus read_job and kill_job", .ty = StringListDef, .value = .{ .strings = &tl.bash.SET_BASH_BACKGROUND } },
+            .{ .name = "BASH_BACKGROUND", .desc = "bash with run_in_background, plus read_job, write_job and kill_job", .ty = StringListDef, .value = .{ .strings = &tl.bash.SET_BASH_BACKGROUND } },
             .{ .name = "READONLY", .desc = "read only search: grep, find and ls", .ty = StringListDef, .value = .{ .strings = &tl.readonly.SET_READONLY } },
         },
     },
@@ -6289,12 +6290,13 @@ test "toolsets flatten into agent tool lists and keep one tool per exposed name"
     var set: r.ContextFactory.ToolSet = .{};
     try factory.build_toolset(.general, &set);
     const tools = set.slice();
-    try std.testing.expectEqual(@as(usize, 4), tools.len);
+    try std.testing.expectEqual(@as(usize, 5), tools.len);
     try std.testing.expectEqualStrings("bash", tools[0].def.name);
     try std.testing.expect(tools[0].func == tl.bash.BashBgTool.func);
     try std.testing.expectEqualStrings("read_job", tools[1].def.name);
     try std.testing.expectEqualStrings("kill_job", tools[2].def.name);
-    try std.testing.expectEqualStrings("read", tools[3].def.name);
+    try std.testing.expectEqualStrings("write_job", tools[3].def.name);
+    try std.testing.expectEqualStrings("read", tools[4].def.name);
 
     var prompt_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer prompt_arena.deinit();

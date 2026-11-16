@@ -55,6 +55,7 @@ pub const inbuilt_tool_set = .{
     r.tools.bash.BashBgTool,
     r.tools.bash.KillJobTool,
     r.tools.bash.ReadJobTool,
+    r.tools.bash.WriteJobTool,
     r.tools.read.ReadTool,
     r.tools.patch.PatchTool,
     r.tools.ask.AskTool,
@@ -1207,13 +1208,13 @@ test "tool pool keeps one tool per exposed name and adds toolsets atomically" {
     try factory.addAgentTools(.general, &bash.SET_BASH_BACKGROUND);
     var set: ToolSet = .{};
     try factory.build_toolset(.general, &set);
-    try std.testing.expectEqual(@as(u32, 4), set.len);
+    try std.testing.expectEqual(@as(u32, 5), set.len);
     try std.testing.expect(set.slice()[1].func == bash.BashBgTool.func);
 
     // A tool added to every agent cannot duplicate a listed exposed name.
     try factory.add(.{ .id = "mcp_bash", .def = .{ .name = "bash" }, .func = bash.BashTool.func }, .{ .allowed_agents = .full, .add_to_agents = true });
     try factory.build_toolset(.general, &set);
-    try std.testing.expectEqual(@as(u32, 4), set.len);
+    try std.testing.expectEqual(@as(u32, 5), set.len);
 
     // A toolset that does not fit leaves the list untouched.
     var names: [MAX_AGENT_TOOLS - 1][]const u8 = undefined;
