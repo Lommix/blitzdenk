@@ -48,7 +48,27 @@ fn appendToolImage(
 }
 
 /// Rail position of a call nested under a run summary row.
-pub const RunRail = enum { none, mid, last };
+pub const RunRail = enum {
+    none,
+    mid,
+    last,
+
+    pub fn head(self: RunRail) []const u8 {
+        return switch (self) {
+            .none => "",
+            .mid => " " ++ r.tui.icon.box_t_right ++ " ",
+            .last => " " ++ r.tui.icon.box_bl ++ " ",
+        };
+    }
+
+    pub fn cont(self: RunRail) []const u8 {
+        return switch (self) {
+            .none => "",
+            .mid => " " ++ r.tui.icon.box_v ++ " ",
+            .last => "   ",
+        };
+    }
+};
 
 /// A call of a tool group block, with its rail when it sits under a run summary.
 pub const GroupCall = struct {
@@ -106,16 +126,8 @@ pub fn buildToolGroupParagraph(
         var line = r.tui.Line{};
         // Calls under a run summary hang off its rail like sub-agent rows.
         const rail_style: r.tui.Style = .{ .fg = app.theme.muted };
-        const head_rail: []const u8 = switch (group_call.rail) {
-            .none => "",
-            .mid => " " ++ r.tui.icon.box_t_right ++ " ",
-            .last => " " ++ r.tui.icon.box_bl ++ " ",
-        };
-        const cont_rail: []const u8 = switch (group_call.rail) {
-            .none => "",
-            .mid => " " ++ r.tui.icon.box_v ++ " ",
-            .last => "   ",
-        };
+        const head_rail = group_call.rail.head();
+        const cont_rail = group_call.rail.cont();
         const child_prefix: []const bool = switch (group_call.rail) {
             .none => &.{},
             .mid => &.{true},

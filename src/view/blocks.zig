@@ -157,16 +157,16 @@ pub fn buildTimelineEntryParagraph(
                     total.* += item.h;
                     continue;
                 }
-                if (runs.hasDiff(call.call_id)) {
-                    try tools.appendToolGroup(arena, out, total, app, &tool_call_list, inner_w, live_tool_blocks);
-                    try appendEditBlocks(arena, out, total, app, call, runs, inner_w);
-                    continue;
-                }
                 const run = if (slot.run != tool_runs.RunSlot.none) runs.runs[slot.run] else null;
                 const anchor = if (run) |value| value.anchor() else null;
                 if (anchor) |a| if (slot.pos < a) continue;
                 const rail: tools.RunRail = if (anchor == null) .none else if (slot.pos + 1 == run.?.len) .last else .mid;
-                try tool_call_list.append(arena, .{ .call = call, .rail = rail });
+                if (runs.hasDiff(call.call_id)) {
+                    try tools.appendToolGroup(arena, out, total, app, &tool_call_list, inner_w, live_tool_blocks);
+                    try appendEditBlocks(arena, out, total, app, call, runs, rail, inner_w);
+                } else {
+                    try tool_call_list.append(arena, .{ .call = call, .rail = rail });
+                }
                 if (anchor != null and anchor.? == slot.pos) {
                     try tools.appendToolGroup(arena, out, total, app, &tool_call_list, inner_w, live_tool_blocks);
                     try tool_runs.appendRunSummary(arena, out, total, app, run.?, inner_w);
@@ -243,6 +243,7 @@ fn appendEditBlocks(
     app: *App,
     call: r.app.TimelinePart.ToolCallEntry,
     runs: tool_runs.ToolRuns,
+    rail: tools.RunRail,
     inner_w: u16,
 ) !void {
     const theme = app.theme;
@@ -266,6 +267,7 @@ fn appendEditBlocks(
         if (open) p.padding.bottom = 0;
         const path = if (app.cwd.len > 0) try std.mem.replaceOwned(u8, arena, diff.path, app.cwd, ".") else diff.path;
         try p.appendLineSpan(arena, &.{
+            .{ .content = rail.head(), .style = .{ .fg = theme.muted } },
             .{ .content = r.tui.icon.ok, .style = .{ .fg = theme.ok, .modifier = bold } },
             .{ .content = " " },
             .{ .content = call.tool_name, .style = .{ .fg = theme.text_hl, .modifier = bold } },
@@ -280,6 +282,7 @@ fn appendEditBlocks(
             .context, .header => {},
         };
         var fold = r.tui.Line{};
+        try fold.pushSpan(arena, .{ .content = rail.cont(), .style = .{ .fg = theme.muted } });
         try fold.pushSpan(arena, .{ .content = " " ++ r.tui.icon.box_bl ++ (if (open) " ▾ " else " ▸ "), .style = .{ .fg = theme.muted } });
         if (stat.insertions > 0) try fold.pushSpanPrint(arena, "+{d} ", .{stat.insertions}, .{ .fg = theme.diff_add, .modifier = bold });
         if (stat.deletions > 0) try fold.pushSpanPrint(arena, "-{d} ", .{stat.deletions}, .{ .fg = theme.diff_remove, .modifier = bold });

@@ -48,14 +48,9 @@ pub const ToolRunHit = struct {
 /// Calls a collapsed run keeps visible, newest last.
 const tool_run_visible = 3;
 
-fn isEditTool(name: []const u8) bool {
-    return std.mem.eql(u8, name, "edit") or std.mem.eql(u8, name, "write") or std.mem.eql(u8, name, "patch");
-}
-
 /// Consecutive tool calls across timeline entries. Visible text, role
-/// headers, shown thinking or diffs, edit tools and calls with sub-agents
-/// attached break a run. An edit fold
-/// reuses the type with `len` 0.
+/// headers, shown thinking or diffs and calls with sub-agents attached break
+/// a run. An edit fold reuses the type with `len` 0.
 pub const ToolRun = struct {
     /// Call id of the first call, or the key of an edit fold; keys
     /// `tool_runs_expanded` and click hits.
@@ -134,7 +129,7 @@ pub fn computeToolRuns(
             .tool_call => |call| {
                 const status = if (statuses.getAgent(call.agent_id)) |agent| agent.entries.getPtr(call.call_id) else null;
                 const has_children = if (status) |value| value.child_ids.items.len > 0 else false;
-                if (has_children or isEditTool(call.tool_name)) {
+                if (has_children) {
                     open = null;
                     try slots.append(alloc, .{ .agent = has_children });
                     continue;
@@ -287,21 +282,20 @@ test "sequential bash and read calls collapse to the newest three and expand on 
     };
 
     const runs = try computeToolRuns(alloc, &entries, null, &app.view.tool_runs_expanded, app.flags, &app.tool_status_entries.value);
-    try std.testing.expectEqual(@as(usize, 2), runs.runs.len);
-    try std.testing.expectEqual(@as(u32, 5), runs.runs[0].len);
-    try std.testing.expectEqual(@as(u32, 1), runs.runs[1].len);
-    try std.testing.expectEqual(@as(usize, 6), runs.open_entry);
+    try std.testing.expectEqual(@as(usize, 1), runs.runs.len);
+    try std.testing.expectEqual(@as(u32, 7), runs.runs[0].len);
+    try std.testing.expectEqual(@as(usize, 1), runs.open_entry);
 
     app.flags.show_thinking = true;
     const split = try computeToolRuns(alloc, &entries, null, &app.view.tool_runs_expanded, app.flags, &app.tool_status_entries.value);
-    try std.testing.expectEqual(@as(usize, 3), split.runs.len);
-    try std.testing.expectEqual(@as(u32, 4), split.runs[1].len);
+    try std.testing.expectEqual(@as(usize, 2), split.runs.len);
+    try std.testing.expectEqual(@as(u32, 6), split.runs[1].len);
     app.flags.show_thinking = false;
 
     const launcher = statuses.entries.getPtr("c2").?;
     try launcher.child_ids.append(alloc, .{ .index = 1, .generation = 0 });
     const apart = try computeToolRuns(alloc, &entries, null, &app.view.tool_runs_expanded, app.flags, &app.tool_status_entries.value);
-    try std.testing.expectEqual(@as(usize, 3), apart.runs.len);
+    try std.testing.expectEqual(@as(usize, 2), apart.runs.len);
     try std.testing.expect(apart.forEntry(2).slots[0].agent);
     launcher.child_ids.clearRetainingCapacity();
 
@@ -309,7 +303,7 @@ test "sequential bash and read calls collapse to the newest three and expand on 
     const ok = r.tui.icon.ok ++ " ";
     const mid = " ├ " ++ ok;
     const last = " └ " ++ ok;
-    const want_collapsed = [_][]const u8{ "❯ you:", "go", "▸ 2 earlier calls", mid ++ "c3", " │   more", mid ++ "c4", last ++ "c5", ok ++ "c6", ok ++ "c7" };
+    const want_collapsed = [_][]const u8{ "❯ you:", "go", "▸ 4 earlier calls", mid ++ "c5", mid ++ "c6", last ++ "c7" };
     try std.testing.expectEqual(want_collapsed.len, collapsed.len);
     for (want_collapsed, collapsed) |want, got| try std.testing.expectEqualStrings(want, got);
     try std.testing.expectEqual(@as(usize, 1), app.view.tool_run_hits.items.len);
@@ -320,7 +314,7 @@ test "sequential bash and read calls collapse to the newest three and expand on 
     try std.testing.expect(app.view.tool_runs_expanded.contains("c1"));
     try std.testing.expect(!app.view.auto_scroll);
     const expanded = try runTestStack(&app, alloc, &entries);
-    const want_expanded = [_][]const u8{ "❯ you:", "go", "▾ 5 calls", mid ++ "c1", mid ++ "c2", mid ++ "c3", " │   more", mid ++ "c4", last ++ "c5", ok ++ "c6", ok ++ "c7" };
+    const want_expanded = [_][]const u8{ "❯ you:", "go", "▾ 7 calls", mid ++ "c1", mid ++ "c2", mid ++ "c3", " │   more", mid ++ "c4", mid ++ "c5", mid ++ "c6", last ++ "c7" };
     try std.testing.expectEqual(want_expanded.len, expanded.len);
     for (want_expanded, expanded) |want, got| try std.testing.expectEqualStrings(want, got);
 
@@ -350,13 +344,13 @@ test "sequential bash and read calls collapse to the newest three and expand on 
     var diff_parts = [_]r.app.TimelinePart{.{ .diff = .{ .path = "/work/a.zig", .diff_lines = &diff_lines, .call_id = "c6" } }};
     const edited = entries ++ [_]r.app.TimelineEntry{.{ .role = .agent, .parts = &diff_parts }};
     const folded = try runTestStack(&app, alloc, &edited);
-    const want_folded = [_][]const u8{ ok ++ "edit ./a.zig", " └ ▸ +1 -1 lines", ok ++ "c7" };
+    const want_folded = [_][]const u8{ mid ++ "edit ./a.zig", " │  └ ▸ +1 -1 lines", last ++ "c7" };
     for (want_folded, folded[folded.len - want_folded.len ..]) |want, got| try std.testing.expectEqualStrings(want, got);
 
     const head = app.view.tool_run_hits.items[0].rect;
     try std.testing.expect(toggleToolRunAt(&app, head.x, head.y));
     const opened = try runTestStack(&app, alloc, &edited);
-    const want_opened = [_][]const u8{ ok ++ "edit ./a.zig", " └ ▾ +1 -1 lines", "file: /work/a.zig", "   1 - old", "     + new", ok ++ "c7" };
+    const want_opened = [_][]const u8{ mid ++ "edit ./a.zig", " │  └ ▾ +1 -1 lines", "file: /work/a.zig", "   1 - old", "     + new", last ++ "c7" };
     for (want_opened, opened[opened.len - want_opened.len ..]) |want, got| try std.testing.expectEqualStrings(want, got);
 
     var handoff_parts = [_]r.app.TimelinePart{.{ .handoff = "## Goal\nship it" }};
