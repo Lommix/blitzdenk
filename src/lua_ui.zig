@@ -268,6 +268,8 @@ const Prop = enum {
     pressed,
     draw,
     label,
+    name,
+    collapsible,
 };
 
 fn readPadding(L: *c.lua_State, padding: *scene.Padding) bool {
@@ -386,6 +388,8 @@ fn applyProp(L: *c.lua_State, sc: *Scene, id: Id, prop: Prop) bool {
             }
         },
         .label => return setLabel(sc, id, stringAt(L, -1) orelse return false) == null,
+        .name => sc.setSlotName(id, stringAt(L, -1) orelse return false) catch return false,
+        .collapsible => node.collapsible = boolAt(L, -1) orelse return false,
     }
     return true;
 }
@@ -421,7 +425,9 @@ fn applyProps(L: *c.lua_State, sc: *Scene, id: Id, idx: c_int) Failure {
     return null;
 }
 
-fn construct(L: *c.lua_State, kind: scene.Kind, button: bool) c_int {
+const Preset = enum { plain, button, slot };
+
+fn construct(L: *c.lua_State, kind: scene.Kind, preset: Preset) c_int {
     const sc = sceneOf(L) orelse return pushHandle(L, .none);
     var failure: Failure = null;
     var id: Id = .none;
@@ -430,8 +436,13 @@ fn construct(L: *c.lua_State, kind: scene.Kind, button: bool) c_int {
         defer sc.unlock();
         if (sc.create(kind)) |created| {
             id = created;
-            if (button) applyButtonDefaults(sc.get(id).?);
+            switch (preset) {
+                .plain => {},
+                .button => applyButtonDefaults(sc.get(id).?),
+                .slot => sc.makeSlot(id, "") catch {},
+            }
             if (c.lua_type(L, 1) > c.LUA_TNIL) failure = applyProps(L, sc, id, 1);
+            if (failure == null and preset == .slot and sc.get(id).?.slot_name.len == 0) failure = "ui.slot: name expected";
             if (failure != null) sc.destroy(id);
         } else |_| {
             failure = "ui: too many nodes";
@@ -439,6 +450,63 @@ fn construct(L: *c.lua_State, kind: scene.Kind, button: bool) c_int {
     }
     if (failure != null) return finish(L, sc, failure, 0);
     return finish(L, sc, null, pushHandle(L, id));
+}
+
+fn native(L: *c.lua_State, comptime which: scene.Native) c_int {
+    const sc = sceneOf(L) orelse return pushHandle(L, .none);
+    var failure: Failure = null;
+    var id: Id = .none;
+    {
+        sc.lock();
+        defer sc.unlock();
+        id = switch (which) {
+            .timeline => sc.timeline,
+            .composer => sc.composer,
+            .lua_error => .none,
+        };
+        if (c.lua_type(L, 1) > c.LUA_TNIL) failure = applyProps(L, sc, id, 1);
+    }
+    if (failure != null) return finish(L, sc, failure, 0);
+    return finish(L, sc, null, pushHandle(L, id));
+}
+
+fn luaTimeline(L: ?*c.lua_State) callconv(.c) c_int {
+    return native(L.?, .timeline);
+}
+
+fn luaComposer(L: ?*c.lua_State) callconv(.c) c_int {
+    return native(L.?, .composer);
+}
+
+fn luaSlot(L: ?*c.lua_State) callconv(.c) c_int {
+    return construct(L.?, .box, .slot);
+}
+
+fn luaRoot(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L.?;
+    c.lua_settop(state, 1);
+    const sc = sceneOf(state) orelse return 1;
+    var failure: Failure = null;
+    {
+        sc.lock();
+        defer sc.unlock();
+        const outcome = if (readHandle(state, 1)) |id|
+            sc.setContent(id)
+        else if (c.lua_type(state, 1) == c.LUA_TNIL)
+            sc.restoreDefault()
+        else
+            error.DeadNode;
+        outcome catch |err| {
+            failure = switch (err) {
+                error.MissingTimeline => "ui.root: the tree must contain ui.timeline()",
+                error.MissingComposer => "ui.root: the tree must contain ui.composer()",
+                error.NotAContainer => "ui.root: a box is expected",
+                error.DeadNode => "ui.root: a live ui node or nil is expected",
+                else => attachFailure(err),
+            };
+        };
+    }
+    return finish(state, sc, failure, 1);
 }
 
 fn applyButtonDefaults(node: *scene.Node) void {
@@ -451,23 +519,23 @@ fn applyButtonDefaults(node: *scene.Node) void {
 }
 
 fn luaBox(L: ?*c.lua_State) callconv(.c) c_int {
-    return construct(L.?, .box, false);
+    return construct(L.?, .box, .plain);
 }
 
 fn luaText(L: ?*c.lua_State) callconv(.c) c_int {
-    return construct(L.?, .text, false);
+    return construct(L.?, .text, .plain);
 }
 
 fn luaSpacer(L: ?*c.lua_State) callconv(.c) c_int {
-    return construct(L.?, .spacer, false);
+    return construct(L.?, .spacer, .plain);
 }
 
 fn luaCanvas(L: ?*c.lua_State) callconv(.c) c_int {
-    return construct(L.?, .canvas, false);
+    return construct(L.?, .canvas, .plain);
 }
 
 fn luaButton(L: ?*c.lua_State) callconv(.c) c_int {
-    return construct(L.?, .box, true);
+    return construct(L.?, .box, .button);
 }
 
 fn luaMount(L: ?*c.lua_State) callconv(.c) c_int {
@@ -489,7 +557,7 @@ fn luaMount(L: ?*c.lua_State) callconv(.c) c_int {
 fn mount(L: *c.lua_State, sc: *Scene) Failure {
     const name = stringAt(L, 1) orelse return "ui.mount: slot name expected";
     const node = readHandle(L, 2) orelse return "ui.mount: ui node expected";
-    const slot = sc.findSlot(name) orelse return fail("unknown slot '{s}'", .{name});
+    const slot = sc.findSlot(name) orelse return fail("no slot '{s}' in the current root", .{name});
     sc.attach(slot, node, null) catch |err| return attachFailure(err);
     return null;
 }
@@ -663,6 +731,8 @@ const UiPropsDef = LuaType{ .table_def = .{
         .{ .name = "key", .ty = LuaType{ .raw = "string|false" }, .optional = true, .desc = "key combo such as '<C-a>' that triggers on_click while the node is on screen. Wins over blitz.bind" },
         .{ .name = "disabled", .ty = LuaType.boolean, .optional = true, .desc = "ignore clicks and keys, draw muted" },
         .{ .name = "pressed", .ty = LuaType{ .raw_refs = .{ .text = "BlitzUiStyle|false", .refs = &.{UiStyleDef} } }, .optional = true, .desc = "style while the mouse button is held on the node" },
+        .{ .name = "name", .ty = LuaType.string, .optional = true, .desc = "box: slot name that ui.mount targets. Required by ui.slot" },
+        .{ .name = "collapsible", .ty = LuaType.boolean, .optional = true, .desc = "give way, last sibling first, while siblings with a minimum size do not fit. Default for slots" },
         .{ .name = "draw", .ty = LuaType{ .raw_refs = .{ .text = "fun(buf: BlitzUiCanvasBuf, frame: integer)|false", .refs = &.{UiCanvasBufDef} } }, .optional = true, .desc = "canvas: draw callback, runs on every drawn frame. A callback that errors is removed" },
     } ++ span_style_fields),
 } };
@@ -672,7 +742,7 @@ const NodeMethod = LuaType{ .raw = "fun(self: BlitzUiNode): BlitzUiNode" };
 const UiNodeDef = LuaType{ .table_def = .{ .name = "BlitzUiNode", .fields = &.{
     .{ .name = "set", .ty = LuaType{ .raw_refs = .{ .text = "fun(self: BlitzUiNode, props: BlitzUiProps|string): BlitzUiNode", .refs = &.{UiPropsDef} } }, .desc = "Merge props into the node. Only the given keys change. A text node also takes a plain string." },
     .{ .name = "add", .ty = LuaType{ .raw = "fun(self: BlitzUiNode, child: BlitzUiNode, index?: integer): BlitzUiNode" }, .desc = "Append a child to a box, or insert it at a 1-based index. A child that already has a parent moves." },
-    .{ .name = "remove", .ty = NodeMethod, .desc = "Remove the node and everything below it for good. Its handles go dead; calls on a dead handle do nothing." },
+    .{ .name = "remove", .ty = NodeMethod, .desc = "Remove the node and everything below it for good. Its handles go dead; calls on a dead handle do nothing. The timeline and composer are only detached and stay alive." },
     .{ .name = "clear", .ty = NodeMethod, .desc = "Remove every child of a box." },
     .{ .name = "show", .ty = NodeMethod, .desc = "Make a hidden node visible again." },
     .{ .name = "hide", .ty = NodeMethod, .desc = "Hide the node; its space returns to the layout." },
@@ -738,21 +808,68 @@ pub const BlitzUi = LuaType{ .table_def = .{ .name = "BlitzUi", .fields = &.{
     .{
         .name = "mount",
         .desc =
-        \\Put a node on screen in a named slot and return it. Slots:
-        \\'left' and 'right' are full height columns beside the main
-        \\column, 'between' sits between timeline and input, 'below'
-        \\under the input. Nodes of one slot stack in mount order. The
-        \\side slots give way while the main column would drop below 40
-        \\columns, 'below' and then 'between' while the timeline would
-        \\drop below 6 rows. node:remove() unmounts.
+        \\Put a node on screen in a named slot and return it. Slots of
+        \\the default root: 'left' and 'right' are full height columns
+        \\beside the main column, 'between' sits between timeline and
+        \\input, 'below' under the input. Nodes of one slot stack in
+        \\mount order. The side slots give way while the main column
+        \\would drop below 40 columns, 'below' and then 'between' while
+        \\the timeline would drop below 6 rows. A custom root defines
+        \\its own slots; a name it lacks raises. node:remove() unmounts.
         ,
         .ty = LuaType{ .function = .{
             .args = &.{
-                .{ .name = "slot", .ty = LuaType{ .raw = "\"left\"|\"right\"|\"between\"|\"below\"" } },
+                .{ .name = "slot", .ty = LuaType.string },
                 .{ .name = "node", .ty = UiNodeDef },
             },
             .ret = &UiNodeDef,
             .fn_ptr = luaMount,
+        } },
+    },
+    .{
+        .name = "timeline",
+        .desc =
+        \\Return the timeline node. There is one; every call returns the
+        \\same node and merges props into it. It fits its content and
+        \\shrinks to the space its siblings leave, so the node after it
+        \\floats under the last message until the timeline fills up.
+        ,
+        .ty = constructor(luaTimeline),
+    },
+    .{
+        .name = "composer",
+        .desc =
+        \\Return the composer node: the input box with its progress and
+        \\status rows, and the permission, ask and wizard prompts. There
+        \\is one; every call returns the same node. It fits its height,
+        \\so place it in a column.
+        ,
+        .ty = constructor(luaComposer),
+    },
+    .{
+        .name = "slot",
+        .desc =
+        \\Create a named mount point: a collapsible box that ui.mount
+        \\fills. Takes name plus every box prop. An empty slot takes no
+        \\space.
+        ,
+        .ty = constructor(luaSlot),
+    },
+    .{
+        .name = "root",
+        .desc =
+        \\Replace the whole screen layout with a box and return it. The
+        \\tree must contain ui.timeline() and ui.composer(); everything
+        \\else is up to you. Nodes mounted in a slot move to the slot of
+        \\the same name in the new root and are removed when it has
+        \\none. ui.root(nil) restores the default root, which also
+        \\returns when the timeline or composer leaves the tree. The Lua
+        \\error strip stays above every root.
+        ,
+        .ty = LuaType{ .function = .{
+            .args = &.{.{ .name = "node", .ty = LuaType{ .raw_refs = .{ .text = "BlitzUiNode|nil", .refs = &.{UiNodeDef} } }, .optional = true }},
+            .ret = &LuaType{ .raw = "BlitzUiNode|nil" },
+            .fn_ptr = luaRoot,
         } },
     },
     .{

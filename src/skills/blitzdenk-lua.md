@@ -533,6 +533,26 @@ ui.mount("left", ui.box({
   nothing. An unknown prop or slot raises.
 - A reload clears the scene and re-runs the config. Tool and listener VMs
   get dead handles, so config that builds UI at load is safe there.
+- `ui.root(box)` replaces the whole layout. The tree must hold
+  `ui.timeline()` and `ui.composer()`; both are single nodes, every call
+  returns the same one. Slots are yours to place with `ui.slot`:
+
+  ```lua
+  ui.root(ui.box({
+      ui.composer(),                               -- input on top
+      ui.slot({ name = "below" }),
+      ui.box({ dir = "row", grow = 1,
+          ui.timeline({ grow = 1 }),
+          ui.slot({ name = "right", dir = "row" }),
+      }),
+  }))
+  ```
+
+  Mounted nodes follow their slot name into the new root and are removed
+  when it has no such slot; `ui.mount` to a missing slot raises, so keep the
+  default names when plugins mount. `ui.root(nil)` restores the default,
+  which also returns when the timeline or composer leaves the tree. Without
+  `grow` the timeline fits its content and the next node floats under it.
 - `ui.canvas({ width = 10, draw = function(buf, frame) ... end })` is the
   escape hatch for free drawing. It is the only node that runs Lua per
   frame: coordinates are canvas-relative, `frame` drives animations, and an

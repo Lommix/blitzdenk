@@ -259,6 +259,10 @@
 ---@field disabled? boolean
 ---style while the mouse button is held on the node
 ---@field pressed? BlitzUiStyle|false
+---box: slot name that ui.mount targets. Required by ui.slot
+---@field name? string
+---give way, last sibling first, while siblings with a minimum size do not fit. Default for slots
+---@field collapsible? boolean
 ---canvas: draw callback, runs on every drawn frame. A callback that errors is removed
 ---@field draw? fun(buf: BlitzUiCanvasBuf, frame: integer)|false
 ---text color: '#RRGGBB' or a theme color name (bg, overlay, muted, text, info, ok, warn, err, ...)
@@ -277,7 +281,7 @@
 ---@field set fun(self: BlitzUiNode, props: BlitzUiProps|string): BlitzUiNode
 ---Append a child to a box, or insert it at a 1-based index. A child that already has a parent moves.
 ---@field add fun(self: BlitzUiNode, child: BlitzUiNode, index?: integer): BlitzUiNode
----Remove the node and everything below it for good. Its handles go dead; calls on a dead handle do nothing.
+---Remove the node and everything below it for good. Its handles go dead; calls on a dead handle do nothing. The timeline and composer are only detached and stay alive.
 ---@field remove fun(self: BlitzUiNode): BlitzUiNode
 ---Remove every child of a box.
 ---@field clear fun(self: BlitzUiNode): BlitzUiNode
@@ -308,14 +312,37 @@
 ---node that calls Lua per frame; give it a width and height or
 ---grow. A frame is skipped while another thread holds the main VM.
 ---@field canvas fun(props?: BlitzUiProps): BlitzUiNode
----Put a node on screen in a named slot and return it. Slots:
----'left' and 'right' are full height columns beside the main
----column, 'between' sits between timeline and input, 'below'
----under the input. Nodes of one slot stack in mount order. The
----side slots give way while the main column would drop below 40
----columns, 'below' and then 'between' while the timeline would
----drop below 6 rows. node:remove() unmounts.
----@field mount fun(slot: "left"|"right"|"between"|"below", node: BlitzUiNode): BlitzUiNode
+---Put a node on screen in a named slot and return it. Slots of
+---the default root: 'left' and 'right' are full height columns
+---beside the main column, 'between' sits between timeline and
+---input, 'below' under the input. Nodes of one slot stack in
+---mount order. The side slots give way while the main column
+---would drop below 40 columns, 'below' and then 'between' while
+---the timeline would drop below 6 rows. A custom root defines
+---its own slots; a name it lacks raises. node:remove() unmounts.
+---@field mount fun(slot: string, node: BlitzUiNode): BlitzUiNode
+---Return the timeline node. There is one; every call returns the
+---same node and merges props into it. It fits its content and
+---shrinks to the space its siblings leave, so the node after it
+---floats under the last message until the timeline fills up.
+---@field timeline fun(props?: BlitzUiProps): BlitzUiNode
+---Return the composer node: the input box with its progress and
+---status rows, and the permission, ask and wizard prompts. There
+---is one; every call returns the same node. It fits its height,
+---so place it in a column.
+---@field composer fun(props?: BlitzUiProps): BlitzUiNode
+---Create a named mount point: a collapsible box that ui.mount
+---fills. Takes name plus every box prop. An empty slot takes no
+---space.
+---@field slot fun(props?: BlitzUiProps): BlitzUiNode
+---Replace the whole screen layout with a box and return it. The
+---tree must contain ui.timeline() and ui.composer(); everything
+---else is up to you. Nodes mounted in a slot move to the slot of
+---the same name in the new root and are removed when it has
+---none. ui.root(nil) restores the default root, which also
+---returns when the timeline or composer leaves the tree. The Lua
+---error strip stays above every root.
+---@field root fun(node?: BlitzUiNode|nil): BlitzUiNode|nil
 ---Request a frame on the next loop tick. Node changes redraw on their own; canvas animations call this while the app is idle.
 ---@field redraw fun()
 

@@ -88,9 +88,11 @@ pub fn renderCompletionPopup(app: *App, frame_alloc: std.mem.Allocator, input_ar
                 const anchor = completionAnchor(app, frame_alloc, text_origin.width);
 
                 const height: u16 = @intCast(p.lines.items.len);
+                const cursor_y = text_origin.y +| @as(u16, @intCast(@min(anchor.row, @as(usize, std.math.maxInt(u16)))));
+                const fits_above = cursor_y -| buf.rect.y >= height;
                 const completion_area = r.tui.Rect{
                     .x = text_origin.x +| @as(u16, @intCast(@min(anchor.col, @as(usize, text_origin.width)))),
-                    .y = text_origin.y +| @as(u16, @intCast(@min(anchor.row, @as(usize, std.math.maxInt(u16))))) -| height,
+                    .y = if (fits_above) cursor_y - height else cursor_y +| 1,
                     .width = @intCast(@min(max_width, std.math.maxInt(u16))),
                     .height = height,
                 };

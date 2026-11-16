@@ -12,6 +12,7 @@ pub const MAX_CELLS: u16 = 4096;
 pub const UNBOUNDED: u16 = std.math.maxInt(u16);
 pub const MIN_MAIN_COLS: u16 = 40;
 pub const MIN_TIMELINE_ROWS: u16 = 6;
+pub const MIN_CONTENT_ROWS: u16 = MIN_TIMELINE_ROWS + 4;
 pub const NO_REF: c_int = r.c.LUA_NOREF;
 
 pub const SLOT_LEFT = "left";
@@ -109,6 +110,7 @@ pub const Node = struct {
     max_height: u16 = UNBOUNDED,
     shrink: bool = false,
     collapsible: bool = false,
+    fixed: bool = false,
     reserve: u16 = 0,
 
     dir: Dir = .column,
@@ -221,6 +223,10 @@ pub const Scene = struct {
     free_indices: std.ArrayList(u32) = .empty,
     live_count: u32 = 0,
     root: Id = .none,
+    content: Id = .none,
+    lua_error: Id = .none,
+    timeline: Id = .none,
+    composer: Id = .none,
     pressed: Id = .none,
     clicks: std.ArrayList(Id) = .empty,
     clicks_pending: std.atomic.Value(bool) = .init(false),
@@ -233,7 +239,7 @@ pub const Scene = struct {
     pub fn init(gpa: std.mem.Allocator, io: std.Io) !Scene {
         var self = Scene{ .gpa = gpa, .io = io };
         errdefer self.deinit();
-        try self.buildDefault();
+        try self.buildBase();
         return self;
     }
 
@@ -265,7 +271,7 @@ pub const Scene = struct {
         self.clicks_pending.store(false, .release);
         self.canvas_draws.clearRetainingCapacity();
         self.pressed = .none;
-        try self.buildDefault();
+        try self.buildBase();
         self.touch();
     }
 
@@ -287,7 +293,7 @@ pub const Scene = struct {
         defer pending.deinit(self.gpa);
         for (pending.items) |id| {
             const node = self.get(id) orelse continue;
-            if (node.parent != null or id.eql(self.root)) continue;
+            if (node.parent != null or node.fixed) continue;
             self.destroy(id);
         }
     }
@@ -300,47 +306,71 @@ pub const Scene = struct {
             self.release(@intCast(index));
         }
         self.root = .none;
+        self.content = .none;
+        self.lua_error = .none;
+        self.timeline = .none;
+        self.composer = .none;
     }
 
-    fn buildDefault(self: *Scene) !void {
-        const root = try self.create(.box);
-        self.root = root;
-        self.get(root).?.dir = .row;
+    fn buildBase(self: *Scene) !void {
+        self.root = try self.create(.box);
+        self.get(self.root).?.fixed = true;
+        self.lua_error = try self.createNative(.lua_error);
+        self.timeline = try self.createNative(.timeline);
+        self.get(self.timeline).?.reserve = MIN_TIMELINE_ROWS;
+        self.composer = try self.createNative(.composer);
+        self.get(self.composer).?.shrink = false;
+        try self.attach(self.root, self.lua_error, null);
+        const content = try self.buildDefaultContent();
+        try self.attach(self.root, content, null);
+        self.content = content;
+    }
 
-        const left = try self.createSlot(SLOT_LEFT, .row);
-        const right = try self.createSlot(SLOT_RIGHT, .row);
-        const between = try self.createSlot(SLOT_BETWEEN, .column);
-        const below = try self.createSlot(SLOT_BELOW, .column);
+    fn buildDefaultContent(self: *Scene) !Id {
+        const content = try self.create(.box);
+        errdefer self.destroy(content);
+        self.get(content).?.dir = .row;
+
+        const left = try self.create(.box);
+        try self.attach(content, left, null);
+        try self.makeSlot(left, SLOT_LEFT);
+        self.get(left).?.dir = .row;
 
         const main = try self.create(.box);
+        try self.attach(content, main, null);
         const main_node = self.get(main).?;
         main_node.grow = 1;
         main_node.reserve = MIN_MAIN_COLS;
 
-        const lua_error = try self.createNative(.lua_error);
-        const timeline = try self.createNative(.timeline);
-        self.get(timeline).?.reserve = MIN_TIMELINE_ROWS;
-        const composer = try self.createNative(.composer);
-        self.get(composer).?.shrink = false;
+        const right = try self.create(.box);
+        try self.attach(content, right, null);
+        try self.makeSlot(right, SLOT_RIGHT);
+        self.get(right).?.dir = .row;
 
-        try self.attach(root, left, null);
-        try self.attach(root, main, null);
-        try self.attach(root, right, null);
-        try self.attach(main, lua_error, null);
-        try self.attach(main, timeline, null);
+        try self.attach(main, self.timeline, null);
+        const between = try self.create(.box);
         try self.attach(main, between, null);
-        try self.attach(main, composer, null);
+        try self.makeSlot(between, SLOT_BETWEEN);
+        try self.attach(main, self.composer, null);
+        const below = try self.create(.box);
         try self.attach(main, below, null);
+        try self.makeSlot(below, SLOT_BELOW);
+        return content;
     }
 
-    fn createSlot(self: *Scene, name: []const u8, dir: Dir) !Id {
-        const id = try self.create(.box);
-        const node = self.get(id).?;
-        node.slot_name = name;
-        node.dir = dir;
+    pub fn makeSlot(self: *Scene, id: Id, name: []const u8) !void {
+        try self.setSlotName(id, name);
+        const node = self.get(id) orelse return;
         node.collapsible = true;
         node.style.bg = .{ .theme = .overlay };
-        return id;
+    }
+
+    pub fn setSlotName(self: *Scene, id: Id, name: []const u8) !void {
+        const node = self.get(id) orelse return;
+        const owned = try self.gpa.dupe(u8, name);
+        self.gpa.free(node.slot_name);
+        node.slot_name = owned;
+        self.touch();
     }
 
     fn createNative(self: *Scene, native: Native) !Id {
@@ -348,7 +378,73 @@ pub const Scene = struct {
         const node = self.get(id).?;
         node.native = native;
         node.shrink = true;
+        node.fixed = true;
         return id;
+    }
+
+    fn contains(self: *Scene, ancestor: Id, id: Id) bool {
+        if (self.get(ancestor) == null or self.get(id) == null) return false;
+        var cursor: ?u32 = id.index;
+        while (cursor) |index| : (cursor = self.nodes.items[index].parent) {
+            if (index == ancestor.index) return true;
+        }
+        return false;
+    }
+
+    fn hostsNatives(self: *Scene, id: Id) bool {
+        return self.contains(id, self.timeline) and self.contains(id, self.composer);
+    }
+
+    pub fn setContent(self: *Scene, new: Id) !void {
+        const node = self.get(new) orelse return error.DeadNode;
+        if (node.kind != .box) return error.NotAContainer;
+        if (node.fixed) return error.Cycle;
+        if (new.eql(self.content)) return;
+        if (!self.contains(new, self.timeline)) return error.MissingTimeline;
+        if (!self.contains(new, self.composer)) return error.MissingComposer;
+
+        const old = self.content;
+        try self.migrateSlots(old, new);
+        try self.attach(self.root, new, null);
+        self.content = new;
+        if (self.get(old) != null and !self.contains(new, old)) self.destroy(old);
+        self.touch();
+    }
+
+    pub fn restoreDefault(self: *Scene) !void {
+        const content = try self.buildDefaultContent();
+        errdefer self.destroy(content);
+        try self.setContent(content);
+    }
+
+    fn migrateSlots(self: *Scene, old: Id, new: Id) !void {
+        if (self.get(old) == null) return;
+        var named: std.ArrayList(u32) = .empty;
+        defer named.deinit(self.gpa);
+        try self.collectSlots(old.index, &named);
+        for (named.items) |slot_index| {
+            const slot = self.idOf(slot_index);
+            if (self.contains(new, slot)) continue;
+            const target = self.findSlotIn(new.index, self.nodes.items[slot_index].slot_name) orelse continue;
+            const moving = try self.gpa.dupe(u32, self.nodes.items[slot_index].children.items);
+            defer self.gpa.free(moving);
+            for (moving) |child| try self.attach(target, self.idOf(child), null);
+        }
+    }
+
+    fn collectSlots(self: *Scene, index: u32, out: *std.ArrayList(u32)) !void {
+        const node = &self.nodes.items[index];
+        if (node.slot_name.len > 0) try out.append(self.gpa, index);
+        for (node.children.items) |child| try self.collectSlots(child, out);
+    }
+
+    fn findSlotIn(self: *Scene, index: u32, name: []const u8) ?Id {
+        const node = &self.nodes.items[index];
+        if (node.slot_name.len > 0 and std.mem.eql(u8, node.slot_name, name)) return self.idOf(index);
+        for (node.children.items) |child| {
+            if (self.findSlotIn(child, name)) |found| return found;
+        }
+        return null;
     }
 
     pub fn create(self: *Scene, kind: Kind) !Id {
@@ -376,23 +472,25 @@ pub const Scene = struct {
     }
 
     pub fn destroy(self: *Scene, id: Id) void {
-        if (self.get(id) == null) return;
+        const node = self.get(id) orelse return;
         self.detachIndex(id.index);
-        self.destroySubtree(id.index);
+        if (!node.fixed) self.destroySubtree(id.index);
         self.touch();
     }
 
     fn destroySubtree(self: *Scene, index: u32) void {
-        const node = &self.nodes.items[index];
-        const children = node.children;
-        node.children = .empty;
+        self.dropChildren(index);
+        self.release(index);
+    }
+
+    fn dropChildren(self: *Scene, index: u32) void {
+        var children = self.nodes.items[index].children;
+        self.nodes.items[index].children = .empty;
+        defer children.deinit(self.gpa);
         for (children.items) |child| {
             self.nodes.items[child].parent = null;
-            self.destroySubtree(child);
+            if (!self.nodes.items[child].fixed) self.destroySubtree(child);
         }
-        var owned = children;
-        owned.deinit(self.gpa);
-        self.release(index);
     }
 
     fn release(self: *Scene, index: u32) void {
@@ -401,6 +499,7 @@ pub const Scene = struct {
         if (node.draw_ref != NO_REF) self.released_refs.append(self.gpa, node.draw_ref) catch {};
         self.freeSpans(node.spans);
         self.gpa.free(node.title);
+        self.gpa.free(node.slot_name);
         node.children.deinit(self.gpa);
         if (self.pressed.index == index) self.pressed = .none;
         const gen = node.gen;
@@ -429,6 +528,7 @@ pub const Scene = struct {
         _ = self.get(child_id) orelse return error.DeadNode;
         if (parent.kind != .box) return error.NotAContainer;
         if (child_id.eql(self.root)) return error.Cycle;
+        if (child_id.eql(self.lua_error) and !parent_id.eql(self.root)) return error.Cycle;
 
         var depth: u16 = 1;
         var cursor: ?u32 = parent_id.index;
@@ -447,15 +547,8 @@ pub const Scene = struct {
     }
 
     pub fn clearChildren(self: *Scene, id: Id) void {
-        const node = self.get(id) orelse return;
-        const children = node.children;
-        node.children = .empty;
-        for (children.items) |child| {
-            self.nodes.items[child].parent = null;
-            self.destroySubtree(child);
-        }
-        var owned = children;
-        owned.deinit(self.gpa);
+        if (self.get(id) == null) return;
+        self.dropChildren(id.index);
         self.touch();
     }
 
@@ -466,11 +559,8 @@ pub const Scene = struct {
     }
 
     pub fn findSlot(self: *Scene, name: []const u8) ?Id {
-        for (self.nodes.items, 0..) |*node, index| {
-            if (!node.alive or node.slot_name.len == 0) continue;
-            if (std.mem.eql(u8, node.slot_name, name)) return self.idOf(@intCast(index));
-        }
-        return null;
+        if (name.len == 0 or self.get(self.content) == null) return null;
+        return self.findSlotIn(self.content.index, name);
     }
 
     pub fn setSpans(self: *Scene, id: Id, spans: []TextSpan) void {
@@ -581,9 +671,25 @@ pub const Scene = struct {
             node.rect = .{};
             node.native_measure = null;
         }
-        if (self.get(self.root) == null) return;
-        self.layout(frame, self.root.index, area, 0);
-        self.draw(frame, self.root.index, .{}, 0);
+        if (!self.hostsNatives(self.content)) self.restoreDefault() catch return;
+        const root = self.get(self.root) orelse return;
+        root.rect = area;
+        root.laid_out = area.width > 0 and area.height > 0;
+        const strip_height = self.measure(frame, self.lua_error.index, area.width, area.height -| MIN_CONTENT_ROWS, 1).h;
+        self.layout(frame, self.lua_error.index, .{
+            .x = area.x,
+            .y = area.y,
+            .width = area.width,
+            .height = strip_height,
+        }, 1);
+        self.layout(frame, self.content.index, .{
+            .x = area.x,
+            .y = area.y +| strip_height,
+            .width = area.width,
+            .height = area.height - strip_height,
+        }, 1);
+        self.draw(frame, self.lua_error.index, .{}, 1);
+        self.draw(frame, self.content.index, .{}, 1);
     }
 
     fn isVacant(self: *Scene, index: u32) bool {
@@ -684,6 +790,7 @@ pub const Scene = struct {
         const node = &self.nodes.items[index];
         node.rect = rect;
         node.laid_out = rect.width > 0 and rect.height > 0;
+        if (node.laid_out and node.kind == .native) _ = self.measureNative(frame, node, rect.width, rect.height);
         if (!node.laid_out or node.kind != .box or depth > MAX_DEPTH) return;
 
         const inset = insets(node);
