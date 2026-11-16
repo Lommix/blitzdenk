@@ -27,6 +27,7 @@ and `osascript` on macOS. XDG variables are unset on macOS; `stateDir` and
 - Result injection into the parent: `App.finishBackgroundAgent` in `src/app.zig`
 - Lua surface: `src/lua.zig`, `src/blitz_default.lua`
 - Tui render: `src/view/` (render-only state is `view.State` at `app.view`); input handling still in `src/app.zig`
+- Lua UI: retained scene tree, layout, draw and hit testing in `src/view/scene.zig` (`app.scene`); `blitz.ui` bindings in `src/lua_ui.zig`; timeline, composer and Lua error strip are native nodes drawn by `NativeHost` in `src/view/root.zig`
 
 ## Tool execution and output
 

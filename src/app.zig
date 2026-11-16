@@ -335,8 +335,7 @@ pub const App = struct {
     lua_status_bar_enabled: bool = false,
     lua_status_bar_cache: [512]u8 = undefined,
     lua_status_bar_cache_len: usize = 0,
-    widget_error_msgs: [r.lua.MAX_LUA_WIDGETS][r.lua.WIDGET_ERROR_CAP]u8 = @splat(@splat(0)),
-    widget_error_lens: [r.lua.MAX_LUA_WIDGETS]usize = @splat(0),
+    scene: r.view.scene.Scene,
     lua_redraw: std.atomic.Value(bool) = .init(false),
     lua_inject_hooks_enabled: std.atomic.Value(bool) = .init(false),
     mcp_manager: r.mcp.Manager,
@@ -369,6 +368,8 @@ pub const App = struct {
     ) !App {
         const lua_vm = try r.lua.LuaVm.init(gpa);
         errdefer lua_vm.deinit();
+        var scene = try r.view.scene.Scene.init(gpa, io);
+        errdefer scene.deinit();
 
         return App{
             .gpa = gpa,
@@ -383,6 +384,7 @@ pub const App = struct {
             .cwd = cwd,
             .cmd_queue = try r.cmd.CommandQueue.init(gpa),
             .lua_vm = lua_vm,
+            .scene = scene,
             .plugins = .init(gpa, io),
             .mcp_manager = r.mcp.Manager.init(gpa, agent_factory.io),
             .permission_queue = .{
@@ -441,6 +443,7 @@ pub const App = struct {
         if (self.mcp_auth) |*task| task.deinit();
         self.mcp_manager.deinit();
         self.lua_vm.deinit();
+        self.scene.deinit();
         self.plugins.deinit();
         self.lua_state.deinit(self.gpa);
         self.cmd_queue.deinit();
@@ -1722,7 +1725,7 @@ pub const App = struct {
     }
 
     pub fn moveCursorVertical(self: *App, delta: i32) bool {
-        const content_width = r.view.composer.inputContentWidth(self.view.widget_frame_input_area.width);
+        const content_width = r.view.composer.inputContentWidth(self.view.composer_area.width);
         const width: usize = switch (self.input_mode) {
             .perm_message => r.view.permission.permFieldTextWidth(self, content_width -| 2),
             else => r.view.composer.inputTextWidth(content_width, r.view.composer.modePromptCols(&self.input_mode)),

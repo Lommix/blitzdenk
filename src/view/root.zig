@@ -1,5 +1,6 @@
 //! Render entry point: `State` holds every render-only cache, and `render`
-//! composes widgets, timeline, composer, chrome and inline images into one buffer.
+//! renders the scene with its native timeline, composer and Lua error nodes,
+//! then chrome and inline images, into one buffer.
 const std = @import("std");
 const r = @import("../root.zig");
 const App = r.app.App;
@@ -11,6 +12,7 @@ pub const completion = @import("completion.zig");
 pub const composer = @import("composer.zig");
 pub const layout = @import("layout.zig");
 pub const permission = @import("permission.zig");
+pub const scene = @import("scene.zig");
 pub const timeline = @import("timeline.zig");
 pub const tool_runs = @import("tool_runs.zig");
 pub const tools = @import("tools.zig");
@@ -45,12 +47,8 @@ pub const State = struct {
     tool_runs_expanded: std.StringHashMapUnmanaged(void) = .empty,
     /// Fold rows drawn last frame, hit-tested by mouse clicks.
     tool_run_hits: std.ArrayList(tool_runs.ToolRunHit) = .empty,
-    widget_layout_cache: layout.WidgetLayout = .{},
-    widget_layout_valid: bool = false,
-    widget_frame_panels: [r.lua.MAX_LUA_WIDGETS]layout.WidgetPanelSlot = @splat(.{}),
-    widget_frame_panels_len: usize = 0,
-    widget_frame_input_area: r.tui.Rect = .{},
-    widget_frame_progress_h: u16 = 0,
+    composer_area: r.tui.Rect = .{},
+    composer_progress_h: u16 = 0,
 
     pub fn deinit(self: *State, gpa: std.mem.Allocator) void {
         self.arena_timeline_render.deinit();
@@ -82,39 +80,37 @@ pub const State = struct {
 
 pub fn render(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     chrome.refreshLuaStatusBar(app);
-    if (renderFrameSnapshot(app, area, buf)) {
+    if (renderFrameSnapshot(app, buf)) {
         underlineImageTokens(buf);
         if (app.image_viewer) |*viewer| r.image_view.render(viewer, app.theme, area, buf);
         if (app.view.frame_snapshot_resize_gen) |gen| app.view.frame_snapshot_resize_seen = gen.*;
         return;
     }
-    chrome.refreshLuaWidgets(app, area, buf);
     renderCore(app, area, buf);
-    chrome.drawLuaPanels(app, buf);
-    composer.renderCompletionPopup(app, app.arena_frame.allocator(), app.view.widget_frame_input_area, app.view.widget_frame_progress_h, buf);
+    chrome.drawLuaCanvases(app, buf);
+    composer.renderCompletionPopup(app, app.arena_frame.allocator(), app.view.composer_area, app.view.composer_progress_h, buf);
     underlineImageTokens(buf);
     if (app.image_viewer) |*viewer| r.image_view.render(viewer, app.theme, area, buf);
     if (app.view.frame_snapshot_resize_gen) |gen| app.view.frame_snapshot_resize_seen = gen.*;
 }
 
-fn renderFrameSnapshot(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) bool {
+fn renderFrameSnapshot(app: *App, buf: *r.tui.Buffer) bool {
     if (!frameSnapshotUsable(app, buf)) return false;
     const snap = app.view.frame_snapshot.?;
 
     @memcpy(buf.cells, snap.cells);
-    chrome.refreshLuaWidgets(app, area, buf);
 
     app.mu.lockUncancelable(app.io);
     _ = app.arena_frame.reset(.free_all);
     const frame_alloc = app.arena_frame.allocator();
     repaintFrameSnapshotTools(app, frame_alloc, buf);
-    if (app.view.widget_frame_input_area.width > 0 and app.view.widget_frame_input_area.height > 0) {
+    if (app.view.composer_area.width > 0 and app.view.composer_area.height > 0) {
         const progress_line = chrome.mainProgressLine(app, frame_alloc);
-        composer.renderInputWidget(app, frame_alloc, app.view.widget_frame_input_area, app.view.widget_frame_progress_h, progress_line, buf);
+        composer.renderInputWidget(app, frame_alloc, app.view.composer_area, app.view.composer_progress_h, progress_line, buf);
     }
     app.mu.unlock(app.io);
 
-    chrome.drawLuaPanels(app, buf);
+    chrome.drawLuaCanvases(app, buf);
     return true;
 }
 
@@ -164,6 +160,93 @@ pub fn recordFrameSnapshotTool(app: *App, calls: []const tools.GroupCall, p: r.t
     };
 }
 
+const NativeHost = struct {
+    app: *App,
+    alloc: std.mem.Allocator,
+    progress_line: ?r.tui.Line,
+    progress_h: u16,
+    scrollbar_reserved: u16,
+    welcome: ?r.tui.Paragraph = null,
+    stack: ?timeline.TimelineStack = null,
+
+    fn measure(ptr: *anyopaque, native: scene.Native, width: u16, max_height: u16) u16 {
+        const host: *NativeHost = @ptrCast(@alignCast(ptr));
+        return switch (native) {
+            .lua_error => chrome.luaErrorHeight(host.app, host.alloc, width, max_height) catch 0,
+            .composer => layout.inputHeight(host.app, host.alloc, .{ .width = width, .height = max_height }) +| host.progress_h,
+            .timeline => host.measureTimeline(width, max_height),
+        };
+    }
+
+    fn draw(ptr: *anyopaque, native: scene.Native, rect: r.tui.Rect, buf: *r.tui.Buffer) void {
+        const host: *NativeHost = @ptrCast(@alignCast(ptr));
+        const app = host.app;
+        switch (native) {
+            .lua_error => {
+                buf.fill(rect, .{ .style = .{ .bg = app.theme.overlay } });
+                chrome.renderLuaError(app, host.alloc, rect, buf) catch |err| {
+                    log.err("lua error render failed with {any}", .{err});
+                };
+            },
+            .composer => {
+                app.view.composer_area = rect;
+                app.view.composer_progress_h = host.progress_h;
+                composer.renderInputWidget(app, host.alloc, rect, host.progress_h, host.progress_line, buf);
+            },
+            .timeline => host.drawTimeline(rect, buf),
+        }
+    }
+
+    fn measureTimeline(host: *NativeHost, width: u16, max_height: u16) u16 {
+        const app = host.app;
+        var content_height: usize = 0;
+        if (app.timeline.items.len == 0 and !app.isMainAgentCompacting()) {
+            var welcome = r.tui.Paragraph{
+                .padding = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
+                .wrap = false,
+            };
+            r.dash.build_info(app, &welcome.lines) catch {};
+            content_height = welcome.totalHeightLong(width);
+            host.welcome = welcome;
+        } else {
+            const content_width = width -| host.scrollbar_reserved;
+            host.stack = timeline.buildTimelineStack(app, host.alloc, content_width, max_height) catch |err| blk: {
+                log.err("timeline build failed with {any}", .{err});
+                break :blk null;
+            };
+            if (host.stack != null and host.stack.?.pinned_shift) {
+                const stale = host.stack;
+                host.stack = timeline.buildTimelineStack(app, host.alloc, content_width, max_height) catch stale;
+            }
+            if (host.stack) |stack| {
+                content_height = stack.total -| stack.scroll_offset;
+                app.view.scrollbar_reserved = if (stack.overflow and width > timeline.scrollbar_strip_width) timeline.scrollbar_strip_width else 0;
+            }
+        }
+        return @intCast(@min(content_height, @as(usize, max_height)));
+    }
+
+    fn drawTimeline(host: *NativeHost, rect: r.tui.Rect, buf: *r.tui.Buffer) void {
+        const app = host.app;
+        buf.fill(rect, .{ .style = .{ .bg = app.theme.overlay } });
+        if (host.welcome) |welcome| {
+            welcome.renderSimple(host.alloc, rect, buf);
+            return;
+        }
+        const stack = host.stack orelse return;
+        const content_area: r.tui.Rect = .{
+            .x = rect.x,
+            .y = rect.y,
+            .width = rect.width -| host.scrollbar_reserved,
+            .height = rect.height,
+        };
+        timeline.renderTimelineStack(app, stack, content_area, buf);
+        if (stack.overflow and host.scrollbar_reserved == timeline.scrollbar_strip_width) {
+            timeline.renderTimelineScrollbar(app, stack, content_area, buf);
+        }
+    }
+};
+
 fn renderCore(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     app.mu.lockUncancelable(app.io);
     defer app.mu.unlock(app.io);
@@ -179,146 +262,29 @@ fn renderCore(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
     for (app.inline_images.entries.items) |entry| entry.frame_pinned = false;
     app.inline_images.prune(app.gpa);
     app.view.frame_snapshot_valid = true;
-
-    var widget_layout_fallback = layout.WidgetLayout{ .area = area, .main = area };
-    const cache_matches_area = app.view.widget_layout_valid and
-        app.view.widget_layout_cache.area.width == area.width and
-        app.view.widget_layout_cache.area.height == area.height;
-    const wl: *const layout.WidgetLayout = if (cache_matches_area) &app.view.widget_layout_cache else &widget_layout_fallback;
-    const main_area = wl.main;
-
-    const input_height = layout.inputHeight(app, frame_alloc, main_area);
-
-    // Timeline fills the screen; input + status stick right after the
-    // timeline
-    // content (or to the viewport bottom once it overflows). Each status
-    // line lives inside the input footer: the main-agent status on the top
-    // row, the statusbar on the row above the bottom padding.
-    const _combined_area, _ =
-        r.tui.Col(main_area, .{
-            r.tui.Constr.fill, // timeline + status
-            r.tui.Constr{ .fixed = input_height }, // input + status footer
-        });
-
-    const lua_error_height = chrome.luaErrorHeight(app, frame_alloc, _combined_area.width, _combined_area.height) catch 0;
-    const _lua_error_area, const _timeline_status_area =
-        r.tui.Col(_combined_area, .{
-            r.tui.Constr{ .fixed = lua_error_height },
-            r.tui.Constr.fill,
-        });
-
-    const progress_line: ?r.tui.Line = chrome.mainProgressLine(app, frame_alloc);
-    const progress_h: u16 = if (progress_line != null) 1 else 0;
-    const footer_h: u16 = input_height +| progress_h;
-    const panels_visible =
-        (_timeline_status_area.height -| progress_h -| wl.panels_total_height) >= layout.WIDGET_MIN_TIMELINE_ROWS and
-        (wl.panels_total_height +| footer_h) <= main_area.height;
-    const between_h: u16 = if (panels_visible) wl.between_total_height else 0;
-    const below_h: u16 = if (panels_visible) wl.below_total_height else 0;
-
-    // Build the content first so the viewport only renders as much as needed.
-    const is_welcome = app.timeline.items.len == 0 and !app.isMainAgentCompacting();
-    var welcome_p: ?r.tui.Paragraph = null;
-    var timeline_stack: ?timeline.TimelineStack = null;
-    var content_end_h: usize = 0;
-    const scrollbar_reserved: u16 = app.view.scrollbar_reserved;
-
-    const timeline_h: u16 = blk: {
-        const viewport_h = _timeline_status_area.height -| progress_h -| between_h;
-        const pinned_h = (main_area.y +| main_area.height) -| footer_h -| below_h -| between_h -| _timeline_status_area.y;
-        break :blk @min(viewport_h, pinned_h);
-    };
-
-    if (is_welcome) {
-        var wp = r.tui.Paragraph{
-            .padding = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
-            .wrap = false,
-        };
-        r.dash.build_info(app, &wp.lines) catch {};
-        content_end_h = wp.totalHeightLong(_timeline_status_area.width);
-        welcome_p = wp;
-    } else {
-        timeline_stack = timeline.buildTimelineStack(app, frame_alloc, _timeline_status_area.width -| scrollbar_reserved, timeline_h) catch |err| blk: {
-            log.err("timeline build failed with {any}", .{err});
-            break :blk null;
-        };
-        if (timeline_stack != null and timeline_stack.?.pinned_shift) {
-            const stale = timeline_stack;
-            timeline_stack = timeline.buildTimelineStack(app, frame_alloc, _timeline_status_area.width -| scrollbar_reserved, timeline_h) catch stale;
-        }
-        if (timeline_stack) |cs| content_end_h = cs.total -| cs.scroll_offset;
-    }
     app.view.scrollbar_track = .{};
     app.view.scrollbar_max = 0;
+    app.view.composer_area = .{};
+    app.view.composer_progress_h = 0;
 
-    // Input sits right after the timeline content; once content fills the
-    // viewport it pins to the bottom and stays sticky. The footer includes
-    // the main-agent status row on top of the input widget. Between panels
-    // push the floating footer past the timeline content, below panels reserve
-    // rows under the pinned footer.
-    const max_footer_y: u16 = (main_area.y +| main_area.height) -| footer_h -| below_h;
-    const content_cap: u16 = @intCast(@min(content_end_h, @as(usize, timeline_h)));
-    const footer_y: u16 = @min(
-        _timeline_status_area.y +| content_cap +| between_h,
-        max_footer_y,
-    );
-    const _input_area: r.tui.Rect = .{
-        .x = main_area.x,
-        .y = footer_y,
-        .width = main_area.width,
-        .height = footer_h,
+    const progress_line: ?r.tui.Line = chrome.mainProgressLine(app, frame_alloc);
+    var host = NativeHost{
+        .app = app,
+        .alloc = frame_alloc,
+        .progress_line = progress_line,
+        .progress_h = if (progress_line != null) 1 else 0,
+        .scrollbar_reserved = app.view.scrollbar_reserved,
     };
-
-    app.view.widget_frame_input_area = _input_area;
-    app.view.widget_frame_progress_h = progress_h;
-    app.view.widget_frame_panels_len = 0;
-    if (panels_visible) {
-        layout.anchorWidgetPanels(wl, footer_y, footer_h, &app.view.widget_frame_panels);
-        app.view.widget_frame_panels_len = wl.panels_len;
-    }
-
-    // Paint the background only over the used region; the rest stays
-    // terminal default so unused viewport space is not rendered.
-    const used_bottom: u16 = @min(footer_y +| footer_h +| below_h, main_area.y +| main_area.height);
-    buf.fill(.{
-        .x = main_area.x,
-        .y = main_area.y,
-        .width = main_area.width,
-        .height = used_bottom -| main_area.y,
-    }, .{ .style = .{ .bg = app.theme.overlay } });
-
-    chrome.renderLuaError(app, frame_alloc, _lua_error_area, buf) catch |err| {
-        log.err("lua error render failed with {any}", .{err});
+    const frame = scene.Frame{
+        .theme = &app.theme,
+        .arena = frame_alloc,
+        .buf = buf,
+        .host = &host,
+        .measureNative = NativeHost.measure,
+        .drawNative = NativeHost.draw,
     };
+    app.scene.render(&frame, area);
 
-    const _timeline_area: r.tui.Rect = .{
-        .x = _timeline_status_area.x,
-        .y = _timeline_status_area.y,
-        .width = _timeline_status_area.width,
-        .height = timeline_h,
-    };
-
-    if (welcome_p) |wp| {
-        const welcome_area: r.tui.Rect = .{
-            .x = _timeline_area.x,
-            .y = _timeline_area.y,
-            .width = _timeline_area.width,
-            .height = content_cap,
-        };
-        wp.renderSimple(frame_alloc, welcome_area, buf);
-    } else if (timeline_stack) |cs| {
-        const content_area: r.tui.Rect = .{
-            .x = _timeline_area.x,
-            .y = _timeline_area.y,
-            .width = _timeline_area.width -| scrollbar_reserved,
-            .height = _timeline_area.height,
-        };
-        timeline.renderTimelineStack(app, cs, content_area, buf);
-        app.view.scrollbar_reserved = if (cs.overflow and _timeline_status_area.width > timeline.scrollbar_strip_width) timeline.scrollbar_strip_width else 0;
-        if (cs.overflow and scrollbar_reserved == timeline.scrollbar_strip_width) {
-            timeline.renderTimelineScrollbar(app, cs, content_area, buf);
-        }
-    }
     for (app.inline_images.entries.items) |entry| {
         if (!entry.frame_pinned) continue;
         var placed = false;
@@ -331,13 +297,6 @@ fn renderCore(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
         if (!placed) entry.frame_pinned = false;
     }
 
-    // Input/Permission: a single overlay_dark block hosting the main-agent
-    // progress, the input content, and the statusbar.
-    composer.renderInputWidget(app, frame_alloc, _input_area, progress_h, progress_line, buf);
-
-    chrome.renderWidgetErrors(app, wl, buf);
-
-    // Notifications
     chrome.renderNotifications(app, frame_alloc, area, buf);
 }
 

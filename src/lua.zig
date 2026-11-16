@@ -1,5 +1,5 @@
 //! The Lua surface: the `blitz` global table that generates meta.lua, bindings
-//! for tools, hooks, commands, MCP and widgets, and the config and tool VMs.
+//! for tools, hooks, commands, MCP and the canvas buffer, and the config and tool VMs.
 const std = @import("std");
 const builtin = @import("builtin");
 const app = @import("app.zig");
@@ -11,6 +11,7 @@ const tl = @import("tools/root.zig");
 const log = std.log.scoped(.lua);
 const r = @import("root.zig");
 const lua_state = @import("lua_state.zig");
+const lua_ui = @import("lua_ui.zig");
 const lua = @This();
 
 fn hookLog(comptime level: std.log.Level, comptime fmt: []const u8, args: anytype) void {
@@ -184,80 +185,6 @@ const ToolResultDef = LuaType{ .table_def = .{ .name = "BlitzToolResult", .field
     .{ .name = "msg", .ty = LuaType.string, .optional = true, .desc = "Tool result text. Above 32KB or 2000 lines the tail is kept and the full text spills to a file with a locator." },
     .{ .name = "img", .ty = LuaType.table, .optional = true, .desc = "{ media_type = string, data = string }; data is base64, decoded size capped at 4MB" },
     .{ .name = "exit_loop", .ty = LuaType.boolean, .optional = true },
-} } };
-const WidgetBufDef = LuaType{ .table_def = .{ .name = "BlitzWidgetBuf", .fields = &.{
-    .{ .name = "width", .ty = LuaInteger, .desc = "visible widget width in cells, shrinks when clipped" },
-    .{ .name = "height", .ty = LuaInteger, .desc = "visible widget height in cells, shrinks when clipped" },
-    .{ .name = "set", .ty = LuaType{ .raw = "fun(x: integer, y: integer, text: string)" }, .desc = "write text at widget-relative coords, clipped to the widget rect, theme text color" },
-    .{ .name = "set_color", .ty = LuaType{ .raw = "fun(x: integer, y: integer, text: string, color: string)" }, .desc = "write text with a foreground color" },
-    .{ .name = "fill", .ty = LuaType{ .raw = "fun(x: integer, y: integer, w: integer, h: integer, color: string)" }, .desc = "solid background fill" },
-    .{ .name = "rect", .ty = LuaType{ .raw = "fun(x: integer, y: integer, w: integer, h: integer, color: string)" }, .desc = "one cell thick background outline" },
-    .{ .name = "box", .ty = LuaType{ .raw = "fun(x: integer, y: integer, w: integer, h: integer, color: string)" }, .desc = "unicode line border in foreground color" },
-} } };
-const WidgetRenderFnDef = LuaType{ .raw_refs = .{ .text = "fun(width: integer, height: integer, buf: BlitzWidgetBuf, frame: integer)", .refs = &.{WidgetBufDef} } };
-const WidgetHandleDef = LuaType{ .table_def = .{ .name = "BlitzWidgetHandle", .fields = &.{
-    .{ .name = "show", .ty = LuaType{ .raw = "fun()" }, .desc = "make the widget visible again" },
-    .{ .name = "hide", .ty = LuaType{ .raw = "fun()" }, .desc = "hide the widget, its space returns to the layout" },
-    .{ .name = "remove", .ty = LuaType{ .raw = "fun()" }, .desc = "unregister the widget permanently" },
-    .{ .name = "set_size", .ty = LuaType{ .raw = "fun(size: integer)" }, .desc = "set width (sidebar) or height (panel) in cells" },
-} } };
-const SidebarDef = LuaType{ .table_def = .{ .name = "BlitzSidebarDef", .fields = &.{
-    .{ .name = "side", .ty = LuaString, .optional = true, .desc = "'left' (default) or 'right'" },
-    .{ .name = "width", .ty = LuaInteger, .desc = "columns" },
-    .{ .name = "render", .ty = WidgetRenderFnDef, .desc = "draw callback, runs on every drawn frame" },
-} } };
-const PanelDef = LuaType{ .table_def = .{ .name = "BlitzPanelDef", .fields = &.{
-    .{ .name = "height", .ty = LuaInteger, .desc = "rows" },
-    .{ .name = "place", .ty = LuaString, .optional = true, .desc = "'between' (default) pins the panel between timeline and input, 'below' pins it under the input" },
-    .{ .name = "render", .ty = WidgetRenderFnDef, .desc = "draw callback, runs on every drawn frame" },
-} } };
-const BlitzDraw = LuaType{ .table_def = .{ .name = "BlitzDraw", .fields = &.{
-    .{
-        .name = "sidebar",
-        .desc =
-        \\Reserve a full height sidebar column and draw into it from Lua.
-        \\side is 'left' (default) or 'right', width is cells. A second add on
-        \\the same side replaces the first. The sidebar hides automatically
-        \\while the main column would drop below 40 columns. render runs on
-        \\every drawn frame with widget-relative dimensions, a BlitzWidgetBuf,
-        \\and the app frame counter (frame) for animations.
-        \\Colors are '#RRGGBB' hex or theme names (bg, muted, text, info, ...).
-        ,
-        .ty = LuaType{ .function = .{
-            .args = &.{.{ .name = "def", .ty = SidebarDef }},
-            .ret = &WidgetHandleDef,
-            .fn_ptr = luaAddSidebar,
-        } },
-    },
-    .{
-        .name = "panel",
-        .desc =
-        \\Reserve a horizontal panel and draw into it from Lua.
-        \\height is cells. Panels of the same place stack bottom up in
-        \\registration order, the first registered panel sits on top of its block.
-        \\place 'between' (default) pins the panel between timeline and input,
-        \\place 'below' pins it under the input widget. All panels hide
-        \\automatically while the timeline viewport would drop below 6 rows. render
-        \\runs on every drawn frame with widget-relative dimensions, a BlitzWidgetBuf,
-        \\and the app frame counter (frame) for animations.
-        ,
-        .ty = LuaType{ .function = .{
-            .args = &.{.{ .name = "def", .ty = PanelDef }},
-            .ret = &WidgetHandleDef,
-            .fn_ptr = luaAddPanel,
-        } },
-    },
-    .{
-        .name = "redraw",
-        .desc = "Request a UI redraw on the next loop tick. Call from animations to force frames while the app is idle.",
-        .ty = LuaType{ .function = .{
-            .fn_ptr = LuaFnBind((struct {
-                fn lua_fn(a: *r.app.App) !void {
-                    a.lua_redraw.store(true, .release);
-                }
-            }).lua_fn, "redraw"),
-        } },
-    },
 } } };
 const AgentIdDef: LuaType = .integer;
 const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
@@ -581,7 +508,7 @@ pub const Blitz = LuaType{
             .{ .name = "agent", .ty = BlitzAgent },
             .{ .name = "cmp", .ty = BlitzCmp },
             .{ .name = "input", .ty = BlitzInput },
-            .{ .name = "draw", .ty = BlitzDraw },
+            .{ .name = "ui", .ty = lua_ui.BlitzUi },
             .{ .name = "tools", .ty = BlitzToolDef },
             .{ .name = "toolsets", .ty = BlitzToolsetDef },
             .{ .name = "hooks", .ty = BlitzHooks },
@@ -1656,7 +1583,7 @@ pub const BlitzHooks = LuaType{
                 \\main Lua VM on the main thread. An iteration is skipped
                 \\while another thread holds the main VM. A callback that
                 \\errors is unregistered. Keep it short and call
-                \\blitz.draw.redraw() when the visuals change. A reload clears
+                \\blitz.ui.redraw() when a canvas changes. A reload clears
                 \\every callback. Never call blitz.agent.await inside it.
                 ,
                 .ty = LuaType{ .function = .{
@@ -3096,20 +3023,6 @@ const LuaInjectEntry = struct {
     hook: r.inject.LuaInjectHook = .{},
 };
 
-pub const WidgetKind = enum { sidebar, panel };
-pub const WidgetSide = enum { left, right };
-pub const WidgetPlace = enum { between, below };
-
-pub const LuaWidgetEntry = struct {
-    kind: WidgetKind = .sidebar,
-    side: WidgetSide = .left,
-    place: WidgetPlace = .between,
-    size: u16 = 0,
-    hidden: bool = false,
-    alive: bool = true,
-    func_ref: c_int = c.LUA_NOREF,
-};
-
 const LuaCommandEntry = struct {
     name: [128]u8 = undefined,
     name_len: usize = 0,
@@ -3563,7 +3476,7 @@ var app_registry_key: u8 = 0;
 
 var owner_registry_key: u8 = 0;
 
-fn fromState(L: *c.lua_State) ?*LuaVm {
+pub fn fromState(L: *c.lua_State) ?*LuaVm {
     _ = c.lua_rawgetp(L, c.LUA_REGISTRYINDEX, @ptrCast(&owner_registry_key));
     defer c.lua_pop(L, 1);
     if (c.lua_type(L, -1) != c.LUA_TLIGHTUSERDATA) return null;
@@ -3654,8 +3567,6 @@ const LUA_ERROR_SHOW_MS: i64 = 8_000;
 pub const LUA_ERROR_FADE_NS: i128 = 2 * std.time.ns_per_s;
 const MAX_LUA_BINDS = 256;
 const MAX_LUA_COMMANDS = 256;
-pub const MAX_LUA_WIDGETS = 8;
-pub const WIDGET_ERROR_CAP = 256;
 const MAX_LUA_MCP_SERVERS = 16;
 const STDOUT_BUF_CAP = 1024 * 1024 * 16;
 const CANCELLATION_HOOK_INTERVAL = 10000;
@@ -3695,8 +3606,6 @@ pub const LuaVm = struct {
     bind_entries: std.ArrayList(LuaBindEntry) = .empty,
     command_entries: std.ArrayList(LuaCommandEntry) = .empty,
     mcp_entries: std.ArrayList(LuaMcpServerEntry) = .empty,
-    widget_entries: [MAX_LUA_WIDGETS]LuaWidgetEntry = @splat(.{}),
-    widget_count: usize = 0,
     stdout_buf: std.ArrayList(u8) = .empty,
     last_error: [512]u8 = undefined,
     last_error_len: usize = 0,
@@ -3765,6 +3674,7 @@ pub const LuaVm = struct {
         c.lua_pushcfunction(self.L, &luaPrintToBuffer);
         c.lua_setglobal(self.L, "print");
         registerBlitzLib(self.L);
+        lua_ui.registerNodeMeta(self.L);
         installPluginSearcher(self.L);
     }
 
@@ -3845,12 +3755,6 @@ pub const LuaVm = struct {
         for (self.command_entries.items) |*entry| {
             c.luaL_unref(self.L, c.LUA_REGISTRYINDEX, entry.func_ref);
         }
-        for (self.widget_entries[0..self.widget_count]) |*entry| {
-            if (!entry.alive) continue;
-            c.luaL_unref(self.L, c.LUA_REGISTRYINDEX, entry.func_ref);
-            entry.alive = false;
-        }
-        self.widget_count = 0;
         c.lua_close(self.L);
         _ = self.arena_state.reset(.free_all);
         self.tool_entries = .empty;
@@ -4107,6 +4011,17 @@ pub const LuaVm = struct {
         if (!self.vm_mu.tryLock()) return;
         defer self.vm_mu.unlock(a.io);
         self.runLoopHooks(a, &self.tick_hooks, "tick", null);
+    }
+
+    pub fn invokeUiClicks(self: *LuaVm) void {
+        const a = self.app orelse return;
+        if (!a.scene.clicks_pending.load(.acquire)) return;
+        if (!self.vm_mu.tryLock()) return;
+        defer self.vm_mu.unlock(a.io);
+        while (a.scene.popClickRef()) |func_ref| {
+            self.invokeBind(func_ref);
+            a.dirty = true;
+        }
     }
 
     pub fn invokeStateHooks(self: *LuaVm) void {
@@ -4454,7 +4369,7 @@ pub const LuaVm = struct {
 
 // ── blitz.* Lua library ─────────────────────────────────────────────
 
-// ── Lua widgets: sidebar + panel render callbacks ──────────────────
+// ── Lua canvas: buffer handed to ui.canvas draw callbacks ──────────
 
 const LuaDrawCtx = struct {
     buf: *tui.Buffer,
@@ -4471,24 +4386,19 @@ fn getDrawCtx(L: *c.lua_State) ?*LuaDrawCtx {
     return @ptrCast(@alignCast(ptr));
 }
 
-fn getWidgetEntry(L: *c.lua_State) ?*LuaWidgetEntry {
-    const ptr = getUpvaluePtr(L) orelse return null;
-    return @ptrCast(@alignCast(ptr));
-}
-
-fn widgetArgInt(L: *c.lua_State, idx: c_int) ?c.lua_Integer {
+fn canvasArgInt(L: *c.lua_State, idx: c_int) ?c.lua_Integer {
     if (c.lua_type(L, idx) != c.LUA_TNUMBER) return null;
     return c.lua_tointegerx(L, idx, null);
 }
 
-fn widgetArgString(L: *c.lua_State, idx: c_int) ?[]const u8 {
+fn canvasArgString(L: *c.lua_State, idx: c_int) ?[]const u8 {
     if (c.lua_type(L, idx) != c.LUA_TSTRING) return null;
     var len: usize = 0;
     const ptr = c.lua_tolstring(L, idx, &len) orelse return null;
     return ptr[0..len];
 }
 
-pub fn parseWidgetColor(theme: *const app.Theme, str: []const u8) tui.Color {
+pub fn parseCanvasColor(theme: *const app.Theme, str: []const u8) tui.Color {
     if (str.len == 0) return .reset;
     if (str[0] == '#') return tui.Color.parseStrHex(str) catch .reset;
     inline for (theme_colors) |binding| {
@@ -4499,13 +4409,13 @@ pub fn parseWidgetColor(theme: *const app.Theme, str: []const u8) tui.Color {
 
 fn bufSetFromLua(state: *c.lua_State, color: ?[]const u8) c_int {
     const draw = getDrawCtx(state) orelse return 0;
-    const x = widgetArgInt(state, 1) orelse return 0;
-    const y = widgetArgInt(state, 2) orelse return 0;
-    const text = widgetArgString(state, 3) orelse return 0;
+    const x = canvasArgInt(state, 1) orelse return 0;
+    const y = canvasArgInt(state, 2) orelse return 0;
+    const text = canvasArgString(state, 3) orelse return 0;
     if (x < 0 or y < 0 or x >= draw.rect.width or y >= draw.rect.height) return 0;
     const ux: u16 = @intCast(x);
     const uy: u16 = @intCast(y);
-    const fg: tui.Color = if (color) |str| parseWidgetColor(draw.theme, str) else draw.theme.text;
+    const fg: tui.Color = if (color) |str| parseCanvasColor(draw.theme, str) else draw.theme.text;
     draw.buf.setStringMax(
         draw.rect.x +| ux,
         draw.rect.y +| uy,
@@ -4522,13 +4432,13 @@ fn luaBufSet(L: ?*c.lua_State) callconv(.c) c_int {
 
 fn luaBufSetColor(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
-    const color = widgetArgString(state, 4) orelse return 0;
+    const color = canvasArgString(state, 4) orelse return 0;
     return bufSetFromLua(state, color);
 }
 
-const WidgetRegion = struct { x: u16, y: u16, w: u16, h: u16 };
+const CanvasRegion = struct { x: u16, y: u16, w: u16, h: u16 };
 
-fn widgetClampedRegion(draw: *const LuaDrawCtx, x: c.lua_Integer, y: c.lua_Integer, w: c.lua_Integer, h: c.lua_Integer) ?WidgetRegion {
+fn canvasClampedRegion(draw: *const LuaDrawCtx, x: c.lua_Integer, y: c.lua_Integer, w: c.lua_Integer, h: c.lua_Integer) ?CanvasRegion {
     if (x < 0 or y < 0 or w <= 0 or h <= 0) return null;
     if (x >= draw.rect.width or y >= draw.rect.height) return null;
     const end_x = @min(x +| w, @as(c.lua_Integer, draw.rect.width));
@@ -4544,13 +4454,13 @@ fn widgetClampedRegion(draw: *const LuaDrawCtx, x: c.lua_Integer, y: c.lua_Integ
 fn luaBufFill(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
     const draw = getDrawCtx(state) orelse return 0;
-    const x = widgetArgInt(state, 1) orelse return 0;
-    const y = widgetArgInt(state, 2) orelse return 0;
-    const w = widgetArgInt(state, 3) orelse return 0;
-    const h = widgetArgInt(state, 4) orelse return 0;
-    const color = widgetArgString(state, 5) orelse return 0;
-    const region = widgetClampedRegion(draw, x, y, w, h) orelse return 0;
-    const cell = tui.Cell{ .style = .{ .bg = parseWidgetColor(draw.theme, color) } };
+    const x = canvasArgInt(state, 1) orelse return 0;
+    const y = canvasArgInt(state, 2) orelse return 0;
+    const w = canvasArgInt(state, 3) orelse return 0;
+    const h = canvasArgInt(state, 4) orelse return 0;
+    const color = canvasArgString(state, 5) orelse return 0;
+    const region = canvasClampedRegion(draw, x, y, w, h) orelse return 0;
+    const cell = tui.Cell{ .style = .{ .bg = parseCanvasColor(draw.theme, color) } };
     var row: u16 = 0;
     while (row < region.h) : (row += 1) {
         var col: u16 = 0;
@@ -4564,13 +4474,13 @@ fn luaBufFill(L: ?*c.lua_State) callconv(.c) c_int {
 fn luaBufRect(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
     const draw = getDrawCtx(state) orelse return 0;
-    const x = widgetArgInt(state, 1) orelse return 0;
-    const y = widgetArgInt(state, 2) orelse return 0;
-    const w = widgetArgInt(state, 3) orelse return 0;
-    const h = widgetArgInt(state, 4) orelse return 0;
-    const color = widgetArgString(state, 5) orelse return 0;
-    const region = widgetClampedRegion(draw, x, y, w, h) orelse return 0;
-    const cell = tui.Cell{ .style = .{ .bg = parseWidgetColor(draw.theme, color) } };
+    const x = canvasArgInt(state, 1) orelse return 0;
+    const y = canvasArgInt(state, 2) orelse return 0;
+    const w = canvasArgInt(state, 3) orelse return 0;
+    const h = canvasArgInt(state, 4) orelse return 0;
+    const color = canvasArgString(state, 5) orelse return 0;
+    const region = canvasClampedRegion(draw, x, y, w, h) orelse return 0;
+    const cell = tui.Cell{ .style = .{ .bg = parseCanvasColor(draw.theme, color) } };
     const last_col = region.x +| region.w -| 1;
     const last_row = region.y +| region.h -| 1;
     var col: u16 = 0;
@@ -4589,13 +4499,13 @@ fn luaBufRect(L: ?*c.lua_State) callconv(.c) c_int {
 fn luaBufBox(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L.?;
     const draw = getDrawCtx(state) orelse return 0;
-    const x = widgetArgInt(state, 1) orelse return 0;
-    const y = widgetArgInt(state, 2) orelse return 0;
-    const w = widgetArgInt(state, 3) orelse return 0;
-    const h = widgetArgInt(state, 4) orelse return 0;
-    const color = widgetArgString(state, 5) orelse return 0;
-    const region = widgetClampedRegion(draw, x, y, w, h) orelse return 0;
-    const fg = parseWidgetColor(draw.theme, color);
+    const x = canvasArgInt(state, 1) orelse return 0;
+    const y = canvasArgInt(state, 2) orelse return 0;
+    const w = canvasArgInt(state, 3) orelse return 0;
+    const h = canvasArgInt(state, 4) orelse return 0;
+    const color = canvasArgString(state, 5) orelse return 0;
+    const region = canvasClampedRegion(draw, x, y, w, h) orelse return 0;
+    const fg = parseCanvasColor(draw.theme, color);
     const edge = tui.Cell{ .style = .{ .fg = fg } };
     const hcell = tui.Cell{ .char = 0x2500, .style = .{ .fg = fg } };
     const vcell = tui.Cell{ .char = 0x2502, .style = .{ .fg = fg } };
@@ -4621,7 +4531,7 @@ fn luaBufBox(L: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
-fn pushWidgetBufTable(L: *c.lua_State, draw: *LuaDrawCtx) void {
+fn pushCanvasBufTable(L: *c.lua_State, draw: *LuaDrawCtx) void {
     c.lua_newtable(L);
     setFieldAny(L, -2, "width", @as(c.lua_Integer, draw.rect.width));
     setFieldAny(L, -2, "height", @as(c.lua_Integer, draw.rect.height));
@@ -4636,180 +4546,29 @@ fn pushWidgetBufTable(L: *c.lua_State, draw: *LuaDrawCtx) void {
     }
 }
 
-pub fn invokeWidgetRender(
+pub fn invokeCanvasDraw(
     vm: *LuaVm,
-    entry: *const LuaWidgetEntry,
+    func_ref: c_int,
     rect: tui.Rect,
     buf: *tui.Buffer,
     theme: *const app.Theme,
     frame: usize,
-    err_out: []u8,
-) usize {
-    if (rect.width == 0 or rect.height == 0) return 0;
+) bool {
+    if (rect.width == 0 or rect.height == 0) return true;
     const L = vm.L;
     const top = c.lua_gettop(L);
     defer c.lua_settop(L, top);
 
-    _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, entry.func_ref);
-    if (c.lua_type(L, -1) != c.LUA_TFUNCTION) return 0;
+    _ = c.lua_rawgeti(L, c.LUA_REGISTRYINDEX, func_ref);
+    if (c.lua_type(L, -1) != c.LUA_TFUNCTION) return true;
 
-    c.lua_pushinteger(L, rect.width);
-    c.lua_pushinteger(L, rect.height);
     var draw = LuaDrawCtx{ .buf = buf, .rect = rect, .theme = theme };
-    pushWidgetBufTable(L, &draw);
+    pushCanvasBufTable(L, &draw);
     c.lua_pushinteger(L, @intCast(frame));
 
-    const status = c.lua_pcallk(L, 4, 0, 0, 0, null);
-    if (status != 0) {
-        var len: usize = 0;
-        const ptr = c.lua_tolstring(L, -1, &len);
-        const capped = @min(len, err_out.len);
-        if (ptr) |p| {
-            @memcpy(err_out[0..capped], p[0..capped]);
-            return capped;
-        }
-    }
-    return 0;
-}
-
-fn requestWidgetRedraw(state: *c.lua_State) void {
-    const vm = fromState(state) orelse return;
-    if (vm.app) |a| a.lua_redraw.store(true, .release);
-}
-
-fn luaWidgetShow(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const entry = getWidgetEntry(state) orelse return 0;
-    if (!entry.alive) return 0;
-    entry.hidden = false;
-    requestWidgetRedraw(state);
-    return 0;
-}
-
-fn luaWidgetHide(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const entry = getWidgetEntry(state) orelse return 0;
-    if (!entry.alive) return 0;
-    entry.hidden = true;
-    requestWidgetRedraw(state);
-    return 0;
-}
-
-fn luaWidgetRemove(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const entry = getWidgetEntry(state) orelse return 0;
-    if (!entry.alive) return 0;
-    const vm = fromState(state);
-    entry.alive = false;
-    if (vm) |v| {
-        c.luaL_unref(v.L, c.LUA_REGISTRYINDEX, entry.func_ref);
-        entry.func_ref = c.LUA_NOREF;
-    }
-    requestWidgetRedraw(state);
-    return 0;
-}
-
-fn luaWidgetSetSize(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L.?;
-    const entry = getWidgetEntry(state) orelse return 0;
-    if (!entry.alive) return 0;
-    const size = widgetArgInt(state, 1) orelse return 0;
-    if (size < 1) return 0;
-    entry.size = @intCast(@min(size, 4096));
-    requestWidgetRedraw(state);
-    return 0;
-}
-
-fn pushWidgetHandle(L: *c.lua_State, entry: *LuaWidgetEntry) void {
-    c.lua_newtable(L);
-    inline for (.{
-        .{ "show", &luaWidgetShow },
-        .{ "hide", &luaWidgetHide },
-        .{ "remove", &luaWidgetRemove },
-        .{ "set_size", &luaWidgetSetSize },
-    }) |binding| {
-        setClosureField(L, -2, binding[0], @ptrCast(entry), binding[1]);
-    }
-}
-
-fn appendWidgetEntry(vm: *LuaVm, entry: LuaWidgetEntry) ?*LuaWidgetEntry {
-    for (vm.widget_entries[0..vm.widget_count]) |*slot| {
-        if (slot.alive) continue;
-        slot.* = entry;
-        return slot;
-    }
-    if (vm.widget_count >= MAX_LUA_WIDGETS) return null;
-    vm.widget_entries[vm.widget_count] = entry;
-    vm.widget_count += 1;
-    return &vm.widget_entries[vm.widget_count - 1];
-}
-
-fn dropSidebarSide(vm: *LuaVm, side: WidgetSide, keep: *LuaWidgetEntry) void {
-    for (vm.widget_entries[0..vm.widget_count]) |*entry| {
-        if (!entry.alive or entry.kind != .sidebar or entry.side != side) continue;
-        if (entry == keep) continue;
-        c.luaL_unref(vm.L, c.LUA_REGISTRYINDEX, entry.func_ref);
-        entry.alive = false;
-    }
-}
-
-fn luaAddWidget(state: *c.lua_State, kind: WidgetKind, comptime fname: []const u8) c_int {
-    if (isToolVm(state) catch false) {
-        c.lua_pushnil(state);
-        return 1;
-    }
-    const Args = struct {
-        side: ?[]const u8 = null,
-        place: ?[]const u8 = null,
-        width: ?u32 = null,
-        height: ?u32 = null,
-        render: LuaFnRef = .{ .idx = c.LUA_NOREF },
-    };
-    const args = readAnyArg(Args, state, fname, 1) orelse return 0;
-    const a = requireAppFromRegistry(state, "failed to get app") orelse return 0;
-    const vm = a.lua_vm;
-
-    var entry = LuaWidgetEntry{ .kind = kind, .func_ref = args.render.idx };
-    switch (kind) {
-        .sidebar => {
-            entry.side = if (args.side) |s|
-                (if (std.mem.eql(u8, s, "left")) WidgetSide.left else if (std.mem.eql(u8, s, "right")) WidgetSide.right else return widgetRegError(state, args.render.idx, fname))
-            else
-                WidgetSide.left;
-            const width = args.width orelse return widgetRegError(state, args.render.idx, fname);
-            if (width == 0 or width > 4096) return widgetRegError(state, args.render.idx, fname);
-            entry.size = @intCast(width);
-        },
-        .panel => {
-            entry.place = if (args.place) |p|
-                (if (std.mem.eql(u8, p, "between")) WidgetPlace.between else if (std.mem.eql(u8, p, "below")) WidgetPlace.below else return widgetRegError(state, args.render.idx, fname))
-            else
-                WidgetPlace.between;
-            const height = args.height orelse return widgetRegError(state, args.render.idx, fname);
-            if (height == 0 or height > 4096) return widgetRegError(state, args.render.idx, fname);
-            entry.size = @intCast(height);
-        },
-    }
-
-    const stored = appendWidgetEntry(vm, entry) orelse return widgetRegError(state, args.render.idx, fname);
-    if (kind == .sidebar) dropSidebarSide(vm, entry.side, stored);
-    requestWidgetRedraw(state);
-    pushWidgetHandle(state, stored);
-    return 1;
-}
-
-fn widgetRegError(state: *c.lua_State, render_ref: c_int, comptime fname: []const u8) c_int {
-    if (render_ref != c.LUA_NOREF) c.luaL_unref(state, c.LUA_REGISTRYINDEX, render_ref);
-    _ = c.luaL_error(state, fname ++ ": invalid or too many widget registrations");
-    return 0;
-}
-
-fn luaAddSidebar(L: ?*c.lua_State) callconv(.c) c_int {
-    return luaAddWidget(L.?, .sidebar, "draw.sidebar");
-}
-
-fn luaAddPanel(L: ?*c.lua_State) callconv(.c) c_int {
-    return luaAddWidget(L.?, .panel, "draw.panel");
+    if (c.lua_pcallk(L, 2, 0, 0, 0, null) == 0) return true;
+    vm.popError(.action);
+    return false;
 }
 
 // ── Plugins ────────────────────────────────────────────────────────────

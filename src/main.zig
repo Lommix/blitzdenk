@@ -901,6 +901,7 @@ pub fn run(
             if (fading_before and !fading_now) app.dirty = true;
 
             if (app.lua_redraw.swap(false, .acq_rel)) app.dirty = true;
+            if (app.scene.changed.swap(false, .acq_rel)) app.dirty = true;
             if (app.inline_images_ready.load(.acquire)) app.dirty = true;
 
             const animated = app.animationActive() or fading_now;
@@ -947,6 +948,7 @@ pub fn run(
             try app.tick();
             app.lua_vm.invokeTickHooks();
             app.lua_vm.invokeStateHooks();
+            app.lua_vm.invokeUiClicks();
 
             while (true) {
                 const next_event = term.nextEvent();
@@ -962,6 +964,7 @@ pub fn run(
                             if (res == .close) app.closeImageViewer();
                             continue;
                         }
+                        if (app.scene.keyPress(k)) continue;
                         if (app.keymap.parse(k)) |action| {
                             switch (action) {
                                 .exit => {
@@ -1520,6 +1523,10 @@ fn hotReloadLua(
         };
         app.clearSelections(false);
         app.keymap.custom.clearRetainingCapacity();
+        app.scene.reset() catch |err| {
+            reload_failed = true;
+            std.log.scoped(.lua).err("hot-reload: failed to reset ui scene ({any})", .{err});
+        };
         context_factory.resetDefs();
         try context_factory.resetLoadedTools();
         const lua_reload_failed = loadUserLua(app, io, arena, config_lua, "hot-reload: ", reset_failed, .reload);
@@ -1661,6 +1668,8 @@ fn handleMouse(
             .close => app.closeImageViewer(),
             .pass => {},
         }
+    } else if (handleSceneMouse(app, m)) {
+        mouse_press.* = null;
     } else {
         if (!r.view.timeline.handleScrollbarMouse(app, m)) {
             const res = term.handleMouse(m);
@@ -1685,6 +1694,15 @@ fn handleMouse(
             mouse_press.* = null;
         }
     }
+}
+
+fn handleSceneMouse(app: *App, m: tui.Terminal.Mouse) bool {
+    if (m.button != .left) return false;
+    return switch (m.action) {
+        .press => app.scene.press(m.x, m.y),
+        .release => app.scene.releasePress(m.x, m.y),
+        .move => app.scene.isPressing(),
+    };
 }
 
 const image_token_punct = "\"'`([{<,;:";

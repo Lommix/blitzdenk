@@ -1,12 +1,11 @@
 //! Chrome around the timeline: notifications, the status bar, the main-agent
-//! progress line, and the Lua-status-bar cache, widget surfaces and error banner
+//! progress line, and the Lua-status-bar cache, canvas draws and error banner
 //! that overlay the frame.
 const std = @import("std");
 const r = @import("../root.zig");
 const ct = @import("ctime");
 const App = r.app.App;
 const text_utils = r.tui.text_utils;
-const layout = @import("layout.zig");
 
 fn notificationTime(sent_ms: i64, out: *[8]u8) []const u8 {
     const seconds: std.c.time_t = @intCast(@divTrunc(sent_ms, std.time.ms_per_s));
@@ -125,65 +124,24 @@ pub fn refreshLuaStatusBar(app: *App) void {
     }
 }
 
-fn drawLuaWidget(app: *App, vm: *r.lua.LuaVm, entry_index: usize, rect: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const entry = &vm.widget_entries[entry_index];
-    if (!entry.alive or entry.hidden) return;
-    const err_len = r.lua.invokeWidgetRender(vm, entry, rect, buf, &app.theme, app.frame_count, &app.widget_error_msgs[entry_index]);
-    app.widget_error_lens[entry_index] = err_len;
-}
-
-pub fn refreshLuaWidgets(app: *App, area: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const vm = app.lua_vm;
-    if (vm.widget_count == 0) {
-        app.view.widget_layout_valid = false;
-        return;
-    }
-    for (&app.widget_error_lens) |*l| l.* = 0;
-    if (!vm.vm_mu.tryLock()) return;
-    defer vm.vm_mu.unlock(app.io);
-
-    const wl = layout.computeWidgetLayout(vm, area);
-    app.view.widget_layout_cache = wl;
-    app.view.widget_layout_valid = true;
-    const bg_cell = r.tui.Cell{ .style = .{ .bg = app.theme.overlay } };
-
-    if (wl.left) |rect| {
-        buf.fill(rect, bg_cell);
-        drawLuaWidget(app, vm, wl.left_index, rect, buf);
-    }
-    if (wl.right) |rect| {
-        buf.fill(rect, bg_cell);
-        drawLuaWidget(app, vm, wl.right_index, rect, buf);
-    }
-}
-
-pub fn drawLuaPanels(app: *App, buf: *r.tui.Buffer) void {
-    if (app.view.widget_frame_panels_len == 0) return;
+pub fn drawLuaCanvases(app: *App, buf: *r.tui.Buffer) void {
+    const scene = &app.scene;
+    if (scene.canvas_draws.items.len == 0) return;
     const vm = app.lua_vm;
     if (!vm.vm_mu.tryLock()) return;
     defer vm.vm_mu.unlock(app.io);
-    for (app.view.widget_frame_panels[0..app.view.widget_frame_panels_len]) |slot| {
-        drawLuaWidget(app, vm, slot.entry_index, slot.rect, buf);
-        drawWidgetError(app, slot.entry_index, slot.rect, buf);
+    for (scene.canvas_draws.items) |canvas| {
+        scene.lock();
+        const func_ref = if (scene.get(canvas.id)) |node| node.draw_ref else r.view.scene.NO_REF;
+        scene.unlock();
+        if (func_ref == r.view.scene.NO_REF) continue;
+        buf.fill(canvas.rect, .{ .style = .{ .bg = canvas.bg } });
+        if (r.lua.invokeCanvasDraw(vm, func_ref, canvas.rect, buf, &app.theme, app.frame_count)) continue;
+        scene.lock();
+        if (scene.get(canvas.id)) |node| node.draw_ref = r.view.scene.NO_REF;
+        scene.unlock();
+        r.c.luaL_unref(vm.L, r.c.LUA_REGISTRYINDEX, func_ref);
     }
-}
-
-fn drawWidgetError(app: *App, entry_index: usize, rect: r.tui.Rect, buf: *r.tui.Buffer) void {
-    const err_len = app.widget_error_lens[entry_index];
-    if (err_len == 0) return;
-    const msg = app.widget_error_msgs[entry_index][0..err_len];
-    var line_it = std.mem.splitScalar(u8, msg, '\n');
-    var row: u16 = 0;
-    while (line_it.next()) |line_text| {
-        if (row >= rect.height) break;
-        buf.setStringMax(rect.x, rect.y +| row, line_text, .{ .fg = app.theme.err }, rect.width);
-        row += 1;
-    }
-}
-
-pub fn renderWidgetErrors(app: *App, wl: *const layout.WidgetLayout, buf: *r.tui.Buffer) void {
-    if (wl.left) |rect| drawWidgetError(app, wl.left_index, rect, buf);
-    if (wl.right) |rect| drawWidgetError(app, wl.right_index, rect, buf);
 }
 
 fn blendTo(from: r.tui.Color, to: r.tui.Color, t: f64) r.tui.Color {

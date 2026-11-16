@@ -24,6 +24,7 @@ pub const Col = rect.Col;
 // Cells + Styling
 pub const Cell = cell.Cell;
 pub const Style = cell.Style;
+pub const Modifier = cell.Modifier;
 pub const Color = cell.Color;
 
 // Buffer
