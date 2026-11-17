@@ -30,19 +30,21 @@ blitz.set_capabilities({
 ---------------------------------------------------------------------------------------------------
 --- Default Agent tool set overwrites
 ---------------------------------------------------------------------------------------------------
-local codemode_tool = type(core.codemode) == "table"
-		and core.codemode.setup({
-			tools = {
-				blitz.toolsets.BASH_BACKGROUND,
-				blitz.tools.READ,
-				blitz.tools.EDIT,
-				blitz.tools.WRITE,
-				blitz.tools.ASK,
-				core.subagents.toolset,
-				core.todo.toolset,
-			},
-		})
-	or core.codemode
+
+local codemode = core.codemode.setup({
+	name = "codemode",
+	tools = {
+		blitz.tools.BASH,
+		blitz.tools.READ,
+		blitz.tools.WRITE,
+		blitz.tools.EDIT,
+	},
+	description = [[Callable tools, each takes one table:
+- bash{ command, description, timeout? }: run a shell command
+- read{ file_path, offset?, limit? }: read a text file or image
+- write{ file_path, content }: write a new file
+- edit{ file_path, old_string, new_string, replace_all? }: replace text in a file]],
+})
 
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.toolsets.BASH_BACKGROUND,
@@ -52,7 +54,7 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.ASK,
 
 	--- add plugin tool sets
-	codemode_tool,
+	codemode,
 	core.subagents.toolset,
 	core.todo.toolset,
 })
