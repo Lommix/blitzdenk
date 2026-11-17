@@ -196,8 +196,8 @@ const CtxDef = LuaType{ .table_def = .{ .name = "BlitzCtx", .fields = &.{
     .{ .name = "set_child_id", .ty = LuaType{ .raw = "fun(self: BlitzCtx, agent_id: integer)" } },
     .{ .name = "approve", .ty = LuaType{ .raw = "fun(self: BlitzCtx, description: string): integer, string|nil" } },
     .{ .name = "ask", .ty = LuaType{ .raw_refs = .{ .text = "fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil", .refs = &.{ AskRequestDef, AskAnswersOrNilDef } } }, .desc = std.fmt.comptimePrint("Ask the user up to {d} independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index.", .{r.permissions.MAX_QUESTIONS}) },
-    .{ .name = "call", .ty = LuaType{ .raw = "fun(self: BlitzCtx, name: string, args: table): string" }, .desc = "Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. A tool without a grant list cannot call itself; one with a grant list can only call granted tools." },
-    .{ .name = "batch", .ty = LuaType{ .raw = "fun(self: BlitzCtx, requests: table): string[]" }, .desc = "Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order. A failed item does not abort the batch." },
+    .{ .name = "call", .ty = LuaType{ .raw = "fun(self: BlitzCtx, name: string, args: table): string, { media_type: string, data: string }?" }, .desc = "Run one tool of this agent. Returns the tool result text and, when the tool produced an image (for example read on a png), a second value { media_type, data } with base64 data. Pass that table as `img` in the tool return to show it to the model. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. A tool without a grant list cannot call itself; one with a grant list can only call granted tools." },
+    .{ .name = "batch", .ty = LuaType{ .raw = "fun(self: BlitzCtx, requests: table): string[], table<integer, { media_type: string, data: string }>" }, .desc = "Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order, and a second table mapping request index to its image { media_type, data } for requests that produced one. A failed item does not abort the batch." },
 } } };
 const CallDef = LuaType{ .table_def = .{ .name = "BlitzCall", .fields = &.{
     .{ .name = "id", .ty = LuaType.string },
@@ -371,16 +371,23 @@ fn applyTheme(a: *r.app.App, theme: ThemeArg) !void {
     a.dirty = true;
 }
 
+const ToolInfoDef = LuaType{ .table_def = .{ .name = "BlitzToolInfo", .fields = &.{
+    .{ .name = "id", .ty = LuaType.string, .desc = "pool id of the tool" },
+    .{ .name = "name", .ty = LuaType.string, .desc = "name the model sees" },
+    .{ .name = "description", .ty = LuaType.string },
+    .{ .name = "schema", .ty = LuaType.string, .desc = "JSON schema of the tool arguments" },
+} } };
+const ToolInfoListDef = LuaType{ .raw_refs = .{ .text = "BlitzToolInfo[]", .refs = &.{ToolInfoDef} } };
 const ToolArgsDef = LuaType{ .raw_refs = .{ .text = "table<string, BlitzArgDef>", .refs = &.{ToolArgDef} } };
 const ToolDef = LuaType{ .table_def = .{ .name = "ToolDef", .fields = &.{
     .{ .name = "name", .ty = LuaType.string },
-    .{ .name = "description", .ty = LuaType.string },
+    .{ .name = "description", .ty = LuaType.string, .desc = std.fmt.comptimePrint("At most {d} bytes. Include the arguments of any granted `tools` here; blitz.tool_info returns them.", .{MAX_TOOL_DESCRIPTION}) },
     .{ .name = "schema", .ty = LuaType.string, .optional = true },
     .{ .name = "args", .ty = ToolArgsDef, .optional = true },
     .{ .name = "snippet", .ty = LuaType.string, .optional = true },
     .{ .name = "guidelines", .ty = LuaType.string, .optional = true },
     .{ .name = "requires_vision", .ty = LuaType.boolean, .optional = true, .desc = "only offer the tool to agents whose model has vision" },
-    .{ .name = "tools", .ty = ToolNamesDef, .optional = true, .desc = "Sealed grant list of tool ids and toolsets. The tool can run these through ctx:call and ctx:batch without the agent holding them, and nothing else. They are listed with their schemas in the tool description. Absent keeps the default: ctx:call and ctx:batch run the tools of the calling agent." },
+    .{ .name = "tools", .ty = ToolNamesDef, .optional = true, .desc = "Sealed grant list of tool ids and toolsets. The tool can run these through ctx:call and ctx:batch without the agent holding them, and nothing else. Absent keeps the default: ctx:call and ctx:batch run the tools of the calling agent." },
     .{ .name = "func", .ty = LuaType{ .raw_refs = .{
         .text = "fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult",
         .refs = &.{ CtxDef, CallDef, ToolResultDef },
@@ -413,6 +420,7 @@ const ToolNameList = struct {
     items: []const []const u8 = &.{},
 };
 const MAX_TOOLSET_DEPTH = 8;
+const MAX_TOOL_DESCRIPTION = 16 * 1024;
 
 fn collectToolNames(state: *c.lua_State, idx: c_int, alloc: Allocator, out: *std.ArrayList([]const u8), depth: u8) ?[]const u8 {
     switch (c.lua_type(state, idx)) {
@@ -540,7 +548,7 @@ pub const Blitz = LuaType{
                                 var entry: LuaToolEntry = .{};
 
                                 entry.name_len = getStringField(state, def.idx, "name", &entry.name) orelse return error.InvalidToolName;
-                                entry.desc_len = getStringField(state, def.idx, "description", &entry.description) orelse return error.InvalidToolDescription;
+                                entry.description = try readToolDescription(state, def.idx, vm.luaArena());
                                 if (getStringField(state, def.idx, "snippet", &entry.snippet)) |len| {
                                     entry.snippet_len = len;
                                 }
@@ -611,6 +619,38 @@ pub const Blitz = LuaType{
                                 } });
                             }
                         }).lua_fn, "add_tool"),
+                    },
+                },
+            },
+            .{
+                .name = "tool_info",
+                .desc = "Id, name, description and argument schema of tools from the tool pool, given as ids, exposed names or toolsets. Unknown tools and tools that hold grants are skipped, and a shared exposed name keeps the first. MCP tools are not loaded while the config runs. Returns an empty list inside tool VMs.",
+                .ty = LuaType{
+                    .function = .{
+                        .args = &.{.{ .name = "tools", .ty = LuaType{ .raw = "string|string[]" } }},
+                        .ret = &ToolInfoListDef,
+                        .fn_ptr = LuaFnBind((struct {
+                            fn lua_fn(state: *c.lua_State, a: *r.app.App, tools: ToolNameList) ![]const ToolInfoRow {
+                                const vm = fromState(state) orelse return error.NoLuaVm;
+                                if (vm.is_tool_vm) return &.{};
+                                const alloc = vm.luaArena();
+                                var rows: std.ArrayList(ToolInfoRow) = .empty;
+                                next: for (tools.items) |name| {
+                                    const row: ToolInfoRow = if (a.context_factory.resolveLoaded(name)) |tool| blk: {
+                                        if (tool.def.nested_tools != null) continue;
+                                        break :blk .{ .id = tool.key(), .name = tool.def.name, .description = tool.def.description, .schema = tool.def.parameters_schema };
+                                    } else if (findEntry(vm, name)) |entry| blk: {
+                                        if (entry.nested_tools != null) continue;
+                                        break :blk .{ .id = entry.nameSlice(), .name = entry.nameSlice(), .description = entry.descSlice(), .schema = entry.schemaSlice() };
+                                    } else continue;
+                                    for (rows.items) |taken| {
+                                        if (std.mem.eql(u8, taken.name, row.name)) continue :next;
+                                    }
+                                    try rows.append(alloc, row);
+                                }
+                                return rows.items;
+                            }
+                        }).lua_fn, "tool_info"),
                     },
                 },
             },
@@ -2976,8 +3016,7 @@ const BlitzAgent = LuaType{ .table_def = .{ .name = "BlitzAgent", .fields = &.{
 const LuaToolEntry = struct {
     name: [128]u8 = undefined,
     name_len: usize = 0,
-    description: [1024]u8 = undefined,
-    desc_len: usize = 0,
+    description: []const u8 = "",
     snippet: [256]u8 = undefined,
     snippet_len: usize = 0,
     guidelines: [512]u8 = undefined,
@@ -2994,7 +3033,7 @@ const LuaToolEntry = struct {
         return self.name[0..self.name_len];
     }
     fn descSlice(self: *const LuaToolEntry) []const u8 {
-        return self.description[0..self.desc_len];
+        return self.description;
     }
     fn snippetSlice(self: *const LuaToolEntry) []const u8 {
         return self.snippet[0..self.snippet_len];
@@ -3431,6 +3470,16 @@ fn getStringField(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8, d
     return len;
 }
 
+fn readToolDescription(state: *c.lua_State, table_idx: c_int, alloc: Allocator) ![]const u8 {
+    _ = c.lua_getfield(state, table_idx, "description");
+    defer c.lua_pop(state, 1);
+    if (c.lua_type(state, -1) != c.LUA_TSTRING) return error.InvalidToolDescription;
+    var len: usize = 0;
+    const ptr = c.lua_tolstring(state, -1, &len) orelse return error.InvalidToolDescription;
+    if (len > MAX_TOOL_DESCRIPTION) return error.ToolDescriptionTooLong;
+    return try alloc.dupe(u8, ptr[0..len]);
+}
+
 fn readToolGrants(state: *c.lua_State, table_idx: c_int, alloc: Allocator, own_name: []const u8) !?[]const []const u8 {
     _ = c.lua_getfield(state, table_idx, "tools");
     defer c.lua_pop(state, 1);
@@ -3490,6 +3539,13 @@ fn pushEventPayload(L: *c.lua_State, event: r.events.AppEvent) c_int {
 }
 
 // ── ToolContext bridge (passed as light userdata during tool calls) ──
+
+const ToolInfoRow = struct {
+    id: []const u8,
+    name: []const u8,
+    description: []const u8,
+    schema: []const u8,
+};
 
 const GrantedTool = struct {
     id: []const u8,
@@ -5557,12 +5613,33 @@ fn prepareNestedRun(bridge: *CtxBridge, state: *c.lua_State, name: []const u8, a
     };
 }
 
-fn runNestedTool(run: NestedToolRun, alloc: Allocator, io: std.Io) anyerror![]const u8 {
+const NestedResult = struct {
+    content: []const u8,
+    image: ?r.sdk.ToolImage = null,
+};
+
+fn runNestedTool(run: NestedToolRun, alloc: Allocator, io: std.Io) anyerror!NestedResult {
     const output = r.tools.context.runWithOwner(run.tool, alloc, io, run.call, run.owner) catch |err| {
         if (err == error.Canceled) return err;
-        return std.fmt.allocPrint(alloc, "error: nested tool failed: {s}", .{@errorName(err)}) catch err;
+        return .{ .content = std.fmt.allocPrint(alloc, "error: nested tool failed: {s}", .{@errorName(err)}) catch return err };
     };
-    return output.content;
+    return .{ .content = output.content, .image = output.image };
+}
+
+fn pushNestedImage(state: *c.lua_State, image: ?r.sdk.ToolImage) void {
+    const img = image orelse {
+        c.lua_pushnil(state);
+        return;
+    };
+    const marker = ";base64,";
+    const marker_at = std.mem.indexOf(u8, img.url, marker) orelse {
+        c.lua_pushnil(state);
+        return;
+    };
+    const data = img.url[marker_at + marker.len ..];
+    c.lua_createtable(state, 0, 2);
+    setFieldAny(state, -2, "media_type", img.media_type);
+    setFieldAny(state, -2, "data", data);
 }
 
 fn luaCtxCall(L: ?*c.lua_State) callconv(.c) c_int {
@@ -5586,8 +5663,9 @@ fn luaCtxCall(L: ?*c.lua_State) callconv(.c) c_int {
         _ = c.luaL_error(state, "ctx.call: %s", @errorName(err).ptr);
         return 0;
     };
-    _ = c.lua_pushlstring(state, output.ptr, output.len);
-    return 1;
+    _ = c.lua_pushlstring(state, output.content.ptr, output.content.len);
+    pushNestedImage(state, output.image);
+    return 2;
 }
 
 fn luaCtxBatch(L: ?*c.lua_State) callconv(.c) c_int {
@@ -5629,11 +5707,11 @@ fn luaCtxBatch(L: ?*c.lua_State) callconv(.c) c_int {
         c.lua_pop(state, 3);
     }
 
-    const futures = arena.alloc(std.Io.Future(anyerror![]const u8), count) catch {
+    const futures = arena.alloc(std.Io.Future(anyerror!NestedResult), count) catch {
         _ = c.luaL_error(state, "ctx.batch: out of memory");
         return 0;
     };
-    const results = arena.alloc([]const u8, count) catch {
+    const results = arena.alloc(NestedResult, count) catch {
         _ = c.luaL_error(state, "ctx.batch: out of memory");
         return 0;
     };
@@ -5656,10 +5734,16 @@ fn luaCtxBatch(L: ?*c.lua_State) callconv(.c) c_int {
 
     c.lua_createtable(state, @intCast(count), 0);
     for (results, 0..) |output, i| {
-        _ = c.lua_pushlstring(state, output.ptr, output.len);
+        _ = c.lua_pushlstring(state, output.content.ptr, output.content.len);
         c.lua_rawseti(state, -2, @intCast(i + 1));
     }
-    return 1;
+    c.lua_createtable(state, 0, 0);
+    for (results, 0..) |output, i| {
+        if (output.image == null) continue;
+        pushNestedImage(state, output.image);
+        c.lua_rawseti(state, -2, @intCast(i + 1));
+    }
+    return 2;
 }
 
 /// Block on the perm event, then push (status_int, payload?) onto the Lua

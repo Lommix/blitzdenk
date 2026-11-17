@@ -149,9 +149,16 @@ local my_tool = blitz.register_tool({
   `ctx:batch` run only those tools, by id or exposed name, even when the agent
   does not hold them. They are resolved on every call, so reloads and MCP
   tools apply. `ctx.tools` lists the resolved exposed names, `nil` without
-  `tools`. Their descriptions and schemas are appended to the tool
-  description. A tool with `tools` cannot be granted. Without `tools`,
+  `tools`. A tool with `tools` cannot be granted. Without `tools`,
   `ctx:call` runs the agent's own tools and rejects the running tool.
+- `description` is at most 16384 bytes. Granted `tools` are not described
+  automatically: put their arguments into `description`.
+  `blitz.tool_info(tools)` returns `{ id, name, description, schema }` rows
+  for ids, exposed names or toolsets that exist while the config runs (MCP
+  tools do not yet). Unknown tools are skipped.
+- `ctx:call` returns `text, img` and `ctx:batch` returns `texts, imgs` (index
+  to image). `img` is `{ media_type, data }`, the shape of the `img` return
+  field, so a wrapper can forward an image read by a nested tool.
 
 ## Agents
 

@@ -719,12 +719,6 @@ fn refreshAgentToolsInternal(self: *const Self, agent: *r.agent.Agent, base: r.t
         definitions[count] = tool;
         count += 1;
     }
-    var catalogue_arena = std.heap.ArenaAllocator.init(self.alloc);
-    defer catalogue_arena.deinit();
-    for (definitions[0..count]) |*definition| {
-        const grants = definition.def.nested_tools orelse continue;
-        definition.def.description = try self.describeGrants(catalogue_arena.allocator(), definition.def.description, grants, definitions[0..count], vision);
-    }
     if (live) try r.tools.context.installLive(agent, base, definitions[0..count]) else try r.tools.context.install(agent, base, definitions[0..count]);
 }
 
@@ -752,23 +746,6 @@ pub fn resolveGrants(self: *const Self, alloc: std.mem.Allocator, grants: []cons
         try resolved.append(alloc, tool);
     }
     return resolved.items;
-}
-
-fn describeGrants(self: *const Self, alloc: std.mem.Allocator, base: []const u8, grants: []const []const u8, held: []const r.tools.Tool, vision: bool) ![]const u8 {
-    const tools = try self.resolveGrants(alloc, grants, vision);
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    try out.writer.print("{s}\n\nCallable tools:", .{base});
-    for (tools) |tool| {
-        const already_held = for (held) |own| {
-            if (std.mem.eql(u8, own.def.name, tool.def.name)) break true;
-        } else false;
-        if (already_held) {
-            try out.writer.print("\n- {s}: same arguments as the tool of the same name", .{tool.def.name});
-        } else {
-            try out.writer.print("\n- {s}: {s}\n  schema: {s}", .{ tool.def.name, tool.def.description, tool.def.parameters_schema });
-        }
-    }
-    return out.written();
 }
 
 fn findLoaded(self: *const Self, name: []const u8) ?r.tools.Tool {

@@ -582,10 +582,10 @@
 ---@field approve fun(self: BlitzCtx, description: string): integer, string|nil
 ---Ask the user up to 8 independent multiple-choice questions in one request. Returns REQ_STATUS_CHOICE and one pick list per question, or REQ_STATUS_DENIED and nil when canceled. Each pick carries text and a 1-based index; a custom message pick has no index.
 ---@field ask fun(self: BlitzCtx, request: BlitzAskRequest): integer, BlitzAskPick[][]|nil
----Run one tool of this agent. Returns the tool result text. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. A tool without a grant list cannot call itself; one with a grant list can only call granted tools.
----@field call fun(self: BlitzCtx, name: string, args: table): string
----Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order. A failed item does not abort the batch.
----@field batch fun(self: BlitzCtx, requests: table): string[]
+---Run one tool of this agent. Returns the tool result text and, when the tool produced an image (for example read on a png), a second value { media_type, data } with base64 data. Pass that table as `img` in the tool return to show it to the model. When it exceeds 32KB or 2000 lines, the tail is kept, the full text spills to a file, and the locator is appended. Returns the nested error text on failure. A tool without a grant list cannot call itself; one with a grant list can only call granted tools.
+---@field call fun(self: BlitzCtx, name: string, args: table): string, { media_type: string, data: string }?
+---Run an array of { name, args } requests in parallel, at most 8 concurrent. Returns one tail-capped result text per request, in input order, and a second table mapping request index to its image { media_type, data } for requests that produced one. A failed item does not abort the batch.
+---@field batch fun(self: BlitzCtx, requests: table): string[], table<integer, { media_type: string, data: string }>
 
 ---@class BlitzCall
 ---@field id string
@@ -601,6 +601,7 @@
 
 ---@class ToolDef
 ---@field name string
+---At most 16384 bytes. Include the arguments of any granted `tools` here; blitz.tool_info returns them.
 ---@field description string
 ---@field schema? string
 ---@field args? table<string, BlitzArgDef>
@@ -608,9 +609,18 @@
 ---@field guidelines? string
 ---only offer the tool to agents whose model has vision
 ---@field requires_vision? boolean
----Sealed grant list of tool ids and toolsets. The tool can run these through ctx:call and ctx:batch without the agent holding them, and nothing else. They are listed with their schemas in the tool description. Absent keeps the default: ctx:call and ctx:batch run the tools of the calling agent.
+---Sealed grant list of tool ids and toolsets. The tool can run these through ctx:call and ctx:batch without the agent holding them, and nothing else. Absent keeps the default: ctx:call and ctx:batch run the tools of the calling agent.
 ---@field tools? (string|string[])[]
 ---@field func fun(ctx: BlitzCtx, call: BlitzCall): BlitzToolResult
+
+---@class BlitzToolInfo
+---pool id of the tool
+---@field id string
+---name the model sees
+---@field name string
+---@field description string
+---JSON schema of the tool arguments
+---@field schema string
 
 ---@class BlitzAgentRow
 ---packed agent id
@@ -838,6 +848,8 @@
 ---@field register_tool fun(def: ToolDef): string
 ---Add a tool or a toolset from the tool pool to an agent type's tool set.
 ---@field add_tool fun(agent_type: integer, tool: string|string[])
+---Id, name, description and argument schema of tools from the tool pool, given as ids, exposed names or toolsets. Unknown tools and tools that hold grants are skipped, and a shared exposed name keeps the first. MCP tools are not loaded while the config runs. Returns an empty list inside tool VMs.
+---@field tool_info fun(tools: string|string[]): BlitzToolInfo[]
 ---Return the main agent, if a session is running.
 ---@field get_main_agent fun(): integer|nil
 ---Return the id of the recorded session, or nil until its journal holds a first record.
