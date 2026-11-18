@@ -117,6 +117,7 @@ pub const Agent = struct {
     usage: sdk.Usage = .{},
     context_state: ContextState = .{},
     context_mutex: std.Io.Mutex = .init,
+    compaction_handoff: ?[]u8 = null,
     context_limit: u64,
     status: Status = .idle,
     activity: Activity = .idle,
@@ -185,6 +186,7 @@ pub const Agent = struct {
         if (self.compact_task) |*task| task.deinit();
         if (self.task) |*task| task.deinit();
         if (self.messages) |*messages| messages.deinit();
+        if (self.compaction_handoff) |handoff| self.alloc.free(handoff);
         if (self.pending_model) |*model| model.deinit();
         self.model.deinit();
         if (self.cache_key) |key| self.alloc.free(key);
@@ -604,11 +606,24 @@ pub const Agent = struct {
 
     fn publishCompactionContext(self: *Agent, messages: []const sdk.Message) void {
         const estimate = self.estimateContext(messages);
+        const handoff = compact.handoffMarkdown(self.alloc, messages) catch null;
         self.context_mutex.lockUncancelable(self.io);
         defer self.context_mutex.unlock(self.io);
+        if (self.compaction_handoff) |previous| self.alloc.free(previous);
+        self.compaction_handoff = handoff;
         const count = self.compaction.completion_count.fetchAdd(1, .release) +% 1;
         if (self.task) |*task| task.compaction_count = count;
         self.context_state = .{ .tokens = estimate };
+    }
+
+    pub fn takeCompactionHandoff(self: *Agent, alloc: std.mem.Allocator) ?[]u8 {
+        self.context_mutex.lockUncancelable(self.io);
+        defer self.context_mutex.unlock(self.io);
+        const handoff = self.compaction_handoff orelse return null;
+        const copy = alloc.dupe(u8, handoff) catch return null;
+        self.alloc.free(handoff);
+        self.compaction_handoff = null;
+        return copy;
     }
 
     fn applyProviderContext(self: *Agent, tokens: u64, estimate: u64, compaction_count: usize) void {

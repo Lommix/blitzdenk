@@ -1684,7 +1684,7 @@ pub const App = struct {
         self.compaction_completion_seen_count = compacted_count;
         _ = self.event_bus.emit(self, .{ .compaction_complete = agent_id });
         const alloc = self.sessionAlloc();
-        const handoff = (r.compact.handoffMarkdown(alloc, agent.history()) catch null) orelse {
+        const handoff = agent.takeCompactionHandoff(alloc) orelse {
             self.pushSystemMessage("compact complete", .{});
             return;
         };
