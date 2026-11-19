@@ -61,6 +61,18 @@ const MAX_TIMEOUT_SECS = 2_147_483;
 const TIMEOUT_RANGE_TEXT = std.fmt.comptimePrint("(0, {d}]", .{MAX_TIMEOUT_SECS});
 const OUTPUT_CAP_TEXT = std.fmt.comptimePrint("{d}MB", .{exec.MAX_OUTPUT / (1024 * 1024)});
 
+fn invalidArgsMessage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) []const u8 {
+    const Present = struct {
+        command: ?std.json.Value = null,
+        description: ?std.json.Value = null,
+    };
+    const present = r.parseArgs(Present, ctx, call) orelse return "invalid arguments: expected a JSON object";
+    if (present.command == null and present.description == null) return "invalid arguments: \"command\" and \"description\" are required";
+    if (present.command == null) return "invalid arguments: \"command\" is required";
+    if (present.description == null) return "invalid arguments: \"description\" is required";
+    return "invalid arguments: \"command\" and \"description\" must be strings, \"timeout\" a number, \"run_in_background\" a boolean";
+}
+
 fn runSync(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     return run(ctx, call, false);
 }
@@ -79,7 +91,7 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall, background: bool) r.r.sdk.Too
 
     const args = r.parseArgs(Args, ctx, call) orelse {
         std.log.err("[BAD CMD] {s}", .{call.input});
-        return r.errResult(call, "invalid arguments: \"command\" is required and must be a non-empty string");
+        return r.errResult(call, invalidArgsMessage(ctx, call));
     };
 
     if (args.command.len == 0) return r.errResult(call, "invalid arguments: \"command\" is required and must be a non-empty string");
