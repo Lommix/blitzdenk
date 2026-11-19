@@ -3,6 +3,9 @@
 A minimal self improving coding harness for POSIX. No dependencies, vendored Lua.
 Ships as a single <2MB binary using less then 99MB of ram.
 
+Blitzdenk is a mix between PI and DeepSeek-Harness. But native and based
+on Lua for extension.
+
 ![demo](docs/assets/screenshot.png)
 
 ```shell
@@ -37,6 +40,12 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	core.subagents.toolset,
 	core.todo.toolset,
 })
+```
+
+How to update all plugins:
+
+```shell
+blitz plugin update
 ```
 
 ## About
