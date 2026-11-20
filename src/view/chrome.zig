@@ -90,27 +90,62 @@ fn statusBarLine(app: *App, alloc: std.mem.Allocator) !r.tui.Line {
         return .{};
     }
 
-    const ctx_pct: u8 = @intFromFloat(@min(app.contextPercent(), 100));
-    var status_buf: [256]u8 = undefined;
+    const usage = app.registry.usage();
+    const prompt_tokens = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens;
+    const hit_percent: f64 = if (prompt_tokens > 0)
+        @as(f64, @floatFromInt(usage.cache_read_tokens)) / @as(f64, @floatFromInt(prompt_tokens)) * 100
+    else
+        0;
+    const ctx_pct: u32 = @intFromFloat(@max(app.contextPercent(), 0));
+
+    const plain: r.tui.Style = .{ .fg = app.theme.muted };
+    const strong: r.tui.Style = .{ .fg = app.theme.text_hl, .modifier = .{ .bold = true } };
+    const good: r.tui.Style = .{ .fg = app.theme.ok };
+    const tokens: r.tui.Style = .{ .fg = app.theme.warn };
+    const money: r.tui.Style = .{ .fg = app.theme.err };
+
+    var cache_buf: [16]u8 = undefined;
     var in_buf: [16]u8 = undefined;
     var out_buf: [16]u8 = undefined;
-    var cache_buf: [16]u8 = undefined;
-    const usage = app.registry.usage();
-    const status = std.fmt.bufPrint(
-        &status_buf,
-        "IN:{s} OUT:{s} CACHE:{s} | CTX:{d}% {s}",
-        .{
-            formatTokenCount(&in_buf, usage.input_tokens),
-            formatTokenCount(&out_buf, usage.output_tokens),
-            formatTokenCount(&cache_buf, usage.cache_read_tokens + usage.cache_write_tokens),
-            ctx_pct,
-            switch (app.flags.approval_mode) {
-                .strict => "| APPROVAL",
-                .default => "",
-            },
-        },
-    ) catch " ?? ";
-    return r.tui.Line.new(alloc, "{s}", .{status}, .{ .fg = app.theme.muted });
+
+    var line = r.tui.Line{ .style = plain };
+    try line.pushSpanPrint(alloc, "{s} • {s}", .{ statusModelName(app), statusEffort(app) }, strong);
+    try line.pushText(alloc, " (Cache:", plain);
+    try line.pushText(alloc, formatTokenCount(&cache_buf, usage.cache_read_tokens), good);
+    try line.pushText(alloc, " In:", plain);
+    try line.pushText(alloc, formatTokenCount(&in_buf, usage.input_tokens), tokens);
+    try line.pushText(alloc, " Out:", plain);
+    try line.pushText(alloc, formatTokenCount(&out_buf, usage.output_tokens), tokens);
+    try line.pushText(alloc, ") Ctx:", plain);
+    try line.pushSpanPrint(alloc, "{d}%", .{ctx_pct}, strong);
+    try line.pushText(alloc, " Hit:", plain);
+    try line.pushSpanPrint(alloc, "{d:.1}%", .{hit_percent}, good);
+    try line.pushText(alloc, " Cost:", plain);
+    try line.pushSpanPrint(alloc, "${d:.2}", .{sessionCost(app, alloc)}, money);
+    if (app.flags.approval_mode == .strict) try line.pushText(alloc, " | APPROVAL", plain);
+    return line;
+}
+
+fn statusModelName(app: *App) []const u8 {
+    if (app.main_agent_id) |id| {
+        if (app.registry.get(id)) |agent| return agent.model.languageModel().modelId();
+    }
+    return app.context_factory.agentModelName(&app.config, .general) orelse "?";
+}
+
+fn statusEffort(app: *App) []const u8 {
+    if (app.main_agent_id) |id| {
+        if (app.registry.get(id)) |agent| return @tagName(agent.reasoning_effort);
+    }
+    const effort = app.context_factory.agentEffort(.general) orelse return "?";
+    return @tagName(effort);
+}
+
+fn sessionCost(app: *App, alloc: std.mem.Allocator) f64 {
+    const entries = app.registry.usageByModel(alloc) catch return 0;
+    var cost: f64 = 0;
+    for (entries) |entry| cost += app.context_factory.modelCost(&app.config, entry.model, entry.usage);
+    return cost;
 }
 
 pub fn refreshLuaStatusBar(app: *App) void {
@@ -304,8 +339,11 @@ fn formatTokenCount(dest: []u8, count: u64) []const u8 {
     } else if (count < 1_000_000) {
         const k = @as(f64, @floatFromInt(count)) / 1000.0;
         return std.fmt.bufPrint(dest, "{d:.1}k", .{k}) catch "0k";
-    } else {
+    } else if (count < 1_000_000_000) {
         const m = @as(f64, @floatFromInt(count)) / 1_000_000.0;
         return std.fmt.bufPrint(dest, "{d:.1}M", .{m}) catch "0M";
+    } else {
+        const g = @as(f64, @floatFromInt(count)) / 1_000_000_000.0;
+        return std.fmt.bufPrint(dest, "{d:.1}G", .{g}) catch "0G";
     }
 }
