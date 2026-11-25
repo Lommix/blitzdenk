@@ -37,7 +37,6 @@ fn bashDef(comptime background: bool) r.context.DefinitionMeta {
     const schema_head =
         \\{"type": "object", "properties": {
         \\  "command": {"type": "string", "description": "Bash command to execute"},
-        \\  "description": {"type": "string", "description": "Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples: \"ls\" → \"List files in current directory\"; \"git status\" → \"Show working tree status\"; \"npm install\" → \"Install package dependencies\""},
         \\  "timeout": {"type": "number", "description": "Timeout in seconds (default 60s)
     ;
     const background_schema =
@@ -46,7 +45,7 @@ fn bashDef(comptime background: bool) r.context.DefinitionMeta {
     ;
     const schema_tail =
         \\
-        \\}, "required": ["command", "description"]}
+        \\}, "required": ["command"]}
     ;
     return .{
         .name = "bash",
@@ -64,13 +63,10 @@ const OUTPUT_CAP_TEXT = std.fmt.comptimePrint("{d}MB", .{exec.MAX_OUTPUT / (1024
 fn invalidArgsMessage(ctx: r.ToolContext, call: r.r.sdk.ToolCall) []const u8 {
     const Present = struct {
         command: ?std.json.Value = null,
-        description: ?std.json.Value = null,
     };
     const present = r.parseArgs(Present, ctx, call) orelse return "invalid arguments: expected a JSON object";
-    if (present.command == null and present.description == null) return "invalid arguments: \"command\" and \"description\" are required";
     if (present.command == null) return "invalid arguments: \"command\" is required";
-    if (present.description == null) return "invalid arguments: \"description\" is required";
-    return "invalid arguments: \"command\" and \"description\" must be strings, \"timeout\" a number, \"run_in_background\" a boolean";
+    return "invalid arguments: \"command\" must be a string, \"timeout\" a number, \"run_in_background\" a boolean";
 }
 
 fn runSync(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
@@ -84,7 +80,6 @@ fn runBg(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
 fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall, background: bool) r.r.sdk.ToolOutput {
     const Args = struct {
         command: []const u8,
-        description: []const u8,
         timeout: ?f64 = null,
         run_in_background: bool = false,
     };
@@ -109,17 +104,15 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall, background: bool) r.r.sdk.Too
     var w = r.tui.AnsiWriter.init(&sgr_buf);
 
     w.styled(.{ .modifier = .{ .bold = true }, .fg = app.theme.text_hl }, "bash ");
-    w.styled(.{ .fg = app.theme.info }, args.description);
-    w.writeAll(" ");
     w.styled(.{ .fg = app.theme.muted }, cleaned_command_str);
 
     r.setToolStatus(ctx, call, w.finish()) catch {};
 
     const description = std.fmt.allocPrint(
         ctx.alloc,
-        "{s}\n\nRun: `{s}` ?",
-        .{ args.description, args.command },
-    ) catch args.description;
+        "Run: `{s}` ?",
+        .{args.command},
+    ) catch args.command;
 
     const decision = ctx.requestPermission(call, .{ .call = .{
         .description = description,
