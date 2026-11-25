@@ -112,6 +112,7 @@ pub const Agent = struct {
     skill_catalog_digest: ?u64 = null,
     capability_catalog_digest: ?u64 = null,
     mcp_catalog_digest: ?u64 = null,
+    agent_catalog_digest: ?u64 = null,
     lua_hook_digests: inject.LuaHookDigests = .{},
     lua_reload_generation_seen: u64 = 0,
     usage: sdk.Usage = .{},
@@ -913,6 +914,7 @@ pub const Agent = struct {
         self.skill_catalog_digest = null;
         self.capability_catalog_digest = null;
         self.mcp_catalog_digest = null;
+        self.agent_catalog_digest = null;
         self.lua_hook_digests.map.clearRetainingCapacity();
     }
 

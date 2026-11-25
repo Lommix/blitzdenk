@@ -34,6 +34,7 @@ pub const InjectionsHooks = struct {
         inject_available_skills,
         inject_mcp_catalog,
         inject_capability_catalog,
+        r.tools.subagents.injectCatalog,
         inject_lua_reload_notice,
     };
 
@@ -208,7 +209,7 @@ fn inject_mcp_catalog(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.Agent)
     try emitCatalog(w, "available_mcp", names.len, serialized, &agent.mcp_catalog_digest, "");
 }
 
-fn emitCatalog(w: *std.Io.Writer, tag: []const u8, count: usize, serialized: []const u8, digest_slot: *?u64, replacement_line: []const u8) !void {
+pub fn emitCatalog(w: *std.Io.Writer, tag: []const u8, count: usize, serialized: []const u8, digest_slot: *?u64, replacement_line: []const u8) !void {
     const digest = std.hash.Wyhash.hash(0, serialized);
     const replaced = digest_slot.* != null and digest_slot.*.? != digest;
     if (digest_slot.*) |last| {
@@ -257,7 +258,7 @@ fn inject_lua_reload_notice(w: *std.Io.Writer, app: *r.app.App, agent: *r.agent.
     try w.writeAll("[LUA VM RELOADED]\n");
 }
 
-fn writeCatalogField(w: *std.Io.Writer, value: []const u8) !void {
+pub fn writeCatalogField(w: *std.Io.Writer, value: []const u8) !void {
     for (value) |c| {
         switch (c) {
             '\n', '\r' => try w.writeByte(' '),

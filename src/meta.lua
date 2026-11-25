@@ -373,12 +373,22 @@
 ---@field FIND string
 ---list a directory
 ---@field LS string
+---launch a background sub agent
+---@field AGENT string
+---send a message to another agent
+---@field MESSAGE_AGENT string
+---abort a sub agent
+---@field CANCEL_AGENT string
+---end the turn until a sub agent reports
+---@field IDLE string
 
 ---@class BlitzToolsetDef
 ---bash with run_in_background, plus read_job, write_job and kill_job
 ---@field BASH_BACKGROUND string[]
 ---read only search: grep, find and ls
 ---@field READONLY string[]
+---launch, message and cancel background sub agents, and idle until one reports
+---@field SUBAGENTS string[]
 
 ---@class BlitzAgentCreatedEvent
 ---packed AgentId of the new agent

@@ -63,6 +63,10 @@ pub const inbuilt_tool_set = .{
     r.tools.readonly.GrepTool,
     r.tools.readonly.FindTool,
     r.tools.readonly.LsTool,
+    r.tools.subagents.AgentTool,
+    r.tools.subagents.MessageAgentTool,
+    r.tools.subagents.CancelAgentTool,
+    r.tools.subagents.IdleTool,
 };
 
 pub const AgentDef = struct {

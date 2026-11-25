@@ -23,6 +23,7 @@ and `osascript` on macOS. XDG variables are unset on macOS; `stateDir` and
 ## Sub-agent flow
 
 - Reserve, spawn, state: `src/agent_registry.zig`, `src/commands.zig`
+- Tools and `<available_agents>` catalogue: `src/tools/subagents.zig`
 - Run loop: `src/agent.zig`, `src/agent_run.zig`
 - Result injection into the parent: `App.finishBackgroundAgent` in `src/app.zig`
 - Lua surface: `src/lua.zig`, `src/blitz_default.lua`

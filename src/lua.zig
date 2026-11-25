@@ -1514,6 +1514,10 @@ pub const BlitzToolDef = LuaType{
             .{ .name = "GREP", .desc = "search file contents with rg", .ty = LuaType.string, .value = .{ .string = tl.readonly.GrepTool.def.name } },
             .{ .name = "FIND", .desc = "find files by name with fd", .ty = LuaType.string, .value = .{ .string = tl.readonly.FindTool.def.name } },
             .{ .name = "LS", .desc = "list a directory", .ty = LuaType.string, .value = .{ .string = tl.readonly.LsTool.def.name } },
+            .{ .name = "AGENT", .desc = "launch a background sub agent", .ty = LuaType.string, .value = .{ .string = tl.subagents.AgentTool.def.name } },
+            .{ .name = "MESSAGE_AGENT", .desc = "send a message to another agent", .ty = LuaType.string, .value = .{ .string = tl.subagents.MessageAgentTool.def.name } },
+            .{ .name = "CANCEL_AGENT", .desc = "abort a sub agent", .ty = LuaType.string, .value = .{ .string = tl.subagents.CancelAgentTool.def.name } },
+            .{ .name = "IDLE", .desc = "end the turn until a sub agent reports", .ty = LuaType.string, .value = .{ .string = tl.subagents.IdleTool.def.name } },
         },
     },
 };
@@ -1524,6 +1528,7 @@ pub const BlitzToolsetDef = LuaType{
         .fields = &.{
             .{ .name = "BASH_BACKGROUND", .desc = "bash with run_in_background, plus read_job, write_job and kill_job", .ty = StringListDef, .value = .{ .strings = &tl.bash.SET_BASH_BACKGROUND } },
             .{ .name = "READONLY", .desc = "read only search: grep, find and ls", .ty = StringListDef, .value = .{ .strings = &tl.readonly.SET_READONLY } },
+            .{ .name = "SUBAGENTS", .desc = "launch, message and cancel background sub agents, and idle until one reports", .ty = StringListDef, .value = .{ .strings = &tl.subagents.SET_SUBAGENTS } },
         },
     },
 };

@@ -3,7 +3,7 @@
 ---------------------------------------------------------------------------------------------------
 --- Plugins
 ---------------------------------------------------------------------------------------------------
--- Optional Plugin with subagents, codemode and todo list
+-- Optional Plugin with codemode and todo list
 -- blitz.plugin("blitz-core", { url = "https://github.com/Lommix/blitz-core" })
 -- local core = require("blitz-core")
 
@@ -39,8 +39,8 @@ blitz.set_agent_tools(blitz.AGENT_GENERAL, {
 	blitz.tools.EDIT,
 	blitz.tools.WRITE,
 	blitz.tools.ASK,
+	blitz.toolsets.SUBAGENTS,
 	-- add plugin tool sets
-	-- core.subagents.toolset,
 	-- core.todo.toolset,
 })
 

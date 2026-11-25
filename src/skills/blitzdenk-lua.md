@@ -106,6 +106,8 @@ blitz.set_capabilities({
   `blitz.toolsets.BASH_BACKGROUND`.
 - `blitz.toolsets.READONLY` is `GREP` (rg), `FIND` (fd) and `LS`. `GREP`
   and `FIND` need `rg` and `fd` on PATH.
+- `blitz.toolsets.SUBAGENTS` is `AGENT`, `MESSAGE_AGENT`, `CANCEL_AGENT` and
+  `IDLE`. See Agents.
 - The read tool returns scaled images as PNG and shrinks further to fit the
   byte limit. A format the decoder cannot read goes out unscaled with a note.
 - Capability rules form the `<env_capabilities>` catalogue, injected once
@@ -189,6 +191,12 @@ blitz.agent.spawn({
   handle, so a module local set at load stays valid in hooks and tools. An
   unknown name returns 0, which spawns `general`.
 - `blitz.list_agent_types()` maps type names from tool arguments to handles.
+- `blitz.tools.AGENT` runs background children and defaults to `general`.
+  Agents that hold it get an `<available_agents>` catalogue of every type,
+  built from `description`. `in_agent_tool = false` hides a type from the
+  catalogue; it can still be spawned by name. The main agent and its children
+  can launch agents, grandchildren cannot.
+- A registered tool named like a built-in tool is skipped.
 - The agent tool result carries the id as `agent_id: <int>`.
 - **Timeline**: agents spawned inside a tool attach to its row; inside
   codemode, direct spawns and `ctx:call`/`ctx:batch` calls to `agent` attach
