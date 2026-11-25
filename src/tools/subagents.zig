@@ -17,8 +17,9 @@ pub const AgentTool = r.Tool{
     .def = .{
         .name = "agent",
         .description =
-        \\Launch a new background agent to handle a task autonomously. The tool returns immediately. When the agent finishes, its answer is injected into your context; oversized answers spill to a file. Subagents will wake you up.
-        \\Start independent agents together in one message and keep working while they run. Split parallel write work into disjoint file scopes; agents editing shared files affect each other. When only waiting for results remains, end your turn with idle instead of polling. Review the final diff yourself before reporting the work done.
+        \\Launch a new background agent to handle a task autonomously. The tool returns immediately.
+        \\When the agent finishes, its answer is injected into your context; oversized answers spill to a file. Subagents will wake you up.
+        \\
         ,
         .prompt_snippet = "launch a new agent with a task",
         .parameters_schema =
@@ -28,8 +29,7 @@ pub const AgentTool = r.Tool{
         \\      "description": {"type": "string", "description": "A short (3-5 word) description of the task"},
         \\      "prompt": {"type": "string", "description": "The task for the agent to perform"},
         \\      "agent_type": {"type": "string", "description": "The type of specialized agent to use for this task. One name from the available agents catalogue. Defaults to general"},
-        \\      "cwd": {"type": "string", "description": "The working directory of the agent. Defaults to current"},
-        \\      "clean": {"type": "boolean", "description": "Bare agent: no AGENTS.md context files in the system prompt and no system-reminder injections. Defaults to false"}
+        \\      "cwd": {"type": "string", "description": "The working directory of the agent. Defaults to current"}
         \\  },
         \\  "required": ["description", "prompt"]
         \\}
@@ -93,10 +93,9 @@ fn runAgent(ctx: r.ToolContext, call: r.ToolCall) r.ToolResult {
         prompt: []const u8,
         agent_type: ?[]const u8 = null,
         cwd: ?[]const u8 = null,
-        clean: ?bool = null,
     };
     const args = r.parseArgs(Args, ctx, call) orelse
-        return r.errResult(call, "invalid arguments: expected {description, prompt, agent_type?, cwd?, clean?}");
+        return r.errResult(call, "invalid arguments: expected {description, prompt, agent_type?, cwd?}");
 
     if (ctx.agent().depth > MAX_SPAWNER_DEPTH) return r.errResult(call, "max agent depth reached");
 
@@ -110,7 +109,7 @@ fn runAgent(ctx: r.ToolContext, call: r.ToolCall) r.ToolResult {
         .description = args.description,
         .prompt = args.prompt,
         .cwd = args.cwd orelse "",
-        .clean = args.clean orelse false,
+        .clean = false,
     }) catch |err| return switch (err) {
         error.NoAgentSlots => r.errResult(call, "No agent slots left"),
         else => failure(ctx, call, "failed to start agent: {s}", .{@errorName(err)}),
