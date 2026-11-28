@@ -316,6 +316,7 @@ const ModelDef = LuaType{ .table_def = .{ .name = "BlitzModelDef", .fields = &.{
     .{ .name = "presence_penalty", .ty = LuaType.number, .optional = true },
     .{ .name = "enable_thinking", .ty = LuaType.boolean, .optional = true },
     .{ .name = "thinking", .ty = ThinkingDef, .optional = true },
+    .{ .name = "prompt_caching", .ty = LuaType.boolean, .optional = true, .desc = "anthropic only: send cache_control breakpoints; defaults true, set false to opt out" },
     .{ .name = "cost", .ty = ModelCostDef, .optional = true, .desc = "price per 1M tokens; absent = free" },
 } } };
 const ProviderDef = LuaType{ .table_def = .{ .name = "BlitzProviderDef", .fields = &.{
@@ -860,6 +861,7 @@ pub const Blitz = LuaType{
                                 presence_penalty: ?f32 = null,
                                 enable_thinking: ?bool = null,
                                 thinking: ?r.models.Thinking = null,
+                                prompt_caching: ?bool = null,
                                 cost: ?r.config.ModelCost = null,
                             };
 
@@ -886,6 +888,7 @@ pub const Blitz = LuaType{
                                     } },
                                     .anthropic => .{ .anthropic = .{
                                         .max_tokens = args.max_tokens orelse 16_384,
+                                        .prompt_caching = args.prompt_caching orelse true,
                                         .thinking = args.thinking,
                                         .temperature = args.temperature,
                                         .top_p = args.top_p,

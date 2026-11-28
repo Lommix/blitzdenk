@@ -720,6 +720,8 @@
 ---@field presence_penalty? number
 ---@field enable_thinking? boolean
 ---@field thinking? BlitzThinking
+---anthropic only: send cache_control breakpoints; defaults true, set false to opt out
+---@field prompt_caching? boolean
 ---price per 1M tokens; absent = free
 ---@field cost? BlitzModelCost
 

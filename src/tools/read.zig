@@ -84,28 +84,36 @@ fn run(ctx: r.ToolContext, call: r.r.sdk.ToolCall) r.r.sdk.ToolOutput {
     }
 
     const start_line: u64 = if (args.offset) |o| (if (o > 0) o else 1) else 1;
-    const max_lines: u64 = if (args.limit) |l| l else r.MAX_DISPLAY_LINES;
-    const out = switch (readSection(ctx.alloc, ctx.io, resolved, start_line, max_lines) catch |err|
+    const max_lines: u64 = @min(args.limit orelse r.MAX_DISPLAY_LINES, r.MAX_DISPLAY_LINES);
+    const page = switch (readSection(ctx.alloc, ctx.io, resolved, start_line, max_lines, PAGE_BYTE_BUDGET) catch |err|
         return r.errResult(call, r.fsFailure(ctx, "failed to read", resolved, err))) {
-        .text => |text| text,
+        .page => |page| page,
         .missing => return r.errResult(call, r.pathFailure(ctx, "file not found", args.file_path)),
         .not_file => return r.errResult(call, r.pathFailure(ctx, "not a regular file", args.file_path)),
         .not_readable => return r.errResult(call, r.pathFailure(ctx, "file is not readable", args.file_path)),
         .empty => return r.okResult(call, "(empty file)"),
-        .too_large => return r.errResult(call, "requested section exceeds the 4MB read limit; retry with offset and limit"),
+        .long_line => |line| return r.okResult(call, std.fmt.allocPrint(
+            ctx.alloc,
+            "[Line {d} alone exceeds the {d}KB read cap. Use bash: sed -n '{d}p' '{s}' | head -c {d}]",
+            .{ line, @divTrunc(r.MAX_DISPLAY_BYTES, 1024), line, resolved, PAGE_BYTE_BUDGET },
+        ) catch "line exceeds the read cap; use bash with sed and head -c"),
         .past_end => |total| return r.errResult(call, std.fmt.allocPrint(
             ctx.alloc,
             "offset {d} is past the end of file ({d} lines)",
             .{ start_line, total },
         ) catch "offset past end of file"),
     };
-    if (looksBinary(out)) {
-        ctx.alloc.free(out);
+    if (looksBinary(page.text)) {
+        ctx.alloc.free(page.text);
         return r.errResult(call, "binary file (NUL byte or invalid UTF-8); use bash with xxd/strings/base64 to inspect");
     }
-    const truncated = r.truncateOutputToOwned(ctx.alloc, out, r.MAX_DISPLAY_BYTES, r.MAX_DISPLAY_LINES);
-    if (truncated.ptr != out.ptr) ctx.alloc.free(out);
-    return r.okResult(call, truncated);
+    if (!page.more) return r.okResult(call, page.text);
+    defer ctx.alloc.free(page.text);
+    const continued = if (page.total_lines) |total|
+        std.fmt.allocPrint(ctx.alloc, "{s}\n[Showing lines {d}-{d} of {d}. Use offset={d} to continue.]", .{ page.text, page.first_line, page.last_line, total, page.last_line + 1 })
+    else
+        std.fmt.allocPrint(ctx.alloc, "{s}\n[Showing lines {d}-{d}; more lines follow. Use offset={d} to continue.]", .{ page.text, page.first_line, page.last_line, page.last_line + 1 });
+    return r.okResult(call, continued catch return r.errResult(call, "out of memory"));
 }
 
 /// Catalog skill at `path` this agent may load; hidden skills read as plain files.
@@ -134,20 +142,30 @@ fn looksBinary(data: []const u8) bool {
     return std.mem.indexOfScalar(u8, data, 0) != null or !std.unicode.utf8ValidateSlice(data);
 }
 
-const READ_SECTION_CAP = 4 * 1024 * 1024;
+const LINE_COUNT_SCAN_CAP = 4 * 1024 * 1024;
+const PAGE_BYTE_BUDGET = r.MAX_DISPLAY_BYTES - 256;
+
+const Page = struct {
+    text: []u8,
+    first_line: u64,
+    last_line: u64,
+    total_lines: ?u64,
+    more: bool,
+};
 
 const Section = union(enum) {
-    text: []u8,
+    page: Page,
     missing,
     not_file,
     not_readable,
     empty,
     past_end: u64,
-    too_large,
+    long_line: u64,
 };
 
-/// Lines `start..start+max` of `path` in `cat -n` format (`%6d\t<line>`).
-fn readSection(alloc: std.mem.Allocator, io: std.Io, path: []const u8, start: u64, max: u64) !Section {
+/// Whole lines from `start` in `cat -n` format (`%6d\t<line>`), stopping at
+/// `max_lines` or before the line that would push the text past `max_bytes`.
+fn readSection(alloc: std.mem.Allocator, io: std.Io, path: []const u8, start: u64, max_lines: u64, max_bytes: usize) !Section {
     const cwd = std.Io.Dir.cwd();
     const st = cwd.statFile(io, path, .{}) catch |err| return switch (err) {
         error.FileNotFound => .missing,
@@ -167,34 +185,84 @@ fn readSection(alloc: std.mem.Allocator, io: std.Io, path: []const u8, start: u6
     var offset: u64 = 0;
     var line: u64 = 1;
     var line_open = false;
-    const stop = start +| max;
-    while (line < stop) {
+    var line_mark: usize = 0;
+    var last_line: u64 = 0;
+    var kept_end: u64 = 0;
+    const stop = start +| max_lines;
+    scan: while (line < stop) {
         const n = try file.readPositional(io, &.{&chunk}, offset);
         if (n == 0) {
             const total = if (line_open) line else line - 1;
             if (total == 0) return .empty;
             if (total < start) return .{ .past_end = total };
+            if (line_open) {
+                last_line = line;
+                kept_end = offset;
+            }
             break;
         }
+        const chunk_offset = offset;
         offset += n;
-        var rest = chunk[0..n];
-        while (rest.len > 0 and line < stop) {
+        var pos: usize = 0;
+        while (pos < n and line < stop) {
+            const rest = chunk[pos..n];
             const nl = std.mem.indexOfScalar(u8, rest, '\n');
             const seg = if (nl) |i| rest[0 .. i + 1] else rest;
             if (line >= start) {
-                if (!line_open) try out.print(alloc, "{d:>6}\t", .{line});
+                if (!line_open) {
+                    line_mark = out.items.len;
+                    try out.print(alloc, "{d:>6}\t", .{line});
+                }
                 try out.appendSlice(alloc, seg);
-                if (out.items.len > READ_SECTION_CAP) {
-                    out.deinit(alloc);
-                    return .too_large;
+                if (out.items.len > max_bytes) {
+                    if (line == start) {
+                        out.deinit(alloc);
+                        return .{ .long_line = line };
+                    }
+                    out.shrinkRetainingCapacity(line_mark);
+                    break :scan;
                 }
             }
-            rest = rest[seg.len..];
+            pos += seg.len;
             line_open = nl == null;
-            if (!line_open) line += 1;
+            if (!line_open) {
+                if (line >= start) {
+                    last_line = line;
+                    kept_end = chunk_offset + pos;
+                }
+                line += 1;
+            }
         }
     }
-    return .{ .text = try out.toOwnedSlice(alloc) };
+    const more = kept_end < st.size;
+    const total_lines: ?u64 = if (!more)
+        last_line
+    else if (st.size <= LINE_COUNT_SCAN_CAP)
+        try countFileLines(io, file)
+    else
+        null;
+    return .{ .page = .{
+        .text = try out.toOwnedSlice(alloc),
+        .first_line = start,
+        .last_line = last_line,
+        .total_lines = total_lines,
+        .more = more,
+    } };
+}
+
+fn countFileLines(io: std.Io, file: std.Io.File) !u64 {
+    var chunk: [64 * 1024]u8 = undefined;
+    var offset: u64 = 0;
+    var lines: u64 = 0;
+    var last: u8 = '\n';
+    while (true) {
+        const n = try file.readPositional(io, &.{&chunk}, offset);
+        if (n == 0) break;
+        offset += n;
+        lines += std.mem.count(u8, chunk[0..n], "\n");
+        last = chunk[n - 1];
+    }
+    return lines + @intFromBool(last != '\n');
 }
 
 fn sniffImageType(io: std.Io, path: []const u8) ?[]const u8 {
@@ -399,41 +467,49 @@ test "readSection matches cat -n and reports edge cases" {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const a = try std.fmt.bufPrint(&buf, "{s}/a.txt", .{root});
     {
-        const s = try readSection(testing.allocator, io, a, 1, 2000);
+        const s = (try readSection(testing.allocator, io, a, 1, 2000, 1024)).page;
         defer testing.allocator.free(s.text);
         try testing.expectEqualStrings("     1\tone\n     2\ttwo\n     3\tthree", s.text);
+        try testing.expect(!s.more);
     }
     {
-        const s = try readSection(testing.allocator, io, a, 2, 1);
+        const s = (try readSection(testing.allocator, io, a, 2, 1, 1024)).page;
         defer testing.allocator.free(s.text);
         try testing.expectEqualStrings("     2\ttwo\n", s.text);
+        try testing.expect(s.more);
+        try testing.expectEqual(@as(u64, 2), s.last_line);
+        try testing.expectEqual(@as(?u64, 3), s.total_lines);
     }
-    try testing.expectEqual(@as(u64, 3), (try readSection(testing.allocator, io, a, 4, 10)).past_end);
+    try testing.expectEqual(@as(u64, 3), (try readSection(testing.allocator, io, a, 4, 10, 1024)).past_end);
 
     var nl_buf: [std.fs.max_path_bytes]u8 = undefined;
     const nl = try std.fmt.bufPrint(&nl_buf, "{s}/nl.txt", .{root});
-    try testing.expectEqual(@as(u64, 1), (try readSection(testing.allocator, io, nl, 2, 10)).past_end);
+    try testing.expectEqual(@as(u64, 1), (try readSection(testing.allocator, io, nl, 2, 10, 1024)).past_end);
 
     var other: [std.fs.max_path_bytes]u8 = undefined;
-    try testing.expect(try readSection(testing.allocator, io, try std.fmt.bufPrint(&other, "{s}/empty.txt", .{root}), 1, 10) == .empty);
-    try testing.expect(try readSection(testing.allocator, io, try std.fmt.bufPrint(&other, "{s}/sub", .{root}), 1, 10) == .not_file);
-    try testing.expect(try readSection(testing.allocator, io, try std.fmt.bufPrint(&other, "{s}/missing", .{root}), 1, 10) == .missing);
+    try testing.expect(try readSection(testing.allocator, io, try std.fmt.bufPrint(&other, "{s}/empty.txt", .{root}), 1, 10, 1024) == .empty);
+    try testing.expect(try readSection(testing.allocator, io, try std.fmt.bufPrint(&other, "{s}/sub", .{root}), 1, 10, 1024) == .not_file);
+    try testing.expect(try readSection(testing.allocator, io, try std.fmt.bufPrint(&other, "{s}/missing", .{root}), 1, 10, 1024) == .missing);
 }
 
-test "readSection stops past the section cap" {
+test "readSection keeps the head under the byte cap" {
     const testing = std.testing;
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const data = try testing.allocator.alloc(u8, READ_SECTION_CAP + 1);
-    defer testing.allocator.free(data);
-    @memset(data, 'x');
-    try tmp.dir.writeFile(io, .{ .sub_path = "big.txt", .data = data });
+    try tmp.dir.writeFile(io, .{ .sub_path = "big.txt", .data = "aaaa\nbbbb\ncccc\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" });
     const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
     defer testing.allocator.free(root);
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&buf, "{s}/big.txt", .{root});
-    try testing.expect(try readSection(testing.allocator, io, path, 1, 10) == .too_large);
+    {
+        const s = (try readSection(testing.allocator, io, path, 1, 10, 26)).page;
+        defer testing.allocator.free(s.text);
+        try testing.expectEqualStrings("     1\taaaa\n     2\tbbbb\n", s.text);
+        try testing.expectEqual(@as(u64, 2), s.last_line);
+        try testing.expectEqual(@as(?u64, 4), s.total_lines);
+    }
+    try testing.expectEqual(@as(u64, 4), (try readSection(testing.allocator, io, path, 4, 10, 26)).long_line);
 }
 
 test "sniffImageType reads the magic bytes" {

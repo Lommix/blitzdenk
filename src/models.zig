@@ -49,6 +49,7 @@ pub const ResponseOptions = struct {
 
 pub const AnthropicOptions = struct {
     max_tokens: u32 = 16_384,
+    prompt_caching: bool = true,
     thinking: ?Thinking = null,
     temperature: ?f32 = null,
     top_p: ?f32 = null,
@@ -111,6 +112,7 @@ pub fn applyParams(params: ModelParams, effort: ?ReasoningEffort, reasoning: boo
         },
         .anthropic => |p| {
             opts.max_output_tokens = p.max_tokens;
+            opts.prompt_caching = p.prompt_caching;
             if (p.temperature) |value| opts.temperature = @floatCast(value);
             if (p.top_p) |value| opts.top_p = @floatCast(value);
             if (p.top_k) |value| opts.top_k = value;

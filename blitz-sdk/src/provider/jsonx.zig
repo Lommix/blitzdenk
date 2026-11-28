@@ -14,11 +14,11 @@ pub fn buildChatRequest(
     stream: bool,
     replay_reasoning: bool,
 ) ![]const u8 {
-    var invalid_calls: std.StringHashMapUnmanaged(void) = .empty;
-    defer invalid_calls.deinit(a);
+    var invalid_inputs: std.StringHashMapUnmanaged(void) = .empty;
+    defer invalid_inputs.deinit(a);
     for (params.messages) |msg| {
         for (msg.parts()) |part| switch (part) {
-            .tool_call => |call| if (!isValidJsonObject(a, call.input)) try invalid_calls.put(a, call.id, {}),
+            .tool_call => |call| if (!isValidJsonObject(a, call.input)) try invalid_inputs.put(a, call.id, {}),
             else => {},
         };
     }
@@ -54,7 +54,6 @@ pub fn buildChatRequest(
                     .tool_result => |result| result,
                     else => continue,
                 };
-                if (invalid_calls.contains(result.id)) continue;
                 run_has_output = true;
                 try s.beginObject();
                 try s.objectField("role");
@@ -128,7 +127,6 @@ pub fn buildChatRequest(
                         .tool_call => |call| call,
                         else => continue,
                     };
-                    if (invalid_calls.contains(call.id)) continue;
                     try s.beginObject();
                     try s.objectField("id");
                     try s.write(call.id);
@@ -139,7 +137,7 @@ pub fn buildChatRequest(
                     try s.objectField("name");
                     try s.write(call.name);
                     try s.objectField("arguments");
-                    try s.write(call.input);
+                    try s.write(if (invalid_inputs.contains(call.id)) "{}" else call.input);
                     try s.endObject();
                     try s.endObject();
                 }

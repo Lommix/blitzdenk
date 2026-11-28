@@ -358,7 +358,7 @@ pub fn parseChatResponse(a: std.mem.Allocator, body: []const u8) !*model.Generat
                                             }
                                         }
                                     }
-                                    if (!isValidToolCall(a, id, name, input)) continue;
+                                    if (!isValidToolCall(id, name)) continue;
                                     try calls.append(a, .{
                                         .id = try a.dupe(u8, id),
                                         .name = try a.dupe(u8, name),
@@ -587,7 +587,7 @@ fn parseChatStreamImpl(a: std.mem.Allocator, sse_text: []const u8, sctx: *model.
     var valid_calls: std.ArrayList(types.ToolCall) = .empty;
     errdefer valid_calls.deinit(a);
     for (calls.items) |tc| {
-        if (isValidToolCall(a, tc.id, tc.name, tc.input)) {
+        if (isValidToolCall(tc.id, tc.name)) {
             sctx.send(.{ .type = .tool_call, .tool_call_id = tc.id, .tool_name = tc.name, .tool_input = tc.input });
             try valid_calls.append(a, tc);
         } else {
@@ -670,8 +670,8 @@ fn stringField(value: std.json.Value, name: []const u8) ?[]const u8 {
     return if (field == .string) field.string else null;
 }
 
-fn isValidToolCall(a: std.mem.Allocator, id: []const u8, name: []const u8, input: []const u8) bool {
-    return id.len > 0 and name.len > 0 and isJsonObject(a, input);
+fn isValidToolCall(id: []const u8, name: []const u8) bool {
+    return id.len > 0 and name.len > 0;
 }
 
 fn encodeJsonArray(a: std.mem.Allocator, values: []const []const u8) ![]const u8 {

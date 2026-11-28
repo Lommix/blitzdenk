@@ -211,8 +211,8 @@ fn run(
 
         const has_tools = result.tool_calls.len > 0;
         if (!has_tools and result.finish_reason == .tool_calls) {
-            log.err("provider finished with tool_calls but returned no valid tool calls at step {d}; retrying turn", .{step_no});
-            return error.NetworkError;
+            log.err("provider finished with tool_calls but returned no tool calls at step {d}", .{step_no});
+            return error.EmptyToolCalls;
         }
 
         {
@@ -666,8 +666,16 @@ fn executeOne(
 
     for (opts.tools) |tool| {
         if (!std.mem.eql(u8, tool.name, call.name)) continue;
+        const arguments = toolArguments(a, call.input) catch |err| {
+            err_buf = std.fmt.allocPrint(a, "error: tool call arguments are not a valid JSON object ({s}); the call did not run. Re-issue it with complete JSON arguments.", .{@errorName(err)}) catch "";
+            output = if (err_buf.len > 0) err_buf else "error: tool call arguments are not a valid JSON object; the call did not run";
+            exec_err = err;
+            break;
+        };
         if (tool.execute) |exec| {
-            if (executeTool(a, io, opts.cancellation, exec, tool.execute_ctx, call)) |out| {
+            var checked_call = call;
+            checked_call.input = arguments;
+            if (executeTool(a, io, opts.cancellation, exec, tool.execute_ctx, checked_call)) |out| {
                 output = out.content;
                 is_err = out.is_error;
                 exit_loop = out.exit_loop;
@@ -720,6 +728,14 @@ fn executeOne(
         .exit_loop = exit_loop,
         .image = owned_image,
     };
+}
+
+fn toolArguments(a: std.mem.Allocator, input: []const u8) ![]const u8 {
+    if (std.mem.trim(u8, input, " \t\r\n").len == 0) return "{}";
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, input, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.ArgumentsNotAnObject;
+    return input;
 }
 
 fn executeTool(

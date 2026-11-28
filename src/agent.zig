@@ -569,6 +569,7 @@ pub const Agent = struct {
         if (self.flags.cancel) return false;
         if (self.retry_count >= self.max_retries) return false;
         if (failure == error.Canceled) return true;
+        if (failure == error.EmptyToolCalls) return self.retry_count == 0;
         if (self.contextNearLimit()) return false;
         if (failure == error.NetworkError or failure == error.Timeout) return true;
         if (failure != error.RateLimited and failure != error.ApiError) return false;

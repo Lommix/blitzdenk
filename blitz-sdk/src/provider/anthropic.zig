@@ -227,11 +227,11 @@ fn buildRequest(
     params: model.GenerateParams,
     stream: bool,
 ) ![]const u8 {
-    var invalid_calls: std.StringHashMapUnmanaged(void) = .empty;
-    defer invalid_calls.deinit(a);
+    var invalid_inputs: std.StringHashMapUnmanaged(void) = .empty;
+    defer invalid_inputs.deinit(a);
     for (params.messages) |msg| {
         for (msg.parts()) |part| switch (part) {
-            .tool_call => |call| if (!isJsonObject(a, call.input)) try invalid_calls.put(a, call.id, {}),
+            .tool_call => |call| if (!isJsonObject(a, call.input)) try invalid_inputs.put(a, call.id, {}),
             else => {},
         };
     }
@@ -265,12 +265,12 @@ fn buildRequest(
     try s.beginArray();
     for (params.messages, 0..) |msg, i| {
         if (msg.role == .system or msg.role == .developer) continue;
-        if (!hasContent(msg, &invalid_calls)) continue;
+        if (!hasContent(msg)) continue;
         try s.beginObject();
         try s.objectField("role");
         try s.write(if (msg.role == .assistant) "assistant" else "user");
         try s.objectField("content");
-        try writeContent(&s, msg, &invalid_calls, params.prompt_caching and i + 1 == params.messages.len, params.cache_ttl);
+        try writeContent(&s, msg, &invalid_inputs, params.prompt_caching and i + 1 == params.messages.len, params.cache_ttl);
         try s.endObject();
     }
     try s.endArray();
@@ -395,8 +395,8 @@ fn writeCacheControl(s: *std.json.Stringify, ttl: ?[]const u8) !void {
     try s.endObject();
 }
 
-fn writeContent(s: *std.json.Stringify, msg: types.Message, invalid_calls: *const std.StringHashMapUnmanaged(void), cache: bool, ttl: ?[]const u8) !void {
-    const last = lastContentIndex(msg, invalid_calls);
+fn writeContent(s: *std.json.Stringify, msg: types.Message, invalid_inputs: *const std.StringHashMapUnmanaged(void), cache: bool, ttl: ?[]const u8) !void {
+    const last = cacheTargetIndex(msg);
     try s.beginArray();
     for (msg.parts(), 0..) |part, i| {
         switch (part) {
@@ -410,7 +410,6 @@ fn writeContent(s: *std.json.Stringify, msg: types.Message, invalid_calls: *cons
                 try s.endObject();
             },
             .tool_call => |call| {
-                if (invalid_calls.contains(call.id)) continue;
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("tool_use");
@@ -419,12 +418,11 @@ fn writeContent(s: *std.json.Stringify, msg: types.Message, invalid_calls: *cons
                 try s.objectField("name");
                 try s.write(call.name);
                 try s.objectField("input");
-                try jsonx.writeRaw(s, call.input);
+                try jsonx.writeRaw(s, if (invalid_inputs.contains(call.id)) "{}" else call.input);
                 if (cache and last == i) try writeCacheControl(s, ttl);
                 try s.endObject();
             },
             .tool_result => |result| {
-                if (invalid_calls.contains(result.id)) continue;
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("tool_result");
@@ -488,18 +486,20 @@ fn isJsonObject(a: std.mem.Allocator, value: []const u8) bool {
     return parsed.value == .object;
 }
 
-fn hasContent(msg: types.Message, invalid_calls: *const std.StringHashMapUnmanaged(void)) bool {
-    return lastContentIndex(msg, invalid_calls) != null;
+fn hasContent(msg: types.Message) bool {
+    for (msg.parts()) |part| switch (part) {
+        .tool_call, .tool_result, .text, .reasoning, .image => return true,
+        else => {},
+    };
+    return false;
 }
 
-fn lastContentIndex(msg: types.Message, invalid_calls: *const std.StringHashMapUnmanaged(void)) ?usize {
+fn cacheTargetIndex(msg: types.Message) ?usize {
     var index = msg.parts().len;
     while (index > 0) {
         index -= 1;
         switch (msg.parts()[index]) {
-            .tool_call => |call| if (!invalid_calls.contains(call.id)) return index,
-            .tool_result => |result| if (!invalid_calls.contains(result.id)) return index,
-            .text, .reasoning, .image => return index,
+            .tool_call, .tool_result, .text, .image => return index,
             else => {},
         }
     }

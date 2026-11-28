@@ -260,19 +260,11 @@ fn buildRequest(
     stream: bool,
     compact_request: bool,
 ) ![]const u8 {
-    var invalid_calls: std.StringHashMapUnmanaged(void) = .empty;
-    defer invalid_calls.deinit(a);
+    var invalid_inputs: std.StringHashMapUnmanaged(void) = .empty;
+    defer invalid_inputs.deinit(a);
     for (params.messages) |msg| {
         for (msg.parts()) |part| switch (part) {
-            .tool_call => |call| if (!isJsonObject(a, call.input)) try invalid_calls.put(a, call.id, {}),
-            .provider_data => |value| {
-                if (!std.mem.eql(u8, value.provider, provider_name)) continue;
-                var parsed = std.json.parseFromSlice(std.json.Value, a, value.data, .{}) catch continue;
-                defer parsed.deinit();
-                if (isInvalidFunctionCall(a, parsed.value)) {
-                    if (stringField(parsed.value, "call_id")) |id| try invalid_calls.put(a, id, {});
-                }
-            },
+            .tool_call => |call| if (!isJsonObject(a, call.input)) try invalid_inputs.put(a, call.id, {}),
             else => {},
         };
     }
@@ -307,9 +299,11 @@ fn buildRequest(
             if (!std.mem.eql(u8, value.provider, provider_name)) continue;
             var parsed = std.json.parseFromSlice(std.json.Value, a, value.data, .{}) catch continue;
             defer parsed.deinit();
-            if (isInvalidFunctionCall(a, parsed.value)) continue;
-            if (std.mem.eql(u8, stringField(parsed.value, "type") orelse "", "function_call_output") and invalid_calls.contains(stringField(parsed.value, "call_id") orelse "")) continue;
-            try jsonx.writeRaw(&s, value.data);
+            if (isInvalidFunctionCall(a, parsed.value)) {
+                try writeSanitizedFunctionCall(&s, parsed.value);
+            } else {
+                try jsonx.writeRaw(&s, value.data);
+            }
             replayed = true;
         }
         if (replayed) continue;
@@ -324,7 +318,6 @@ fn buildRequest(
                     .tool_result => |result| result,
                     else => continue,
                 };
-                if (invalid_calls.contains(result.id)) continue;
                 run_has_output = true;
                 try s.beginObject();
                 try s.objectField("type");
@@ -379,7 +372,6 @@ fn buildRequest(
                     .tool_call => |call| call,
                     else => continue,
                 };
-                if (invalid_calls.contains(call.id)) continue;
                 try s.beginObject();
                 try s.objectField("type");
                 try s.write("function_call");
@@ -388,7 +380,7 @@ fn buildRequest(
                 try s.objectField("name");
                 try s.write(call.name);
                 try s.objectField("arguments");
-                try s.write(call.input);
+                try s.write(if (invalid_inputs.contains(call.id)) "{}" else call.input);
                 try s.endObject();
             }
         }
@@ -679,6 +671,19 @@ fn isJsonObject(a: std.mem.Allocator, value: []const u8) bool {
     var parsed = std.json.parseFromSlice(std.json.Value, a, value, .{}) catch return false;
     defer parsed.deinit();
     return parsed.value == .object;
+}
+
+fn writeSanitizedFunctionCall(s: *std.json.Stringify, value: std.json.Value) !void {
+    try s.beginObject();
+    try s.objectField("type");
+    try s.write("function_call");
+    try s.objectField("call_id");
+    try s.write(stringField(value, "call_id") orelse "");
+    try s.objectField("name");
+    try s.write(stringField(value, "name") orelse "");
+    try s.objectField("arguments");
+    try s.write("{}");
+    try s.endObject();
 }
 
 fn isInvalidFunctionCall(a: std.mem.Allocator, value: std.json.Value) bool {

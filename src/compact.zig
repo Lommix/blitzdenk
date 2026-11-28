@@ -57,9 +57,9 @@ pub const SUMMARIZATION_PROMPT =
 ;
 
 pub const SUMMARY_PREFIX =
-    \\The messages below are an automatically generated checkpoint condensing an earlier span of this conversation.
+    \\This message is an automatically generated checkpoint condensing an earlier span of this conversation. The messages after it are the most recent part, kept verbatim.
     \\You also have access to the state of the tools that were used before the checkpoint.
-    \\Continue the task directly from this summary; do not re-introduce or restart the work. If asked about missing context, say earlier messages were condensed into this summary.
+    \\Continue the task from the most recent messages; where they differ from this summary, they win. Do not re-introduce or restart the work. If asked about missing context, say earlier messages were condensed into this summary.
     \\Here is the checkpoint summary:
     \\
 ;
@@ -278,15 +278,15 @@ fn installSummaryAt(alloc: std.mem.Allocator, messages: []const sdk.Message, sum
     var next: std.ArrayList(sdk.Message) = .empty;
     defer next.deinit(alloc);
     if (findSystemMessage(messages)) |system| try next.append(alloc, system);
-    for (messages[cut_index..]) |message| {
-        if (message.role != .system) try next.append(alloc, message);
-    }
     var scratch = std.heap.ArenaAllocator.init(alloc);
     defer scratch.deinit();
     const file_lists = try collectFileLists(scratch.allocator(), messages[0..cut_index]);
     const summary_text = try formatSummaryText(alloc, summary, file_lists);
     defer alloc.free(summary_text);
     try next.append(alloc, sdk.UserMessage(summary_text));
+    for (messages[cut_index..]) |message| {
+        if (message.role != .system) try next.append(alloc, message);
+    }
     return agent_run.OwnedMessages.clone(alloc, next.items);
 }
 
@@ -711,8 +711,9 @@ test "installed summary lists distinct files from read and write calls" {
     };
     var outcome = try installSummaryAt(std.testing.allocator, &messages, "checkpoint", messages.len - 1);
     defer outcome.deinit();
-    const summary = outcome.messages[outcome.messages.len - 1];
+    const summary = outcome.messages[1];
     try std.testing.expect(isSummaryMessage(summary));
+    try std.testing.expectEqualStrings("recent", outcome.messages[outcome.messages.len - 1].text());
     const text = summary.text();
     try std.testing.expect(std.mem.indexOf(u8, text, "<read-files>\nsrc/a.zig\n</read-files>") != null);
     const handoff = (try handoffMarkdown(std.testing.allocator, outcome.messages)).?;
@@ -736,10 +737,10 @@ test "second compaction carries previous checkpoint file tags forward" {
     };
     var outcome = try installSummaryAt(std.testing.allocator, &messages, "new checkpoint", messages.len - 1);
     defer outcome.deinit();
-    const text = outcome.messages[outcome.messages.len - 1].text();
+    const text = outcome.messages[1].text();
     try std.testing.expect(std.mem.indexOf(u8, text, "<read-files>\nsrc/a.zig\n</read-files>") != null);
     try std.testing.expect(std.mem.endsWith(u8, text, "<modified-files>\nsrc/b.zig\nsrc/c.zig\n</modified-files>"));
-    for (outcome.messages[1 .. outcome.messages.len - 1]) |message| {
+    for (outcome.messages[2..]) |message| {
         try std.testing.expect(!isSummaryMessage(message));
     }
 }
@@ -757,7 +758,7 @@ test "carry-forward binds to the installed tag block over echoed tag text" {
     };
     var outcome = try installSummaryAt(std.testing.allocator, &messages, "new checkpoint", messages.len - 1);
     defer outcome.deinit();
-    const text = outcome.messages[outcome.messages.len - 1].text();
+    const text = outcome.messages[1].text();
     try std.testing.expect(std.mem.indexOf(u8, text, "<read-files>\nsrc/old.zig\n</read-files>") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Run tests") == null);
     try std.testing.expect(std.mem.endsWith(u8, text, "<modified-files>\nsrc/b.zig\nsrc/new.zig\n</modified-files>"));
@@ -771,7 +772,7 @@ test "summary without file-touched tool calls installs without tags" {
     };
     var outcome = try installSummaryAt(std.testing.allocator, &messages, "plain checkpoint", messages.len - 1);
     defer outcome.deinit();
-    const text = outcome.messages[outcome.messages.len - 1].text();
+    const text = outcome.messages[1].text();
     try std.testing.expect(std.mem.endsWith(u8, text, "plain checkpoint"));
     try std.testing.expect(std.mem.indexOf(u8, text, "<read-files") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "<modified-files") == null);
@@ -805,7 +806,7 @@ test "ordinary SDK compaction generates and installs a summary" {
     var outcome = try compactOrdinary(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, &messages, null, false, "compaction-session");
     defer outcome.deinit();
     try std.testing.expectEqual(@as(u64, 12), outcome.usage.total_tokens);
-    try std.testing.expect(std.mem.endsWith(u8, outcome.messages.messages[outcome.messages.messages.len - 1].text(), "generated summary"));
+    try std.testing.expect(std.mem.endsWith(u8, outcome.messages.messages[1].text(), "generated summary"));
 
     const small = [_]sdk.Message{ sdk.SystemMessage("system"), sdk.UserMessage("small conversation") };
     var forced = try compactOrdinary(std.testing.allocator, std.testing.io, .{ .ctx = &fixture, .vtable = &vtable }, &small, null, true, "compaction-session");

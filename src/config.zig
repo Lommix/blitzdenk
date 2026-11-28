@@ -62,8 +62,11 @@ pub const ModelCost = struct {
     output: f64 = 0,
     cache: f64 = 0,
 
+    const cache_write_multiplier = 1.25;
+
     pub fn calculate(self: ModelCost, usage: sdk.Usage) f64 {
         return (@as(f64, @floatFromInt(usage.input_tokens)) / 1e6) * self.input +
+            (@as(f64, @floatFromInt(usage.cache_write_tokens)) / 1e6) * self.input * cache_write_multiplier +
             (@as(f64, @floatFromInt(usage.output_tokens)) / 1e6) * self.output +
             (@as(f64, @floatFromInt(usage.cache_read_tokens)) / 1e6) * self.cache;
     }
