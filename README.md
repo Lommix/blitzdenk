@@ -34,11 +34,20 @@ are supported by LSP. Change anything and make it your own.
 blitz.plugin("blitz-core", { url = "https://github.com/Lommix/blitz-core" })
 local core = require("blitz-core")
 
+local codemode = core.codemode.setup({
+	name = "codemode",
+	tools = {
+		blitz.tools.BASH,
+		blitz.tools.READ,
+		blitz.tools.WRITE,
+		blitz.tools.EDIT,
+	},
+})
+
+
 blitz.set_agent_tools(blitz.AGENT_GENERAL, {
     ...
-	core.codemode,
-	core.subagents.toolset,
-	core.todo.toolset,
+	codemode,
 })
 ```
 
